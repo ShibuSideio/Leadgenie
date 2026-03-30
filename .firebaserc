@@ -1,5 +1,14 @@
 {
   "projects": {
     "default": "lead-sniper-prod"
+  },
+  "targets": {
+    "lead-sniper-prod": {
+      "hosting": {
+        "main": [
+          "lead-sniper-prod"
+        ]
+      }
+    }
   }
 }
