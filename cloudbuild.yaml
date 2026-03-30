@@ -1,0 +1,16 @@
+steps:
+# Install Firebase Tools
+- name: 'node'
+  entrypoint: 'npm'
+  args: ['install', '-g', 'firebase-tools']
+
+# Deploy Firebase Hosting & Rules
+- name: 'node'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    firebase deploy --only hosting,firestore:rules --project $PROJECT_ID --token "$_FIREBASE_TOKEN"
+
+substitutions:
+    _FIREBASE_TOKEN: 'YOUR_FIREBASE_CI_TOKEN_HERE'  # Note: The actual token should be configured as an environment variable or secret mapped to this substitution in the Cloud Build Trigger GUI safely.

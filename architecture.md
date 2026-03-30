@@ -128,14 +128,16 @@ The application has been restructured from a monolithic Python polling service t
 
 ---
 
-## 5. Deployment Map (CI/CD)
+## 5. Deployment Map (Native GCP CI/CD)
 
-The code utilizes Google Cloud Build pipelines mapped individually per folder.
+The application utilizes a strict enterprise security boundary where GitHub acts **exclusively** as a Source Control Management (SCM) repository. All compilation, secret binding, and deployment are orchestrated identically to enterprise blueprints natively within **Google Cloud Build Triggers**. No deployment tokens or long-lived authentication keys are housed in GitHub.
 
-1. `gcloud builds submit --config=services/orchestrator/cloudbuild.yaml`
-2. `gcloud builds submit --config=services/pipeline-main/cloudbuild.yaml`
-3. `gcloud builds submit --config=services/scraper-heavy/cloudbuild.yaml`
-4. `gcloud builds submit --config=services/whatsapp-webhook/cloudbuild.yaml`
+### 5.1. Google Cloud Build Native Triggers Configured
+Administrators manually map 6 native GUI Cloud Build Triggers in the GCP console tracking `Push to Branch: main`.
 
-Firebase Hosting Deploy:
-`firebase deploy --only hosting,firestore:rules`
+1. **Lead Pipeline Trigger**: Uses `services/pipeline-main/cloudbuild.yaml` (Filter match: `services/pipeline-main/**`).
+2. **Orchestrator Trigger**: Uses `services/orchestrator/cloudbuild.yaml` (Filter match: `services/orchestrator/**`).
+3. **Heavy Scraper Trigger**: Uses `services/scraper-heavy/cloudbuild.yaml` (Filter match: `services/scraper-heavy/**`).
+4. **Webhook Listener Trigger**: Uses `services/whatsapp-webhook/cloudbuild.yaml` (Filter match: `services/whatsapp-webhook/**`).
+5. **Email Worker Trigger**: Uses `services/email-summary/cloudbuild.yaml` (Filter match: `services/email-summary/**`).
+6. **Firebase Portal Trigger**: Uses the root `./cloudbuild.yaml` (Filter match: `public/**` & `cloudbuild.yaml` & `firestore.rules`), passing `_FIREBASE_TOKEN` explicitly via Cloud Secrets natively integrated into the GCP Trigger UI.
