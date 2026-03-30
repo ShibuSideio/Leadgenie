@@ -1,12 +1,12 @@
 steps:
 # Enterprise Immutable Firebase Pipeline
-- name: 'node:20'
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:node'
   entrypoint: 'bash'
   args:
   - '-c'
   - |
     npm install -g firebase-tools
-    firebase deploy --project lead-sniper-prod --only hosting,firestore --non-interactive
+    firebase deploy --project lead-sniper-prod --only hosting,firestore --non-interactive --debug
 
 options:
   logging: CLOUD_LOGGING_ONLY
