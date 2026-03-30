@@ -44,13 +44,13 @@
                 <div class="stats-box mt-3">
                     <h4>Monthly ROI Report</h4>
                     <div class="stat">Est. Saved: <span>$490</span></div>
-                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="alert('Generating ROI PDF...')">Download PDF</button>
-                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="alert('Sending ROI Email...')">Email Report</button>
+                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="showToast('Generating ROI PDF (Enterprise Feature)', 'info')">Download PDF</button>
+                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="showToast('Dispatching ROI Analytics Report', 'info')">Email Report</button>
                 </div>
                 <div class="stats-box mt-3">
                     <h4>WhatsApp BYOA</h4>
                     <p class="text-small">Status: <span style="color:var(--text-muted)">Unconnected</span></p>
-                    <button class="primary-btn full-width mt-3" style="font-size:0.8rem; background: #25D366;" onclick="alert('Initiate Meta Oauth...')">Connect WhatsApp</button>
+                    <button class="primary-btn full-width mt-3" style="font-size:0.8rem; background: #25D366;" onclick="showToast('Redirecting to Meta Business Oauth...', 'success')">Connect WhatsApp</button>
                     <label style="display:flex; align-items:center; gap:8px; margin-top: 12px; font-size: 0.8rem;">
                         <input type="checkbox" id="auto-send-cb"> Auto-Send Messages
                     </label>
@@ -88,11 +88,15 @@
             </label>
             
             <div style="display:flex; gap: 12px;">
-                <button class="primary-btn full-width" onclick="alert('Campaign Created!'); document.getElementById('new-campaign-modal').classList.add('hidden');">Save Campaign</button>
+                <button class="primary-btn full-width" onclick="saveCampaignAction()">Save Campaign</button>
                 <button class="secondary-btn full-width" onclick="document.getElementById('new-campaign-modal').classList.add('hidden')">Cancel</button>
             </div>
         </div>
     </div>
+    </div>
+
+    <!-- UI Overlay Utilities -->
+    <div id="toast-container" class="toast-container"></div>
 
     <script src="app.js"></script>
 </body>
