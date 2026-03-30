@@ -1,0 +1,13 @@
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    args:
+    - gcloud
+    - functions
+    - deploy
+    - orchestrator-sweep
+    - --runtime=python310
+    - --trigger-http
+    - --entry-point=trigger_daily_sweep
+    - --region=asia-south1
+    - --memory=256MB
+    - --source=./services/orchestrator

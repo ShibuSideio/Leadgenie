@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local testing
+test_flow.py
+export_legacy_data.py
+*.db
+*.sqlite3
+
+# Env
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Credentials
+*.pem
+*.json
+!firebase.json

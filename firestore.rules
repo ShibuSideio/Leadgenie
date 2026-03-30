@@ -1,0 +1,19 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Basic tenant isolation. Admins and team members must only access data within their own tenantId.
+    match /tenants/{tenantId}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.token.tenant == tenantId;
+    }
+    
+    // Scraped cache accessible by internal functions (checked in IAM, but block public read)
+    match /scraped_cache/{cacheId} {
+      allow read, write: if false; // Only accessible via Admin SDK in Cloud Run
+    }
+    
+    // Deny all other access
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

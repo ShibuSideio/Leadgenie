@@ -1,0 +1,98 @@
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 4.0"
+    }
+  }
+}
+
+provider "google" {
+  project = var.project_id
+  region  = var.region
+}
+
+# -------------------------------------------------------------
+# IAM & Services
+# -------------------------------------------------------------
+resource "google_project_service" "services" {
+  for_each = toset([
+    "run.googleapis.com",
+    "cloudtasks.googleapis.com",
+    "cloudscheduler.googleapis.com",
+    "firestore.googleapis.com"
+  ])
+  service = each.value
+  disable_on_destroy = false
+}
+
+# -------------------------------------------------------------
+# Secret Manager
+# -------------------------------------------------------------
+resource "google_secret_manager_secret" "serper_api_key" {
+  secret_id = "serper_api_key"
+  replication { automatic = true }
+  rotation { next_rotation_time = "2026-06-01T00:00:00Z" ; rotation_period = "7776000s" } # 90 days
+}
+resource "google_secret_manager_secret" "whatsapp_webhook_token" {
+  secret_id = "whatsapp_webhook_token"
+  replication { automatic = true }
+  rotation { next_rotation_time = "2026-06-01T00:00:00Z" ; rotation_period = "7776000s" } # 90 days
+}
+resource "google_secret_manager_secret" "gmail_app_password" {
+  secret_id = "gmail_app_password"
+  replication { automatic = true }
+  rotation { next_rotation_time = "2026-06-01T00:00:00Z" ; rotation_period = "7776000s" } # 90 days
+}
+
+# -------------------------------------------------------------
+# Monitoring, Alerts & Backups
+# -------------------------------------------------------------
+resource "google_monitoring_alert_policy" "cloud_run_failures" {
+  display_name = "Cloud Run 5xx Errors"
+  combiner     = "OR"
+  conditions {
+    display_name = "5xx API Rate"
+    condition_threshold {
+      filter          = "resource.type = \"cloud_run_revision\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"5xx\""
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 5
+    }
+  }
+}
+
+resource "google_storage_bucket" "firestore_backup" {
+  name          = "${var.project_id}-firestore-backups"
+  location      = var.region
+  force_destroy = true
+  lifecycle_rule {
+      condition { age = 30 }
+      action { type = "Delete" }
+  }
+}
+
+# -------------------------------------------------------------
+# Cloud Tasks Queue
+# -------------------------------------------------------------
+resource "google_cloud_tasks_queue" "pipeline_queue" {
+  name     = "lead-pipeline-queue"
+  location = var.region
+
+  rate_limits {
+    max_dispatches_per_second = 1
+    max_concurrent_dispatches = 5
+  }
+
+  retry_config {
+    max_attempts       = 3
+    min_backoff        = "10s"
+  }
+  depends_on = [google_project_service.services]
+}
+
+# -------------------------------------------------------------
+# Cloud Run Services (Placeholders for IaC; deployed via Cloud Build)
+# -------------------------------------------------------------
+# Services: lead-pipeline-main, scraper-heavy, whatsapp-webhook
+# These are typically created first to get the URLs, but actual code deployed later.

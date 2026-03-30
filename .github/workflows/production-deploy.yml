@@ -1,0 +1,53 @@
+name: Production V16 Pipeline Deployment
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy-microservices:
+    name: Build & Deploy Cloud Run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - id: auth
+        name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy Orchestrator
+        run: gcloud builds submit --config=services/orchestrator/cloudbuild.yaml
+
+      - name: Deploy Pipeline Core
+        run: gcloud builds submit --config=services/pipeline-main/cloudbuild.yaml
+
+      - name: Deploy Scraper Heavy
+        run: gcloud builds submit --config=services/scraper-heavy/cloudbuild.yaml
+
+      - name: Deploy Webhook Listener
+        run: gcloud builds submit --config=services/whatsapp-webhook/cloudbuild.yaml
+
+      - name: Deploy Daily Email Summary Worker
+        run: gcloud builds submit --config=services/email-summary/cloudbuild.yaml
+
+  deploy-frontend:
+    name: Deploy Firebase UI
+    runs-on: ubuntu-latest
+    needs: deploy-microservices
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy to Firebase Hosting & Rules
+        run: firebase deploy --only hosting,firestore:rules --project sideio-leads --token "${{ secrets.FIREBASE_TOKEN }}"

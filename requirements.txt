@@ -1,0 +1,8 @@
+google-generativeai>=0.8.0
+google-genai>=0.8.0
+requests>=2.32.0
+PyYAML>=6.0.1
+streamlit>=1.35.0
+schedule>=1.2.2
+rich>=13.7.0
+pandas>=2.2.0
