@@ -15,6 +15,7 @@ steps:
   - 'asia-south1'
   - '--memory'
   - '128Mi'
+  - '--no-allow-unauthenticated'
 
 options:
   logging: CLOUD_LOGGING_ONLY

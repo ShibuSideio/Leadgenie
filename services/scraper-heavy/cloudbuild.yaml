@@ -15,6 +15,9 @@ steps:
   - 'asia-south1'
   - '--memory'
   - '2Gi'
+  - '--no-allow-unauthenticated'
+
+timeout: '1800s'
 
 options:
   logging: CLOUD_LOGGING_ONLY
