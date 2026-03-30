@@ -1,12 +1,12 @@
-// Firebase configuration
+// Firebase configuration (Placeholder)
 const firebaseConfig = {
-  apiKey: "AIzaSyCxqimZJ7kspuJJ8qXF34zguLkNXi6MWd4",
-  authDomain: "lead-sniper-prod.firebaseapp.com",
-  projectId: "lead-sniper-prod",
-  storageBucket: "lead-sniper-prod.firebasestorage.app",
-  messagingSenderId: "222247989819",
-  appId: "1:222247989819:web:17066a1bbf0b1f3df2221e",
-  measurementId: "G-SQ6DDQ7HW0"
+    apiKey: "AIzaSyCxqimZJ7kspuJJ8qXF34zguLkNXi6MWd4",
+    authDomain: "lead-sniper-prod.firebaseapp.com",
+    projectId: "lead-sniper-prod",
+    storageBucket: "lead-sniper-prod.firebasestorage.app",
+    messagingSenderId: "222247989819",
+    appId: "1:222247989819:web:17066a1bbf0b1f3df2221e",
+    measurementId: "G-SQ6DDQ7HW0"
 };
 
 // Initialize Firebase
