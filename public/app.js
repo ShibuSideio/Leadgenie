@@ -1,9 +1,9 @@
 // Firebase configuration (Placeholder)
 const firebaseConfig = {
     apiKey: "YOUR_API_KEY",
-    authDomain: "sideio-leads-v16.firebaseapp.com",
-    projectId: "sideio-leads-v16",
-    storageBucket: "sideio-leads-v16.appspot.com",
+    authDomain: "lead-sniper-prod.firebaseapp.com",
+    projectId: "lead-sniper-prod",
+    storageBucket: "lead-sniper-prod.appspot.com",
     messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
     appId: "YOUR_APP_ID"
 };
