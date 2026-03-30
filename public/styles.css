@@ -1,13 +1,13 @@
 :root {
-    --bg-dark: #f1f5f9;
-    --glass-bg: rgba(255, 255, 255, 0.85);
-    --glass-border: rgba(0, 0, 0, 0.08);
-    --primary: #2563eb;
-    --primary-hover: #1d4ed8;
+    --bg-dark: #f8fafc;
+    --glass-bg: #ffffff;
+    --glass-border: rgba(0, 0, 0, 0.05);
+    --primary: #4f46e5;
+    --primary-hover: #4338ca;
     --success: #10b981;
     --text-main: #0f172a;
-    --text-muted: #64748b;
-    --accent: #8b5cf6;
+    --text-muted: #475569;
+    --accent: #ea580c;
 }
 
 * {
@@ -18,7 +18,7 @@
 
 body {
     font-family: 'Outfit', sans-serif;
-    background: radial-gradient(circle at top right, #e2e8f0, var(--bg-dark));
+    background: linear-gradient(135deg, #f0f4f8, var(--bg-dark));
     color: var(--text-main);
     min-height: 100vh;
     display: flex;
@@ -26,15 +26,13 @@ body {
     overflow-x: hidden;
 }
 
-/* Glassmorphism Utilities */
+/* Premium Card Utilities */
 .glass-panel {
     background: var(--glass-bg);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
     border: 1px solid var(--glass-border);
-    border-radius: 16px;
+    border-radius: 12px;
     padding: 24px;
-    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.04);
 }
 
 .glass-nav {
@@ -42,8 +40,8 @@ body {
     justify-content: space-between;
     align-items: center;
     padding: 16px 32px;
-    background: rgba(255, 255, 255, 0.85);
-    backdrop-filter: blur(8px);
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--glass-border);
     position: sticky;
     top: 0;
@@ -64,10 +62,11 @@ body {
 }
 
 #auth-container h1 {
-    font-size: 2rem;
+    font-size: 2.2rem;
     margin-bottom: 8px;
-    background: linear-gradient(to right, #38bdf8, #818cf8);
+    background: linear-gradient(to right, var(--primary), var(--accent));
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 
@@ -87,11 +86,11 @@ button {
 }
 
 .primary-btn {
-    background: linear-gradient(135deg, var(--primary), var(--accent));
+    background: linear-gradient(135deg, var(--primary), #3730a3);
     color: white;
     padding: 12px 24px;
     font-size: 1rem;
-    box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
+    box-shadow: 0 4px 15px rgba(79, 70, 229, 0.3);
 }
 
 .primary-btn:hover {
@@ -107,7 +106,7 @@ button {
 }
 
 .secondary-btn:hover {
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(0, 0, 0, 0.03);
 }
 
 .full-width {
@@ -135,7 +134,7 @@ hr {
 }
 
 .stats-box {
-    background: rgba(255, 255, 255, 0.6);
+    background: #f8fafc;
     padding: 16px;
     border-radius: 8px;
     border: 1px solid var(--glass-border);
@@ -173,7 +172,7 @@ hr {
 }
 
 .badge {
-    background: #ef4444;
+    background: var(--accent);
     color: white;
     padding: 4px 8px;
     border-radius: 4px;
@@ -190,16 +189,17 @@ hr {
 }
 
 .lead-card {
-    background: rgba(255,255,255,0.03);
+    background: #ffffff;
     border: 1px solid var(--glass-border);
-    padding: 20px;
+    padding: 24px;
     border-radius: 12px;
-    transition: transform 0.2s ease, background 0.2s ease;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.02);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .lead-card:hover {
-    transform: scale(1.01);
-    background: rgba(255,255,255,0.06);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.06);
 }
 
 .lead-header {
@@ -225,12 +225,13 @@ hr {
 }
 
 .dm-draft {
-    background: rgba(241, 245, 249, 0.8);
-    padding: 12px;
-    border-left: 3px solid var(--primary);
-    border-radius: 4px;
+    background: #f8fafc;
+    padding: 16px;
+    border-left: 4px solid var(--primary);
+    border-radius: 6px;
     font-size: 0.95rem;
     line-height: 1.5;
+    color: #334155;
 }
 
 .action-row {

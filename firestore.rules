@@ -11,7 +11,12 @@ service cloud.firestore {
       allow read, write: if false; // Only accessible via Admin SDK in Cloud Run
     }
     
-    // Deny all other access
+    // Open access to the 'leads' table for active development testing
+    match /leads/{document=**} {
+      allow read, write: if true;
+    }
+    
+    // Deny all other unhandled requests
     match /{document=**} {
       allow read, write: if false;
     }

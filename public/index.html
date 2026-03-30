@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sideio Leads V16</title>
+    <title>Sideio Business Growth</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
     <!-- Firebase SDks -->
@@ -13,18 +13,18 @@
 </head>
 <body>
     <div id="auth-container" class="glass-panel">
-        <h1>Welcome to Sideio Leads.</h1>
-        <p>Enterprise Technical Architecture V16.0</p>
+        <h1>Welcome to Sideio.</h1>
+        <p>Grow your business pipeline on autopilot.</p>
         <button id="login-btn" class="primary-btn">Sign in with Google</button>
     </div>
 
     <div id="app-container" class="hidden">
         <nav class="glass-nav">
-            <div class="logo">Sideio Leads V16</div>
+            <div class="logo">Sideio Smart Growth</div>
             <div class="nav-links">
                 <a href="#" id="tab-dashboard" class="active">Dashboard</a>
-                <a href="#" id="tab-campaigns">Campaigns</a>
-                <a href="#" id="tab-team">Team</a>
+                <a href="#" id="tab-campaigns">Targeting</a>
+                <a href="#" id="tab-team">My Team</a>
                 <button id="logout-btn" class="secondary-btn">Logout</button>
             </div>
         </nav>
@@ -33,39 +33,39 @@
             <!-- Sidebar -->
             <aside class="glass-panel sidebar">
                 <h3>Quick Actions</h3>
-                <button class="primary-btn full-width" onclick="document.getElementById('new-campaign-modal').classList.remove('hidden')">+ New Campaign</button>
+                <button class="primary-btn full-width" onclick="document.getElementById('new-campaign-modal').classList.remove('hidden')">+ Find New Clients</button>
                 <hr>
                 <div class="stats-box">
-                    <h4>Outcome Tracker</h4>
-                    <div class="stat">Leads Today: <span>24</span></div>
-                    <div class="stat">Contacted: <span>18</span></div>
-                    <div class="stat">Replied: <span>3</span></div>
+                    <h4>Today's Performance</h4>
+                    <div class="stat">New Prospects: <span>0</span></div>
+                    <div class="stat">Messaged: <span>0</span></div>
+                    <div class="stat">Replies: <span>0</span></div>
                 </div>
                 <div class="stats-box mt-3">
-                    <h4>Monthly ROI Report</h4>
-                    <div class="stat">Est. Saved: <span>$490</span></div>
-                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="showToast('Generating ROI PDF (Enterprise Feature)', 'info')">Download PDF</button>
-                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="showToast('Dispatching ROI Analytics Report', 'info')">Email Report</button>
+                    <h4>Business Value Added</h4>
+                    <div class="stat">Value Generated: <span>₹ 0</span></div>
+                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="showToast('Building your monthly performance PDF...', 'info')">Download Report</button>
+                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="showToast('Sending report to your registered email...', 'info')">Email Report</button>
                 </div>
                 <div class="stats-box mt-3">
-                    <h4>WhatsApp BYOA</h4>
+                    <h4>WhatsApp Automation</h4>
                     <p class="text-small">Status: <span style="color:var(--text-muted)">Unconnected</span></p>
-                    <button class="primary-btn full-width mt-3" style="font-size:0.8rem; background: #25D366;" onclick="showToast('Redirecting to Meta Business Oauth...', 'success')">Connect WhatsApp</button>
+                    <button class="primary-btn full-width mt-3" style="font-size:0.8rem; background: #25D366;" onclick="showToast('Redirecting to WhatsApp setup...', 'success')">Connect WhatsApp</button>
                     <label style="display:flex; align-items:center; gap:8px; margin-top: 12px; font-size: 0.8rem;">
-                        <input type="checkbox" id="auto-send-cb"> Auto-Send Messages
+                        <input type="checkbox" id="auto-send-cb"> Auto-Send Client Messages
                     </label>
                 </div>
             </aside>
 
             <!-- Main Content Area -->
             <section class="glass-panel main-feed">
-                <div style="background: rgba(234, 179, 8, 0.2); border: 1px solid rgba(234, 179, 8, 0.4); padding: 12px; border-radius: 8px; margin-bottom: 24px;">
-                    <strong style="color: #facc15;">⚠️ Mandatory Anti-Spam Feature:</strong> Ensure all auto-sent WhatsApp DMs utilize dynamic Gemini formatting variations to prevent Meta throttling/bans.
+                <div style="background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.3); padding: 12px; border-radius: 8px; margin-bottom: 24px; color: #b45309;">
+                    <strong>💡 Smart Tip:</strong> Keep your automated WhatsApp messages friendly and conversational. Spamming the exact same message will cause Meta to restrict your number!
                 </div>
-                <h2>Recent High-Signal Leads</h2>
+                <h2>Your Latest Hot Leads</h2>
                 <div class="competitor-monitor">
-                    <span class="badge">Competitor Monitor Active</span>
-                    Listening for: <i>CompetitorX, ProductY</i>
+                    <span class="badge">Smart Tracking Active</span>
+                    Looking for keywords: <i>Real Estate, SaaS Sales, B2B</i>
                 </div>
                 <div id="leads-list" class="leads-list">
                     <!-- Leads will be injected here via JS -->
@@ -76,20 +76,20 @@
     </div>
 
     <div id="new-campaign-modal" class="hidden" style="position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:999; display:flex; justify-content:center; align-items:center;">
-        <div class="glass-panel" style="width: 400px;">
-            <h2>Create New Campaign</h2>
+        <div class="glass-panel" style="width: 400px; max-width: 90%;">
+            <h2>Find New Clients</h2>
             <br>
-            <input type="text" placeholder="Campaign Name" class="full-width" style="margin-bottom: 12px; padding: 8px;">
-            <input type="text" placeholder="Product Bio" class="full-width" style="margin-bottom: 12px; padding: 8px;">
-            <input type="text" placeholder="Keywords (comma separated)" class="full-width" style="margin-bottom: 12px; padding: 8px;">
+            <input type="text" placeholder="What do you want to call this search?" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            <input type="text" placeholder="Describe your product offering..." class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            <input type="text" placeholder="Target Keywords (e.g. CEO, funding, hiring)" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             
             <label style="display:flex; align-items:center; gap:8px; margin-bottom: 24px; font-size: 0.9rem;">
-                <input type="checkbox" id="competitor-monitor-cb" checked> Enable Smart Competitor Monitor
+                <input type="checkbox" id="competitor-monitor-cb" checked> Automatically track my competitors
             </label>
             
             <div style="display:flex; gap: 12px;">
-                <button class="primary-btn full-width" onclick="saveCampaignAction()">Save Campaign</button>
-                <button class="secondary-btn full-width" onclick="document.getElementById('new-campaign-modal').classList.add('hidden')">Cancel</button>
+                <button class="primary-btn full-width" onclick="saveCampaignAction()">Start Searching</button>
+                <button class="secondary-btn full-width" onclick="document.getElementById('new-campaign-modal').classList.add('hidden')">Close</button>
             </div>
         </div>
     </div>

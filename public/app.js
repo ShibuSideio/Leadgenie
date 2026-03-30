@@ -52,7 +52,7 @@ let leadsListenerUnsubscribe = null;
 
 // Load Leads Real-Time
 function loadLeads(user) {
-    leadsList.innerHTML = '<div class="lead-card pulse">Authenticating real-time datastream...</div>';
+    leadsList.innerHTML = '<div class="lead-card pulse">Connecting to your secure database...</div>';
     
     if (leadsListenerUnsubscribe) {
         leadsListenerUnsubscribe();
@@ -64,12 +64,12 @@ function loadLeads(user) {
         .onSnapshot(snapshot => {
             if (snapshot.empty) {
                 leadsList.innerHTML = `
-                    <div class="lead-card" style="text-align: center; padding: 40px;">
-                        <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">🌱</div>
-                        <h3 style="color: var(--text-main); margin-bottom: 8px;">Your Pipeline is Pristine</h3>
+                    <div class="lead-card" style="text-align: center; padding: 40px; border: none; background: transparent; box-shadow: none;">
+                        <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">🚀</div>
+                        <h3 style="color: var(--text-main); margin-bottom: 8px;">Let's Grow Your Business</h3>
                         <p style="color: var(--text-muted); font-size: 0.95rem; line-height: 1.5;">
-                            There is currently absolutely zero data inside the <strong>lead-sniper-prod</strong> database.<br>
-                            Start a new campaign to command the engine to begin scraping intelligent targets.
+                            Your dashboard is ready and secure.<br>
+                            Click "+ Find New Clients" to let the AI start finding highly qualified leads for you.
                         </p>
                     </div>
                 `;
@@ -84,8 +84,8 @@ function loadLeads(user) {
             });
         }, error => {
             console.error("Firestore Listener Error:", error);
-            leadsList.innerHTML = '<div class="lead-card" style="color: #ef4444; border-color: #ef4444;">Permission Denied. Verify database rules exist.</div>';
-            showToast('Datastream Authentication Failed', 'error');
+            leadsList.innerHTML = '<div class="lead-card" style="color: #ef4444; border-color: #ef4444;">Could not connect to database. Please check permissions.</div>';
+            showToast('Connection Refused', 'error');
         });
 }
 
@@ -125,10 +125,10 @@ window.updateLeadStatus = function(docId, newStatus) {
         status: newStatus,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     }).then(() => {
-        showToast(`Lead trajectory updated to: ${newStatus}`, 'success');
+        showToast(`Lead status updated: ${newStatus}`, 'success');
     }).catch(error => {
         console.error("Mutation Error:", error);
-        showToast('Permission Denied updating document hierarchy', 'error');
+        showToast('Error saving update to database', 'error');
     });
 };
 
@@ -155,9 +155,9 @@ window.showToast = function(message, type = 'info') {
 
 // Campaign Handler
 window.saveCampaignAction = function() {
-    showToast('Provisioning Campaign Blueprint...', 'info');
+    showToast('Setting up your search...', 'info');
     setTimeout(() => {
         document.getElementById('new-campaign-modal').classList.add('hidden');
-        showToast('Autonomous Scanner Activated', 'success');
+        showToast('System is now looking for clients!', 'success');
     }, 800);
 };
