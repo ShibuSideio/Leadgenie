@@ -28,6 +28,7 @@ auth.onAuthStateChanged(user => {
         authContainer.classList.add('hidden');
         appContainer.classList.remove('hidden');
         loadLeads(user);
+        loadCampaigns(user);
     } else {
         // User logged out
         authContainer.classList.remove('hidden');
@@ -49,6 +50,35 @@ logoutBtn.addEventListener('click', () => {
 });
 
 let leadsListenerUnsubscribe = null;
+let campaignsListenerUnsubscribe = null;
+
+// Dynamic Campaign Hydration
+function loadCampaigns(user) {
+    const feed = document.getElementById('active-campaign-feed');
+    if (!feed) return;
+    
+    if (campaignsListenerUnsubscribe) campaignsListenerUnsubscribe();
+    
+    // Simplistic listener returning the single most recent active campaign
+    campaignsListenerUnsubscribe = db.collection('campaigns')
+        .orderBy('createdAt', 'desc')
+        .limit(1)
+        .onSnapshot(snapshot => {
+            if (snapshot.empty) {
+                feed.innerHTML = '';
+                return;
+            }
+            const activeCamp = snapshot.docs[0].data();
+            feed.innerHTML = `
+                <div class="competitor-monitor" style="background: rgba(79, 70, 229, 0.05); border: 1px solid rgba(79, 70, 229, 0.2); padding: 12px; border-radius: 8px; margin-bottom: 24px;">
+                    <span class="badge" style="background: var(--primary);">Tracking Active: ${activeCamp.name}</span>
+                    <span style="color: var(--text-muted); font-size: 0.9rem;">Looking for keywords: <i>${activeCamp.keywords}</i></span>
+                </div>
+            `;
+        }, error => {
+            console.error("Campaign Hook Error:", error);
+        });
+}
 
 // Load Leads Real-Time
 function loadLeads(user) {
@@ -155,9 +185,34 @@ window.showToast = function(message, type = 'info') {
 
 // Campaign Handler
 window.saveCampaignAction = function() {
+    const nameInput = document.getElementById('camp-name');
+    const bioInput = document.getElementById('camp-bio');
+    const keysInput = document.getElementById('camp-keys');
+    
+    if (!nameInput || !keysInput || !nameInput.value || !keysInput.value) {
+        showToast('Campaign Name and Keywords are required', 'error');
+        return;
+    }
+    
     showToast('Setting up your search...', 'info');
-    setTimeout(() => {
+    
+    // Physical Firestore Mutation
+    db.collection('campaigns').add({
+        name: nameInput.value,
+        bio: bioInput.value,
+        keywords: keysInput.value,
+        status: 'active',
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    }).then(() => {
         document.getElementById('new-campaign-modal').classList.add('hidden');
         showToast('System is now looking for clients!', 'success');
-    }, 800);
+        
+        // Purge inputs
+        nameInput.value = '';
+        bioInput.value = '';
+        keysInput.value = '';
+    }).catch(error => {
+        console.error("Campaign Creation Error:", error);
+        showToast('Failed to save campaign. Check permissions.', 'error');
+    });
 };

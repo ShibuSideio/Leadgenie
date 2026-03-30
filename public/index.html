@@ -63,10 +63,7 @@
                     <strong>💡 Smart Tip:</strong> Keep your automated WhatsApp messages friendly and conversational. Spamming the exact same message will cause Meta to restrict your number!
                 </div>
                 <h2>Your Latest Hot Leads</h2>
-                <div class="competitor-monitor">
-                    <span class="badge">Smart Tracking Active</span>
-                    Looking for keywords: <i>Real Estate, SaaS Sales, B2B</i>
-                </div>
+                <div id="active-campaign-feed"></div>
                 <div id="leads-list" class="leads-list">
                     <!-- Leads will be injected here via JS -->
                     <div class="lead-card pulse">Loading intelligence...</div>
@@ -79,9 +76,9 @@
         <div class="glass-panel" style="width: 400px; max-width: 90%;">
             <h2>Find New Clients</h2>
             <br>
-            <input type="text" placeholder="What do you want to call this search?" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
-            <input type="text" placeholder="Describe your product offering..." class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
-            <input type="text" placeholder="Target Keywords (e.g. CEO, funding, hiring)" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            <input type="text" id="camp-name" placeholder="What do you want to call this search?" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            <input type="text" id="camp-bio" placeholder="Describe your product offering..." class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            <input type="text" id="camp-keys" placeholder="Target Keywords (e.g. CEO, funding, hiring)" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             
             <label style="display:flex; align-items:center; gap:8px; margin-bottom: 24px; font-size: 0.9rem;">
                 <input type="checkbox" id="competitor-monitor-cb" checked> Automatically track my competitors

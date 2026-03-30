@@ -15,6 +15,11 @@ service cloud.firestore {
     match /leads/{document=**} {
       allow read, write: if true;
     }
+
+    // Open access to the 'campaigns' table for tracking Search Payloads
+    match /campaigns/{document=**} {
+      allow read, write: if true;
+    }
     
     // Deny all other unhandled requests
     match /{document=**} {
