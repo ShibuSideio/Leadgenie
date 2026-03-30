@@ -1,12 +1,12 @@
 {
   "projects": {
-    "default": "lead-sniper-prod-691c1"
+    "default": "lead-sniper-prod"
   },
   "targets": {
-    "lead-sniper-prod-691c1": {
+    "lead-sniper-prod": {
       "hosting": {
         "main": [
-          "lead-sniper-prod-691c1"
+          "lead-sniper-prod"
         ]
       }
     }
