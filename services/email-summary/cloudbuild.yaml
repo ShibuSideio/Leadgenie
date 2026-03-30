@@ -15,3 +15,6 @@ steps:
   - 'asia-south1'
   - '--memory'
   - '128Mi'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

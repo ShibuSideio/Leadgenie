@@ -14,3 +14,6 @@ steps:
 
 substitutions:
     _FIREBASE_TOKEN: 'YOUR_FIREBASE_CI_TOKEN_HERE'  # Note: The actual token should be configured as an environment variable or secret mapped to this substitution in the Cloud Build Trigger GUI safely.
+
+options:
+  logging: CLOUD_LOGGING_ONLY

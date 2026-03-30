@@ -11,3 +11,6 @@ steps:
     - --region=asia-south1
     - --memory=256MB
     - --source=./services/orchestrator
+
+options:
+  logging: CLOUD_LOGGING_ONLY
