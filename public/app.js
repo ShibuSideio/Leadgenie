@@ -1,9 +1,9 @@
 // Firebase configuration (Placeholder)
 const firebaseConfig = {
     apiKey: "YOUR_API_KEY",
-    authDomain: "lead-sniper-prod.firebaseapp.com",
-    projectId: "lead-sniper-prod",
-    storageBucket: "lead-sniper-prod.appspot.com",
+    authDomain: "lead-sniper-prod-691c1.firebaseapp.com",
+    projectId: "lead-sniper-prod-691c1",
+    storageBucket: "lead-sniper-prod-691c1.appspot.com",
     messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
     appId: "YOUR_APP_ID"
 };
