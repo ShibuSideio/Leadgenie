@@ -82,8 +82,13 @@ def dispatch():
     
     campaign_ref = db.collection("campaigns").document(campaign_id)
     campaign = campaign_ref.get().to_dict()
-    bio = campaign.get("product_bio", "")
-    keywords = campaign.get("keywords", [])
+    bio = campaign.get("bio", "")
+    
+    raw_keywords = campaign.get("keywords", "")
+    if isinstance(raw_keywords, str):
+        keywords = [k.strip() for k in raw_keywords.split(',') if k.strip()]
+    else:
+        keywords = raw_keywords
     
     all_results = []
     
@@ -126,9 +131,11 @@ def dispatch():
                         "score": evaluation.get("score"),
                         "pain_point": evaluation.get("pain_point"),
                         "dm": evaluation.get("dm"),
-                        "status": "new"
+                        "status": "new",
+                        "createdAt": firestore.SERVER_TIMESTAMP
                     }
-                    db.collection("tenants").document(tenant_id).collection("leads").add(lead_doc)
+                    # Secure Multi-Tenant Enterprise Write
+                    db.collection("leads").add(lead_doc)
                     all_results.append(lead_doc)
                     
     return jsonify({"processed_leads": len(all_results)}), 200

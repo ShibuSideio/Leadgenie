@@ -56,15 +56,18 @@ def send_daily_summaries():
         t_data = t.to_dict()
         email = t_data.get("admin_email")
         if email:
-            # Query recent leads across all campaigns for this tenant
-            leads_query = db.collection("tenants").document(t.id).collection("leads").where("status", "in", ["new", "contacted"]).limit(10).stream()
+            # Query recent leads securely across all campaigns for this tenant
+            leads_query = db.collection("leads").where("tenant_id", "==", t.id).limit(50).stream()
             
             top_leads = []
             total = 0
             for l in leads_query:
                 data = l.to_dict()
-                top_leads.append(f"- URL: {data.get('url')} | Score: {data.get('score')} | Pain: {data.get('pain_point')[:50]}...")
+                if data.get("status") not in ["new", "contacted"]:
+                    continue
+                top_leads.append(f"- URL: {data.get('url')} | Score: {data.get('score')} | Pain: {str(data.get('pain_point'))[:50]}...")
                 total += 1
+                if total >= 10: break
             
             if total > 0:
                 send_summary_email(email, total, top_leads)
