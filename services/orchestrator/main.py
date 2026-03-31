@@ -79,10 +79,15 @@ def trigger_daily_sweep(request):
             }
         }
         
-        sa_email = get_service_account_email()
+        sa_email = get_service_account_email().strip()
         if sa_email:
+            # Cloud Run strictly rejects OIDC tokens if the audience string includes the HTTP path.
+            # We must aggressively strip '/dispatch' from the dynamic PIPELINE_URL to build a clean Base Target Audience.
+            base_url_audience = PIPELINE_URL.split('/dispatch')[0]
+            
             task["http_request"]["oidc_token"] = {
-                "service_account_email": sa_email
+                "service_account_email": sa_email,
+                "audience": base_url_audience
             }
         
         response = tasks_client.create_task(request={"parent": queue_path, "task": task})
