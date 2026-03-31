@@ -33,12 +33,7 @@ steps:
     PIPELINE_URL=$$(gcloud run services describe lead-pipeline-main --region=asia-south1 --format="value(status.url)")/dispatch
     echo "Resolved dynamic PIPELINE_URL: $$PIPELINE_URL"
     
-    gcloud run deploy orchestrator \
-      --image gcr.io/$$PROJECT_ID/lead-orchestrator \
-      --region asia-south1 \
-      --memory 256Mi \
-      --no-allow-unauthenticated \
-      --set-env-vars="PROJECT_ID=$$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=$$PIPELINE_URL"
+    gcloud run deploy orchestrator --image "gcr.io/$$PROJECT_ID/lead-orchestrator" --region asia-south1 --memory 256Mi --no-allow-unauthenticated --set-env-vars="PROJECT_ID=$$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=$$PIPELINE_URL"
 
 # ---------------------------------------------------------------------
 # Microservice 3: Scraper Heavy (Playwright)
