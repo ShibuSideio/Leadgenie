@@ -98,7 +98,6 @@ function loadCampaigns(user) {
                         <td style="padding: 12px;"><i style="color:var(--text-muted); font-size:0.85rem">${camp.keywords || 'N/A'}</i></td>
                         <td style="padding: 12px;">${statusBadge}</td>
                         <td style="padding: 12px; text-align:right;">
-                            <button class="primary-btn" style="padding: 4px 8px; font-size: 0.75rem; margin-right: 4px;" onclick="triggerCampaignEngine('${id}')">⚡ Run</button>
                             <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; margin-right: 4px;" onclick="openEditModal('${id}', '${(camp.name || '').replace(/'/g, "\\'")}', '${(camp.bio || '').replace(/'/g, "\\'")}', '${(camp.keywords || '').replace(/'/g, "\\'")}')">Edit</button>
                             <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; border-color: ${statusColor}; color: ${statusColor}" onclick="toggleCampaignStatus('${id}', '${camp.status}')">${isActive ? 'Pause' : 'Resume'}</button>
                         </td>
@@ -412,21 +411,6 @@ window.toggleCampaignStatus = function(id, currentStatus) {
         showToast(`Campaign ${newStatus} successfully`, 'success');
     }).catch(err => {
         showToast('Status update failed', 'error');
-    });
-};
-
-window.triggerCampaignEngine = function(campaignId) {
-    showToast('Waking up AI engine...', 'info');
-    fetch('/api/trigger', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ campaign_id: campaignId })
-    }).then(res => {
-        if (!res.ok) throw new Error("Trigger proxy failed");
-        showToast('Search sequence specifically initiated for this campaign!', 'success');
-    }).catch(err => {
-        console.error("Manual Trigger Error", err);
-        showToast('Engine proxy failed to securely connect.', 'error');
     });
 };
 

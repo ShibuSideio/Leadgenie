@@ -109,6 +109,11 @@ def dispatch():
         
         # Step 3, 4, 5
         for url in filtered_urls[:30]:
+            # Deduplication Gateway: Block Duplicate Processing!
+            existing = db.collection("leads").where("tenant_id", "==", tenant_id).where("campaign_id", "==", campaign_id).where("url", "==", url).limit(1).get()
+            if len(list(existing)) > 0:
+                continue
+
             # Cache check
             cache_ref = db.collection("scraped_cache").document(url.replace('/','_'))
             cache_doc = cache_ref.get()
