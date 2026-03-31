@@ -1,7 +1,18 @@
 import os
 import json
+import urllib.request
 from google.cloud import firestore
 from google.cloud import tasks_v2
+
+def get_service_account_email():
+    try:
+        url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
+        req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
+        with urllib.request.urlopen(req, timeout=2) as response:
+            return response.read().decode('utf-8')
+    except Exception as e:
+        print(f"Failed to fetch metadata SA email: {e}")
+        return ""
 
 db = firestore.Client()
 tasks_client = tasks_v2.CloudTasksClient()
@@ -58,7 +69,7 @@ def trigger_daily_sweep(request):
         tenant_id = campaign_data.get("tenant_id")
         if not tenant_id: continue
         
-        # Enqueue to Cloud Tasks
+        # Securely bypass internal OIDC firewall constraints natively
         task = {
             "http_request": {
                 "http_method": tasks_v2.HttpMethod.POST,
@@ -67,6 +78,12 @@ def trigger_daily_sweep(request):
                 "body": json.dumps({"tenant_id": tenant_id, "campaign_id": campaign_id}).encode()
             }
         }
+        
+        sa_email = get_service_account_email()
+        if sa_email:
+            task["http_request"]["oidc_token"] = {
+                "service_account_email": sa_email
+            }
         
         response = tasks_client.create_task(request={"parent": queue_path, "task": task})
         count += 1
