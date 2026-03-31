@@ -13,19 +13,50 @@ PIPELINE_URL = os.environ.get("PIPELINE_URL", "https://lead-pipeline-main-abc.a.
 
 def trigger_daily_sweep(request):
     """
-    HTTP Cloud Function triggered by Cloud Scheduler daily at 6AM.
-    Retrieves all active campaigns and enqueues tasks into Cloud Tasks.
+    HTTP Cloud Function triggered by Cloud Scheduler daily at 6AM or via manual UI proxy.
     """
-    print("Triggering daily sweep orchestrator...")
-    campaigns = db.collection("campaigns").where("status", "==", "active").stream()
+    if request.method == "OPTIONS":
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Max-Age': '3600'
+        }
+        return ('', 204, headers)
+
+    headers = {'Access-Control-Allow-Origin': '*'}
+    
+    manual_camp_id = None
+    if request.method == "POST":
+        try:
+            data = request.json
+            if data and "campaign_id" in data:
+                manual_camp_id = data["campaign_id"]
+        except:
+            pass
+
+    print(f"Triggering orchestrator. Manual Mode: {manual_camp_id}")
+    
+    if manual_camp_id:
+        campaigns = [db.collection("campaigns").document(manual_camp_id)]
+    else:
+        campaigns = list(db.collection("campaigns").where("status", "==", "active").stream())
     
     queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
     
     count = 0
     for camp_doc in campaigns:
-        campaign_data = camp_doc.to_dict()
+        if manual_camp_id:
+           camp_snap = camp_doc.get()
+           if not camp_snap.exists: continue
+           campaign_data = camp_snap.to_dict()
+           campaign_id = manual_camp_id
+        else:
+           campaign_data = camp_doc.to_dict()
+           campaign_id = camp_doc.id
+
         tenant_id = campaign_data.get("tenant_id")
-        campaign_id = camp_doc.id
+        if not tenant_id: continue
         
         # Enqueue to Cloud Tasks
         task = {
@@ -38,7 +69,6 @@ def trigger_daily_sweep(request):
         }
         
         response = tasks_client.create_task(request={"parent": queue_path, "task": task})
-        print(f"Created task {response.name} for campaign {campaign_id}")
         count += 1
         
-    return f"Successfully queued {count} campaign jobs.", 200
+    return f"Successfully queued {count} campaign jobs.", 200, headers

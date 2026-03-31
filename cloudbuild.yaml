@@ -8,7 +8,7 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/lead-orchestrator']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args: ['run', 'deploy', 'orchestrator', '--image', 'gcr.io/$PROJECT_ID/lead-orchestrator', '--region', 'asia-south1', '--memory', '256Mi', '--no-allow-unauthenticated']
+  args: ['run', 'deploy', 'orchestrator', '--image', 'gcr.io/$PROJECT_ID/lead-orchestrator', '--region', 'asia-south1', '--memory', '256Mi', '--allow-unauthenticated']
 
 # ---------------------------------------------------------------------
 # Microservice 2: Pipeline Main

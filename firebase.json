@@ -11,6 +11,13 @@
     ],
     "rewrites": [
       {
+        "source": "/api/trigger",
+        "run": {
+          "serviceId": "orchestrator",
+          "region": "asia-south1"
+        }
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }
