@@ -22,9 +22,9 @@
         <nav class="glass-nav">
             <div class="logo">Sideio Smart Growth</div>
             <div class="nav-links">
-                <a href="#" id="tab-dashboard" class="active">Dashboard</a>
-                <a href="#" id="tab-campaigns">Targeting</a>
-                <a href="#" id="tab-team">My Team</a>
+                <a href="#" id="tab-dashboard" class="active" onclick="switchTab('dashboard')">Dashboard</a>
+                <a href="#" id="tab-campaigns" onclick="switchTab('target')">Targeting</a>
+                <a href="#" id="tab-team" onclick="switchTab('team')">My Team</a>
                 <button id="logout-btn" class="secondary-btn">Logout</button>
             </div>
         </nav>
@@ -44,13 +44,13 @@
                 <div class="stats-box mt-3">
                     <h4>Business Value Added</h4>
                     <div class="stat">Value Generated: <span>₹ 0</span></div>
-                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="showToast('Building your monthly performance PDF...', 'info')">Download Report</button>
-                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="showToast('Sending report to your registered email...', 'info')">Email Report</button>
+                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="window.print()">Download Report</button>
+                    <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="sendEmailReport()">Email Report</button>
                 </div>
                 <div class="stats-box mt-3">
                     <h4>WhatsApp Automation</h4>
                     <p class="text-small">Status: <span style="color:var(--text-muted)">Unconnected</span></p>
-                    <button class="primary-btn full-width mt-3" style="font-size:0.8rem; background: #25D366;" onclick="showToast('Redirecting to WhatsApp setup...', 'success')">Connect WhatsApp</button>
+                    <button class="primary-btn full-width mt-3" style="font-size:0.8rem; background: #25D366;" onclick="window.open('https://business.facebook.com/wa/manage/home/', '_blank')">Connect WhatsApp</button>
                     <label style="display:flex; align-items:center; gap:8px; margin-top: 12px; font-size: 0.8rem;">
                         <input type="checkbox" id="auto-send-cb"> Auto-Send Client Messages
                     </label>
@@ -58,7 +58,7 @@
             </aside>
 
             <!-- Main Content Area -->
-            <section class="glass-panel main-feed">
+            <section id="view-dashboard" class="glass-panel main-feed">
                 <div style="background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.3); padding: 12px; border-radius: 8px; margin-bottom: 24px; color: #b45309;">
                     <strong>💡 Smart Tip:</strong> Keep your automated WhatsApp messages friendly and conversational. Spamming the exact same message will cause Meta to restrict your number!
                 </div>
@@ -67,6 +67,22 @@
                 <div id="leads-list" class="leads-list">
                     <!-- Leads will be injected here via JS -->
                     <div class="lead-card pulse">Loading intelligence...</div>
+                </div>
+            </section>
+
+            <section id="view-target" class="glass-panel main-feed hidden">
+                <h2>Targeting Models</h2>
+                <div class="stats-box mt-3" style="background: #ffffff;">
+                    <p>Current Logic Router: <strong>Gemini 2.5 Flash B2B Scoring</strong></p>
+                    <p>Pipeline Schedule: <strong>06:00 AM IST (Cloud Scheduler)</strong></p>
+                </div>
+            </section>
+
+            <section id="view-team" class="glass-panel main-feed hidden">
+                <h2>My Team</h2>
+                <div class="stats-box mt-3" style="background: #ffffff;">
+                    <p>You are currently the only administrator of this pipeline.</p>
+                    <button class="primary-btn mt-3" onclick="showToast('Invite link copied to clipboard', 'success')">+ Invite Member</button>
                 </div>
             </section>
         </main>
