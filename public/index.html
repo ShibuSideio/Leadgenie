@@ -5,11 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sideio Business Growth</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <!-- Firebase core logic -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+    <!-- Chart.js Enterprise Analytics Engine -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Core Application -->
     <link rel="stylesheet" href="styles.css">
-    <!-- Firebase SDks -->
-    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-auth-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore-compat.js"></script>
 </head>
 <body>
     <div id="auth-container" class="glass-panel">
@@ -34,6 +37,15 @@
             <aside class="glass-panel sidebar">
                 <h3>Quick Actions</h3>
                 <button class="primary-btn full-width" onclick="document.getElementById('new-campaign-modal').classList.remove('hidden')">+ Find New Clients</button>
+                
+                <!-- Chart.js Mounted Analytics Rendering -->
+                <div class="glass-panel text-center" style="margin-top: 20px;">
+                    <h3 style="font-size: 0.95rem; margin-bottom: 2px;">Today's Analytics</h3>
+                    <div style="height: 180px; width: 100%; position: relative;">
+                        <canvas id="funnelChart"></canvas>
+                    </div>
+                </div>
+
                 <hr>
                 <div class="stats-box">
                     <h4>Today's Performance</h4>
@@ -72,6 +84,10 @@
                 <div id="leads-list" class="leads-list">
                     <!-- Leads will be injected here via JS -->
                     <div class="lead-card pulse">Loading intelligence...</div>
+                </div>
+                
+                <div style="text-align: center; margin-top: 16px;">
+                    <button class="secondary-btn" onclick="loadMoreLeads()" style="padding: 10px 24px;">Load Historical Leads</button>
                 </div>
             </section>
 
@@ -142,6 +158,19 @@
             <div style="display:flex; gap: 12px;">
                 <button class="primary-btn full-width" onclick="saveEditedCampaign()">Update Engine</button>
                 <button class="secondary-btn full-width" onclick="closeEditModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Timeline Event Audit Log Modal -->
+    <div id="audit-log-modal" class="hidden" style="position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:999; display:flex; justify-content:center; align-items:center;">
+        <div class="glass-panel" style="width: 500px; max-width: 90%; max-height: 80vh; overflow-y: auto;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px;">
+                <h2 style="margin:0;">CRM Interaction Audit Log</h2>
+                <button class="secondary-btn" style="padding: 4px 8px;" onclick="document.getElementById('audit-log-modal').classList.add('hidden')">Close</button>
+            </div>
+            <div id="audit-timeline-feed" style="background:#f8fafc; padding: 16px; border-radius: 6px; border: 1px solid var(--glass-border);">
+                <!-- Dynamic timeline blocks injected here by JS -->
             </div>
         </div>
     </div>

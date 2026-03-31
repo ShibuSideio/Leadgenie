@@ -64,9 +64,9 @@ function loadCampaigns(user) {
     
     if (campaignsListenerUnsubscribe) campaignsListenerUnsubscribe();
     
-    // Listen to ALL campaigns for the table
+    // Listen to ALL campaigns for the user (Tenant Lock)
     campaignsListenerUnsubscribe = db.collection('campaigns')
-        .orderBy('createdAt', 'desc')
+        .where('tenant_id', '==', user.uid)
         .onSnapshot(snapshot => {
             if (snapshot.empty) {
                 if (feed) feed.innerHTML = '';
@@ -78,9 +78,12 @@ function loadCampaigns(user) {
             let tableHTML = '';
             let filterHTML = '<option value="all">All Campaigns</option>';
             
-            snapshot.forEach(doc => {
-                const camp = doc.data();
-                const id = doc.id;
+            // Client-side sort to bypass missing GCP composite indexes securely
+            const campsArray = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            campsArray.sort((a, b) => b.createdAt?.toMillis() - a.createdAt?.toMillis());
+            
+            campsArray.forEach(camp => {
+                const id = camp.id;
                 const isActive = camp.status === 'active';
                 if (isActive) activeCount++;
                 
@@ -127,7 +130,37 @@ function loadCampaigns(user) {
         });
 }
 
-// Load Leads Real-Time
+// --- ENTERPRISE CHART.JS PIPELINE ---
+let conversionChart = null;
+function initAnalyticsChart(newC, contactedC, convertedC) {
+    const ctx = document.getElementById('funnelChart');
+    if (!ctx) return;
+    
+    if (conversionChart) {
+        conversionChart.data.datasets[0].data = [newC, contactedC, convertedC];
+        conversionChart.update();
+        return;
+    }
+
+    conversionChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: ['New Processed', 'Messaged', 'Converted'],
+            datasets: [{
+                data: [newC, contactedC, convertedC],
+                backgroundColor: ['#4F46E5', '#3B82F6', '#25D366'],
+                borderWidth: 0
+            }]
+        },
+        options: { cutout: '75%', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+    });
+}
+
+// Pagination Controls
+let lastVisibleLead = null;
+let isLoadingMore = false;
+
+// Load Leads Real-Time (Multi-Tenant + Pagination)
 function loadLeads(user) {
     leadsList.innerHTML = '<div class="lead-card pulse">Connecting to your secure database...</div>';
     
@@ -137,15 +170,31 @@ function loadLeads(user) {
     
     // Real Firestore Listener binding to the 'leads' collection
     leadsListenerUnsubscribe = db.collection('leads')
-        .orderBy('createdAt', 'desc')
+        .where('tenant_id', '==', user.uid)
+        .limit(50)
         .onSnapshot(snapshot => {
             if (snapshot.empty) {
                 rawLeadsCache = [];
                 renderLeads();
+                initAnalyticsChart(0,0,0);
                 return;
             }
+            
+            lastVisibleLead = snapshot.docs[snapshot.docs.length - 1];
 
             rawLeadsCache = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            // Client side sort to bypass index build constraints
+            rawLeadsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
+            
+            // Execute Business Intelligence Chart Algorithms
+            let cNew = 0, cContact= 0, cConvert = 0;
+            rawLeadsCache.forEach(l => {
+                if (l.status === 'contacted') cContact++;
+                else if (l.status === 'converted') cConvert++;
+                else cNew++;
+            });
+            initAnalyticsChart(cNew, cContact, cConvert);
+            
             renderLeads();
             
         }, error => {
@@ -154,6 +203,40 @@ function loadLeads(user) {
             showToast('Connection Refused', 'error');
         });
 }
+
+// Load More Intersection Target Mutator
+window.loadMoreLeads = function() {
+    if (isLoadingMore || !lastVisibleLead) return;
+    
+    const currentUser = firebase.auth().currentUser;
+    if (!currentUser) return;
+
+    isLoadingMore = true;
+    showToast('Loading older pipeline records...', 'info');
+
+    db.collection('leads')
+        .where('tenant_id', '==', currentUser.uid)
+        .startAfter(lastVisibleLead)
+        .limit(50)
+        .get().then((snapshot) => {
+            if (snapshot.empty) {
+                showToast('No more historical records exist.', 'info');
+                isLoadingMore = false;
+                return;
+            }
+            lastVisibleLead = snapshot.docs[snapshot.docs.length - 1];
+            
+            const newMappers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            rawLeadsCache = [...rawLeadsCache, ...newMappers];
+            rawLeadsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
+            renderLeads();
+            isLoadingMore = false;
+        }).catch(err => {
+            console.error("Pagination Fault: ", err);
+            showToast('Failed to cursor historical data.', 'error');
+            isLoadingMore = false;
+        });
+};
 
 window.filterLeadsByCampaign = function(campaignId) {
     currentCampaignFilter = campaignId;
@@ -213,10 +296,13 @@ function createLeadCard(docId, lead) {
         <div class="pain-point">" ${lead.pain_point || 'Analyzing sentiment...'} "</div>
         <div class="dm-draft">${lead.dm || 'Drafting variation...'}</div>
         <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'completed')" title="Mark as Contacted">✅ Contacted</button>
+            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'contacted')" title="Mark as Contacted">✅ Contacted</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">🚫 Ignore</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">🎯 Converted</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'snoozed')" title="Follow-up Later">⏰ Snooze</button>
+            
+            <!-- Audit Log Injection -->
+            <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${encodeURIComponent(JSON.stringify(lead.interactions || []))}')" title="Audit Log">🕒 View Timeline Logs</button>
         </div>
     `;
     return card;
@@ -224,15 +310,39 @@ function createLeadCard(docId, lead) {
 
 // Database Mutators
 window.updateLeadStatus = function(docId, newStatus) {
+    const timestamp = new Date().toLocaleString();
+    const actionLog = { action: `Status Changed to ${newStatus.toUpperCase()}`, date: timestamp };
+
     db.collection('leads').doc(docId).update({
         status: newStatus,
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+        interactions: firebase.firestore.FieldValue.arrayUnion(actionLog)
     }).then(() => {
         showToast(`Lead status updated: ${newStatus}`, 'success');
     }).catch(error => {
         console.error("Mutation Error:", error);
         showToast('Error saving update to database', 'error');
     });
+};
+
+// Modals
+window.viewLeadTimeline = function(eventsJson) {
+    try {
+        const events = JSON.parse(decodeURIComponent(eventsJson)) || [];
+        const feed = document.getElementById('audit-timeline-feed');
+        
+        if (events.length === 0) {
+            feed.innerHTML = '<p style="color:var(--text-muted); text-align:center;">No CRM interactions recorded yet.</p>';
+        } else {
+            feed.innerHTML = events.map(e => `
+                <div style="padding:12px; border-left: 3px solid var(--primary); margin-bottom:12px; background: white; border-radius: 0 4px 4px 0; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                    <small style="color:var(--text-muted); display:block; margin-bottom:4px;">${e.date}</small>
+                    <strong style="color: var(--text-main); font-size: 0.95rem;">${e.action}</strong>
+                </div>
+            `).join('');
+        }
+        document.getElementById('audit-log-modal').classList.remove('hidden');
+    } catch(e) { console.error('Timeline Schema Sync Error', e); }
 };
 
 // --- TOAST UI ENGINE ---
@@ -317,12 +427,13 @@ window.saveCampaignAction = function() {
     
     showToast('Setting up your search...', 'info');
     
-    // Physical Firestore Mutation
+    // Physical Firestore Mutation (Secured Identity)
     db.collection('campaigns').add({
         name: nameInput.value,
         bio: bioInput.value,
         keywords: keysInput.value,
         status: 'active',
+        tenant_id: firebase.auth().currentUser.uid,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
     }).then(() => {
         document.getElementById('new-campaign-modal').classList.add('hidden');
