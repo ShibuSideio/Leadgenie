@@ -25,13 +25,16 @@ def get_secret(secret_name):
     return response.payload.data.decode("UTF-8")
 
 def search_serper(query):
-    api_key = get_secret(SERPER_API_KEY_NAME)
+    api_key = get_secret(SERPER_API_KEY_NAME).strip()
     url = "https://google.serper.dev/search"
     payload = json.dumps({"q": query, "num": 20})
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
-    response = httpx.post(url, headers=headers, data=payload)
+    
+    response = httpx.post(url, headers=headers, data=payload, timeout=30)
     if response.status_code == 200:
         return response.json().get("organic", [])
+    
+    print(f"SERPER API AUTH OR RATE LIMIT CRASH HTTP {response.status_code}: {response.text}")
     return []
 
 def safe_truncate(text: str) -> str:
@@ -39,14 +42,19 @@ def safe_truncate(text: str) -> str:
     return text[:100000]
 
 def pre_filter_gemini(snippets, bio):
-    prompt = f"Review these 80 search snippets. Based on the user's product bio: '{bio}', discard low-signal content. Return only the URLs of the top 30 potential leads.\n\nSnippets: {json.dumps(snippets)}"
+    if not snippets:
+        return []
+    
+    prompt = f"Review these {len(snippets)} search snippets. Based on the user's product bio: '{bio}', discard low-signal companies. YOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads. Do NOT output markdown. Do NOT output bullet points. Every line must start precisely with 'http'.\n\nSnippets: {json.dumps(snippets)}"
     response = model.generate_content(prompt)
     
-    # Very rudimentary extraction of URLs from Gemini response
+    # Aggressively parse only raw HTTP links from Gemini inference
     urls = []
     for line in response.text.split('\n'):
-        if line.startswith('http'):
-             urls.append(line.strip())
+        clean_url = line.strip().replace('- ', '').replace('* ', '')
+        if clean_url.startswith('http'):
+             urls.append(clean_url)
+    print(f"Gemini approved {len(urls)} URLs matching the B2B criteria.")
     return urls
 
 def scrape_url(url):
@@ -90,6 +98,10 @@ def dispatch():
     else:
         keywords = raw_keywords
     
+    if not keywords:
+        print(f"CRITICAL ERROR: Campaign {campaign_id} has empty keywords matrix. Pipeline aborted.")
+        return jsonify({"error": "Empty keywords matrix"}), 400
+        
     all_results = []
     
     for kw in keywords:
