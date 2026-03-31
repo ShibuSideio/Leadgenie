@@ -62,7 +62,12 @@
                 <div style="background: rgba(234, 179, 8, 0.1); border: 1px solid rgba(234, 179, 8, 0.3); padding: 12px; border-radius: 8px; margin-bottom: 24px; color: #b45309;">
                     <strong>💡 Smart Tip:</strong> Keep your automated WhatsApp messages friendly and conversational. Spamming the exact same message will cause Meta to restrict your number!
                 </div>
-                <h2>Your Latest Hot Leads</h2>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h2>Your Latest Hot Leads</h2>
+                    <select id="campaign-filter" style="padding: 6px; border-radius: 6px; border: 1px solid var(--glass-border); background: #fff;" onchange="filterLeadsByCampaign(this.value)">
+                        <option value="all">All Campaigns</option>
+                    </select>
+                </div>
                 <div id="active-campaign-feed"></div>
                 <div id="leads-list" class="leads-list">
                     <!-- Leads will be injected here via JS -->
@@ -71,10 +76,24 @@
             </section>
 
             <section id="view-target" class="glass-panel main-feed hidden">
-                <h2>Targeting Models</h2>
-                <div class="stats-box mt-3" style="background: #ffffff;">
-                    <p>Current Logic Router: <strong>Gemini 2.5 Flash B2B Scoring</strong></p>
-                    <p>Pipeline Schedule: <strong>06:00 AM IST (Cloud Scheduler)</strong></p>
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h2>Active Campaign Matrix</h2>
+                    <button class="primary-btn" onclick="document.getElementById('new-campaign-modal').classList.remove('hidden')">+ New Search</button>
+                </div>
+                <div class="stats-box mt-3" style="background: #ffffff; padding:0; overflow:hidden;">
+                    <table style="width:100%; text-align:left; border-collapse: collapse; font-size: 0.9rem;">
+                        <thead style="background: rgba(79, 70, 229, 0.05); border-bottom: 1px solid var(--glass-border);">
+                            <tr>
+                                <th style="padding: 12px;">Campaign</th>
+                                <th style="padding: 12px;">Keywords</th>
+                                <th style="padding: 12px;">Status</th>
+                                <th style="padding: 12px; text-align:right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="campaign-list-table">
+                            <tr><td colspan="4" style="padding:16px; text-align:center;">Loading campaigns...</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </section>
 
@@ -106,6 +125,25 @@
             </div>
         </div>
     </div>
+    </div>
+
+    <div id="edit-campaign-modal" class="hidden" style="position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:999; display:flex; justify-content:center; align-items:center;">
+        <div class="glass-panel" style="width: 400px; max-width: 90%;">
+            <h2>Edit Campaign Rules</h2>
+            <br>
+            <input type="hidden" id="edit-camp-id">
+            <label style="font-size: 0.8rem; color: var(--text-muted);">Campaign Name</label>
+            <input type="text" id="edit-camp-name" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            <label style="font-size: 0.8rem; color: var(--text-muted);">Product Bio</label>
+            <input type="text" id="edit-camp-bio" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            <label style="font-size: 0.8rem; color: var(--text-muted);">Target Keywords</label>
+            <input type="text" id="edit-camp-keys" class="full-width" style="margin-bottom: 24px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            
+            <div style="display:flex; gap: 12px;">
+                <button class="primary-btn full-width" onclick="saveEditedCampaign()">Update Engine</button>
+                <button class="secondary-btn full-width" onclick="closeEditModal()">Cancel</button>
+            </div>
+        </div>
     </div>
 
     <!-- UI Overlay Utilities -->

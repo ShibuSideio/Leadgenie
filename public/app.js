@@ -52,31 +52,78 @@ logoutBtn.addEventListener('click', () => {
 let leadsListenerUnsubscribe = null;
 let campaignsListenerUnsubscribe = null;
 
+// Selected Filter State
+let currentCampaignFilter = 'all';
+let rawLeadsCache = [];
+
 // Dynamic Campaign Hydration
 function loadCampaigns(user) {
     const feed = document.getElementById('active-campaign-feed');
-    if (!feed) return;
+    const tableBody = document.getElementById('campaign-list-table');
+    const filterSelect = document.getElementById('campaign-filter');
     
     if (campaignsListenerUnsubscribe) campaignsListenerUnsubscribe();
     
-    // Simplistic listener returning the single most recent active campaign
+    // Listen to ALL campaigns for the table
     campaignsListenerUnsubscribe = db.collection('campaigns')
         .orderBy('createdAt', 'desc')
-        .limit(1)
         .onSnapshot(snapshot => {
             if (snapshot.empty) {
-                feed.innerHTML = '';
+                if (feed) feed.innerHTML = '';
+                if (tableBody) tableBody.innerHTML = '<tr><td colspan="4" style="padding:16px; text-align:center;">No campaigns found. Click "New Search" to start.</td></tr>';
                 return;
             }
-            const activeCamp = snapshot.docs[0].data();
-            feed.innerHTML = `
-                <div class="competitor-monitor" style="background: rgba(79, 70, 229, 0.05); border: 1px solid rgba(79, 70, 229, 0.2); padding: 12px; border-radius: 8px; margin-bottom: 24px;">
-                    <span class="badge" style="background: var(--primary);">Tracking Active: ${activeCamp.name}</span>
-                    <span style="color: var(--text-muted); font-size: 0.9rem;">Looking for keywords: <i>${activeCamp.keywords}</i></span>
-                </div>
-            `;
+            
+            let activeCount = 0;
+            let tableHTML = '';
+            let filterHTML = '<option value="all">All Campaigns</option>';
+            
+            snapshot.forEach(doc => {
+                const camp = doc.data();
+                const id = doc.id;
+                const isActive = camp.status === 'active';
+                if (isActive) activeCount++;
+                
+                // Build Table Row
+                const statusColor = isActive ? '#25D366' : '#ef4444';
+                const toggleAction = isActive ? 'pause' : 'resume';
+                const statusBadge = `<span style="font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(camp.status || 'unknown').toUpperCase()}</span>`;
+                
+                tableHTML += `
+                    <tr style="border-bottom: 1px solid var(--glass-border);">
+                        <td style="padding: 12px;"><strong>${camp.name || 'Untitled'}</strong></td>
+                        <td style="padding: 12px;"><i style="color:var(--text-muted); font-size:0.85rem">${camp.keywords || 'N/A'}</i></td>
+                        <td style="padding: 12px;">${statusBadge}</td>
+                        <td style="padding: 12px; text-align:right;">
+                            <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; margin-right: 4px;" onclick="openEditModal('${id}', '${(camp.name || '').replace(/'/g, "\\'")}', '${(camp.bio || '').replace(/'/g, "\\'")}', '${(camp.keywords || '').replace(/'/g, "\\'")}')">Edit</button>
+                            <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; border-color: ${statusColor}; color: ${statusColor}" onclick="toggleCampaignStatus('${id}', '${camp.status}')">${isActive ? 'Pause' : 'Resume'}</button>
+                        </td>
+                    </tr>
+                `;
+                
+                // Build Filter Dropdown
+                filterHTML += `<option value="${id}">${camp.name}</option>`;
+            });
+            
+            if (tableBody) tableBody.innerHTML = tableHTML;
+            if (filterSelect) {
+                const currentVal = filterSelect.value;
+                filterSelect.innerHTML = filterHTML;
+                filterSelect.value = currentVal || 'all';
+            }
+            
+            // Render Generic Active Stats Header instead of pinning just one campaign
+            if (feed) {
+                feed.innerHTML = `
+                    <div class="competitor-monitor" style="background: rgba(79, 70, 229, 0.05); border: 1px solid rgba(79, 70, 229, 0.2); padding: 12px; border-radius: 8px; margin-bottom: 24px;">
+                        <span class="badge" style="background: var(--primary);">System Status: Online</span>
+                        <span style="color: var(--text-muted); font-size: 0.9rem; margin-left: 8px;">Scraping ${activeCount} Active Target Matrices</span>
+                    </div>
+                `;
+            }
         }, error => {
             console.error("Campaign Hook Error:", error);
+            if (tableBody) tableBody.innerHTML = '<tr><td colspan="4" style="padding:16px; text-align:center; color: #ef4444;">Database Connection Error</td></tr>';
         });
 }
 
@@ -90,33 +137,59 @@ function loadLeads(user) {
     
     // Real Firestore Listener binding to the 'leads' collection
     leadsListenerUnsubscribe = db.collection('leads')
-        .orderBy('status', 'desc')
+        .orderBy('createdAt', 'desc')
         .onSnapshot(snapshot => {
             if (snapshot.empty) {
-                leadsList.innerHTML = `
-                    <div class="lead-card" style="text-align: center; padding: 40px; border: none; background: transparent; box-shadow: none;">
-                        <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">🚀</div>
-                        <h3 style="color: var(--text-main); margin-bottom: 8px;">Let's Grow Your Business</h3>
-                        <p style="color: var(--text-muted); font-size: 0.95rem; line-height: 1.5;">
-                            Your dashboard is ready and secure.<br>
-                            Click "+ Find New Clients" to let the AI start finding highly qualified leads for you.
-                        </p>
-                    </div>
-                `;
+                rawLeadsCache = [];
+                renderLeads();
                 return;
             }
 
-            leadsList.innerHTML = '';
-            snapshot.forEach(doc => {
-                const lead = doc.data();
-                const card = createLeadCard(doc.id, lead);
-                leadsList.appendChild(card);
-            });
+            rawLeadsCache = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            renderLeads();
+            
         }, error => {
             console.error("Firestore Listener Error:", error);
             leadsList.innerHTML = '<div class="lead-card" style="color: #ef4444; border-color: #ef4444;">Could not connect to database. Please check permissions.</div>';
             showToast('Connection Refused', 'error');
         });
+}
+
+window.filterLeadsByCampaign = function(campaignId) {
+    currentCampaignFilter = campaignId;
+    renderLeads();
+};
+
+function renderLeads() {
+    if (rawLeadsCache.length === 0) {
+        leadsList.innerHTML = `
+            <div class="lead-card" style="text-align: center; padding: 40px; border: none; background: transparent; box-shadow: none;">
+                <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">🚀</div>
+                <h3 style="color: var(--text-main); margin-bottom: 8px;">Let's Grow Your Business</h3>
+                <p style="color: var(--text-muted); font-size: 0.95rem; line-height: 1.5;">
+                    Your dashboard is ready and secure.<br>
+                    No leads found matching this filter.
+                </p>
+            </div>
+        `;
+        return;
+    }
+    
+    leadsList.innerHTML = '';
+    
+    const filteredLeads = currentCampaignFilter === 'all' 
+        ? rawLeadsCache 
+        : rawLeadsCache.filter(lead => lead.campaign_id === currentCampaignFilter);
+    
+    if (filteredLeads.length === 0) {
+         leadsList.innerHTML = '<div class="lead-card" style="text-align:center; padding: 24px; color: var(--text-muted);">No leads currently discovered for this campaign. The AI is still searching.</div>';
+         return;
+    }
+
+    filteredLeads.forEach(lead => {
+        const card = createLeadCard(lead.id, lead);
+        leadsList.appendChild(card);
+    });
 }
 
 // Organic DOM Factory
@@ -183,7 +256,55 @@ window.showToast = function(message, type = 'info') {
     }, 3500);
 };
 
-// Campaign Handler
+// Campaign Edit Hub
+window.openEditModal = function(id, name, bio, keywords) {
+    document.getElementById('edit-camp-id').value = id;
+    document.getElementById('edit-camp-name').value = name;
+    document.getElementById('edit-camp-bio').value = bio;
+    document.getElementById('edit-camp-keys').value = keywords;
+    document.getElementById('edit-campaign-modal').classList.remove('hidden');
+};
+
+window.closeEditModal = function() {
+    document.getElementById('edit-campaign-modal').classList.add('hidden');
+};
+
+window.saveEditedCampaign = function() {
+    const id = document.getElementById('edit-camp-id').value;
+    const name = document.getElementById('edit-camp-name').value;
+    const bio = document.getElementById('edit-camp-bio').value;
+    const keys = document.getElementById('edit-camp-keys').value;
+    
+    if (!name || !keys) return showToast('Name and Keywords required', 'error');
+    
+    showToast('Pushing updates to AI Engine...', 'info');
+    db.collection('campaigns').doc(id).update({
+        name: name,
+        bio: bio,
+        keywords: keys,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }).then(() => {
+        closeEditModal();
+        showToast('Campaign successfully updated!', 'success');
+    }).catch(err => {
+        console.error("Update Error:", err);
+        showToast('Error modifying campaign', 'error');
+    });
+};
+
+window.toggleCampaignStatus = function(id, currentStatus) {
+    const newStatus = currentStatus === 'active' ? 'paused' : 'active';
+    db.collection('campaigns').doc(id).update({
+        status: newStatus,
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }).then(() => {
+        showToast(`Campaign ${newStatus} successfully`, 'success');
+    }).catch(err => {
+        showToast('Status update failed', 'error');
+    });
+};
+
+// Campaign Creator
 window.saveCampaignAction = function() {
     const nameInput = document.getElementById('camp-name');
     const bioInput = document.getElementById('camp-bio');
