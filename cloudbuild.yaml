@@ -37,7 +37,7 @@ steps:
       --image gcr.io/$$PROJECT_ID/lead-orchestrator \
       --region asia-south1 \
       --memory 256Mi \
-      --allow-unauthenticated \
+      --no-allow-unauthenticated \
       --set-env-vars="PROJECT_ID=$$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=$$PIPELINE_URL"
 
 # ---------------------------------------------------------------------
