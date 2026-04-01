@@ -5,7 +5,7 @@ import logging
 initialize_app()
 db = firestore.client()
 
-@identity_fn.before_user_created()
+@identity_fn.before_user_created(invoker="private")
 def process_user_creation(event: identity_fn.AuthBlockingEvent) -> identity_fn.BeforeCreateResponse | None:
     user_record = event.data
     uid = user_record.uid
