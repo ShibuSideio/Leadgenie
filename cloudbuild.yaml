@@ -19,7 +19,7 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/lead-pipeline-main']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args: ['run', 'deploy', 'lead-pipeline-main', '--image', 'gcr.io/$PROJECT_ID/lead-pipeline-main', '--region', 'asia-south1', '--memory', '256Mi', '--no-allow-unauthenticated']
+  args: ['run', 'deploy', 'lead-pipeline-main', '--image', 'gcr.io/$PROJECT_ID/lead-pipeline-main', '--region', 'asia-south1', '--memory', '512Mi', '--no-allow-unauthenticated', '--service-account', 'lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com']
 
 # Removed fragile bash orchestrator build module
 # Microservice 3: Scraper Heavy (Playwright)
@@ -30,7 +30,7 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/scraper-heavy']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args: ['run', 'deploy', 'scraper-heavy', '--image', 'gcr.io/$PROJECT_ID/scraper-heavy', '--region', 'asia-south1', '--memory', '2Gi', '--min-instances', '0', '--no-allow-unauthenticated']
+  args: ['run', 'deploy', 'scraper-heavy', '--image', 'gcr.io/$PROJECT_ID/scraper-heavy', '--region', 'asia-south1', '--memory', '2Gi', '--min-instances', '0', '--no-allow-unauthenticated', '--service-account', 'scraper-heavy-sa@$PROJECT_ID.iam.gserviceaccount.com']
 
 # ---------------------------------------------------------------------
 # Microservice 4: WhatsApp Webhook
@@ -41,7 +41,7 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/whatsapp-webhook']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args: ['run', 'deploy', 'whatsapp-webhook', '--image', 'gcr.io/$PROJECT_ID/whatsapp-webhook', '--region', 'asia-south1', '--memory', '128Mi', '--allow-unauthenticated']
+  args: ['run', 'deploy', 'whatsapp-webhook', '--image', 'gcr.io/$PROJECT_ID/whatsapp-webhook', '--region', 'asia-south1', '--memory', '128Mi', '--allow-unauthenticated', '--service-account', 'whatsapp-webhook-sa@$PROJECT_ID.iam.gserviceaccount.com']
 
 # ---------------------------------------------------------------------
 # Microservice 5: Email Summary
@@ -52,7 +52,7 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/email-summary']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args: ['run', 'deploy', 'email-summary', '--image', 'gcr.io/$PROJECT_ID/email-summary', '--region', 'asia-south1', '--memory', '128Mi', '--no-allow-unauthenticated']
+  args: ['run', 'deploy', 'email-summary', '--image', 'gcr.io/$PROJECT_ID/email-summary', '--region', 'asia-south1', '--memory', '128Mi', '--no-allow-unauthenticated', '--service-account', 'email-summary-sa@$PROJECT_ID.iam.gserviceaccount.com']
 
 # ---------------------------------------------------------------------
 # Firebase Frontend Deployment

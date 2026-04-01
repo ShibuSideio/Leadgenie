@@ -11,14 +11,18 @@ service cloud.firestore {
       allow read, write: if false; // Only accessible via Admin SDK in Cloud Run
     }
     
-    // Open access to the 'leads' table for active development testing
-    match /leads/{document=**} {
-      allow read, write: if true;
+    // Strict RLS for top-level leads collection
+    match /leads/{documentId} {
+      allow read: if request.auth != null && request.auth.token.tenant == resource.data.tenant_id;
+      allow create: if request.auth != null && request.auth.token.tenant == request.resource.data.tenant_id;
+      allow update, delete: if request.auth != null && request.auth.token.tenant == resource.data.tenant_id;
     }
 
-    // Open access to the 'campaigns' table for tracking Search Payloads
-    match /campaigns/{document=**} {
-      allow read, write: if true;
+    // Strict RLS for top-level campaigns collection
+    match /campaigns/{documentId} {
+      allow read: if request.auth != null && request.auth.token.tenant == resource.data.tenant_id;
+      allow create: if request.auth != null && request.auth.token.tenant == request.resource.data.tenant_id;
+      allow update, delete: if request.auth != null && request.auth.token.tenant == resource.data.tenant_id;
     }
     
     // Deny all other unhandled requests

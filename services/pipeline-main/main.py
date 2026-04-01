@@ -1,11 +1,13 @@
 import os
 import json
 import httpx
+import hashlib
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
 from google.cloud import firestore
 import google.auth
 from google.cloud import secretmanager
+from google.api_core.exceptions import AlreadyExists
 import vertexai
 from vertexai.generative_models import GenerativeModel
 
@@ -51,7 +53,7 @@ def pre_filter_gemini(snippets, bio):
     # Aggressively parse only raw HTTP links from Gemini inference
     urls = []
     for line in response.text.split('\n'):
-        clean_url = line.strip().replace('- ', '').replace('* ', '')
+        clean_url = line.strip().replace('- ', '').replace('* ', '').replace('`', '').replace('"', '')
         if clean_url.startswith('http'):
              urls.append(clean_url)
     print(f"Gemini approved {len(urls)} URLs matching the B2B criteria.")
@@ -62,6 +64,17 @@ def scrape_url(url):
     try:
         resp = httpx.get(url, timeout=10)
         soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        # Smart WAF Heuristics Check (Cloudflare / Incapsula)
+        title_str = soup.title.string.lower() if soup.title and soup.title.string else ""
+        body_str = soup.get_text(separator=' ', strip=True)[:2000].lower()
+        search_blob = f"{title_str} {body_str}"
+        
+        waf_fingerprints = ["just a moment...", "attention required!", "access denied", "cloudflare"]
+        for fingerprint in waf_fingerprints:
+            if fingerprint in search_blob:
+                raise ValueError(f"WAF block explicitly detected ({fingerprint})")
+                
         text = soup.get_text(separator=' ', strip=True)
         if len(text) < 500: # Potential JS Heavy page
             raise ValueError("Too little content, likely JS framework")
@@ -121,9 +134,22 @@ def dispatch():
         
         # Step 3, 4, 5
         for url in filtered_urls[:30]:
-            # Deduplication Gateway: Block Duplicate Processing!
-            existing = db.collection("leads").where("tenant_id", "==", tenant_id).where("campaign_id", "==", campaign_id).where("url", "==", url).limit(1).get()
-            if len(list(existing)) > 0:
+            # Deterministic Deduplication Gateway (Atomic locking)
+            lead_id_str = f"{tenant_id}_{campaign_id}_{url}"
+            lead_id = hashlib.sha256(lead_id_str.encode('utf-8')).hexdigest()
+            doc_ref = db.collection("leads").document(lead_id)
+            
+            try:
+                # Atomically ensure one task processes this URL cleanly preventing token burn
+                doc_ref.create({
+                    "tenant_id": tenant_id,
+                    "campaign_id": campaign_id,
+                    "url": url,
+                    "status": "processing",
+                    "createdAt": firestore.SERVER_TIMESTAMP
+                })
+            except AlreadyExists:
+                # Silently catch duplicate invocations safely returning execution cycles
                 continue
 
             # Cache check
@@ -141,6 +167,15 @@ def dispatch():
             if text:
                 evaluation = final_score_and_dm(text, bio)
                 if evaluation.get("score", 0) >= 7:
+                    # Upgrade the atomic stub securely saving pipeline extraction logic
+                    doc_ref.update({
+                        "score": evaluation.get("score"),
+                        "pain_point": evaluation.get("pain_point"),
+                        "dm": evaluation.get("dm"),
+                        "status": "new"
+                    })
+                    
+                    # Store purely for JSON endpoint tracking response formatting locally
                     lead_doc = {
                         "tenant_id": tenant_id,
                         "campaign_id": campaign_id,
@@ -148,12 +183,12 @@ def dispatch():
                         "score": evaluation.get("score"),
                         "pain_point": evaluation.get("pain_point"),
                         "dm": evaluation.get("dm"),
-                        "status": "new",
-                        "createdAt": firestore.SERVER_TIMESTAMP
+                        "status": "new"
                     }
-                    # Secure Multi-Tenant Enterprise Write
-                    db.collection("leads").add(lead_doc)
                     all_results.append(lead_doc)
+                else:
+                    # Delete the atomic document so we don't accidentally ingest phantom rows
+                    doc_ref.delete()
                     
     return jsonify({"processed_leads": len(all_results)}), 200
 

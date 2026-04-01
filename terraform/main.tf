@@ -39,10 +39,54 @@ resource "google_secret_manager_secret" "whatsapp_webhook_token" {
   replication { automatic = true }
   rotation { next_rotation_time = "2026-06-01T00:00:00Z" ; rotation_period = "7776000s" } # 90 days
 }
-resource "google_secret_manager_secret" "gmail_app_password" {
-  secret_id = "gmail_app_password"
+resource "google_secret_manager_secret" "sendgrid_api_key" {
+  secret_id = "sendgrid_api_key"
   replication { automatic = true }
   rotation { next_rotation_time = "2026-06-01T00:00:00Z" ; rotation_period = "7776000s" } # 90 days
+}
+
+# -------------------------------------------------------------
+# Microservice Dedicated Service Accounts
+# -------------------------------------------------------------
+resource "google_service_account" "lead_pipeline_sa" {
+  account_id   = "lead-pipeline-sa"
+  display_name = "Lead Pipeline Execution Engine"
+}
+
+resource "google_service_account" "scraper_heavy_sa" {
+  account_id   = "scraper-heavy-sa"
+  display_name = "Playwright Execution Fallback"
+}
+
+resource "google_service_account" "whatsapp_webhook_sa" {
+  account_id   = "whatsapp-webhook-sa"
+  display_name = "Meta Webhook Verifier"
+}
+
+resource "google_service_account" "email_summary_sa" {
+  account_id   = "email-summary-sa"
+  display_name = "Daily Automated Worker"
+}
+
+# -------------------------------------------------------------
+# Strict Least Privilege Secret Bindings (IAM)
+# -------------------------------------------------------------
+resource "google_secret_manager_secret_iam_member" "pipeline_serper_access" {
+  secret_id = google_secret_manager_secret.serper_api_key.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.lead_pipeline_sa.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "webhook_token_access" {
+  secret_id = google_secret_manager_secret.whatsapp_webhook_token.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.whatsapp_webhook_sa.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "email_smtp_access" {
+  secret_id = google_secret_manager_secret.sendgrid_api_key.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.email_summary_sa.email}"
 }
 
 # -------------------------------------------------------------

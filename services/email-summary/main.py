@@ -1,7 +1,6 @@
 import os
-import smtplib
-from email.message import EmailMessage
 import datetime
+import httpx
 from flask import Flask, jsonify
 from google.cloud import firestore
 from google.cloud import secretmanager
@@ -11,7 +10,7 @@ db = firestore.Client()
 project_id = os.environ.get("PROJECT_ID", "sideio-leads-v16")
 sm_client = secretmanager.SecretManagerServiceClient()
 
-GMAIL_PASS_SECRET = f"projects/{project_id}/secrets/gmail_app_password/versions/latest"
+SENDGRID_API_KEY_SECRET = f"projects/{project_id}/secrets/sendgrid_api_key/versions/latest"
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "admin@yourdomain.com")
 
 def get_secret(secret_name):
@@ -22,26 +21,34 @@ def get_secret(secret_name):
         return ""
 
 def send_summary_email(recipient, lead_count, top_leads):
-    password = get_secret(GMAIL_PASS_SECRET)
-    if not password:
-        print("Missing Gmail App Password")
+    api_key = get_secret(SENDGRID_API_KEY_SECRET).strip()
+    if not api_key:
+        print("Missing SendGrid API Key")
         return
         
-    msg = EmailMessage()
-    msg.set_content(f"Daily Lead Sniper Summary\n\nGenerated {lead_count} new contact-ready leads today.\n\nTop Leads:\n" + "\n".join(top_leads))
-    msg['Subject'] = 'Your Daily Lead Sniper Summary'
-    msg['From'] = SENDER_EMAIL
-    msg['To'] = recipient
+    content = f"Daily Lead Sniper Summary\n\nGenerated {lead_count} new contact-ready leads today.\n\nTop Leads:\n" + "\n".join(top_leads)
+    
+    payload = {
+        "personalizations": [{"to": [{"email": recipient}]}],
+        "from": {"email": SENDER_EMAIL},
+        "subject": "Your Daily Lead Sniper Summary",
+        "content": [{"type": "text/plain", "value": content}]
+    }
 
     try:
-        # Utilize Gmail SMTP Relay using App Password
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.login(SENDER_EMAIL, password)
-        server.send_message(msg)
-        server.quit()
-        print(f"Sent summary email to {recipient}")
+        # Utilize SendGrid HTTP API avoiding GCP Serverless IP ban triggers
+        resp = httpx.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=10
+        )
+        if resp.status_code >= 400:
+            print(f"SendGrid Post Error: {resp.text}")
+        else:
+            print(f"Sent summary email sequence dynamically via HTTP to {recipient}")
     except Exception as e:
-        print(f"SMTP Error: {e}")
+        print(f"HTTP Flow Control Error calling SendGrid: {e}")
 
 @app.route("/send", methods=["POST"])
 def send_daily_summaries():

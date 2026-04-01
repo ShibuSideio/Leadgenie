@@ -1,18 +1,23 @@
 import os
 import json
 import urllib.request
+import time
 from google.cloud import firestore
 from google.cloud import tasks_v2
 
 def get_service_account_email():
-    try:
-        url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
-        req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
-        with urllib.request.urlopen(req, timeout=2) as response:
-            return response.read().decode('utf-8')
-    except Exception as e:
-        print(f"Failed to fetch metadata SA email: {e}")
-        return ""
+    url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
+    for attempt in range(1, 4):
+        try:
+            req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.read().decode('utf-8')
+        except Exception as e:
+            print(f"Failed to fetch metadata SA email on attempt {attempt}: {e}")
+            if attempt < 3:
+                time.sleep(1.5 ** attempt) # Exponential backoff limit
+    print("Critical Failure: OIDC token metadata fetch permanently dropped.")
+    return ""
 
 db = firestore.Client()
 tasks_client = tasks_v2.CloudTasksClient()
@@ -22,10 +27,41 @@ LOCATION = os.environ.get("LOCATION", "asia-south1")
 QUEUE = os.environ.get("QUEUE", "lead-pipeline-queue")
 PIPELINE_URL = os.environ.get("PIPELINE_URL", "https://lead-pipeline-main-abc.a.run.app/dispatch")
 
+def handle_purge(request):
+    data = request.json or {}
+    tenant_id = data.get("tenant_id")
+    if not tenant_id:
+        return "Missing tenant_id", 400
+        
+    print(f"INITIATING DATA ERASURE DPDP COMPLIANCE FOR TENANT: {tenant_id}")
+    
+    # 1. Purge Campaigns
+    campaigns = db.collection("campaigns").where("tenant_id", "==", tenant_id).stream()
+    for doc in campaigns:
+        doc.reference.delete()
+        
+    # 2. Purge Leads & Linked Scraped Caches
+    leads = db.collection("leads").where("tenant_id", "==", tenant_id).stream()
+    for doc in leads:
+        lead_data = doc.to_dict()
+        url = lead_data.get("url")
+        if url:
+            cache_id = url.replace('/','_')
+            db.collection("scraped_cache").document(cache_id).delete()
+        doc.reference.delete()
+        
+    # 3. Purge Tenant Baseline
+    db.collection("tenants").document(tenant_id).delete()
+    
+    return f"Successfully erased tenant {tenant_id} data completely", 200
+
 def trigger_daily_sweep(request):
     """
     HTTP Cloud Function triggered by Cloud Scheduler daily at 6AM or via manual UI proxy.
     """
+    if request.path == "/purge" and request.method == "POST":
+        return handle_purge(request)
+
     if request.method == "OPTIONS":
         headers = {
             'Access-Control-Allow-Origin': '*',
