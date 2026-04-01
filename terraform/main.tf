@@ -67,7 +67,7 @@ resource "google_service_account" "whatsapp_webhook_sa" {
 }
 
 resource "google_service_account" "email_summary_sa" {
-  account_id   = "email-summary-sa"
+  account_id   = "email-worker-sa"
   display_name = "Daily Automated Worker"
 }
 
@@ -105,6 +105,10 @@ resource "google_monitoring_alert_policy" "cloud_run_failures" {
       duration        = "300s"
       comparison      = "COMPARISON_GT"
       threshold_value = 5
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_RATE"
+      }
     }
   }
 }
@@ -122,21 +126,21 @@ resource "google_storage_bucket" "firestore_backup" {
 # -------------------------------------------------------------
 # Cloud Tasks Queue
 # -------------------------------------------------------------
-resource "google_cloud_tasks_queue" "pipeline_queue" {
-  name     = "lead-pipeline-queue"
-  location = var.region
-
-  rate_limits {
-    max_dispatches_per_second = 1
-    max_concurrent_dispatches = 5
-  }
-
-  retry_config {
-    max_attempts       = 3
-    min_backoff        = "10s"
-  }
-  depends_on = [google_project_service.services]
-}
+# resource "google_cloud_tasks_queue" "pipeline_queue" {
+#   name     = "lead-pipeline-queue"
+#   location = var.region
+#
+#   rate_limits {
+#     max_dispatches_per_second = 1
+#     max_concurrent_dispatches = 5
+#   }
+#
+#   retry_config {
+#     max_attempts       = 3
+#     min_backoff        = "10s"
+#   }
+#   depends_on = [google_project_service.services]
+# }
 
 # -------------------------------------------------------------
 # Cloud Run Services (Placeholders for IaC; deployed via Cloud Build)
