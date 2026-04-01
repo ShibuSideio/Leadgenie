@@ -31,26 +31,20 @@ resource "google_project_service" "services" {
 # -------------------------------------------------------------
 resource "google_secret_manager_secret" "serper_api_key" {
   secret_id = "serper_api_key"
-  replication { automatic = true }
-  rotation {
-    next_rotation_time = "2026-06-01T00:00:00Z"
-    rotation_period    = "7776000s"
+  replication { 
+    auto {} 
   }
 }
 resource "google_secret_manager_secret" "whatsapp_webhook_token" {
   secret_id = "whatsapp_webhook_token"
-  replication { automatic = true }
-  rotation {
-    next_rotation_time = "2026-06-01T00:00:00Z"
-    rotation_period    = "7776000s"
+  replication { 
+    auto {} 
   }
 }
 resource "google_secret_manager_secret" "sendgrid_api_key" {
   secret_id = "sendgrid_api_key"
-  replication { automatic = true }
-  rotation {
-    next_rotation_time = "2026-06-01T00:00:00Z"
-    rotation_period    = "7776000s"
+  replication { 
+    auto {} 
   }
 }
 
