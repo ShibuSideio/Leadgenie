@@ -22,17 +22,28 @@ const logoutBtn = document.getElementById('logout-btn');
 const leadsList = document.getElementById('leads-list');
 
 // Authentication state observer
-auth.onAuthStateChanged(user => {
+auth.onAuthStateChanged(async user => {
     if (user) {
-        // User logged in
-        authContainer.classList.add('hidden');
-        appContainer.classList.remove('hidden');
-        loadLeads(user);
-        loadCampaigns(user);
+        try {
+            // Priority Identity Resolution Map for Strict RLS Custom Claims
+            const idTokenResult = await user.getIdTokenResult();
+            activeTenantId = idTokenResult.claims.tenant || user.uid; 
+            
+            // Render UI
+            authContainer.classList.add('hidden');
+            appContainer.classList.remove('hidden');
+            loadLeads(user);
+            loadCampaigns(user);
+        } catch(error) {
+            console.error("JWT Claim Sync Error", error);
+            authContainer.classList.remove('hidden');
+            appContainer.classList.add('hidden');
+        }
     } else {
         // User logged out
         authContainer.classList.remove('hidden');
         appContainer.classList.add('hidden');
+        activeTenantId = null;
     }
 });
 
@@ -55,6 +66,7 @@ let campaignsListenerUnsubscribe = null;
 // Selected Filter State
 let currentCampaignFilter = 'all';
 let rawLeadsCache = [];
+let activeTenantId = null; // Globally synced claim reference
 
 // Dynamic Campaign Hydration
 function loadCampaigns(user) {
@@ -66,7 +78,7 @@ function loadCampaigns(user) {
     
     // Listen to ALL campaigns for the user (Tenant Lock)
     campaignsListenerUnsubscribe = db.collection('campaigns')
-        .where('tenant_id', '==', user.uid)
+        .where('tenant_id', '==', activeTenantId)
         .onSnapshot(snapshot => {
             if (snapshot.empty) {
                 if (feed) feed.innerHTML = '';
@@ -170,7 +182,7 @@ function loadLeads(user) {
     
     // Real Firestore Listener binding to the 'leads' collection
     leadsListenerUnsubscribe = db.collection('leads')
-        .where('tenant_id', '==', user.uid)
+        .where('tenant_id', '==', activeTenantId)
         .limit(50)
         .onSnapshot(snapshot => {
             if (snapshot.empty) {
@@ -215,7 +227,7 @@ window.loadMoreLeads = function() {
     showToast('Loading older pipeline records...', 'info');
 
     db.collection('leads')
-        .where('tenant_id', '==', currentUser.uid)
+        .where('tenant_id', '==', activeTenantId)
         .startAfter(lastVisibleLead)
         .limit(50)
         .get().then((snapshot) => {
@@ -433,7 +445,7 @@ window.saveCampaignAction = function() {
         bio: bioInput.value,
         keywords: keysInput.value,
         status: 'active',
-        tenant_id: firebase.auth().currentUser.uid,
+        tenant_id: activeTenantId,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
     }).then(() => {
         document.getElementById('new-campaign-modal').classList.add('hidden');
