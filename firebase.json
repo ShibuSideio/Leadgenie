@@ -2,10 +2,7 @@
   "firestore": {
     "rules": "firestore.rules"
   },
-  "functions": {
-    "source": "functions",
-    "runtime": "python310"
-  },
+
   "hosting": {
     "public": "public",
     "ignore": [

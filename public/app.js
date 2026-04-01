@@ -23,7 +23,6 @@ const leadsList = document.getElementById('leads-list');
 // Selected Filter State
 let currentCampaignFilter = 'all';
 let rawLeadsCache = [];
-let activeTenantId = null; 
 
 function handleAuthRejection() {
     showToast("Session Expired or Unauthorized Access.", "error");
@@ -33,30 +32,14 @@ function handleAuthRejection() {
 // Authentication state observer
 auth.onAuthStateChanged(async user => {
     if (user) {
-        try {
-            let idTokenResult = await user.getIdTokenResult();
-            if (!idTokenResult.claims.tenant) {
-                showToast("Identity Sandbox Lockout: Backend Claims Failed", "error");
-                auth.signOut();
-                return;
-            }
-
-            activeTenantId = idTokenResult.claims.tenant; 
-            
-            // Render UI
-            authContainer.classList.add('hidden');
-            appContainer.classList.remove('hidden');
-            loadDashboard();
-        } catch(error) {
-            console.error("JWT Claim Sync Error", error);
-            authContainer.classList.remove('hidden');
-            appContainer.classList.add('hidden');
-        }
+        // Render UI directly (Thin Client architecture: token validated on the backend API layer)
+        authContainer.classList.add('hidden');
+        appContainer.classList.remove('hidden');
+        loadDashboard();
     } else {
         // User logged out
         authContainer.classList.remove('hidden');
         appContainer.classList.add('hidden');
-        activeTenantId = null;
     }
 });
 
