@@ -43,8 +43,14 @@ def authenticate_request(request):
     if not auth_header or not auth_header.startswith('Bearer '):
         raise ValueError("Missing or incorrectly formatted Authorization header.")
     
-    token = auth_header.split('Bearer ')[1]
-    decoded_token = auth.verify_id_token(token)
+    token = auth_header.split(' ')[1]
+    
+    try:
+        decoded_token = auth.verify_id_token(token)
+    except Exception as e:
+        import sys
+        print(f"FATAL TOKEN VERIFICATION ERROR: {str(e)}", file=sys.stderr)
+        raise ValueError(f"Token verification strictly failed: {str(e)}")
     
     uid = decoded_token.get('uid')
     if not uid:

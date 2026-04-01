@@ -58,23 +58,26 @@ logoutBtn.addEventListener('click', () => {
 
 // Unified Dashboard Loader
 async function loadDashboard() {
-    const user = auth.currentUser;
+    const user = firebase.auth().currentUser;
     if (!user) return;
     
     await Promise.all([
-        loadCampaigns(user),
-        loadLeads(user)
+        loadCampaigns(),
+        loadLeads()
     ]);
 }
 
 // Dynamic Campaign Hydration via REST API
-async function loadCampaigns(user) {
+async function loadCampaigns() {
     const feed = document.getElementById('active-campaign-feed');
     const tableBody = document.getElementById('campaign-list-table');
     const filterSelect = document.getElementById('campaign-filter');
     
     try {
-        const token = await user.getIdToken();
+        const user = firebase.auth().currentUser;
+        if (!user) return handleAuthRejection();
+        
+        const token = await user.getIdToken(); 
         const response = await fetch('/api/campaigns', {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${token}` }
@@ -166,11 +169,14 @@ function initAnalyticsChart(newC, contactedC, convertedC) {
 }
 
 // Load Leads Real-Time (Thin Client API)
-async function loadLeads(user) {
+async function loadLeads() {
     leadsList.innerHTML = '<div class="lead-card pulse">Connecting to Secure Orchestrator...</div>';
     
     try {
-        const token = await user.getIdToken();
+        const user = firebase.auth().currentUser;
+        if (!user) return handleAuthRejection();
+        
+        const token = await user.getIdToken(); 
         const response = await fetch('/api/leads', {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${token}` }
