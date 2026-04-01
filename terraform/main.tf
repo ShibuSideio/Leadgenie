@@ -20,7 +20,11 @@ resource "google_project_service" "services" {
     "run.googleapis.com",
     "cloudtasks.googleapis.com",
     "cloudscheduler.googleapis.com",
-    "firestore.googleapis.com"
+    "firestore.googleapis.com",
+    "cloudfunctions.googleapis.com",
+    "eventarc.googleapis.com",
+    "pubsub.googleapis.com",
+    "artifactregistry.googleapis.com"
   ])
   service = each.value
   disable_on_destroy = false
