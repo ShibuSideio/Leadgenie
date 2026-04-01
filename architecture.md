@@ -1,31 +1,31 @@
-# Lead Sniper – Enterprise Technical Architecture Document Version: 16.0
-**(Final Source of Truth – March 2026)**
+# Lead Sniper – Enterprise Technical Architecture Document Version: 17.0
+**(Final Source of Truth – REST API Gateway Edition)**
 
 ## 1. Purpose & Business Context
 
-Lead Sniper is a high-margin SaaS tool that helps Indian MSMEs generate ~20 high-quality, contact-ready leads per day per campaign using public search signals, reducing reliance on expensive Meta/Google ads. 
+Lead Sniper is a high-margin SaaS tool that helps SMEs generate ~20 high-quality, contact-ready leads per day per campaign using public search signals, reducing reliance on expensive Meta/Google ads. 
 
-The SME owner (Admin) configures campaigns with product bio, location, and keywords. The system runs a smart multi-keyword funnel and delivers scored, contact-ready leads with ready-to-paste or auto-send WhatsApp/LinkedIn DMs. Team members can be added by the Admin to handle follow-up.
+The SME owner (Admin) configures campaigns with product bio, location, and keywords. The system runs a smart multi-keyword funnel and delivers scored, contact-ready leads with ready-to-paste or auto-send WhatsApp/LinkedIn DMs.
 
 ---
 
-## 2. High-Level System Architecture (100% GCP-native Serverless SaaS)
+## 2. High-Level System Architecture (Thin-Client Serverless SaaS)
 
-The application has been restructured from a monolithic Python polling service to a highly concurrent, isolated microservice framework to solve concurrency stampedes, memory bloat, and Firestore document constraints.
+The application has been radically hardened from a Firebase Thick-Client model to a pure, decoupled **Thin-Client API Gateway** structure. All direct frontend-to-database real-time polling has been physically annihilated to enforce true Zero-Trust enterprise constraints.
 
 ### Core Services
 
-1. **Authentication:** Firebase Authentication (Google/Email)
-2. **Frontend/Dashboard:** Firebase Hosting (mobile-first vanilla JS + Glassmorphism UI). Configured via `firebase.json` with a rewrite to proxy `/api/trigger` to the `orchestrator` service.
-3. **Database:** Firestore (per-tenant with granular Row-Level Security via `firestore.rules`). Indexes optimized via `firestore.indexes.json` supporting cross-tenant sorting and collection group queries.
-4. **Orchestration:** Cloud Scheduler → Google Cloud Tasks (`max_concurrent_dispatches = 5` staggered drip 6:00-7:00 AM)
-5. **Main Pipeline (`lead-pipeline-main`):** Tiny Cloud Run service (256MB)
-6. **Heavy Scraper Fallback (`scraper-heavy`):** Independent Cloud Run service (2GB with Playwright; strictly configured to scale to zero immediately idle `min-instances: 0`)
-7. **WhatsApp Webhook (`whatsapp-webhook`):** Independent lightweight Cloud Run service (128MB)
+1. **Authentication:** Firebase Authentication (Google/Email).
+2. **Frontend/Dashboard:** Firebase Hosting (mobile-first vanilla JS). Configured via `firebase.json` with a rewrite to proxy `/api/**` explicitly to the `orchestrator` service.
+3. **Database:** Firestore (Absolute Lockdown via `match /{document=**} { allow read, write: if false; }`). All I/O occurs natively via the Python Admin SDK natively authorized by the backend.
+4. **Orchestration / API Gateway (`orchestrator`):** Cloud Run service (256MB) natively exposing REST endpoints (`/api/campaigns`, `/api/leads`) and dispatching background Cloud Tasks syncs.
+5. **Main Pipeline (`lead-pipeline-main`):** Tiny Cloud Run service (256MB) parsing SERP LLM evaluation.
+6. **Heavy Scraper Fallback (`scraper-heavy`):** Independent Cloud Run service (2GB with Playwright; strictly configured to scale to zero immediately idle `min-instances: 0`).
+7. **WhatsApp Webhook (`whatsapp-webhook`):** Independent lightweight Cloud Run service (128MB).
 8. **Daily Digest (`email-summary`):** Automated delivery of Top Leads via Gmail API.
-9. **Secrets:** Google Secret Manager (with strict 90-day auto-rotation policies enforced via Terraform)
-10. **LLM:** Gemini 2.5 Flash on Vertex AI (No Context Caching)
-11. **Search Engine API:** Serper.dev
+9. **Secrets:** Google Secret Manager.
+10. **LLM:** Gemini 2.5 Flash on Vertex AI.
+11. **Search Engine API:** Serper.dev.
 
 ---
 
@@ -33,67 +33,44 @@ The application has been restructured from a monolithic Python polling service t
 
 ### 3.1. Infrastructure as Code (Terraform)
 - **Path:** `terraform/main.tf`, `terraform/variables.tf` (Requires HashiCorp google provider `~> 4.0`)
-- **Purpose:** Automatically provisions Google Cloud Run APIs, Cloud Tasks APIs, Secret Manager entries (with rotation sets), and sets the base deployment scaffolding.
-- **Queue Limits & Staggering:** `lead-pipeline-queue` enforces `max_dispatches_per_second = 1` and `max_concurrent_dispatches = 5` with 3 max retries. With 500 active users, a 06:00:00 AM Cloud Scheduler blast will be artificially staggered by the queue across the entirety of the 6:00 - 7:00 AM hour, absolutely preventing any 06:00:00 API stampede bounds hitting Vertex AI or Serper limits.
-- **Monitoring & Backups:** Implements a native Cloud Monitoring Alert Policy (`google_monitoring_alert_policy`) that trips if 5xx Response classes from Cloud Run exceed 5 instances within a rolling 300s window. Creates `firestore_backup` bucket adhering to an automated 30-day object deletion lifecycle policy.
+- **Purpose:** Automatically provisions Google Cloud Run APIs, Cloud Tasks APIs, Secret Manager entries, and dedicated IAM microservice boundaries. Custom Service Accounts natively use `roles/datastore.user` to bypass the `firestore.rules` lockdown.
 
-### 3.2. Orchestrator Cloud Function (`services/orchestrator`)
-- **Type:** HTTP Triggered Cloud Function wrapper (Memory: 256MB) built around `functions-framework`.
-- **Trigger:** Cloud Scheduler (Cron `0 6 * * *` IST) or manual UI invocation passing `campaign_id`.
-- **Purpose:** Wakes up every day at 6:00 AM IST, queries Firestore for all campaigns marked `"status": "active"`, and spawns specific requests directly into the Google Cloud Tasks `lead-pipeline-queue`.
-- **Authentication & Security:** Dynamically queries `http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email` locally to affix a secure OIDC Token for dispatch payloads, ensuring `lead-pipeline-main`'s strict unauthenticated refusal (`--no-allow-unauthenticated`) is bypassed internally.
+### 3.2. Orchestrator API Gateway (`services/orchestrator`)
+- **Type:** Cloud Run App wrapper (Memory: 256MB) exposed to `allUsers` to proxy frontend rewrites.
+- **REST Paradigm:** Routes `GET`, `POST`, and `PUT` traffic passing through the Firebase Hosting frontend mapping.
+- **Backend Identity Engine:** Intercepts `Authorization: Bearer <token>`, decodes the UID, and dynamically executes an anchor query against the `users` collection to mathematically extract or map the `tenant_id`. Brand new registrations seamlessly default to `role: admin`.
+- **Legacy Trigger:** Wakes up via Cloud Scheduler at 6:00 AM IST to stagger async queue loops into `lead-pipeline-queue`.
 - **Dependencies:**
+  - `firebase-admin>=6.5.0`
   - `google-cloud-firestore==2.14.0`
   - `google-cloud-tasks==2.15.0`
   - `Flask==3.0.0`
 
 ### 3.3. Pipeline Core (`services/pipeline-main`)
-- **Type:** Cloud Run App (Memory: 256MB). Deployed via Gunicorn with 1 worker and 8 threads.
-- **Purpose:** Executes the multi-keyword intelligence sweep.
-- **Workflow:**
-  1. *Sweep:* Queries Serper.dev API for top 20 organic results per keyword. Manually deduplicates iterating links into a `seen` set.
-  2. *Pre-Filter:* Sends the JSON snippet array + user Product Bio to Gemini 2.5 Flash on Vertex AI. Uses a strict system prompt overriding markdown block formats to return a newline-separated list of raw `http` strings to safely bypass traditional LLM malformed JSON hazards. Truncates flow mapping to the top 30 filtered URLs.
-  3. *Primary Scrape:* Attempts text extraction using `httpx + BeautifulSoup4` (10s timeout). If the extracted body drops below 500 chars (indicating an empty React/Vue DOM backbone), it seamlessly fails over by invoking `scraper-heavy` REST fully headless.
-  4. *Cache Control:* Applies a hard truncation (`text[:100000]`) ensuring no website pushes Firestore beyond its 1MB Document limit. Saves mapping to `/scraped_cache/{url}` before executing any scoring.
-  5. *Deduplication Gateway:* Executes a deterministic `limit(1)` verification against Firestore comparing combinations of `tenant_id`, `campaign_id`, and `url` blocking any duplicate processing or API token burn.
-  6. *LLM Final Scoring & DM Synthesis:* Reads the resulting extracted text and product biography. Gemini infers an intent score (0-10), isolates pain points, and synthesizes 2-sentence conversational WhatsApp/LinkedIn targeted hooks. 
-  7. *Storage:* Writes passing leads (Score >= 7) securely tagged with `tenant_id` allowing RLS safety limits to enforce UI queries.
-- **Dependencies:**
-  - `google-cloud-firestore==2.14.0`, `google-cloud-secret-manager==2.16.2`, `google-cloud-aiplatform>=1.47.0`, `grpcio==1.60.0`, `Flask==3.0.0`, `gunicorn==21.2.0`, `httpx==0.26.0`, `beautifulsoup4==4.12.3`
+- **Type:** Cloud Run App (Memory: 256MB).
+- **Workflow:** Extrapolates SERP arrays -> Scrapes DOM -> Evaluates intent (Gemini) -> Synthesizes DM Hooks -> Logs payload strictly using the backend-affixed `tenant_id` context.
 
 ### 3.4. Heavy Scraper (`services/scraper-heavy`)
-- **Type:** Independent Cloud Run App (Memory: 2GB, `min-instances: 0`).
-- **Purpose:** Acts entirely as a failover network for the primary pipeline. Instantiates an `async_playwright` headless Chromium instance (using `mcr.microsoft.com/playwright/python:v1.42.0-jammy`). Waits for `networkidle` state, aggressively injects an explicit `document.querySelectorAll('script, style, noscript, nav, footer, iframe').forEach(el => el.remove());` string cleanup to sanitize noise, gets purely rendered innerText payload, caps it at `100,000` bytes, and immediately replies to pipeline before returning memory capacity cleanly.
-- **Dependencies:**
-  - `playwright==1.42.0`, `Flask==3.0.0`, `gunicorn==21.2.0`
+- **Type:** Independent Cloud Run App (Memory: 2GB, `min-instances: 0`). Headless Chromium instance executing heavy React/Vue DOM string parsing natively capping cache limits below 100kb payload constraints.
 
 ### 3.5. WhatsApp Webhook (`services/whatsapp-webhook`)
-- **Type:** Cloud Run App (Memory: 128MB). Exposed unauthenticated purely for external Meta payloads.
-- **Purpose:** Listens strictly for Meta API GET (verification handshakes via `hub.verify_token`) and POST (status update) event webhooks. Connects directly to Firestore evaluating `collection_group("leads").where("wa_message_id", "==", message_id)` to globally update tracked outcome states across all shards (`delivered`, `read`, `replied`). Applies strict `X-Hub-Signature-256` HMAC validation using Secret Manager mapping `whatsapp_webhook_token` against payload digest combinations to prevent bad actors spoofing state changes.
-- **Dependencies:**
-  - `google-cloud-firestore==2.14.0`, `google-cloud-secret-manager==2.16.2`, `Flask==3.0.0`, `grpcio==1.60.0`, `gunicorn==21.2.0`
+- **Type:** Cloud Run App (Memory: 128MB). Listens strictly for Meta API GET and POST event webhooks securely bypassing Firebase UI scopes.
 
 ### 3.6. Daily Email Summary (`services/email-summary`)
-- **Type:** Cloud Run App Triggered via Scheduler (Memory: 128MB).
-- **Purpose:** Compiles a digest of top scored leads for each Tenant and blasts daily HTML emails using standard Gmail SMTP_SSL (port 465) / App Passwords via Secret Manager `gmail_app_password`. Reads directly over the tenants collection sequentially, extracting the newest 10 high-value leads filtered firmly where `status` bounds are equivalent to `"new"` or `"contacted"`.
-- **Dependencies:**
-  - `google-cloud-firestore==2.14.0`, `google-cloud-secret-manager==2.16.2`, `Flask==3.0.0`, `gunicorn==21.2.0`, `grpcio==1.60.0`
+- **Type:** Cloud Run App Triggered via Scheduler (Memory: 128MB) natively firing Python SMTP templates to SME owners.
 
 ### 3.7. Frontend Application (`public/`)
-- **Deployment:** Firebase Hosting. Configured through `firebase.json` triggering a rewrite of `/api/trigger` mappings to strictly proxy to the `orchestrator` service mapping in `asia-south1`.
-- **Rules:** Strict Row-Level Security (`firestore.rules`) ensuring Admins/Team Members can only query their own Firebase Auth `{tenantId}` datasets. Explicitly denies public access to `scraped_cache` documents.
-- **Core Functionality:**
-  - UI 5-Button Event Hooks: Directly mutating the Outcome Trackers (`[Complete]`, `[Ignore]`, `[Converted]`, `[No Response]`, `[Follow-up Later]`).
-  - New Campaigns: Enables tracking through explicitly triggering the Smart Competitor Monitor keywords.
-  - Return On Investment: Emits active UI metrics indicating monthly saved dollars vs Ad Cost and dynamically generates PDF reports.
-- **Theme:** Vibrant, dynamic dark-mode glassmorphism utilizing `Outfit` fonts.
+- **Deployment:** Firebase Hosting. 
+- **Networking:** Stripped of all `firebase-firestore` CDN SDKs. The frontend operates solely via `fetch()` API operations transmitting standard JWT structures.
+- **Routing:** Configured through `firebase.json` triggering a rewrite of `/api/**` mappings to strictly proxy to the `orchestrator` service.
+- **Core Functionality:** Decoupled HTML DOM mutating dynamically purely off backend-sanitized JSON arrays yielding secure multi-tenant execution matrices.
 
 ---
 
-## 4. Security, Monitoring & Backups (IaC Enforcement)
-- **Log Metrics Policy:** Terraform enforces a Cloud Monitor alert catching any `run.googleapis.com/request_count` spanning >5 instances of `5xx` rate boundaries inside a 5-minute rolling window.
-- **Secret Rotations:** `rotations { }` block enforces exact 90-day auto-reset cycling of API keys defined inside GCP.
-- **Recovery Strategy:** Firestore natively dumps data to standard multi-regional Cloud Storage Buckets utilizing 30-day `lifecycle_rule` policies ensuring automatic garbage collection.
+## 4. Security, Monitoring & Backups
+- **No Thick-Client I/O:** `firestore.rules` formally blocks all operations. The database is invisible to the internet.
+- **Data Perimeter Isolation:** The Orchestrator's internal Identity logic intercepts all `POST` payloads manually deleting and affixing securely generated `tenant_id` traits masking against potential structural UI payload injection attacks.
+- **Log Metrics Policy:** Terraform enforces a Cloud Monitor alert catching any rate boundaries inside a 5-minute rolling window.
 
 ---
 
@@ -101,41 +78,30 @@ The application has been restructured from a monolithic Python polling service t
 
 ### 5.1. Concurrency Control (Stampede Mitigation) [✅ PASSED]
 - **Objective:** Verify Vertex AI/Serper.dev quotas are respected.
-- **Test:** Generated 500 active mock campaigns in Firestore. Triggered the `Orchestrator` manually.
-- **Expectation Check:** The Cloud Tasks dashboard successfully staggered all 500 queued items over ~45 minutes. The dispatch rate never exceeded `max_concurrent_dispatches = 5`, eliminating any timestamp stampedes against Gemini APIs.
+- **Expectation Check:** The Cloud Tasks dashboard successfully staggered all 500 queued items effectively limiting `max_concurrent_dispatches = 5`.
 
-### 5.2. Scraper Fallback Architecture (Playwright Memory Trap Isolation) [✅ PASSED]
-- **Objective:** Ensure single-page apps (SPAs) don't crash the fast-pipeline, and Playwright triggers successfully, then scales to zero.
-- **Test:** Passed a heavy React SPA bundle to `/dispatch`.
-- **Expectation Check:** The `lead-pipeline-main` executed a `Timeout/EmptyDOM` capture and smoothly re-routed to `scraper-heavy`. Chromium isolated execution accurately rendered content.
+### 5.2. Tenant Data Cross-Contamination (Identity API Verification) [✅ PASSED]
+- **Objective:** Verify MSME Teams are strictly bound to their Tenant ID via REST logic.
+- **Test:** Authenticate as User A. Attempt to pass a mutated `POST /api/campaigns` requesting creation inside Tenant B's UUID.
+- **Expectation Check:** API safely executed a backend dict `pop()`, forcefully overriding the payload with User A's legitimately queried `users` tenant footprint.
 
-### 5.3. Firestore 1MB Write Limitation (Cache Fix) [✅ PASSED]
-- **Objective:** Prevent backend crashes when caching large corporate domains.
-- **Test:** Pointed pipeline at a massive Wiki page (> 2MB HTML DOM).
-- **Expectation Check:** `scraped_cache` string extraction successfully hit `truncate_text()` limiter capping at `100,000` bytes inside Firestore native UI.
-
-### 5.4. Tenant Data Cross-Contamination (RLS Verification) [✅ PASSED]
-- **Objective:** Verify MSME Teams are strictly bound to their Tenant ID.
-- **Test:** Authenticate as User A (Tenant A). Attempt to query `/tenants/{Tenant_B}/leads`.
-- **Expectation Check:** API safely failed out producing `FirebaseError: Missing or insufficient permissions.`.
-
-### 5.5. WhatsApp Signature Exchange [✅ PASSED]
-- **Objective:** Assert Meta Webhooks can't be spoofed.
-- **Test:** Sent a cURL POST to `/webhook` attempting a message `Status=Read` impersonation.
-- **Expectation Check:** The pipeline executed a `HTTP 403 Forbidden` exit safely dropping the forged hash via the strict HMAC digest matching.
+### 5.3. Thin-Client Refusal (Security Hardening) [✅ PASSED]
+- **Objective:** Assert Legacy Client-Side Javascript cannot poll the DB.
+- **Test:** Execute a raw `db.collection('leads').get()` from DevTools.
+- **Expectation Check:** Payload drops mathematically responding `403 Permission Denied` correctly enforcing lockdown boundaries.
 
 ---
 
-## 6. Deployment Map (Native GCP CI/CD)
+## 6. Deployment Map (Native CI/CD)
 
-The application utilizes a strict enterprise security boundary where GitHub acts **exclusively** as a Source Control Management (SCM) repository. All compilation, secret binding, and deployment are orchestrated identically to enterprise blueprints natively within **Google Cloud Build Triggers** mapping branches purely to `cloudbuild.yaml`. No deployment tokens or long-lived authentication keys are housed in GitHub.
+The application utilizes a strict enterprise security boundary where GitHub acts **exclusively** as a Source Control Management (SCM) repository. 
 
 ### 6.1. Google Cloud Build Native Triggers Configured
 Administrators manually map 6 native GUI Cloud Build Triggers in the GCP console tracking `Push to Branch: main`.
 
-1. **Lead Pipeline Trigger**: Uses `services/pipeline-main` logic to isolate and deploy `lead-pipeline-main` isolated into 256Mi RAM limits.
-2. **Orchestrator Trigger**: Uses `services/orchestrator` resolving `lead-orchestrator` bounded to 256Mi RAM mapping.
-3. **Heavy Scraper Trigger**: Uses `services/scraper-heavy` explicit provisioning limits triggering a map to 2Gi limits and `min-instances: 0` for 100% failover shutdown states.
-4. **Webhook Listener Trigger**: Uses `services/whatsapp-webhook` mapping explicit `--allow-unauthenticated` deployments running against 128Mi.
+1. **Lead Pipeline Trigger**: Uses `services/pipeline-main` tracking 256Mi RAM limits.
+2. **Orchestrator Trigger**: Uses `services/orchestrator` tracking 256Mi and `--allow-unauthenticated` for API Proxying.
+3. **Heavy Scraper Trigger**: Uses `services/scraper-heavy` explicit 2Gi limits and `min-instances: 0` fast-shutoff configurations.
+4. **Webhook Listener Trigger**: Uses `services/whatsapp-webhook` mapping explicit `--allow-unauthenticated` execution against 128Mi.
 5. **Email Worker Trigger**: Uses `services/email-summary` deployed mapping to 128Mi.
-6. **Firebase Portal Trigger**: Employs an exact `$FIREBASE_SA_KEY` Secret Manager mapping running `npm install -g firebase-tools` inside an ephemeral `node:20` build context before safely calling `firebase deploy --only hosting,firestore`.
+6. **Firebase Portal Trigger**: Employs an exact `$FIREBASE_SA_KEY` Secret Manager mapping natively executing `npm install -g firebase-tools` inside `node:20` to trigger strict `hosting,firestore` execution updates flawlessly avoiding missing `functions` triggers.
