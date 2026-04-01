@@ -47,12 +47,23 @@ def authenticate_request(request):
     decoded_token = auth.verify_id_token(token)
     
     uid = decoded_token.get('uid')
+    if not uid:
+        raise ValueError("Critical Security Anomaly: Invalid structural decoding.")
+        
+    user_ref = db.collection('users').document(uid)
+    user_doc = user_ref.get()
     
-    # Strictly respect the backend-assigned custom claims (or fallback to UID for Grandfathered Admins)
-    tenant_id = decoded_token.get('tenant') or decoded_token.get('uid')
-    
-    if not tenant_id:
-        raise ValueError("Critical Security Anomaly: Evaluated Token profoundly lacks inherently mapped Tenant Identifiers.")
+    if not user_doc.exists:
+        # Fallback Creation: Brand new user registration
+        tenant_id = uid
+        user_ref.set({
+            'tenant_id': tenant_id,
+            'role': 'admin',
+            'createdAt': firestore.SERVER_TIMESTAMP
+        })
+    else:
+        user_data = user_doc.to_dict()
+        tenant_id = user_data.get('tenant_id') or uid
         
     return uid, tenant_id
 
@@ -115,6 +126,55 @@ def trigger_daily_sweep(request):
             results = [sanitize_document(doc) for doc in docs]
             return jsonify({"status": "success", "data": results}), 200
             
+        except ValueError as ve:
+            return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
+        except Exception as e:
+            return jsonify({"error": "Internal Error", "message": str(e)}), 500
+
+    # -----------------------------------------------------------------------------------------
+    # REST API Gateway Protocol (Frontend Database Mutations)
+    # -----------------------------------------------------------------------------------------
+    if request.path.startswith("/api/") and request.method in ["POST", "PUT"]:
+        try:
+            uid, tenant_id = authenticate_request(request)
+            data = request.json or {}
+            
+            # Remove any forged tenant injections
+            data.pop('tenant_id', None)
+            
+            if request.path == "/api/campaigns" and request.method == "POST":
+                data['tenant_id'] = tenant_id
+                data['createdAt'] = firestore.SERVER_TIMESTAMP
+                data['updatedAt'] = firestore.SERVER_TIMESTAMP
+                update_time, doc_ref = db.collection("campaigns").add(data)
+                return jsonify({"status": "success", "id": doc_ref.id}), 201
+                
+            elif request.path.startswith("/api/campaigns/") and request.method == "PUT":
+                doc_id = request.path.split("/")[-1]
+                # Secure Authorization Enforcement: Document MUST logically belong to Tenant
+                doc_ref = db.collection("campaigns").document(doc_id)
+                doc_data = doc_ref.get()
+                if doc_data.exists and doc_data.to_dict().get('tenant_id') == tenant_id:
+                    data['updatedAt'] = firestore.SERVER_TIMESTAMP
+                    doc_ref.update(data)
+                    return jsonify({"status": "success"}), 200
+                return jsonify({"error": "Forbidden"}), 403
+                
+            elif request.path.startswith("/api/leads/") and request.method == "PUT":
+                doc_id = request.path.split("/")[-1]
+                doc_ref = db.collection("leads").document(doc_id)
+                doc_data = doc_ref.get()
+                if doc_data.exists and doc_data.to_dict().get('tenant_id') == tenant_id:
+                    data['updatedAt'] = firestore.SERVER_TIMESTAMP
+                    if 'interactions' in data:
+                        # Prevent client array mutation overwrites
+                        db_interaction = {"action": data.get("interactions", "") , "date": firestore.SERVER_TIMESTAMP}
+                        doc_ref.update({"status": data.get("status"), "updatedAt": firestore.SERVER_TIMESTAMP, "interactions": firestore.ArrayUnion([db_interaction])})
+                    else:
+                        doc_ref.update(data)
+                    return jsonify({"status": "success"}), 200
+                return jsonify({"error": "Forbidden"}), 403
+                
         except ValueError as ve:
             return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
         except Exception as e:
