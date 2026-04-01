@@ -10,6 +10,14 @@ service cloud.firestore {
     match /scraped_cache/{cacheId} {
       allow read, write: if false; // Only accessible via Admin SDK in Cloud Run
     }
+    // -------------------------------------------------------------
+    // Invitations Ledger (Admins only write, public no read)
+    // -------------------------------------------------------------
+    match /invitations/{documentId} {
+      allow read: if false; // Accessed strictly via Admin SDK Backend Eventarc
+      allow create: if request.auth != null && request.auth.token.role == 'admin' && request.auth.token.tenant == request.resource.data.tenant_id;
+      allow delete: if request.auth != null && request.auth.token.role == 'admin' && request.auth.token.tenant == resource.data.tenant_id;
+    }
     
     // Strict RLS for top-level leads collection
     match /leads/{documentId} {

@@ -55,6 +55,13 @@ steps:
   args: ['run', 'deploy', 'email-summary', '--image', 'gcr.io/$PROJECT_ID/email-summary', '--region', 'asia-south1', '--memory', '128Mi', '--no-allow-unauthenticated', '--service-account', 'email-summary-sa@$PROJECT_ID.iam.gserviceaccount.com']
 
 # ---------------------------------------------------------------------
+# Microservice 6: Auth Event Trigger
+# ---------------------------------------------------------------------
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: ['functions', 'deploy', 'auth-trigger', '--gen2', '--runtime', 'python310', '--region', 'asia-south1', '--source', './services/auth-trigger', '--entry-point', 'process_user_creation', '--trigger-event-filters', 'type=google.firebase.auth.user.v1.created', '--trigger-location', 'asia-south1', '--memory', '128Mi', '--service-account', 'auth-trigger-sa@$PROJECT_ID.iam.gserviceaccount.com']
+
+# ---------------------------------------------------------------------
 # Firebase Frontend Deployment
 # ---------------------------------------------------------------------
 - name: 'node:20'

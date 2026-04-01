@@ -26,8 +26,25 @@ auth.onAuthStateChanged(async user => {
     if (user) {
         try {
             // Priority Identity Resolution Map for Strict RLS Custom Claims
-            const idTokenResult = await user.getIdTokenResult();
-            activeTenantId = idTokenResult.claims.tenant || user.uid; 
+            let idTokenResult = await user.getIdTokenResult();
+            
+            // Zero-Trust: Poll backend Eventarc for natively assigned Role claims
+            let retryCount = 0;
+            while (!idTokenResult.claims.tenant && retryCount < 6) {
+                console.log("Awaiting authoritative claims generation from backend...");
+                await new Promise(r => setTimeout(r, 2000)); // Delay between polling
+                await user.getIdToken(true); // Force Native Token Refresh
+                idTokenResult = await user.getIdTokenResult();
+                retryCount++;
+            }
+            
+            if (!idTokenResult.claims.tenant) {
+                showToast("Identity Sandbox Lockout: Backend Claims Timeout", "error");
+                auth.signOut();
+                return;
+            }
+
+            activeTenantId = idTokenResult.claims.tenant; 
             
             // Render UI
             authContainer.classList.add('hidden');

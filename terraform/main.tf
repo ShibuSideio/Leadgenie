@@ -71,9 +71,25 @@ resource "google_service_account" "email_summary_sa" {
   display_name = "Daily Automated Worker"
 }
 
+resource "google_service_account" "auth_trigger_sa" {
+  account_id   = "auth-trigger-sa"
+  display_name = "Eventarc Auth Manager"
+}
+
 # -------------------------------------------------------------
 # Strict Least Privilege Secret Bindings (IAM)
 # -------------------------------------------------------------
+resource "google_project_iam_member" "auth_trigger_firebase" {
+  project = var.project_id
+  role    = "roles/firebaseauth.admin"
+  member  = "serviceAccount:${google_service_account.auth_trigger_sa.email}"
+}
+
+resource "google_project_iam_member" "auth_trigger_firestore" {
+  project = var.project_id
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${google_service_account.auth_trigger_sa.email}"
+}
 resource "google_secret_manager_secret_iam_member" "pipeline_serper_access" {
   secret_id = google_secret_manager_secret.serper_api_key.id
   role      = "roles/secretmanager.secretAccessor"
