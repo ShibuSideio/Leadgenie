@@ -3,7 +3,6 @@ import json
 import urllib.request
 import time
 from flask import jsonify
-from flask_cors import cross_origin
 from google.cloud import tasks_v2
 
 import firebase_admin
@@ -49,8 +48,8 @@ def authenticate_request(request):
     
     uid = decoded_token.get('uid')
     
-    # Strictly respect the backend-assigned custom claims (or fallback temporarily to UID for Root Admins)
-    tenant_id = decoded_token.get('tenant', uid)
+    # Strictly respect the backend-assigned custom claims (or fallback to UID for Grandfathered Admins)
+    tenant_id = decoded_token.get('tenant') or decoded_token.get('uid')
     
     if not tenant_id:
         raise ValueError("Critical Security Anomaly: Evaluated Token profoundly lacks inherently mapped Tenant Identifiers.")
@@ -94,7 +93,6 @@ def handle_purge(request):
     db.collection("tenants").document(tenant_id).delete()
     return jsonify({"message": f"Successfully erased tenant {tenant_id} data completely"}), 200
 
-@cross_origin(origins=["https://lead-sniper-prod.web.app", "https://lead-sniper-prod.firebaseapp.com", "http://localhost:5000", "http://localhost:3000"])
 def trigger_daily_sweep(request):
     """
     Unified Orchestrator API Gateway Module.
