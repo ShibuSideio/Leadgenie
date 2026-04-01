@@ -2,8 +2,24 @@ import os
 import json
 import urllib.request
 import time
-from google.cloud import firestore
+from flask import jsonify
+from flask_cors import cross_origin
 from google.cloud import tasks_v2
+
+import firebase_admin
+from firebase_admin import credentials, firestore, auth
+
+# Initialize Admin SDK once natively for Thin Client API Authorization
+if not firebase_admin._apps:
+    firebase_admin.initialize_app()
+
+db = firestore.client()
+tasks_client = tasks_v2.CloudTasksClient()
+
+PROJECT_ID = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+LOCATION = os.environ.get("LOCATION", "asia-south1")
+QUEUE = os.environ.get("QUEUE", "lead-pipeline-queue")
+PIPELINE_URL = os.environ.get("PIPELINE_URL", "https://lead-pipeline-main-abc.a.run.app/dispatch")
 
 def get_service_account_email():
     url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
@@ -19,29 +35,54 @@ def get_service_account_email():
     print("Critical Failure: OIDC token metadata fetch permanently dropped.")
     return ""
 
-db = firestore.Client()
-tasks_client = tasks_v2.CloudTasksClient()
+def authenticate_request(request):
+    """
+    Extract Bearer token mathematically validating the user and extracting their strictly mapped UI scope.
+    Returns: User UID and Tenant ID dynamically synthesized from the Custom Claims.
+    """
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        raise ValueError("Missing or incorrectly formatted Authorization header.")
+    
+    token = auth_header.split('Bearer ')[1]
+    decoded_token = auth.verify_id_token(token)
+    
+    uid = decoded_token.get('uid')
+    
+    # Strictly respect the backend-assigned custom claims (or fallback temporarily to UID for Root Admins)
+    tenant_id = decoded_token.get('tenant', uid)
+    
+    if not tenant_id:
+        raise ValueError("Critical Security Anomaly: Evaluated Token profoundly lacks inherently mapped Tenant Identifiers.")
+        
+    return uid, tenant_id
 
-PROJECT_ID = os.environ.get("PROJECT_ID", "sideio-leads-v16")
-LOCATION = os.environ.get("LOCATION", "asia-south1")
-QUEUE = os.environ.get("QUEUE", "lead-pipeline-queue")
-PIPELINE_URL = os.environ.get("PIPELINE_URL", "https://lead-pipeline-main-abc.a.run.app/dispatch")
+def sanitize_document(doc):
+    """
+    Statically unpacks and sanitizes Firestore Documents dynamically serializing Timestamps securely.
+    """
+    data = doc.to_dict()
+    data['id'] = doc.id
+    
+    # Process Timestamps explicitly bypassing Flask JSONEncoder errors natively.
+    for k, v in data.items():
+        if hasattr(v, 'timestamp'):  
+            data[k] = v.isoformat()
+    return data
 
 def handle_purge(request):
     data = request.json or {}
     tenant_id = data.get("tenant_id")
     if not tenant_id:
-        return "Missing tenant_id", 400
+        return jsonify({"error": "Missing tenant_id"}), 400
         
     print(f"INITIATING DATA ERASURE DPDP COMPLIANCE FOR TENANT: {tenant_id}")
     
-    # 1. Purge Campaigns
-    campaigns = db.collection("campaigns").where("tenant_id", "==", tenant_id).stream()
+    campaigns = db.collection("campaigns").where(field_path="tenant_id", op_string="==", value=tenant_id).stream()
     for doc in campaigns:
         doc.reference.delete()
         
-    # 2. Purge Leads & Linked Scraped Caches
-    leads = db.collection("leads").where("tenant_id", "==", tenant_id).stream()
+    leads = db.collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id).stream()
     for doc in leads:
         lead_data = doc.to_dict()
         url = lead_data.get("url")
@@ -50,29 +91,46 @@ def handle_purge(request):
             db.collection("scraped_cache").document(cache_id).delete()
         doc.reference.delete()
         
-    # 3. Purge Tenant Baseline
     db.collection("tenants").document(tenant_id).delete()
-    
-    return f"Successfully erased tenant {tenant_id} data completely", 200
+    return jsonify({"message": f"Successfully erased tenant {tenant_id} data completely"}), 200
 
+@cross_origin(origins=["https://lead-sniper-prod.web.app", "https://lead-sniper-prod.firebaseapp.com", "http://localhost:5000", "http://localhost:3000"])
 def trigger_daily_sweep(request):
     """
-    HTTP Cloud Function triggered by Cloud Scheduler daily at 6AM or via manual UI proxy.
+    Unified Orchestrator API Gateway Module.
+    Natively controls Background Task Dispatch arrays and Secure Thin-Client Database Polling.
     """
+    # -----------------------------------------------------------------------------------------
+    # REST API Gateway Protocol (Frontend Database Reading)
+    # -----------------------------------------------------------------------------------------
+    if request.path in ["/api/campaigns", "/api/leads"] and request.method == "GET":
+        try:
+            uid, tenant_id = authenticate_request(request)
+            
+            if request.path == "/api/campaigns":
+                docs = db.collection("campaigns").where(field_path="tenant_id", op_string="==", value=tenant_id).stream()
+                
+            elif request.path == "/api/leads":
+                # Apply explicit server-side sorting logic if indexing allows, otherwise stream natively.
+                docs = db.collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(200).stream()
+
+            results = [sanitize_document(doc) for doc in docs]
+            return jsonify({"status": "success", "data": results}), 200
+            
+        except ValueError as ve:
+            return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
+        except Exception as e:
+            return jsonify({"error": "Internal Error", "message": str(e)}), 500
+
+    # -----------------------------------------------------------------------------------------
+    # Legacy Internal Triggers (Admin/Purge/Sweep)
+    # -----------------------------------------------------------------------------------------
     if request.path == "/purge" and request.method == "POST":
         return handle_purge(request)
 
-    if request.method == "OPTIONS":
-        headers = {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST',
-            'Access-Control-Allow-Headers': 'Content-Type',
-            'Access-Control-Max-Age': '3600'
-        }
-        return ('', 204, headers)
-
-    headers = {'Access-Control-Allow-Origin': '*'}
-    
+    # -----------------------------------------------------------------------------------------
+    # Legacy Cloud Scheduler / Manual Execution Triggers
+    # -----------------------------------------------------------------------------------------
     manual_camp_id = None
     if request.method == "POST":
         try:
@@ -87,7 +145,7 @@ def trigger_daily_sweep(request):
     if manual_camp_id:
         campaigns = [db.collection("campaigns").document(manual_camp_id)]
     else:
-        campaigns = list(db.collection("campaigns").where("status", "==", "active").stream())
+        campaigns = list(db.collection("campaigns").where(field_path="status", op_string="==", value="active").stream())
     
     queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
     
@@ -105,7 +163,6 @@ def trigger_daily_sweep(request):
         tenant_id = campaign_data.get("tenant_id")
         if not tenant_id: continue
         
-        # Securely bypass internal OIDC firewall constraints natively
         task = {
             "http_request": {
                 "http_method": tasks_v2.HttpMethod.POST,
@@ -117,16 +174,13 @@ def trigger_daily_sweep(request):
         
         sa_email = get_service_account_email().strip()
         if sa_email:
-            # Cloud Run strictly rejects OIDC tokens if the audience string includes the HTTP path.
-            # We must aggressively strip '/dispatch' from the dynamic PIPELINE_URL to build a clean Base Target Audience.
             base_url_audience = PIPELINE_URL.split('/dispatch')[0]
-            
             task["http_request"]["oidc_token"] = {
                 "service_account_email": sa_email,
                 "audience": base_url_audience
             }
         
-        response = tasks_client.create_task(request={"parent": queue_path, "task": task})
+        tasks_client.create_task(request={"parent": queue_path, "task": task})
         count += 1
         
-    return f"Successfully queued {count} campaign jobs.", 200, headers
+    return jsonify({"message": f"Successfully queued {count} campaign jobs."}), 200

@@ -1,39 +1,15 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Basic tenant isolation. Admins and team members must only access data within their own tenantId.
-    match /tenants/{tenantId}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.token.tenant == tenantId;
-    }
-    
-    // Scraped cache accessible by internal functions (checked in IAM, but block public read)
-    match /scraped_cache/{cacheId} {
-      allow read, write: if false; // Only accessible via Admin SDK in Cloud Run
-    }
     // -------------------------------------------------------------
-    // Invitations Ledger (Admins only write, public no read)
+    // ABSOLUTE DATABASE LOCKDOWN: MULTI-TENANT THIN CLIENT ARCHITECTURE
     // -------------------------------------------------------------
-    match /invitations/{documentId} {
-      allow read: if false; // Accessed strictly via Admin SDK Backend Eventarc
-      allow create: if request.auth != null && request.auth.token.role == 'admin' && request.auth.token.tenant == request.resource.data.tenant_id;
-      allow delete: if request.auth != null && request.auth.token.role == 'admin' && request.auth.token.tenant == resource.data.tenant_id;
-    }
+    // All direct frontend Firestore polling is mathematically blocked.
+    // Real-time synchronization is revoked.
+    // 
+    // Data ingress and egress strictly flows through the Orchestrator API Gateway
+    // utilizing the Firebase Admin SDK to bypass these constraints securely.
     
-    // Strict RLS for top-level leads collection
-    match /leads/{documentId} {
-      allow read: if request.auth != null && request.auth.token.tenant == resource.data.tenant_id;
-      allow create: if request.auth != null && request.auth.token.tenant == request.resource.data.tenant_id;
-      allow update, delete: if request.auth != null && request.auth.token.tenant == resource.data.tenant_id;
-    }
-
-    // Strict RLS for top-level campaigns collection
-    match /campaigns/{documentId} {
-      allow read: if request.auth != null && request.auth.token.tenant == resource.data.tenant_id;
-      allow create: if request.auth != null && request.auth.token.tenant == request.resource.data.tenant_id;
-      allow update, delete: if request.auth != null && request.auth.token.tenant == resource.data.tenant_id;
-    }
-    
-    // Deny all other unhandled requests
     match /{document=**} {
       allow read, write: if false;
     }
