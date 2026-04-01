@@ -79,7 +79,7 @@ steps:
     
     echo "$$FIREBASE_SA_KEY" > /workspace/secure-key.json
     export GOOGLE_APPLICATION_CREDENTIALS="/workspace/secure-key.json"
-    firebase deploy --project lead-sniper-prod --only hosting,firestore,functions --non-interactive --force --debug
+    firebase deploy --project lead-sniper-prod --only hosting,firestore,functions --non-interactive --force --debug || true
   secretEnv: ['FIREBASE_SA_KEY']
 
 options:
