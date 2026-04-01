@@ -83,6 +83,24 @@ resource "google_service_account" "auth_trigger_sa" {
 # -------------------------------------------------------------
 # Strict Least Privilege Secret Bindings (IAM)
 # -------------------------------------------------------------
+resource "google_project_iam_member" "firestore_access_pipeline" {
+  project = var.project_id
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${google_service_account.lead_pipeline_sa.email}"
+}
+
+resource "google_project_iam_member" "firestore_access_webhook" {
+  project = var.project_id
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${google_service_account.whatsapp_webhook_sa.email}"
+}
+
+resource "google_project_iam_member" "firestore_access_email" {
+  project = var.project_id
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${google_service_account.email_summary_sa.email}"
+}
+
 resource "google_project_iam_member" "auth_trigger_firebase" {
   project = var.project_id
   role    = "roles/firebaseauth.admin"
