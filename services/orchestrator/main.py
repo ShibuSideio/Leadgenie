@@ -7,7 +7,16 @@ from flask_cors import CORS
 from google.cloud import tasks_v2
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["https://lead-sniper-prod.web.app", "https://lead-sniper-prod.firebaseapp.com"]}})
+CORS(app, resources={
+    r"/api/*": {
+        "origins": [
+            "https://lead-sniper-prod.web.app", 
+            "https://lead-sniper-prod.firebaseapp.com"
+        ],
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "allow_headers": ["Authorization", "Content-Type"]
+    }
+})
 
 @app.errorhandler(Exception)
 def handle_exception(e):
@@ -50,9 +59,6 @@ def authenticate_request(request):
     Extract Bearer token mathematically validating the user and extracting their strictly mapped UI scope.
     Returns: User UID and Tenant ID dynamically synthesized from the Custom Claims.
     """
-    if request.method == 'OPTIONS': 
-        return '', 204
-        
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
         raise ValueError("Missing or incorrectly formatted Authorization header.")
@@ -131,9 +137,6 @@ def trigger_daily_sweep(path):
     Unified Orchestrator API Gateway Module.
     Natively controls Background Task Dispatch arrays and Secure Thin-Client Database Polling.
     """
-    if request.method == 'OPTIONS':
-        return '', 204
-
     # -----------------------------------------------------------------------------------------
     # REST API Gateway Protocol (Frontend Database Reading)
     # -----------------------------------------------------------------------------------------
