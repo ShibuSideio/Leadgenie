@@ -9,6 +9,13 @@ from google.cloud import tasks_v2
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ["https://lead-sniper-prod.web.app", "https://lead-sniper-prod.firebaseapp.com"]}})
 
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Log the error safely here
+    import sys
+    print(f"GLOBAL CONTAINER EXCEPTION: {str(e)}", file=sys.stderr)
+    return jsonify({"error": "Internal Server Error", "message": str(e)}), 500
+
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
 
@@ -43,6 +50,9 @@ def authenticate_request(request):
     Extract Bearer token mathematically validating the user and extracting their strictly mapped UI scope.
     Returns: User UID and Tenant ID dynamically synthesized from the Custom Claims.
     """
+    if request.method == 'OPTIONS': 
+        return '', 204
+        
     auth_header = request.headers.get('Authorization')
     if not auth_header or not auth_header.startswith('Bearer '):
         raise ValueError("Missing or incorrectly formatted Authorization header.")
@@ -98,11 +108,11 @@ def handle_purge(request):
         
     print(f"INITIATING DATA ERASURE DPDP COMPLIANCE FOR TENANT: {tenant_id}")
     
-    campaigns = db.collection("campaigns").where(field_path="tenant_id", op_string="==", value=tenant_id).stream()
+    campaigns = db.collection("campaigns").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream()
     for doc in campaigns:
         doc.reference.delete()
         
-    leads = db.collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id).stream()
+    leads = db.collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream()
     for doc in leads:
         lead_data = doc.to_dict()
         url = lead_data.get("url")
@@ -132,11 +142,11 @@ def trigger_daily_sweep(path):
             uid, tenant_id = authenticate_request(request)
             
             if request.path == "/api/campaigns":
-                docs = db.collection("campaigns").where(field_path="tenant_id", op_string="==", value=tenant_id).stream()
+                docs = db.collection("campaigns").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream()
                 
             elif request.path == "/api/leads":
                 # Apply explicit server-side sorting logic if indexing allows, otherwise stream natively.
-                docs = db.collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(200).stream()
+                docs = db.collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream()
 
             results = [sanitize_document(doc) for doc in docs]
             return jsonify({"status": "success", "data": results}), 200
@@ -218,7 +228,7 @@ def trigger_daily_sweep(path):
     if manual_camp_id:
         campaigns = [db.collection("campaigns").document(manual_camp_id)]
     else:
-        campaigns = list(db.collection("campaigns").where(field_path="status", op_string="==", value="active").stream())
+        campaigns = list(db.collection("campaigns").where(field_path="status", op_string="==", value="active").limit(100).stream())
     
     queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
     
