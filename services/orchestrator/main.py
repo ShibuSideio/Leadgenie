@@ -2,21 +2,32 @@ import os
 import json
 import urllib.request
 import time
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask import Flask, request, jsonify, make_response
 from google.cloud import tasks_v2
 
 app = Flask(__name__)
-CORS(app, resources={
-    r"/api/*": {
-        "origins": [
-            "https://lead-sniper-prod.web.app", 
-            "https://lead-sniper-prod.firebaseapp.com"
-        ],
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        "allow_headers": ["Authorization", "Content-Type"]
-    }
-})
+ALLOWED_ORIGINS = ["https://lead-sniper-prod.web.app", "https://lead-sniper-prod.firebaseapp.com"]
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        res = make_response()
+        origin = request.headers.get("Origin")
+        if origin in ALLOWED_ORIGINS:
+            res.headers.add("Access-Control-Allow-Origin", origin)
+            res.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            res.headers.add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        return res, 204
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if origin in ALLOWED_ORIGINS:
+        response.headers.add("Access-Control-Allow-Origin", origin)
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+    return response
+
 
 @app.errorhandler(Exception)
 def handle_exception(e):
