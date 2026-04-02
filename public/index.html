@@ -130,6 +130,12 @@
             <input type="text" id="camp-bio" placeholder="Describe your product offering..." class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             <input type="text" id="camp-keys" placeholder="Target Keywords (e.g. CEO, funding, hiring)" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             
+            <label style="font-size: 0.8rem; color: var(--text-muted);">Uber-Style Geographic Targeting</label>
+            <div style="display:flex; gap: 8px; margin-bottom: 12px;">
+                <input type="text" id="camp-gl" placeholder="Country (e.g. us, uk)" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+                <input type="text" id="camp-location" placeholder="State/Region, City" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            </div>
+            
             <label style="display:flex; align-items:center; gap:8px; margin-bottom: 24px; font-size: 0.9rem;">
                 <input type="checkbox" id="competitor-monitor-cb" checked> Automatically track my competitors
             </label>
@@ -152,7 +158,13 @@
             <label style="font-size: 0.8rem; color: var(--text-muted);">Product Bio</label>
             <input type="text" id="edit-camp-bio" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             <label style="font-size: 0.8rem; color: var(--text-muted);">Target Keywords</label>
-            <input type="text" id="edit-camp-keys" class="full-width" style="margin-bottom: 24px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            <input type="text" id="edit-camp-keys" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            
+            <label style="font-size: 0.8rem; color: var(--text-muted);">Geographic Targeting</label>
+            <div style="display:flex; gap: 8px; margin-bottom: 24px;">
+                <input type="text" id="edit-camp-gl" placeholder="Country Code" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+                <input type="text" id="edit-camp-location" placeholder="City, State" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+            </div>
             
             <div style="display:flex; gap: 12px;">
                 <button class="primary-btn full-width" onclick="saveEditedCampaign()">Update Engine</button>

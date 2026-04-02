@@ -26,10 +26,15 @@ def get_secret(secret_name):
     response = sm_client.access_secret_version(request={"name": secret_name})
     return response.payload.data.decode("UTF-8")
 
-def search_serper(query):
+def search_serper(query, location=None, gl=None):
     api_key = get_secret(SERPER_API_KEY_NAME).strip()
     url = "https://google.serper.dev/search"
-    payload = json.dumps({"q": query, "num": 20})
+    payload_dict = {"q": query, "num": 20}
+    if location:
+        payload_dict["location"] = location
+    if gl:
+        payload_dict["gl"] = gl
+    payload = json.dumps(payload_dict)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     
     response = httpx.post(url, headers=headers, data=payload, timeout=30)
@@ -88,12 +93,20 @@ def scrape_url(url):
         return ""
 
 def final_score_and_dm(text, bio):
-    prompt = f"Score this 1-10 based on campaign goals and product bio: '{bio}'. Extract core pain point and write a highly conversational, brief, varied, non-salesy 2-sentence WhatsApp/LinkedIn DM. Format JSON with keys: score, pain_point, dm.\n\nText: {text}"
+    prompt = f"Score this 1-10 based on campaign goals and product bio: '{bio}'. You must extract contact information. If NO email, phone number, or LinkedIn URL is found in the text, you MUST penalize the lead score to 0, regardless of how well their bio matches. Extract core pain point and write a highly conversational, brief, varied, non-salesy 2-sentence WhatsApp/LinkedIn DM. Format JSON strictly with exact keys: score, pain_point, dm, email, phone, linkedin.\n\nText: {text}"
     result = model.generate_content(prompt)
     try:
-        return json.loads(result.text.replace('```json', '').replace('```', ''))
+        data = json.loads(result.text.replace('```json', '').replace('```', ''))
+        return {
+            "score": data.get("score", 0),
+            "pain_point": data.get("pain_point", "Unknown"),
+            "dm": data.get("dm", "Failed to generate DM"),
+            "email": data.get("email", ""),
+            "phone": data.get("phone", ""),
+            "linkedin": data.get("linkedin", "")
+        }
     except:
-        return {"score": 0, "pain_point": "Unknown", "dm": "Failed to generate DM"}
+        return {"score": 0, "pain_point": "Unknown", "dm": "Failed to parse generation", "email": "", "phone": "", "linkedin": ""}
 
 @app.route("/dispatch", methods=["POST"])
 def dispatch():
@@ -104,6 +117,9 @@ def dispatch():
     campaign_ref = db.collection("campaigns").document(campaign_id)
     campaign = campaign_ref.get().to_dict()
     bio = campaign.get("bio", "")
+    
+    location = campaign.get("location", "").strip()
+    gl = campaign.get("gl", "").strip()
     
     raw_keywords = campaign.get("keywords", "")
     if isinstance(raw_keywords, str):
@@ -119,7 +135,7 @@ def dispatch():
     
     for kw in keywords:
         # Step 1: Sweep
-        results = search_serper(kw)
+        results = search_serper(kw, location=location if location else None, gl=gl if gl else None)
         
         # URL Deduplication
         unique_results = []
@@ -172,6 +188,9 @@ def dispatch():
                         "score": evaluation.get("score"),
                         "pain_point": evaluation.get("pain_point"),
                         "dm": evaluation.get("dm"),
+                        "email": evaluation.get("email", ""),
+                        "phone": evaluation.get("phone", ""),
+                        "linkedin": evaluation.get("linkedin", ""),
                         "status": "new"
                     })
                     
@@ -183,6 +202,9 @@ def dispatch():
                         "score": evaluation.get("score"),
                         "pain_point": evaluation.get("pain_point"),
                         "dm": evaluation.get("dm"),
+                        "email": evaluation.get("email", ""),
+                        "phone": evaluation.get("phone", ""),
+                        "linkedin": evaluation.get("linkedin", ""),
                         "status": "new"
                     }
                     all_results.append(lead_doc)

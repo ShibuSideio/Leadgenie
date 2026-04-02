@@ -112,13 +112,16 @@ async function loadCampaigns() {
             const statusColor = isActive ? '#25D366' : '#ef4444';
             const statusBadge = `<span style="font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(camp.status || 'unknown').toUpperCase()}</span>`;
             
+            const hasLocation = camp.gl && camp.location;
+            const locationWarn = hasLocation ? '' : '<br><span style="color: #ea580c; font-size: 0.75rem; display:block; margin-top:4px;">⚠️ Location Missing: Edit Campaign to set Targeting</span>';
+            
             tableHTML += `
                 <tr style="border-bottom: 1px solid var(--glass-border);">
-                    <td style="padding: 12px;"><strong>${camp.name || 'Untitled'}</strong></td>
+                    <td style="padding: 12px;"><strong>${camp.name || 'Untitled'}</strong>${locationWarn}</td>
                     <td style="padding: 12px;"><i style="color:var(--text-muted); font-size:0.85rem">${camp.keywords || 'N/A'}</i></td>
                     <td style="padding: 12px;">${statusBadge}</td>
                     <td style="padding: 12px; text-align:right;">
-                        <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; margin-right: 4px;" onclick="openEditModal('${id}', '${(camp.name || '').replace(/'/g, "\\'")}', '${(camp.bio || '').replace(/'/g, "\\'")}', '${(camp.keywords || '').replace(/'/g, "\\'")}')">Edit</button>
+                        <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; margin-right: 4px;" onclick="openEditModal('${id}', '${(camp.name || '').replace(/'/g, "\\'")}', '${(camp.bio || '').replace(/'/g, "\\'")}', '${(camp.keywords || '').replace(/'/g, "\\'")}', '${(camp.gl || '').replace(/'/g, "\\'")}', '${(camp.location || '').replace(/'/g, "\\'")}')">Edit</button>
                         <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; border-color: ${statusColor}; color: ${statusColor}" onclick="toggleCampaignStatus('${id}', '${camp.status}')">${isActive ? 'Pause' : 'Resume'}</button>
                     </td>
                 </tr>
@@ -310,11 +313,15 @@ window.viewLeadTimeline = function(eventsJson) {
     } catch(e) { console.error('Timeline Schema Sync Error', e); }
 };
 
-window.openEditModal = function(id, name, bio, keywords) {
+window.openEditModal = function(id, name, bio, keywords, gl, location) {
     document.getElementById('edit-camp-id').value = id;
     document.getElementById('edit-camp-name').value = name;
     document.getElementById('edit-camp-bio').value = bio;
     document.getElementById('edit-camp-keys').value = keywords;
+    const glEl = document.getElementById('edit-camp-gl');
+    const locEl = document.getElementById('edit-camp-location');
+    if (glEl) glEl.value = gl;
+    if (locEl) locEl.value = location;
     document.getElementById('edit-campaign-modal').classList.remove('hidden');
 };
 
@@ -357,11 +364,21 @@ window.saveEditedCampaign = async function() {
     const name = document.getElementById('edit-camp-name').value;
     const bio = document.getElementById('edit-camp-bio').value;
     const keys = document.getElementById('edit-camp-keys').value;
+    const glInput = document.getElementById('edit-camp-gl');
+    const locationInput = document.getElementById('edit-camp-location');
+    
     if (!name || !keys) return showToast('Name and Keywords required', 'error');
     
     showToast('Pushing updates to AI Engine...', 'info');
     try {
-        const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', { name, bio, keywords: keys });
+        const payload = { 
+            name, 
+            bio, 
+            keywords: keys,
+            gl: glInput ? glInput.value : '',
+            location: locationInput ? locationInput.value : ''
+        };
+        const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', payload);
         if(success) {
             closeEditModal();
             showToast('Campaign successfully updated!', 'success');
@@ -389,6 +406,9 @@ window.saveCampaignAction = async function() {
     const nameInput = document.getElementById('camp-name');
     const bioInput = document.getElementById('camp-bio');
     const keysInput = document.getElementById('camp-keys');
+    const glInput = document.getElementById('camp-gl');
+    const locationInput = document.getElementById('camp-location');
+    
     if (!nameInput || !keysInput || !nameInput.value || !keysInput.value) {
         showToast('Campaign Name and Keywords are required', 'error');
         return;
@@ -400,12 +420,16 @@ window.saveCampaignAction = async function() {
             name: nameInput.value,
             bio: bioInput.value,
             keywords: keysInput.value,
+            gl: glInput ? glInput.value : '',
+            location: locationInput ? locationInput.value : '',
             status: 'active'
         });
         if(success) {
             document.getElementById('new-campaign-modal').classList.add('hidden');
             showToast('System is now looking for clients!', 'success');
             nameInput.value = ''; bioInput.value = ''; keysInput.value = '';
+            if (glInput) glInput.value = '';
+            if (locationInput) locationInput.value = '';
             loadDashboard();
         }
     } catch(err) {
