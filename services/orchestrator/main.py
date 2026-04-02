@@ -14,18 +14,20 @@ def handle_preflight():
         res = make_response()
         origin = request.headers.get("Origin")
         if origin in ALLOWED_ORIGINS:
-            res.headers.add("Access-Control-Allow-Origin", origin)
-            res.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-            res.headers.add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+            # STRICT OVERWRITE - DO NOT USE .add()
+            res.headers['Access-Control-Allow-Origin'] = origin
+            res.headers['Access-Control-Allow-Headers'] = "Content-Type, Authorization"
+            res.headers['Access-Control-Allow-Methods'] = "GET, POST, PUT, DELETE, OPTIONS"
         return res, 204
 
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin")
     if origin in ALLOWED_ORIGINS:
-        response.headers.add("Access-Control-Allow-Origin", origin)
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        response.headers.add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        # STRICT OVERWRITE - DO NOT USE .add()
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Headers'] = "Content-Type, Authorization"
+        response.headers['Access-Control-Allow-Methods'] = "GET, POST, PUT, DELETE, OPTIONS"
     return response
 
 
