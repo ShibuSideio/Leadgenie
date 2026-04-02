@@ -203,11 +203,30 @@ async function loadLeads() {
         rawLeadsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
         
         let cNew = 0, cContact= 0, cConvert = 0;
+        let todayNew = 0, todayMessaged = 0, todayReplies = 0;
+        
+        const todayStr = new Date().toISOString().split('T')[0];
+
         rawLeadsCache.forEach(l => {
             if (l.status === 'contacted') cContact++;
             else if (l.status === 'converted') cConvert++;
             else cNew++;
+            
+            // State Synchronization mapping bounds for Daily values cleanly tracking ISO lengths
+            if (l.createdAt && l.createdAt.startsWith(todayStr)) {
+                 if (l.status === 'new') todayNew++;
+                 if (l.status === 'contacted') todayMessaged++;
+                 if (l.status === 'converted') todayReplies++;
+            }
         });
+        
+        const elProsp = document.getElementById('stat-prospects');
+        const elMsg = document.getElementById('stat-messaged');
+        const elRep = document.getElementById('stat-replies');
+        if (elProsp) elProsp.innerText = todayNew;
+        if (elMsg) elMsg.innerText = todayMessaged;
+        if (elRep) elRep.innerText = todayReplies;
+        
         initAnalyticsChart(cNew, cContact, cConvert);
         renderLeads();
         
@@ -240,7 +259,6 @@ function createLeadCard(docId, lead) {
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'contacted')" title="Mark as Contacted">✅ Contacted</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">🚫 Ignore</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">🎯 Converted</button>
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'snoozed')" title="Follow-up Later">⏰ Snooze</button>
             <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${encodeURIComponent(JSON.stringify(lead.interactions || []))}')" title="Audit Log">🕒 View Timeline Logs</button>
         </div>
     `;
@@ -348,14 +366,42 @@ async function performApiMutation(url, method, payload) {
 }
 
 window.updateLeadStatus = async function(docId, newStatus) {
+    if (newStatus === 'ignored') {
+        const leadIndex = rawLeadsCache.findIndex(l => l.id === docId);
+        if (leadIndex !== -1) {
+             rawLeadsCache.splice(leadIndex, 1);
+             renderLeads();
+        }
+    }
+    
     try {
         const success = await performApiMutation(`/api/leads/${docId}`, 'PUT', { status: newStatus });
         if(success) {
             showToast(`Lead status updated: ${newStatus}`, 'success');
-            loadDashboard();
+            if (newStatus !== 'ignored') {
+                loadDashboard();
+            }
         }
     } catch(err) {
         showToast('Error saving update to database', 'error');
+    }
+};
+
+window.openNewCampaignModal = async function() {
+    document.getElementById('new-campaign-modal').classList.remove('hidden');
+    const glInput = document.getElementById('camp-gl');
+    const locInput = document.getElementById('camp-location');
+    
+    // Auto-detect Geo if unpopulated
+    if (glInput && !glInput.value) {
+        try {
+            const resp = await fetch('https://ipapi.co/json/');
+            const json = await resp.json();
+            if (json.country) glInput.value = json.country_code ? json.country_code.toLowerCase() : '';
+            if (json.city) locInput.value = `${json.city}, ${json.region}`;
+        } catch(e) {
+            console.warn("Soft Geolocation Exception:", e);
+        }
     }
 };
 
@@ -451,6 +497,9 @@ window.switchTab = function(tabName) {
     } else if(tabName === 'team') {
         if(document.getElementById('view-team')) document.getElementById('view-team').classList.remove('hidden');
         document.getElementById('tab-team').classList.add('active');
+    } else if(tabName === 'reports') {
+        if(document.getElementById('view-reports')) document.getElementById('view-reports').classList.remove('hidden');
+        if(document.getElementById('tab-reports')) document.getElementById('tab-reports').classList.add('active');
     }
 };
 

@@ -4,7 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sideio Business Growth</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#4f46e5">
+    <link rel="apple-touch-icon" href="icon-192x192.png">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <!-- Firebase core logic -->
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
@@ -27,6 +30,7 @@
                 <a href="#" id="tab-dashboard" class="active" onclick="switchTab('dashboard')">Dashboard</a>
                 <a href="#" id="tab-campaigns" onclick="switchTab('target')">Targeting</a>
                 <a href="#" id="tab-team" onclick="switchTab('team')">My Team</a>
+                <a href="#" id="tab-reports" onclick="switchTab('reports')">Custom Reports</a>
                 <button id="logout-btn" class="secondary-btn">Logout</button>
             </div>
         </nav>
@@ -35,7 +39,7 @@
             <!-- Sidebar -->
             <aside class="glass-panel sidebar">
                 <h3>Quick Actions</h3>
-                <button class="primary-btn full-width" onclick="document.getElementById('new-campaign-modal').classList.remove('hidden')">+ Find New Clients</button>
+                <button class="primary-btn full-width" onclick="openNewCampaignModal()">+ Find New Clients</button>
                 
                 <!-- Chart.js Mounted Analytics Rendering -->
                 <div class="glass-panel text-center" style="margin-top: 20px;">
@@ -48,13 +52,13 @@
                 <hr>
                 <div class="stats-box">
                     <h4>Today's Performance</h4>
-                    <div class="stat">New Prospects: <span>0</span></div>
-                    <div class="stat">Messaged: <span>0</span></div>
-                    <div class="stat">Replies: <span>0</span></div>
+                    <div class="stat">New Prospects: <span id="stat-prospects">0</span></div>
+                    <div class="stat">Messaged: <span id="stat-messaged">0</span></div>
+                    <div class="stat">Replies: <span id="stat-replies">0</span></div>
                 </div>
                 <div class="stats-box mt-3">
                     <h4>Business Value Added</h4>
-                    <div class="stat">Value Generated: <span>₹ 0</span></div>
+                    <div class="stat">Value Generated: <span id="stat-value">₹ 0</span></div>
                     <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="window.print()">Download Report</button>
                     <button class="secondary-btn full-width mt-3" style="font-size:0.8rem" onclick="sendEmailReport()">Email Report</button>
                 </div>
@@ -93,7 +97,7 @@
             <section id="view-target" class="glass-panel main-feed hidden">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <h2>Active Campaign Matrix</h2>
-                    <button class="primary-btn" onclick="document.getElementById('new-campaign-modal').classList.remove('hidden')">+ New Search</button>
+                    <button class="primary-btn" onclick="openNewCampaignModal()">+ New Search</button>
                 </div>
                 <div class="stats-box mt-3" style="background: #ffffff; padding:0; overflow:hidden;">
                     <table style="width:100%; text-align:left; border-collapse: collapse; font-size: 0.9rem;">
@@ -119,6 +123,13 @@
                     <button class="primary-btn mt-3" onclick="showToast('Invite link copied to clipboard', 'success')">+ Invite Member</button>
                 </div>
             </section>
+            
+            <section id="view-reports" class="glass-panel main-feed hidden">
+                <h2>Custom Reports</h2>
+                <div class="stats-box mt-3" style="background: #ffffff; padding: 24px;">
+                    <p style="color: var(--text-muted);">Reporting module architecture is currently under construction. Check back soon for advanced CSV and visual analytics.</p>
+                </div>
+            </section>
         </main>
     </div>
 
@@ -130,7 +141,7 @@
             <input type="text" id="camp-bio" placeholder="Describe your product offering..." class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             <input type="text" id="camp-keys" placeholder="Target Keywords (e.g. CEO, funding, hiring)" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             
-            <label style="font-size: 0.8rem; color: var(--text-muted);">Uber-Style Geographic Targeting</label>
+            <label style="font-size: 0.8rem; color: var(--text-muted); padding-top: 8px;">Target Location</label>
             <div style="display:flex; gap: 8px; margin-bottom: 12px;">
                 <input type="text" id="camp-gl" placeholder="Country (e.g. us, uk)" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
                 <input type="text" id="camp-location" placeholder="State/Region, City" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
@@ -189,6 +200,18 @@
     <!-- UI Overlay Utilities -->
     <div id="toast-container" class="toast-container"></div>
 
+    <!-- Service Worker Registration for PWA -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/sw.js').then(reg => {
+                    console.log('SW Registration successful with scope: ', reg.scope);
+                }).catch(err => {
+                    console.log('SW Registration failed: ', err);
+                });
+            });
+        }
+    </script>
     <script src="app.js"></script>
 </body>
 </html>
