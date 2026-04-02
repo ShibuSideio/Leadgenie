@@ -2,8 +2,12 @@ import os
 import json
 import urllib.request
 import time
-from flask import jsonify
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from google.cloud import tasks_v2
+
+app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": ["https://lead-sniper-prod.web.app", "https://lead-sniper-prod.firebaseapp.com"]}})
 
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
@@ -43,7 +47,7 @@ def authenticate_request(request):
     if not auth_header or not auth_header.startswith('Bearer '):
         raise ValueError("Missing or incorrectly formatted Authorization header.")
     
-    token = auth_header.split(' ')[1]
+    token = auth_header.split('Bearer ')[1]
     
     try:
         decoded_token = auth.verify_id_token(token)
@@ -110,11 +114,16 @@ def handle_purge(request):
     db.collection("tenants").document(tenant_id).delete()
     return jsonify({"message": f"Successfully erased tenant {tenant_id} data completely"}), 200
 
-def trigger_daily_sweep(request):
+@app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
+@app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
+def trigger_daily_sweep(path):
     """
     Unified Orchestrator API Gateway Module.
     Natively controls Background Task Dispatch arrays and Secure Thin-Client Database Polling.
     """
+    if request.method == 'OPTIONS':
+        return '', 204
+
     # -----------------------------------------------------------------------------------------
     # REST API Gateway Protocol (Frontend Database Reading)
     # -----------------------------------------------------------------------------------------

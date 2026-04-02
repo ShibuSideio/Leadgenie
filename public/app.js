@@ -13,6 +13,8 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 
+const API_BASE = "https://orchestrator-222247989819.asia-south1.run.app";
+
 // DOM Elements
 const authContainer = document.getElementById('auth-container');
 const appContainer = document.getElementById('app-container');
@@ -78,7 +80,7 @@ async function loadCampaigns() {
         if (!user) return handleAuthRejection();
         
         const token = await user.getIdToken(); 
-        const response = await fetch('/api/campaigns', {
+        const response = await fetch(`${API_BASE}/api/campaigns`, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${token}` }
         });
@@ -177,7 +179,7 @@ async function loadLeads() {
         if (!user) return handleAuthRejection();
         
         const token = await user.getIdToken(); 
-        const response = await fetch('/api/leads', {
+        const response = await fetch(`${API_BASE}/api/leads`, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${token}` }
         });
@@ -325,7 +327,7 @@ async function performApiMutation(url, method, payload) {
     const user = auth.currentUser;
     if(!user) return false;
     const token = await user.getIdToken();
-    const response = await fetch(url, {
+    const response = await fetch(`${API_BASE}${url}`, {
         method: method,
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
