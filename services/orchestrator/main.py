@@ -193,6 +193,28 @@ def handle_purge(request):
     db.collection("tenants").document(tenant_id).delete()
     return jsonify({"message": f"Successfully erased tenant {tenant_id} data completely"}), 200
 
+@app.route('/api/me', methods=['GET', 'OPTIONS'])
+def get_me():
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        uid, tenant_id, user_role = authenticate_request(request)
+    except ValueError as ve:
+        return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
+    except Exception as e:
+        return jsonify({"error": "Internal Error", "message": str(e)}), 500
+
+    user_doc = db.collection("users").document(uid).get()
+    if user_doc.exists:
+        data = user_doc.to_dict()
+        return jsonify({
+            "status": "success", 
+            "data": data, 
+            "wallet": data.get("wallet", {"allocated_credits": 0, "consumed_credits": 0})
+        }), 200
+    return jsonify({"error": "User structure missing"}), 404
+
+
 @app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 def trigger_daily_sweep(path):
@@ -213,12 +235,6 @@ def trigger_daily_sweep(path):
             elif request.path == "/api/leads":
                 # Apply explicit server-side sorting logic if indexing allows, otherwise stream natively.
                 docs = db.collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream()
-
-            elif request.path == "/api/me":
-                user_doc = db.collection("users").document(uid).get()
-                if user_doc.exists:
-                    return jsonify({"status": "success", "data": user_doc.to_dict(), "wallet": user_doc.to_dict().get("wallet", {"allocated_credits": 0, "consumed_credits": 0})}), 200
-                return jsonify({"error": "User structure missing"}), 404
 
             results = [sanitize_document(doc) for doc in docs]
             return jsonify({"status": "success", "data": results}), 200
