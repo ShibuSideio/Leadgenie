@@ -1,6 +1,7 @@
 import os
 import hashlib
 import hmac
+import httpx
 from flask import Flask, request, jsonify
 from google.cloud import firestore
 from google.cloud import secretmanager
@@ -64,6 +65,48 @@ def webhook():
                         for lead in leads_query:
                             lead.reference.update({"status": status_type})
                             print(f"Updated lead {lead.id} to {status_type}")
+                            
+                    # Interactive Lead Routing (V6 Parsing)
+                    messages = value.get("messages", [])
+                    metadata = value.get("metadata", {})
+                    phone_number_id = metadata.get("display_phone_number") or metadata.get("phone_number_id")
+                    
+                    for msg in messages:
+                        if msg.get("type") == "interactive":
+                            interactive = msg.get("interactive", {})
+                            if interactive.get("type") == "button_reply":
+                                payload_str = interactive.get("button_reply", {}).get("id", "")
+                                sender_wa_id = msg.get("from")
+                                
+                                if "_" in payload_str:
+                                    action, lead_id = payload_str.split("_", 1)
+                                    target_status = "approved" if action == "approve" else "ignored"
+                                    
+                                    # Atomic state sync to Firestore
+                                    lead_ref = db.collection("leads").document(lead_id)
+                                    if lead_ref.get().exists:
+                                        lead_ref.update({"status": target_status})
+                                        print(f"Autonomous State Sync: {lead_id} -> {target_status}")
+                                        
+                                        # Send confirmation back
+                                        if phone_number_id and sender_wa_id:
+                                            try:
+                                                users_query = db.collection("users").where("wa_phone_id", "==", phone_number_id).limit(1).stream()
+                                                wa_token = None
+                                                for u in users_query:
+                                                    wa_token = u.to_dict().get("wa_token")
+                                                    
+                                                if wa_token:
+                                                    reply_payload = {
+                                                        "messaging_product": "whatsapp",
+                                                        "to": sender_wa_id,
+                                                        "type": "text",
+                                                        "text": {"body": f"Acknowledged. Target strictly {target_status}."}
+                                                    }
+                                                    wa_headers = {"Authorization": f"Bearer {wa_token}", "Content-Type": "application/json"}
+                                                    httpx.post(f"https://graph.facebook.com/v18.0/{phone_number_id}/messages", json=reply_payload, headers=wa_headers, timeout=5)
+                                            except Exception as reply_e:
+                                                print(f"Confirmation send failed: {reply_e}")
         except Exception as e:
             print(f"Error processing webhook: {e}")
             

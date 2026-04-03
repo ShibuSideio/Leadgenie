@@ -236,7 +236,7 @@ def dispatch():
             if text:
                 evaluation = final_score_and_dm(text, bio)
                 if evaluation.get("score", 0) >= 7:
-                    # Upgrade the atomic stub securely saving pipeline extraction logic
+                    # Update the atomic stub securely saving pipeline extraction logic
                     doc_ref.update({
                         "score": evaluation.get("score"),
                         "pain_point": evaluation.get("pain_point"),
@@ -246,6 +246,37 @@ def dispatch():
                         "linkedin": evaluation.get("linkedin", ""),
                         "status": "new"
                     })
+                    
+                    # Meta WhatsApp Business API Trigger (V6)
+                    if evaluation.get("score", 0) >= 8:
+                        tenant_doc = db.collection("users").document(tenant_id).get().to_dict() or {}
+                        wa_token = tenant_doc.get("wa_token")
+                        wa_phone_id = tenant_doc.get("wa_phone_id")
+                        admin_phone = tenant_doc.get("admin_phone")
+                        
+                        if wa_token and wa_phone_id and admin_phone:
+                            wa_payload = {
+                                "messaging_product": "whatsapp",
+                                "to": admin_phone,
+                                "type": "interactive",
+                                "interactive": {
+                                    "type": "button",
+                                    "body": {
+                                        "text": f"🔥 Hot Lead Found!\nCompany: {url}\nScore: {evaluation.get('score')}/10\nWhy: {evaluation.get('pain_point')}\n\nDrafted DM: {evaluation.get('dm')}"
+                                    },
+                                    "action": {
+                                        "buttons": [
+                                            {"type": "reply", "reply": {"id": f"approve_{lead_id}", "title": "✅ Approve & Send"}},
+                                            {"type": "reply", "reply": {"id": f"ignore_{lead_id}", "title": "🚫 Ignore"}}
+                                        ]
+                                    }
+                                }
+                            }
+                            try:
+                                wa_headers = {"Authorization": f"Bearer {wa_token}", "Content-Type": "application/json"}
+                                httpx.post(f"https://graph.facebook.com/v18.0/{wa_phone_id}/messages", json=wa_payload, headers=wa_headers, timeout=5)
+                            except Exception as wa_e:
+                                print(f"WhatsApp Meta POST failed: {wa_e}")
                     
                     # Store purely for JSON endpoint tracking response formatting locally
                     lead_doc = {
