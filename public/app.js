@@ -290,6 +290,11 @@ function createLeadCard(docId, lead) {
     try { if (lead.url) urlHostname = new URL(lead.url).hostname; } catch(e){}
     
     const statusColor = lead.status === 'completed' ? 'var(--success)' : (lead.status === 'ignored' ? '#ef4444' : 'var(--text-muted)');
+    
+    let hiringBadge = (lead.hiring_intent_found && lead.hiring_intent_found !== "None") ? `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; margin-right:6px; border:1px solid #a7f3d0">🟢 Hiring: ${lead.hiring_intent_found}</span>` : '';
+    let techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0) ? lead.tech_stack_found.map(tech => `<span style="font-size:0.75rem; background:#f0fdfa; color:#0d9488; padding:2px 6px; border-radius:4px; margin-right:6px; border:1px solid #99f6e4">⚡ ${tech}</span>`).join('') : '';
+    let exclusiveBadge = `<span style="font-size:0.75rem; background:#fef2f2; color:#dc2626; padding:2px 6px; border-radius:4px; margin-right:6px; border:1px solid #fecaca">🔒 Exclusive Lead</span>`;
+
     card.innerHTML = `
         <div class="lead-header">
             <div>
@@ -299,6 +304,11 @@ function createLeadCard(docId, lead) {
             <div class="score">Score: ${lead.score || 0}/10</div>
         </div>
         <div class="pain-point">" ${lead.pain_point || 'Analyzing sentiment...'} "</div>
+        <div class="premium-badges" style="margin-top: 8px; margin-bottom: 8px; font-weight: 500;">
+            ${exclusiveBadge}
+            ${hiringBadge}
+            ${techBadges}
+        </div>
         <div class="dm-draft">${lead.dm || 'Drafting variation...'}</div>
         <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'contacted')" title="Mark as Contacted">✅ Contacted</button>
