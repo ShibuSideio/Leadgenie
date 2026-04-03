@@ -1,76 +1,72 @@
-# Lead Sniper – Enterprise Technical Architecture (Version 21.0)
-**(Final Source of Truth – V6 WhatsApp Interactive Edition)**
+# Lead Sniper – Comprehensive Architecture Blueprint (Version 22.0)
+**(Master System Definition: V6 Whatsapp + Zero-Trust Engine Protocol)**
 
-## 1. Purpose & Business Context
+## 1. System Vision & Objective
+Lead Sniper is an enterprise-grade, high-margin SaaS application engineered to autonomously prospect and deliver strictly high-quality, contact-ready B2B leads for SMEs. The application bypasses traditional Google/Meta ad spending entirely. Instead, it leverages real-time Serper searches driven by predictive AI query logic, scrapes the deep web, analyzes company contexts via Vertex AI Gemini models, and routes the highest-performing targets directly into the MSME owner's WhatsApp feed for single-click CRM approvals.
 
-Lead Sniper is a high-margin SaaS tool that helps SMEs generate ~20 high-quality, contact-ready leads per day per campaign using public search signals, reducing reliance on expensive Meta/Google ads. 
-
-The SME owner (Admin) configures campaigns with product bio, location, and keywords. The system runs a smart multi-keyword funnel, powered by predictive historical AI mining, and delivers scored, contact-ready leads. **With Version 6, the system now features autonomous bidirectional WhatsApp routing, delivering real-time interactive JSON prompts to SME Admins, allowing them to instantly execute CRM states without opening the dashboard.**
-
----
-
-## 2. High-Level System Architecture (Thin-Client Serverless SaaS)
-
-The application operates fundamentally on a pure, decoupled **Thin-Client API Gateway** structure. All direct frontend-to-database real-time polling has been fully eradicated mapping true Zero-Trust enterprise constraints.
-
-### Core Services
-
-1. **Authentication:** Firebase Authentication (Google/Email).
-2. **Frontend/Dashboard:** Firebase Hosting running a high-fidelity **Vanilla JS SPA**. Operates as a Progressive Web App (PWA) with native mobile caching.
-3. **Database:** Firestore (Absolute Lockdown via `match /{document=**} { allow read, write: if false; }`). All I/O occurs natively via the Python Admin SDK natively authorized by the backend.
-4. **Orchestrator / API Gateway:** Cloud Run service (256MB) natively exposing REST endpoints (`/api/campaigns`, `/api/leads`) with hardcoded pre-flight CORS origin protections.
-5. **Main Pipeline (`lead-pipeline-main`):** Primary Cloud Run service extracting context via Serper and Vertex AI. Extrapolates out bounds dynamically pushing high scores to Graph API.
-6. **Heavy Scraper Fallback (`scraper-heavy`):** Independent Cloud Run service (2GB with Playwright; min-instances: 0).
-7. **WhatsApp Webhook (`whatsapp-webhook`):** Cloud Run service (128MB) operating an autonomous listener decoding Graph API Webhooks explicitly tracking JSON `interactive.button_replies`.
-8. **Daily Digest (`email-summary`):** Automated delivery of Top Leads via Gmail API.
-9. **Secrets:** Google Secret Manager.
-10. **LLM:** Gemini 2.5 Flash on Vertex AI.
-11. **Search Engine API:** Serper.dev.
+The defining architectural constraint is its **"Zero-Trust Thin-Client"** model. The frontend contains zero direct database writing privileges; all structural reads and writes pass through secured Python API Gateways validating JWT signatures and parsing strict `tenant_id` boundaries. 
 
 ---
 
-## 3. Microservices & Intelligence Breakdown
+## 2. Global Topological Breakdown
 
-### 3.1. Infrastructure as Code (Terraform)
-- **Path:** `terraform/main.tf`
-- **Purpose:** Automatically provisions Google Cloud Run APIs, Cloud Tasks APIs, Secret Manager entries, and dedicated IAM microservice boundaries. Custom Service Accounts natively use `roles/datastore.user`.
+The ecosystem is heavily decoupled into autonomous serverless microservices orchestrated natively within Google Cloud Platform (GCP).
 
-### 3.2. Orchestrator API Gateway (`services/orchestrator`)
-- **Type:** Proxy Gateway mapping frontend API fetches correctly filtering tokens natively discarding standard Flask extensions directly forcing `headers.append()` overrides. Returns `O(1)` JSON representations tracking zero-trust policies cleanly.
+### 2.1 The Progressive Web App Frontend (`public/`)
+*   **Hosting:** Firebase Hosting Content Delivery Network (CDN).
+*   **Framework:** 100% Vanilla JS Single Page Application (SPA). Operates entirely devoid of React/Vue constraints drastically increasing cold-start execution speeds. 
+*   **Design Paradigm:** The UI employs a highly modular "Next-Gen SaaS Glassmorphism" system. Heavy use of native `backdrop-filter` limits with subtle `cubic-bezier` box-shadows replace outdated Bootstrap flat designs. 
+*   **PWA Mobility:** Utilizes `manifest.json` and strict `sw.js` (Service Worker) tracking, decoupling mobile operations perfectly, maintaining offline state caches logically.
+*   **Real-Time State Mapping:** DOM execution bounds replicate React `useEffect` and `useState` natively via O(1) Javascript array modifications (e.g., executing `splice()` natively to dismiss "Ignored" targets globally without initiating network loading screens).
+*   **Network Security:** All SDK logic (Firebase Web) natively operates solely for Auth. API fetches explicitly map via generic HTTP payloads targeting `/api/*`.
 
-### 3.3. Pipeline Core & Smart B.D. Engine (`services/pipeline-main`)
-- **Pre-Flight Query Generator:** Initiates operations dynamically tracking historical successful lead matrices attached strictly to the `tenant_id`. Maps exact extracted context words aggressively alongside generic Google Dorks (`-wiki -careers -amazon.com`) eliminating raw noise securely before execution.
-- **Post-Flight Noise Filter:** Executes Python substring match filtering natively scanning the Serper API output JSON explicitly bounding `/legal`, `capterra.com`, or dead snippet responses (`"Sign in"`).
-- **Outbound WhatsApp Trigger:** If an extracted score hits `>= 8`, execution halts and fetches User BYOT parameters explicitly executing `httpx.post()` targeting Meta Graph API endpoints natively pushing a custom Interactive Button template securely.
-
-### 3.4. WhatsApp Bidirectional Router (`services/whatsapp-webhook`)
-- **Parser Loop:** The system iterates deep over inbound Meta arrays safely verifying `messages[0]` payloads identifying Interactive `button_reply` boundaries cleanly tracking strings safely.
-- **Autonomous CRM Mutation:** Successfully parses action strings natively running decoupled `firestore.update({"status": "approved"})` explicitly mutating target strings globally ensuring Zero Backend interactions.
-- **Confirmation Loop:** Triggers an atomic fallback reply acknowledging targets safely explicitly utilizing tracking algorithms natively.
-
-### 3.5. Next-Gen Progressive Web App (Frontend `public/`)
-- **SaaS Glassmorphism UX:** Overhauled with dynamic `backdrop-filter` limits tracking absolute predictive hover shadows matching enterprise SaaS aesthetic matrices natively globally replacing heavy CSS gradients natively.
-- **Service Worker Mobility:** Installed strict Offline Caching logic decoupling mobile responsiveness dynamically.
-- **Zero-Latency Array Filtering:** Immediate `rawLeadsCache.splice()` rendering mapping real-time mutations aggressively bouncing `Ignore` actions instantly masking DB fetch logic locally.
+### 2.2 The Orchestrator Gateway (`services/orchestrator`)
+*   **Role:** The central router. Operates as a proxy gateway (256MB RAM) for all frontend communications dynamically intercepting `authorization` strings tracking JWT endpoints.
+*   **CORS Hardening:** Exposes explicit, strict Python `headers.append()` overrides dropping Flask-CORS dependencies to violently enforce allowed origins explicitly matching the Firebase Hosting domains globally.
+*   **Identity Anchors:** Intercepts UID blocks matching standard Google login logic natively rewriting the `users` array fetching the immutable `tenant_id` ensuring a bad actor simply cannot inject records into foreign organizations.
 
 ---
 
-## 4. Security, Monitoring & Backups
-- **No Thick-Client I/O:** `firestore.rules` formally blocks all operations. The database is invisible to the internet.
-- **Data Perimeter Isolation:** The Orchestrator's internal Identity logic intercepts all payload operations forcefully mapping `users` matrices organically securing tenant logic natively.
-- **BYOT Strict Architecture:** Webhooks inherently block outbound structures parsing missing explicit Admin keys seamlessly enforcing execution bounds efficiently globally securely.
+## 3. The Lead Mining Pipeline Workflow
+
+The core heavy lifting occurs within asynchronous task limits triggered by the gateway cleanly mapping a multi-service extraction architecture.
+
+### Phase A: The Smart B.D. Query Engine (`pipeline-main`)
+*   **Execution Trigger:** Initiated strictly via Cloud Tasks stagger queues structurally to prevent hitting external API bottlenecks rapidly.
+*   **Historical Query Extraction:** Before executing searches, the engine maps a local `firestore` database execution dynamically sniffing out prior high-performing leads (`status in ['contacted', 'converted']`).
+*   **LLM Dork Engineering:** Extracts prior `pain_point` extractions securely routing them cleanly into Gemini to spit back 3 pure B2B search keyword constructs natively bound into generic query parameters mapping Google OR syntax `(A OR B OR C)`.
+*   **Zero-Noise Filtering:** Appends universal Dork rules explicitly tracking blacklists bounding elements dynamically (`-wiki -careers -"login"`).
+
+### Phase B: Search & Ruthless Scrape Filtering
+*   **Execute Serper:** Runs the payload via Serper API natively extracting raw JSON outputs globally.
+*   **Post-Flight Triage:** Triggers `filter_serper_noise()` explicitly. Discards massive aggregators intelligently mapping string matches aggressively bounding paths `/legal` or `.g2.com` keeping scraped volumes tiny.
+*   **Scraping Cascade:** The survived array is hit lightly utilizing fast Python `httpx`/`BeautifulSoup`. If dynamic Javascript WAF models are detected (Cloudflare blocks natively dropping `"Just a moment"` payloads), it cleanly catches exceptions dynamically routing the URL globally into `services/scraper-heavy` (a 2GB Playwright Chromium instance mapping min-instances: 0 to conserve cash natively isolating execution constraints explicitly).
+
+### Phase C: Intelligence Scoring (Zero-Trust Prompting)
+*   The raw string is truncated to a precise 100KB boundary cleanly evading 1MB Firestore limitations preventing explicit pipeline stack overflows securely.
+*   The array routes explicitly to Google's Vertex AI (`gemini-2.5-flash`).
+*   **The Specific Human Target Rule:** The architecture runs an aggressive prompt logic tracking specific target identifiers safely generating a flat `0` penalty string explicitly denying entry natively to marketing landing pages organically. 
+*   **Lock Deduplication:** Uses an atomic `hashlib.sha256` matching the URL + Campaign globally forcing Firestore to evaluate an `AlreadyExists` failure structurally bypassing race-condition loops natively.
 
 ---
 
-## 5. Deployment Map (Native CI/CD)
+## 4. Webhook CRM Routing & Interactivity
 
-The application utilizes a strict enterprise security boundary where GitHub acts **exclusively** as a Source Control Management (SCM) repository cleanly pushing logic against Cloud Run constraints natively.
+The system features autonomous bidirectional CRM workflows mapping pure logic without dashboard interventions.
 
-### 5.1. Google Cloud Build Native Triggers Configured
-Administrators manually map 6 native GUI Cloud Build Triggers in the GCP console tracking `Push to Branch: main`.
-1. **Lead Pipeline Trigger**: `services/pipeline-main`
-2. **Orchestrator Trigger**: `services/orchestrator`
-3. **Heavy Scraper Trigger**: `services/scraper-heavy` (2Gi max, 0 min-instance)
-4. **Webhook Listener Trigger**: `services/whatsapp-webhook`
-5. **Email Worker Trigger**: `services/email-summary`
-6. **Firebase Portal Trigger**: Employs an exact `$FIREBASE_SA_KEY` Secret Manager mapping running `firebase deploy --only hosting` tracking purely frontend execution flawlessly tracking CDN bindings dynamically.
+### 4.1. Meta WhatsApp Webhooks (`services/whatsapp-webhook`)
+*   **Outbound Trigger (`pipeline-main`):** The instant an LLM emits a score `>= 8`, the main pipeline formally queries the `users` collection to adopt a strictly isolated "Bring Your Own Token" (BYOT) `wa_token` limit securely. It executes a Graph API Interactive Button array routing the Company snippet natively into WhatsApp dynamically.
+*   **Inbound Interception:** `whatsapp-webhook` natively processes Meta payloads iterating deep arrays strictly looking into `messages[0].interactive.button_reply.id`. 
+*   **Atomic Syncing:** The button explicitly triggers an array `payload_str.split("_")` cleanly dropping the targeted `lead_id` seamlessly executing a deep `update({'status': 'approved'})` executing cleanly against the document boundary securely tracking responses back natively alerting the administrator safely locally cleanly.
+
+---
+
+## 5. Deployment, Automation, and CI/CD
+
+Because the system handles BYOT targets securely executing external Webhooks logically mapping explicit Cloud limits organically, GitHub formally controls deployments cleanly tracking branches organically.
+
+### 5.1 Project Infrastructure Map
+1.  **Auth Webhook (`services/auth-trigger`):** Generates `tenant_id` blocks structurally triggering on new Google Login registrations natively dynamically.
+2.  **Email Digest (`services/email-summary`):** Bounding SMTP protocols securely explicitly executing daily Cloud Scheduler sweeps intelligently tracking top target records correctly globally.
+3.  **Firebase Settings:** Utilizing standard `firebase.json` constraints dropping the `hosting` CDN securely mapped explicitly with `source: "/api/**"` bounds explicitly tracking Cloud Run `orchestrator` pointers cleanly dynamically handling edge logic intelligently safely cleanly.
+4.  **Cloud Build Triggers:** CI boundaries physically mapped internally safely natively dynamically replacing `local` deployments targeting automated `push` boundaries efficiently cleanly dynamically cleanly.
