@@ -29,8 +29,7 @@ def get_secret(secret_name):
 def search_serper(query, location=None, gl=None):
     api_key = get_secret(SERPER_API_KEY_NAME).strip()
     url = "https://google.serper.dev/search"
-    final_query = f"{query} (inurl:contact OR inurl:about OR inurl:team) -www.zoominfo.com -www.ibm.com -www.amazon.com -www.linkedin.com"
-    payload_dict = {"q": final_query, "num": 20}
+    payload_dict = {"q": query, "num": 20}
     if location:
         payload_dict["location"] = location
     if gl:
@@ -48,6 +47,53 @@ def search_serper(query, location=None, gl=None):
 def safe_truncate(text: str) -> str:
     """Enforce strict 100KB text truncation to prevent Firestore 1MB document crashes."""
     return text[:100000]
+
+def generate_smart_query(user_keywords, tenant_id):
+    historical_phrases = []
+    try:
+        # Require composite index, graceful fallback to Global
+        query = db.collection("leads").where("tenant_id", "==", tenant_id).where("status", "in", ["contacted", "converted"]).limit(20)
+        docs = list(query.stream())
+        if not docs:
+            query = db.collection("leads").where("status", "in", ["contacted", "converted"]).limit(20)
+            docs = list(query.stream())
+            
+        pain_points = [d.to_dict().get("pain_point", "") for d in docs if d.to_dict().get("pain_point")]
+        if pain_points:
+            prompt = f"Analyze these successful lead extractions. Extract exactly 3 short conceptual B2B phrases identifying high-value trends. Your output must strictly be comma separated only. Do not use quotes or bullets.\n\nData: {json.dumps(pain_points)}"
+            resp = model.generate_content(prompt)
+            historical_phrases = [p.strip() for p in resp.text.split(',') if p.strip()]
+    except Exception as e:
+        print(f"Historical Composite Mining Exception: {e}")
+        historical_phrases = []
+
+    smart_queries = []
+    blacklist = "-wiki -jobs -careers -investors -support -\"login\" -www.zoominfo.com -www.ibm.com -www.amazon.com"
+    historical_str = ""
+    if historical_phrases:
+        phrases_escaped = [f'"{p}"' for p in historical_phrases[:3]]
+        historical_str = " AND (" + " OR ".join(phrases_escaped) + ")"
+        
+    for kw in user_keywords:
+        q = f'("{kw}"){historical_str} {blacklist}'
+        smart_queries.append(q)
+    return smart_queries
+
+def filter_serper_noise(serper_results):
+    clean_results = []
+    enterprise_domains = ["ibm.com", "amazon.com", "microsoft.com", "g2.com", "capterra.com", "zoominfo.com", "linkedin.com"]
+    noise_paths = ["/legal", "/pricing", "/docs", "/author/", "/login"]
+    noise_snippets = ["sign in", "access denied", "forgot password", "please enable cookies"]
+    
+    for r in serper_results:
+        link = r.get("link", "").lower()
+        snippet = r.get("snippet", "").lower()
+        if any(d in link for d in enterprise_domains): continue
+        if any(p in link for p in noise_paths): continue
+        if any(s in snippet for s in noise_snippets): continue
+        clean_results.append(r)
+        
+    return clean_results
 
 def pre_filter_gemini(snippets, bio):
     if not snippets:
@@ -134,19 +180,25 @@ def dispatch():
         
     all_results = []
     
-    for kw in keywords:
-        # Step 1: Sweep
-        results = search_serper(kw, location=location if location else None, gl=gl if gl else None)
+    # Smart BD Query Injector Native Integration
+    smart_keywords = generate_smart_query(keywords, tenant_id)
+    
+    for kw in smart_keywords:
+        # Step 1: Augmented Sweep
+        raw_results = search_serper(kw, location=location if location else None, gl=gl if gl else None)
+        
+        # Step 2: Ruthless Post-Flight Filter
+        filtered_results = filter_serper_noise(raw_results)
         
         # URL Deduplication
         unique_results = []
         seen = set()
-        for r in results:
+        for r in filtered_results:
             if r.get("link") not in seen:
                 seen.add(r.get("link"))
                 unique_results.append(r)
                 
-        # Step 2: Pre-Filter
+        # Step 3: LLM Pre-Filter
         filtered_urls = pre_filter_gemini(unique_results, bio)
         
         # Step 3, 4, 5
