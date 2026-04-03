@@ -624,6 +624,11 @@ window.fetchL0Data = async function() {
                 `;
             });
             if (tableBody) tableBody.innerHTML = tableHTML || '<tr><td colspan="6" style="padding:16px; text-align:center;">No tenants found.</td></tr>';
+            
+            // Sync the left pane immediately to prevent visual desync locally
+            if (typeof loadMe === "function") {
+                loadMe();
+            }
         } else {
             if (tableBody) tableBody.innerHTML = '<tr><td colspan="6" style="padding:16px; text-align:center; color: #ef4444;">Access Denied. L0 Privilege Missing.</td></tr>';
         }
