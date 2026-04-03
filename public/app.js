@@ -78,9 +78,7 @@ async function loadMe() {
         const response = await fetch(`${API_BASE}/api/me?rt=${new Date().getTime()}`, { 
             method: 'GET',
             headers: { 
-                'Authorization': `Bearer ${token}`,
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
+                'Authorization': `Bearer ${token}`
             } 
         });
         if (response.ok) {
