@@ -252,29 +252,20 @@ async function loadLeads() {
         rawLeadsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
         
         let cNew = 0, cContact= 0, cConvert = 0;
-        let todayNew = 0, todayMessaged = 0, todayReplies = 0;
-        
-        const todayStr = new Date().toISOString().split('T')[0];
 
         rawLeadsCache.forEach(l => {
-            if (l.status === 'contacted') cContact++;
-            else if (l.status === 'converted') cConvert++;
-            else cNew++;
-            
-            // State Synchronization mapping bounds for Daily values cleanly tracking ISO lengths
-            if (l.createdAt && l.createdAt.startsWith(todayStr)) {
-                 if (l.status === 'new') todayNew++;
-                 if (l.status === 'contacted') todayMessaged++;
-                 if (l.status === 'converted') todayReplies++;
-            }
+            if (l.status === 'ignored') return; // Exclude entirely
+            if (l.status === 'contacted') { cContact++; }
+            else if (l.status === 'converted') { cConvert++; }
+            else { cNew++; }
         });
         
         const elProsp = document.getElementById('stat-prospects');
         const elMsg = document.getElementById('stat-messaged');
         const elRep = document.getElementById('stat-replies');
-        if (elProsp) elProsp.innerText = todayNew;
-        if (elMsg) elMsg.innerText = todayMessaged;
-        if (elRep) elRep.innerText = todayReplies;
+        if (elProsp) elProsp.innerText = cNew;
+        if (elMsg) elMsg.innerText = cContact;
+        if (elRep) elRep.innerText = cConvert;
         
         initAnalyticsChart(cNew, cContact, cConvert);
         renderLeads();

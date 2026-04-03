@@ -104,6 +104,7 @@ def authenticate_request(request):
         user_ref.set({
             'tenant_id': tenant_id,
             'role': user_role,
+            'email': decoded_token.get('email', 'unknown'),
             'is_active': True,
             'approval_status': 'pending',
             'beta_expiry': None,
@@ -119,6 +120,10 @@ def authenticate_request(request):
         user_role = user_data.get('role', 'admin')
         is_active = user_data.get('is_active', True)
         
+        email = decoded_token.get('email', '')
+        if email and 'email' not in user_data:
+            user_ref.update({'email': email})
+            
         if not is_active and user_role != 'super_admin':
             raise ValueError("Account suspended by L0 Governance Protocol.")
             
