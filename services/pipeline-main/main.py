@@ -29,7 +29,8 @@ def get_secret(secret_name):
 def search_serper(query, location=None, gl=None):
     api_key = get_secret(SERPER_API_KEY_NAME).strip()
     url = "https://google.serper.dev/search"
-    payload_dict = {"q": query, "num": 20}
+    final_query = f"{query} (inurl:contact OR inurl:about OR inurl:team) -www.zoominfo.com -www.ibm.com -www.amazon.com -www.linkedin.com"
+    payload_dict = {"q": final_query, "num": 20}
     if location:
         payload_dict["location"] = location
     if gl:
@@ -93,7 +94,7 @@ def scrape_url(url):
         return ""
 
 def final_score_and_dm(text, bio):
-    prompt = f"Score this 1-10 based on campaign goals and product bio: '{bio}'. You must extract contact information. If NO email, phone number, or LinkedIn URL is found in the text, you MUST penalize the lead score to 0, regardless of how well their bio matches. Extract core pain point and write a highly conversational, brief, varied, non-salesy 2-sentence WhatsApp/LinkedIn DM. Format JSON strictly with exact keys: score, pain_point, dm, email, phone, linkedin.\n\nText: {text}"
+    prompt = f"Score this 1-10 based on campaign goals and product bio: '{bio}'. You must extract contact information. You must identify a specific human decision-maker (Name). If the extracted text is just a generic corporate homepage, an advertisement, or lacks a specific human contact, you MUST score it 0. Do not recommend generic info@ or sales@ emails without a named target. Extract core pain point and write a highly conversational, brief, varied, non-salesy 2-sentence WhatsApp/LinkedIn DM. Format JSON strictly with exact keys: score, pain_point, dm, email, phone, linkedin.\n\nText: {text}"
     result = model.generate_content(prompt)
     try:
         data = json.loads(result.text.replace('```json', '').replace('```', ''))

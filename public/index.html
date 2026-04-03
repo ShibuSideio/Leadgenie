@@ -127,7 +127,15 @@
             <section id="view-reports" class="glass-panel main-feed hidden">
                 <h2>Custom Reports</h2>
                 <div class="stats-box mt-3" style="background: #ffffff; padding: 24px;">
-                    <p style="color: var(--text-muted);">Reporting module architecture is currently under construction. Check back soon for advanced CSV and visual analytics.</p>
+                    <div style="display:flex; gap:16px; margin-bottom: 16px;">
+                        <div style="flex:1;"><label style="font-size:0.8rem; color:var(--text-muted);">Start Date</label><input type="date" id="report-start" style="width:100%; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;"></div>
+                        <div style="flex:1;"><label style="font-size:0.8rem; color:var(--text-muted);">End Date</label><input type="date" id="report-end" style="width:100%; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;"></div>
+                    </div>
+                    <label style="font-size:0.8rem; color:var(--text-muted);">Campaign Source</label>
+                    <select id="report-campaign-select" class="full-width" style="margin-bottom: 16px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; background: white;">
+                        <option value="all">Global Matrix (All Campaigns)</option>
+                    </select>
+                    <button class="primary-btn full-width" onclick="showToast('Aggregating Intelligence Arrays...', 'info')">Generate Report</button>
                 </div>
             </section>
         </main>
@@ -143,7 +151,14 @@
             
             <label style="font-size: 0.8rem; color: var(--text-muted); padding-top: 8px;">Target Location</label>
             <div style="display:flex; gap: 8px; margin-bottom: 12px;">
-                <input type="text" id="camp-gl" placeholder="Country (e.g. us, uk)" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+                <select id="camp-gl" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; background: white;">
+                    <option value="">Global</option>
+                    <option value="us">United States</option>
+                    <option value="uk">United Kingdom</option>
+                    <option value="ca">Canada</option>
+                    <option value="au">Australia</option>
+                    <option value="in">India</option>
+                </select>
                 <input type="text" id="camp-location" placeholder="State/Region, City" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             </div>
             
@@ -173,7 +188,14 @@
             
             <label style="font-size: 0.8rem; color: var(--text-muted);">Geographic Targeting</label>
             <div style="display:flex; gap: 8px; margin-bottom: 24px;">
-                <input type="text" id="edit-camp-gl" placeholder="Country Code" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+                <select id="edit-camp-gl" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; background: white;">
+                    <option value="">Global</option>
+                    <option value="us">United States</option>
+                    <option value="uk">United Kingdom</option>
+                    <option value="ca">Canada</option>
+                    <option value="au">Australia</option>
+                    <option value="in">India</option>
+                </select>
                 <input type="text" id="edit-camp-location" placeholder="City, State" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             </div>
             
