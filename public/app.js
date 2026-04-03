@@ -99,16 +99,21 @@ async function loadMe() {
                 if (waitroom) waitroom.style.display = 'none';
             }
             
+            // Force display properties explicitly beyond just CSS class removal
             if (data.role === 'super_admin') {
                 const l0Tab = document.getElementById('tab-l0-admin');
-                if (l0Tab) l0Tab.classList.remove('hidden');
+                if (l0Tab) {
+                    l0Tab.classList.remove('hidden');
+                    l0Tab.style.display = 'inline-block';
+                }
             }
 
-            if (payload.wallet) {
-                activeWallet = payload.wallet;
-                const el = document.getElementById('wallet-balance');
-                if (el) el.innerText = (activeWallet.allocated_credits - activeWallet.consumed_credits);
-            }
+            // Defensively check both payload tracks mapping legacy or missing keys safely
+            const w = payload.wallet || data.wallet || {allocated_credits: 0, consumed_credits: 0};
+            activeWallet = w;
+            const el = document.getElementById('wallet-balance');
+            if (el) el.innerText = (w.allocated_credits || 0) - (w.consumed_credits || 0);
+            
         }
     } catch(e) { console.error('Failed to load wallet', e); }
 }
@@ -330,9 +335,11 @@ function renderLeads() {
     }
     
     leadsList.innerHTML = '';
-    const filteredLeads = currentCampaignFilter === 'all' 
-        ? rawLeadsCache 
-        : rawLeadsCache.filter(lead => lead.campaign_id === currentCampaignFilter);
+    const filteredLeads = rawLeadsCache.filter(lead => {
+        if (lead.status === 'ignored') return false;
+        if (currentCampaignFilter !== 'all' && lead.campaign_id !== currentCampaignFilter) return false;
+        return true;
+    });
     
     if (filteredLeads.length === 0) {
          leadsList.innerHTML = '<div class="lead-card" style="text-align:center; padding: 24px; color: var(--text-muted);">No leads currently discovered for this campaign. The AI is still searching.</div>';
