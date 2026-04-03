@@ -81,11 +81,27 @@ async function loadMe() {
             const data = payload.data || {};
             
             const waitroom = document.getElementById('waitroom-overlay');
+            const mainGrid = document.querySelector('.dashboard-grid');
+            const navMenu = document.querySelector('.glass-nav');
+
             if (data.approval_status === 'pending') {
-                if (waitroom) waitroom.style.display = 'flex';
+                if (mainGrid) mainGrid.style.display = 'none';
+                if (navMenu) navMenu.style.display = 'none';
+                if (waitroom) {
+                    waitroom.style.position = 'relative';
+                    waitroom.style.height = '100vh';
+                    waitroom.style.display = 'flex';
+                }
                 return;
             } else {
+                if (mainGrid) mainGrid.style.display = '';
+                if (navMenu) navMenu.style.display = '';
                 if (waitroom) waitroom.style.display = 'none';
+            }
+            
+            if (data.role === 'super_admin') {
+                const l0Tab = document.getElementById('tab-l0-admin');
+                if (l0Tab) l0Tab.classList.remove('hidden');
             }
 
             if (payload.wallet) {
