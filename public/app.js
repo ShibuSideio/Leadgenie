@@ -75,7 +75,14 @@ async function loadMe() {
     try {
         const user = firebase.auth().currentUser;
         const token = await user.getIdToken();
-        const response = await fetch(`${API_BASE}/api/me`, { headers: { 'Authorization': `Bearer ${token}` } });
+        const response = await fetch(`${API_BASE}/api/me?rt=${new Date().getTime()}`, { 
+            method: 'GET',
+            headers: { 
+                'Authorization': `Bearer ${token}`,
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
+            } 
+        });
         if (response.ok) {
             const payload = await response.json();
             const data = payload.data || {};
