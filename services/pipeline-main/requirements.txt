@@ -1,8 +1,9 @@
 google-cloud-firestore==2.14.0
 google-cloud-secret-manager==2.16.2
-grpcio==1.60.0 # needed by some google cloud libraries to match compatibility sometimes
+grpcio==1.60.0
 google-cloud-aiplatform>=1.47.0
 Flask==3.0.0
 gunicorn==21.2.0
 httpx==0.26.0
 beautifulsoup4==4.12.3
+cryptography==41.0.7

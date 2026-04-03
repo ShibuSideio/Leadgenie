@@ -84,10 +84,24 @@ def webhook():
                                     
                                     # Atomic state sync to Firestore
                                     lead_ref = db.collection("leads").document(lead_id)
-                                    if lead_ref.get().exists:
+                                    lead_doc = lead_ref.get()
+                                    if lead_doc.exists:
+                                        lead_data = lead_doc.to_dict()
                                         lead_ref.update({"status": target_status})
                                         print(f"Autonomous State Sync: {lead_id} -> {target_status}")
                                         
+                                        # V7 Meta Compliance Queue Staging
+                                        if target_status == "approved":
+                                            db.collection("outbound_emails").add({
+                                                "lead_id": lead_id,
+                                                "tenant_id": lead_data.get("tenant_id"),
+                                                "url": lead_data.get("url"),
+                                                "dm_payload": lead_data.get("dm"),
+                                                "email": lead_data.get("email"),
+                                                "status": "queued",
+                                                "timestamp": firestore.SERVER_TIMESTAMP
+                                            })
+                                            
                                         # Send confirmation back
                                         if phone_number_id and sender_wa_id:
                                             try:

@@ -2,8 +2,10 @@ import os
 import json
 import urllib.request
 import time
+import datetime
 from flask import Flask, request, jsonify, make_response
 from google.cloud import tasks_v2
+from cryptography.fernet import Fernet
 
 app = Flask(__name__)
 ALLOWED_ORIGINS = ["https://lead-sniper-prod.web.app", "https://lead-sniper-prod.firebaseapp.com"]
@@ -53,6 +55,9 @@ LOCATION = os.environ.get("LOCATION", "asia-south1")
 QUEUE = os.environ.get("QUEUE", "lead-pipeline-queue")
 PIPELINE_URL = os.environ.get("PIPELINE_URL", "https://lead-pipeline-main-abc.a.run.app/dispatch")
 
+FERNET_KEY = os.environ.get("ENCRYPTION_KEY", "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0=")
+cipher_suite = Fernet(FERNET_KEY.encode())
+
 def get_service_account_email():
     url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
     for attempt in range(1, 4):
@@ -95,16 +100,56 @@ def authenticate_request(request):
     if not user_doc.exists:
         # Fallback Creation: Brand new user registration
         tenant_id = uid
+        user_role = 'admin'
         user_ref.set({
             'tenant_id': tenant_id,
-            'role': 'admin',
+            'role': user_role,
+            'is_active': True,
+            'approval_status': 'pending',
+            'beta_expiry': None,
+            'wallet': {
+                'allocated_credits': 0,
+                'consumed_credits': 0
+            },
             'createdAt': firestore.SERVER_TIMESTAMP
         })
     else:
         user_data = user_doc.to_dict()
         tenant_id = user_data.get('tenant_id') or uid
+        user_role = user_data.get('role', 'admin')
+        is_active = user_data.get('is_active', True)
         
-    return uid, tenant_id
+        if not is_active and user_role != 'super_admin':
+            raise ValueError("Account suspended by L0 Governance Protocol.")
+            
+    return uid, tenant_id, user_role
+
+def check_quota(tenant_id):
+    user_doc = db.collection("users").document(tenant_id).get()
+    if user_doc.exists:
+        data = user_doc.to_dict()
+        if data.get("approval_status") != "approved":
+            return False, 403, "Your application is under review. Please wait for L0 approval."
+            
+        beta_expiry = data.get("beta_expiry")
+        if not beta_expiry:
+            return False, 401, "Beta access has expired."
+            
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if hasattr(beta_expiry, 'tzinfo') and beta_expiry.tzinfo is None:
+             beta_expiry = beta_expiry.replace(tzinfo=datetime.timezone.utc)
+             
+        if now > beta_expiry:
+            return False, 401, "Beta access has expired."
+
+        wallet = data.get("wallet", {})
+        if wallet:
+            allocated = int(wallet.get("allocated_credits", 0))
+            consumed = int(wallet.get("consumed_credits", 0))
+            if (allocated - consumed) <= 0:
+                return False, 402, "Beta quota exhausted. Contact admin to reload."
+        return True, 200, "OK"
+    return False, 401, "Unknown identity."
 
 def sanitize_document(doc):
     """
@@ -155,7 +200,7 @@ def trigger_daily_sweep(path):
     # -----------------------------------------------------------------------------------------
     if request.path in ["/api/campaigns", "/api/leads"] and request.method == "GET":
         try:
-            uid, tenant_id = authenticate_request(request)
+            uid, tenant_id, user_role = authenticate_request(request)
             
             if request.path == "/api/campaigns":
                 docs = db.collection("campaigns").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream()
@@ -163,6 +208,12 @@ def trigger_daily_sweep(path):
             elif request.path == "/api/leads":
                 # Apply explicit server-side sorting logic if indexing allows, otherwise stream natively.
                 docs = db.collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream()
+
+            elif request.path == "/api/me":
+                user_doc = db.collection("users").document(uid).get()
+                if user_doc.exists:
+                    return jsonify({"status": "success", "data": user_doc.to_dict(), "wallet": user_doc.to_dict().get("wallet", {"allocated_credits": 0, "consumed_credits": 0})}), 200
+                return jsonify({"error": "User structure missing"}), 404
 
             results = [sanitize_document(doc) for doc in docs]
             return jsonify({"status": "success", "data": results}), 200
@@ -173,17 +224,81 @@ def trigger_daily_sweep(path):
             return jsonify({"error": "Internal Error", "message": str(e)}), 500
 
     # -----------------------------------------------------------------------------------------
+    # REST L0 Governance API Protocol 
+    # -----------------------------------------------------------------------------------------
+    if request.path.startswith("/api/l0/"):
+        try:
+            uid, tenant_id, user_role = authenticate_request(request)
+            if user_role != "super_admin":
+                return jsonify({"error": "Forbidden L0 Access"}), 403
+                
+            if request.path == "/api/l0/users" and request.method == "GET":
+                docs = db.collection("users").limit(100).stream()
+                results = [sanitize_document(doc) for doc in docs]
+                # Gather aggregate tracking limits globally
+                for res in results:
+                    usage_doc = db.collection("usage_metrics").document(res.get("tenant_id", "")).get()
+                    res["usage_metrics"] = usage_doc.to_dict() if usage_doc.exists else {}
+                return jsonify({"status": "success", "data": results}), 200
+                
+            elif request.path == "/api/l0/users/suspend" and request.method == "POST":
+                data = request.json or {}
+                target_uid = data.get("uid")
+                target_state = data.get("is_active", False)
+                if target_uid:
+                    db.collection("users").document(target_uid).update({"is_active": target_state})
+                    return jsonify({"status": "success", "message": f"Suspension toggled cleanly."}), 200
+                return jsonify({"error": "Missing uid limit"}), 400
+
+            elif request.path.startswith("/api/l0/users/") and request.path.endswith("/mint") and request.method == "POST":
+                target_tenant = request.path.split("/")[-2]
+                amount = float(request.json.get("amount", 0)) if request.json else 0
+                if amount > 0:
+                    db.collection("users").document(target_tenant).set(
+                        {"wallet": {"allocated_credits": firestore.Increment(int(amount))}},
+                        merge=True
+                    )
+                    return jsonify({"status": "success", "message": f"Minted {int(amount)} credits."}), 200
+                return jsonify({"error": "Invalid mint amount"}), 400
+
+            elif request.path.startswith("/api/l0/users/") and request.path.endswith("/approve") and request.method == "POST":
+                target_tenant = request.path.split("/")[-2]
+                payload = request.json or {}
+                amount = int(payload.get("amount", 20000))
+                days = int(payload.get("days", 180))
+                
+                new_expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
+                db.collection("users").document(target_tenant).set(
+                    {
+                        "approval_status": "approved",
+                        "beta_expiry": new_expiry,
+                        "wallet": {"allocated_credits": firestore.Increment(amount)}
+                    },
+                    merge=True
+                )
+                return jsonify({"status": "success", "message": f"Approved identity with {amount} credits for {days} days."}), 200
+                
+        except ValueError as ve:
+            return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
+        except Exception as e:
+            return jsonify({"error": "Internal Error", "message": str(e)}), 500
+
+    # -----------------------------------------------------------------------------------------
     # REST API Gateway Protocol (Frontend Database Mutations)
     # -----------------------------------------------------------------------------------------
     if request.path.startswith("/api/") and request.method in ["POST", "PUT"]:
         try:
-            uid, tenant_id = authenticate_request(request)
+            uid, tenant_id, user_role = authenticate_request(request)
             data = request.json or {}
             
             # Remove any forged tenant injections
             data.pop('tenant_id', None)
             
             if request.path == "/api/campaigns" and request.method == "POST":
+                is_valid, status_code, err_msg = check_quota(tenant_id)
+                if not is_valid:
+                    return jsonify({"error": err_msg}), status_code
+
                 data['tenant_id'] = tenant_id
                 data['createdAt'] = firestore.SERVER_TIMESTAMP
                 data['updatedAt'] = firestore.SERVER_TIMESTAMP
@@ -215,6 +330,25 @@ def trigger_daily_sweep(path):
                         doc_ref.update(data)
                     return jsonify({"status": "success"}), 200
                 return jsonify({"error": "Forbidden"}), 403
+                
+            elif request.path == "/api/settings" and request.method == "POST":
+                # BYOT Vault implementation natively tracking symmetric cryptography
+                user_ref = db.collection("users").document(uid)
+                wa_token_raw = data.get("wa_token")
+                wa_phone_id = data.get("wa_phone_id")
+                admin_phone = data.get("admin_phone")
+                
+                settings_update = {}
+                if wa_phone_id: settings_update["wa_phone_id"] = wa_phone_id
+                if admin_phone: settings_update["admin_phone"] = admin_phone
+                if wa_token_raw:
+                    encrypted_token = cipher_suite.encrypt(wa_token_raw.encode()).decode()
+                    settings_update["wa_token"] = encrypted_token
+                
+                if settings_update:
+                    settings_update["updatedAt"] = firestore.SERVER_TIMESTAMP
+                    user_ref.update(settings_update)
+                return jsonify({"status": "success"}), 200
                 
         except ValueError as ve:
             return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
@@ -261,6 +395,10 @@ def trigger_daily_sweep(path):
 
         tenant_id = campaign_data.get("tenant_id")
         if not tenant_id: continue
+        
+        is_valid, _, _ = check_quota(tenant_id)
+        if not is_valid:
+            continue
         
         task = {
             "http_request": {

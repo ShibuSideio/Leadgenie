@@ -64,9 +64,37 @@ async function loadDashboard() {
     if (!user) return;
     
     await Promise.all([
+        loadMe(),
         loadCampaigns(),
         loadLeads()
     ]);
+}
+
+let activeWallet = { allocated_credits: 0, consumed_credits: 0 };
+async function loadMe() {
+    try {
+        const user = firebase.auth().currentUser;
+        const token = await user.getIdToken();
+        const response = await fetch(`${API_BASE}/api/me`, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (response.ok) {
+            const payload = await response.json();
+            const data = payload.data || {};
+            
+            const waitroom = document.getElementById('waitroom-overlay');
+            if (data.approval_status === 'pending') {
+                if (waitroom) waitroom.style.display = 'flex';
+                return;
+            } else {
+                if (waitroom) waitroom.style.display = 'none';
+            }
+
+            if (payload.wallet) {
+                activeWallet = payload.wallet;
+                const el = document.getElementById('wallet-balance');
+                if (el) el.innerText = (activeWallet.allocated_credits - activeWallet.consumed_credits);
+            }
+        }
+    } catch(e) { console.error('Failed to load wallet', e); }
 }
 
 // Dynamic Campaign Hydration via REST API
@@ -388,6 +416,12 @@ window.updateLeadStatus = async function(docId, newStatus) {
 };
 
 window.openNewCampaignModal = async function() {
+    const remaining = activeWallet.allocated_credits - activeWallet.consumed_credits;
+    if (remaining <= 0) {
+        showToast('Beta quota exhausted. Contact admin to reload.', 'error');
+        return;
+    }
+    
     document.getElementById('new-campaign-modal').classList.remove('hidden');
     const glInput = document.getElementById('camp-gl');
     const locInput = document.getElementById('camp-location');
@@ -500,6 +534,140 @@ window.switchTab = function(tabName) {
     } else if(tabName === 'reports') {
         if(document.getElementById('view-reports')) document.getElementById('view-reports').classList.remove('hidden');
         if(document.getElementById('tab-reports')) document.getElementById('tab-reports').classList.add('active');
+    } else if(tabName === 'l0-admin') {
+        if(document.getElementById('view-l0-admin')) document.getElementById('view-l0-admin').classList.remove('hidden');
+        if(document.getElementById('tab-l0-admin')) document.getElementById('tab-l0-admin').classList.add('active');
+        fetchL0Data();
+    }
+};
+
+window.fetchL0Data = async function() {
+    const tableBody = document.getElementById('l0-tenant-table');
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken();
+        const response = await fetch(`${API_BASE}/api/l0/users`, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
+        if (response.status === 200) {
+            document.getElementById('tab-l0-admin').classList.remove('hidden'); // Enable globally
+            const payload = await response.json();
+            const data = payload.data || [];
+            
+            data.sort((a,b) => {
+                if (a.approval_status === 'pending' && b.approval_status !== 'pending') return -1;
+                if (b.approval_status === 'pending' && a.approval_status !== 'pending') return 1;
+                return 0;
+            });
+            
+            let tableHTML = '';
+            data.forEach(t => {
+                const isSuspended = t.is_active === false; // Usually true or undefined = active
+                const isPending = t.approval_status === 'pending';
+                const statusColor = isSuspended ? '#ef4444' : (isPending ? '#f59e0b' : '#25D366');
+                const statusBadge = `<strong style="color:${statusColor}">${isSuspended ? 'SUSPENDED' : (isPending ? 'PENDING' : 'ACTIVE')}</strong>`;
+                const um = t.usage_metrics || {};
+                
+                let actionHTML = '';
+                if (isPending) {
+                    actionHTML = `
+                        <input type="number" id="approve-days-${t.tenant_id}" value="180" style="width: 45px; padding: 4px; font-size: 0.75rem; border: 1px solid #ccc; border-radius: 4px;" title="Days">
+                        <input type="number" id="approve-amt-${t.tenant_id}" value="20000" style="width: 60px; padding: 4px; font-size: 0.75rem; border: 1px solid #ccc; border-radius: 4px;" title="Credits">
+                        <button class="primary-btn" style="padding: 4px 8px; font-size:0.75rem;" onclick="approveCredentials('${t.tenant_id}')">APPROVE</button>
+                    `;
+                } else {
+                    actionHTML = `
+                        <input type="number" id="mint-${t.tenant_id}" placeholder="Amt" style="width: 50px; padding: 4px; font-size: 0.75rem; border: 1px solid #ccc; border-radius: 4px;">
+                        <button class="secondary-btn" style="padding: 4px 8px; font-size:0.75rem; color:#4F46E5; border-color:#4F46E5" onclick="mintCredentials('${t.tenant_id}')">MINT</button>
+                        <button class="secondary-btn" style="padding: 4px 8px; font-size:0.75rem; color:${statusColor}; border-color:${statusColor}" onclick="toggleTenantSuspend('${t.tenant_id}', ${!isSuspended})">
+                            ${isSuspended ? 'UNSUSPEND' : 'CRUSH'}
+                        </button>
+                    `;
+                }
+                
+                tableHTML += `
+                <tr style="border-bottom: 1px solid var(--glass-border);">
+                    <td style="padding: 12px; font-family:monospace; font-size: 0.8rem;">${(t.tenant_id||'Unknown').substring(0,8)}...</td>
+                    <td style="padding: 12px;">${(t.role || 'admin').toUpperCase()}</td>
+                    <td style="padding: 12px;">${statusBadge}</td>
+                    <td style="padding: 12px;">${(um.serper_searches || 0).toLocaleString()}</td>
+                    <td style="padding: 12px;">$${((um.gemini_calls || 0) * 0.0001).toFixed(4)} (<small>${um.gemini_calls||0}</small>)</td>
+                    <td style="padding: 12px; text-align:right;">${actionHTML}</td>
+                </tr>
+                `;
+            });
+            if (tableBody) tableBody.innerHTML = tableHTML || '<tr><td colspan="6" style="padding:16px; text-align:center;">No tenants found.</td></tr>';
+        } else {
+            if (tableBody) tableBody.innerHTML = '<tr><td colspan="6" style="padding:16px; text-align:center; color: #ef4444;">Access Denied. L0 Privilege Missing.</td></tr>';
+        }
+    } catch(err) {
+        console.error(err);
+    }
+};
+
+window.toggleTenantSuspend = async function(uid, isCurrentlyActive) {
+    if(!confirm(`Are you absolutely sure you want to ${isCurrentlyActive ? 'SUSPEND' : 'REACTIVATE'} this tenant globally?`)) return;
+    try {
+        const user = firebase.auth().currentUser;
+        const token = await user.getIdToken();
+        await fetch(`${API_BASE}/api/l0/users/suspend`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uid: uid, is_active: !isCurrentlyActive })
+        });
+        showToast('Telemetry Command Accepted', 'info');
+        fetchL0Data();
+    } catch(err) {
+        showToast('Super Admin action explicitly failed.', 'error');
+    }
+};
+
+window.approveCredentials = async function(tenantId) {
+    const amtEl = document.getElementById(`approve-amt-${tenantId}`);
+    const daysEl = document.getElementById(`approve-days-${tenantId}`);
+    if (!amtEl || !amtEl.value || !daysEl || !daysEl.value) return;
+    try {
+        const user = firebase.auth().currentUser;
+        const token = await user.getIdToken();
+        const resp = await fetch(`${API_BASE}/api/l0/users/${tenantId}/approve`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount: parseInt(amtEl.value), days: parseInt(daysEl.value) })
+        });
+        if (resp.ok) {
+            showToast(`Approved ${tenantId}.`, 'success');
+            fetchL0Data();
+        } else {
+            showToast('Failed to approve.', 'error');
+        }
+    } catch(err) {
+        showToast('Approve action failed.', 'error');
+    }
+};
+
+window.mintCredentials = async function(tenantId) {
+    const amtEl = document.getElementById(`mint-${tenantId}`);
+    if (!amtEl || !amtEl.value) return;
+    try {
+        const user = firebase.auth().currentUser;
+        const token = await user.getIdToken();
+        const resp = await fetch(`${API_BASE}/api/l0/users/${tenantId}/mint`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ amount: amtEl.value })
+        });
+        if (resp.ok) {
+            showToast(`Minted ${amtEl.value} credits.`, 'success');
+            amtEl.value = '';
+            fetchL0Data();
+        } else {
+            showToast('Failed to mint.', 'error');
+        }
+    } catch(err) {
+        showToast('Failed to mint credits.', 'error');
     }
 };
 

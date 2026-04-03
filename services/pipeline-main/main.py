@@ -3,6 +3,7 @@ import json
 import httpx
 import hashlib
 from bs4 import BeautifulSoup
+from cryptography.fernet import Fernet
 from flask import Flask, request, jsonify
 from google.cloud import firestore
 import google.auth
@@ -18,6 +19,8 @@ sm_client = secretmanager.SecretManagerServiceClient()
 
 SCRAPER_HEAVY_URL = os.environ.get("SCRAPER_HEAVY_URL", "https://scraper-heavy-abc.a.run.app/scrape")
 SERPER_API_KEY_NAME = f"projects/{project_id}/secrets/serper_api_key/versions/latest"
+FERNET_KEY = os.environ.get("ENCRYPTION_KEY", "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0=")
+cipher_suite = Fernet(FERNET_KEY.encode())
 
 vertexai.init(project=project_id, location="asia-south1")
 model = GenerativeModel("gemini-2.5-flash")
@@ -183,6 +186,11 @@ def dispatch():
     # Smart BD Query Injector Native Integration
     smart_keywords = generate_smart_query(keywords, tenant_id)
     
+    # Telemetry Billing Check
+    db.collection("usage_metrics").document(tenant_id).set({
+        "serper_searches": firestore.Increment(len(smart_keywords))
+    }, merge=True)
+    
     for kw in smart_keywords:
         # Step 1: Augmented Sweep
         raw_results = search_serper(kw, location=location if location else None, gl=gl if gl else None)
@@ -234,6 +242,8 @@ def dispatch():
                     cache_ref.set({"url": url, "text": safe_truncate(text)})
             
             if text:
+                db.collection("usage_metrics").document(tenant_id).set({"gemini_calls": firestore.Increment(1)}, merge=True)
+                db.collection("users").document(tenant_id).set({"wallet": {"consumed_credits": firestore.Increment(1)}}, merge=True)
                 evaluation = final_score_and_dm(text, bio)
                 if evaluation.get("score", 0) >= 7:
                     # Update the atomic stub securely saving pipeline extraction logic
@@ -250,10 +260,17 @@ def dispatch():
                     # Meta WhatsApp Business API Trigger (V6)
                     if evaluation.get("score", 0) >= 8:
                         tenant_doc = db.collection("users").document(tenant_id).get().to_dict() or {}
-                        wa_token = tenant_doc.get("wa_token")
+                        wa_token_encrypted = tenant_doc.get("wa_token")
                         wa_phone_id = tenant_doc.get("wa_phone_id")
                         admin_phone = tenant_doc.get("admin_phone")
                         
+                        wa_token = None
+                        if wa_token_encrypted:
+                            try:
+                                wa_token = cipher_suite.decrypt(wa_token_encrypted.encode()).decode()
+                            except:
+                                wa_token = wa_token_encrypted # Fallback if not encrypted legacy
+                                
                         if wa_token and wa_phone_id and admin_phone:
                             wa_payload = {
                                 "messaging_product": "whatsapp",
