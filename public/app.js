@@ -606,6 +606,9 @@ window.fetchL0Data = async function() {
                     `;
                 }
                 
+                const w = t.wallet || {allocated_credits: 0, consumed_credits: 0};
+                const rem = (w.allocated_credits || 0) - (w.consumed_credits || 0);
+
                 tableHTML += `
                 <tr style="border-bottom: 1px solid var(--glass-border);">
                     <td style="padding: 12px;">
@@ -614,7 +617,7 @@ window.fetchL0Data = async function() {
                     </td>
                     <td style="padding: 12px;">${(t.role || 'admin').toUpperCase()}</td>
                     <td style="padding: 12px;">${statusBadge}</td>
-                    <td style="padding: 12px;">${(um.serper_searches || 0).toLocaleString()}</td>
+                    <td style="padding: 12px; font-family:monospace;">${rem.toLocaleString()} CR</td>
                     <td style="padding: 12px;">$${((um.gemini_calls || 0) * 0.0001).toFixed(4)} (<small>${um.gemini_calls||0}</small>)</td>
                     <td style="padding: 12px; text-align:right;">${actionHTML}</td>
                 </tr>
