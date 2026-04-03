@@ -597,14 +597,17 @@ window.fetchL0Data = async function() {
                         <input type="number" id="mint-${t.tenant_id}" placeholder="Amt" style="width: 50px; padding: 4px; font-size: 0.75rem; border: 1px solid #ccc; border-radius: 4px;">
                         <button class="secondary-btn" style="padding: 4px 8px; font-size:0.75rem; color:#4F46E5; border-color:#4F46E5" onclick="mintCredentials('${t.tenant_id}')">MINT</button>
                         <button class="secondary-btn" style="padding: 4px 8px; font-size:0.75rem; color:${statusColor}; border-color:${statusColor}" onclick="toggleTenantSuspend('${t.tenant_id}', ${!isSuspended})">
-                            ${isSuspended ? 'UNSUSPEND' : 'CRUSH'}
+                            ${isSuspended ? 'UNSUSPEND' : 'SUSPEND'}
                         </button>
                     `;
                 }
                 
                 tableHTML += `
                 <tr style="border-bottom: 1px solid var(--glass-border);">
-                    <td style="padding: 12px; font-family:monospace; font-size: 0.8rem;">${(t.tenant_id||'Unknown').substring(0,8)}...</td>
+                    <td style="padding: 12px;">
+                        <strong>${t.email || 'No email saved'}</strong><br>
+                        <small style="font-family:monospace; color:var(--text-muted);">${(t.tenant_id||'Unknown').substring(0,8)}...</small>
+                    </td>
                     <td style="padding: 12px;">${(t.role || 'admin').toUpperCase()}</td>
                     <td style="padding: 12px;">${statusBadge}</td>
                     <td style="padding: 12px;">${(um.serper_searches || 0).toLocaleString()}</td>

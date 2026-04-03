@@ -259,9 +259,8 @@ def trigger_daily_sweep(path):
                 target_tenant = request.path.split("/")[-2]
                 amount = float(request.json.get("amount", 0)) if request.json else 0
                 if amount > 0:
-                    db.collection("users").document(target_tenant).set(
-                        {"wallet": {"allocated_credits": firestore.Increment(int(amount))}},
-                        merge=True
+                    db.collection("users").document(target_tenant).update(
+                        {"wallet.allocated_credits": firestore.Increment(int(amount))}
                     )
                     return jsonify({"status": "success", "message": f"Minted {int(amount)} credits."}), 200
                 return jsonify({"error": "Invalid mint amount"}), 400
@@ -273,13 +272,12 @@ def trigger_daily_sweep(path):
                 days = int(payload.get("days", 180))
                 
                 new_expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
-                db.collection("users").document(target_tenant).set(
+                db.collection("users").document(target_tenant).update(
                     {
                         "approval_status": "approved",
                         "beta_expiry": new_expiry,
-                        "wallet": {"allocated_credits": firestore.Increment(amount)}
-                    },
-                    merge=True
+                        "wallet.allocated_credits": firestore.Increment(amount)
+                    }
                 )
                 return jsonify({"status": "success", "message": f"Approved identity with {amount} credits for {days} days."}), 200
                 
