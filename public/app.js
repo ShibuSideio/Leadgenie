@@ -552,6 +552,10 @@ window.switchTab = function(tabName) {
         if(document.getElementById('view-l0-admin')) document.getElementById('view-l0-admin').classList.remove('hidden');
         if(document.getElementById('tab-l0-admin')) document.getElementById('tab-l0-admin').classList.add('active');
         fetchL0Data();
+    } else if(tabName === 'macro') {
+        if(document.getElementById('view-macro')) document.getElementById('view-macro').classList.remove('hidden');
+        if(document.getElementById('tab-macro')) document.getElementById('tab-macro').classList.add('active');
+        fetchMacroTrends();
     }
 };
 
@@ -622,6 +626,115 @@ window.fetchL0Data = async function() {
         }
     } catch(err) {
         console.error(err);
+    }
+};
+
+let rawMacroTrends = null;
+let macroChartObj = null;
+
+window.fetchMacroTrends = async function() {
+    const tableBody = document.getElementById('macro-keywords-table').querySelector('tbody');
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) return;
+        tableBody.innerHTML = '<tr><td colspan="2" style="padding:16px; text-align:center;">Calculating AI Map-Reduce Vectors...</td></tr>';
+        
+        const token = await user.getIdToken();
+        const response = await fetch(`${API_BASE}/api/l0/trends`, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
+        if (response.ok) {
+            const payload = await response.json();
+            rawMacroTrends = payload.data || {};
+            
+            // Populate select dropdowns initially
+            const geoMap = rawMacroTrends.geo_distribution || {};
+            const countries = new Set();
+            const states = new Set();
+            
+            Object.keys(geoMap).forEach(key => {
+                if (key === 'global') return;
+                const parts = key.split('|');
+                if (parts[0]) countries.add(parts[0].toUpperCase());
+            });
+            
+            const countryEl = document.getElementById('macro-filter-country');
+            if (countryEl && countryEl.options.length === 1) {
+                Array.from(countries).sort().forEach(c => {
+                    const opt = document.createElement('option');
+                    opt.value = c.toLowerCase();
+                    opt.innerText = c;
+                    countryEl.appendChild(opt);
+                });
+            }
+            renderMacroTrends();
+        } else {
+            tableBody.innerHTML = '<tr><td colspan="2" style="padding:16px; text-align:center; color:#ef4444;">Access Denied. L0 Privilege Missing.</td></tr>';
+        }
+    } catch (e) {
+        tableBody.innerHTML = '<tr><td colspan="2" style="padding:16px; text-align:center; color:#ef4444;">Gateway Error.</td></tr>';
+    }
+};
+
+window.renderMacroTrends = function() {
+    if (!rawMacroTrends) return;
+    
+    const country = document.getElementById('macro-filter-country').value;
+    const gKey = country === 'global' ? '' : country.toLowerCase();
+    
+    let aggregateDomains = {"Medical/Pharma":0, "Retail/B2C":0, "Finance":0, "Software/Agency":0, "Real Estate":0, "Corporate/Other":0};
+    const tableBody = document.getElementById('macro-keywords-table').querySelector('tbody');
+    
+    // Sum domains matching filter
+    const domainMap = rawMacroTrends.domain_mapping || {};
+    Object.keys(domainMap).forEach(dKey => {
+        if (!gKey || dKey.startsWith(gKey)) {
+            const counts = domainMap[dKey];
+            Object.keys(counts).forEach(ind => {
+                if (aggregateDomains[ind] !== undefined) aggregateDomains[ind] += counts[ind];
+            });
+        }
+    });
+    
+    // Draw Chart
+    const ctx = document.getElementById('macroDomainChart');
+    if (ctx) {
+        const labels = Object.keys(aggregateDomains);
+        const data = Object.values(aggregateDomains);
+        
+        if (macroChartObj) {
+            macroChartObj.data.datasets[0].data = data;
+            macroChartObj.update();
+        } else {
+            macroChartObj = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Active Leads Operations',
+                        data: data,
+                        backgroundColor: '#4F46E5',
+                        borderRadius: 4
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } }
+            });
+        }
+    }
+    
+    // Draw Keywords (only global for now to prevent expensive client-side correlation loops, usually backend correlates this strictly)
+    const kwArr = rawMacroTrends.global_keywords || [];
+    if (kwArr.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="2" style="padding:16px; text-align:center;">No tracking data available.</td></tr>';
+    } else {
+        tableBody.innerHTML = kwArr.slice(0, 15).map(k => `
+            <tr style="border-bottom: 1px solid var(--glass-border);">
+                <td style="padding: 8px;">${k.keyword}</td>
+                <td style="padding: 8px; text-align:right; font-weight:bold; color:var(--primary)">${k.count}</td>
+            </tr>
+        `).join('');
     }
 };
 

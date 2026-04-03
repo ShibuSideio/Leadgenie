@@ -32,6 +32,7 @@
                 <a href="#" id="tab-team" onclick="switchTab('team')">My Team</a>
                 <a href="#" id="tab-reports" onclick="switchTab('reports')">Custom Reports</a>
                 <a href="#view-l0-admin" id="tab-l0-admin" class="font-bold text-purple-600" onclick="switchTab('l0-admin')">L0 Admin</a>
+                <a href="#view-macro" id="tab-macro" class="hidden font-bold text-blue-600" onclick="switchTab('macro')">Global Trends</a>
                 <button id="logout-btn" class="secondary-btn">Logout</button>
             </div>
         </nav>
@@ -164,6 +165,48 @@
                             <tr><td colspan="6" style="padding:16px; text-align:center;">Awaiting L0 Telemetry Arrays...</td></tr>
                         </tbody>
                     </table>
+                </div>
+            </section>
+
+            <section id="view-macro" class="glass-panel main-feed hidden">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h2>Macro Intelligence</h2>
+                    <button class="primary-btn" onclick="fetchMacroTrends()">Calculate Global Arrays</button>
+                </div>
+                
+                <div class="stats-box mt-3" style="background:#ffffff;">
+                    <label style="font-size:0.8rem; color:var(--text-muted);">Geographic Vector Map</label>
+                    <div style="display:flex; gap:8px; margin-bottom: 24px;">
+                        <select id="macro-filter-country" style="flex:1; padding:10px; border-radius:6px; border:1px solid var(--glass-border); background:white;" onchange="renderMacroTrends()">
+                            <option value="global">Global (World)</option>
+                        </select>
+                        <select id="macro-filter-state" style="flex:1; padding:10px; border-radius:6px; border:1px solid var(--glass-border); background:white;" onchange="renderMacroTrends()">
+                            <option value="all">All States</option>
+                        </select>
+                        <select id="macro-filter-district" style="flex:1; padding:10px; border-radius:6px; border:1px solid var(--glass-border); background:white;" onchange="renderMacroTrends()">
+                            <option value="all">All Districts</option>
+                        </select>
+                    </div>
+
+                    <div style="display:flex; gap:16px;">
+                        <div style="flex:1;">
+                            <h4>Trending Industries (Domains)</h4>
+                            <div style="height: 250px; width: 100%; position: relative;">
+                                <canvas id="macroDomainChart"></canvas>
+                            </div>
+                        </div>
+                        <div style="flex:1;">
+                            <h4>Top Search Keywords</h4>
+                            <table style="width:100%; border-collapse:collapse; font-size:0.85rem;" id="macro-keywords-table">
+                                <thead style="background: rgba(79, 70, 229, 0.05); border-bottom: 1px solid var(--glass-border);">
+                                    <tr><th style="padding:8px; text-align:left;">Keyword</th><th style="padding:8px; text-align:right;">Global Count</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td colspan="2" style="padding:16px; text-align:center; color:var(--text-muted)">Awaiting Telemetry Calculation...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </section>
         </main>

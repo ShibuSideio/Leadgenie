@@ -236,8 +236,57 @@ def trigger_daily_sweep(path):
             uid, tenant_id, user_role = authenticate_request(request)
             if user_role != "super_admin":
                 return jsonify({"error": "Forbidden L0 Access"}), 403
+
+            if request.path == "/api/l0/trends" and request.method == "GET":
+                campaigns = db.collection("campaigns").stream()
                 
-            if request.path == "/api/l0/users" and request.method == "GET":
+                keyword_map = {}
+                geo_map = {}
+                domain_map = {}
+                
+                def extract_domain(kw):
+                    kw = kw.lower().strip()
+                    if any(x in kw for x in ["doctor", "clinic", "medical", "health", "hospital", "pharma", "dentist"]): return "Medical/Pharma"
+                    if any(x in kw for x in ["retail", "ecommerce", "store", "shop", "boutique", "supermarket"]): return "Retail/B2C"
+                    if any(x in kw for x in ["finance", "bank", "crypto", "capital", "wealth", "accountant", "cpa"]): return "Finance"
+                    if any(x in kw for x in ["software", "tech", "saas", "agency", "startup", "developer", "marketing"]): return "Software/Agency"
+                    if any(x in kw for x in ["real estate", "realtor", "property", "broker", "brokerage"]): return "Real Estate"
+                    return "Corporate/Other"
+
+                for camp in campaigns:
+                    c = camp.to_dict()
+                    if c.get("status", "paused") != "active": continue
+                    
+                    keywords = c.get("keywords", "")
+                    gl = (c.get("gl", "") or "global").lower().strip()
+                    loc = (c.get("location", "") or "all").lower().strip()
+                    
+                    target_geo = f"{gl}|{loc}"
+                    geo_map[target_geo] = geo_map.get(target_geo, 0) + 1
+                    
+                    import re
+                    words = [w.strip() for w in re.split(r'[,;]+', keywords) if w.strip()]
+                    for w in words:
+                        w_lower = w.lower()
+                        keyword_map[w_lower] = keyword_map.get(w_lower, 0) + 1
+                        
+                        domain = extract_domain(w_lower)
+                        if target_geo not in domain_map:
+                            domain_map[target_geo] = {}
+                        domain_map[target_geo][domain] = domain_map[target_geo].get(domain, 0) + 1
+                        
+                top_keywords = sorted([{"keyword": k, "count": v} for k, v in keyword_map.items()], key=lambda x: x["count"], reverse=True)[:50]
+                
+                return jsonify({
+                    "status": "success", 
+                    "data": {
+                        "global_keywords": top_keywords,
+                        "geo_distribution": geo_map,
+                        "domain_mapping": domain_map
+                    }
+                }), 200
+                
+            elif request.path == "/api/l0/users" and request.method == "GET":
                 docs = db.collection("users").limit(100).stream()
                 results = [sanitize_document(doc) for doc in docs]
                 # Gather aggregate tracking limits globally
