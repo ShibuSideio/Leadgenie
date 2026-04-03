@@ -1,12 +1,12 @@
-# Sideio Leads V11 - Master System Architecture & Developer Handbook
+# Sideio Leads V12 - Enterprise Master System Architecture & Developer Handbook
 
 ## 1. Executive Summary
-Sideio Leads is an enterprise-grade, multi-tenant B2B lead generation platform. It automatically scans the internet based on natural language product descriptions ("bios"), identifies high-value decision-makers, scores their lead quality using Large Language Models (LLMs), and drafts personalized, anti-spam WhatsApp/LinkedIn DMs. The platform operates on a "Bring Your Own Token" (BYOT) architecture for enterprise outbound messaging and utilizes a strict internal credit economy.
+Sideio Leads is an enterprise-grade, multi-tenant B2B lead generation platform. It automatically scans the internet based on natural language product descriptions ("bios"), identifies high-value decision-makers, scores their lead quality using Large Language Models (LLMs), and drafts personalized, anti-spam WhatsApp/LinkedIn DMs. The V12 platform operates on an advanced "Bring Your Own Token" (BYOT) architecture, governed by a strict internal credit economy, and powered by an autonomous, zero-cost Python Reinforcement Learning from Human Feedback (RLHF) Loop.
 
 The system is rigorously decoupled into three core domains:
-1. **Frontend PWA:** A vanilla JavaScript, strictly cached, static asset application served securely via Firebase Hosting.
-2. **Orchestrator Gateway (Cloud Run):** The master REST API, auth gateway, and batched Task Dispatcher.
-3. **Pipeline Worker (Cloud Run):** An asynchronous, scaled processing node handling heavy I/O (scraping), Serper integrations, and Vertex AI (Gemini) inferencing.
+1. **Frontend PWA:** A vanilla JavaScript, strictly cached, static asset application served securely via Firebase Hosting featuring Premium Intelligence Badging.
+2. **Orchestrator Gateway (Cloud Run):** The master REST API, auth gateway, telemetry aggregation layer, and RLHF mutation handler.
+3. **Pipeline Worker (Cloud Run):** An asynchronous, globally locked processing node utilizing Multi-Vector OSINT (Symptom Dorks, GMB, Social, Hiring), structural Tech-Stack regexes, and Vertex AI (Gemini) inferencing.
 
 ---
 
@@ -23,142 +23,92 @@ The entire state is defined programmatically via Terraform and deployed into Goo
 
 ### High-Level Data Flow
 1. User interacts with the **Frontend PWA**, which mints a Firebase OIDC JWT token.
-2. The PWA sends a REST request to the **Orchestrator Gateway**.
-3. The Orchestrator authenticates the token, performs RBAC (Super Admin vs Admin), and mutating Firestore.
-4. The Orchestrator routinely sweeps for `active` campaigns and packages them into JSON payloads.
-5. It injects these payloads into **Cloud Tasks**.
-6. Cloud Tasks securely POSTs the payload to the **Pipeline Worker** using a verified service account OIDC identity.
-7. The Pipeline Worker processes the lead (Serper API -> Gemini Pre-Filter -> Scrape -> Gemini Extraction).
-8. The Pipeline natively pushes the extracted lead directly into Firestore and optionally pushes a notification via the Meta WhatsApp API.
+2. The Orchestrator Gateway authenticates the token, performs RBAC, and records telemetry.
+3. The Orchestrator packages `active` campaigns and injects them into **Cloud Tasks**.
+4. Cloud Tasks pushes the JSON payload to the **Pipeline Worker** using a verified OIDC identity.
+5. The Pipeline extracts target accounts using Symptom Dorks, Multi-Vector Serper sweeping, and zero-cost RLHF cutoffs.
+6. Target URLs are locked using Unified Account Resolution (UAR) to prevent duplicated effort cross-campaign.
+7. Leads cleanly pass Vertex AI extraction and inherently populate Firestore while optionally firing Meta WhatsApp API pushes.
 
 ---
 
 ## 3. Database Schema (Firestore)
 
-The application relies strictly on Google Firestore. Data integrity is enforced via application-tier gateways rather than raw database rules, as all requests route through the Orchestrator.
-
 ### `users` (or `tenants`)
-Manages Identity, Governance, and Telemetry Economy.
+Manages Identity, Governance, Economy, and RLHF Weightings.
 - `tenant_id` [String] (Maps to Firebase UID).
 - `email` [String]
 - `role` [String] (`admin` or `super_admin`).
 - `approval_status` [String] (`pending` or `approved`).
-- `beta_expiry` [Timestamp] (Absolute closure of system access).
 - `is_active` [Boolean] (L0 Governance kill-switch).
-- `wallet.allocated_credits` [Int] (Max allowed leads/actions).
-- `wallet.consumed_credits` [Int] (Current burn).
-- `wa_token` [String] (Symmetrically Encrypted Fernet CIPHER TEXT of the Meta WhatsApp API token).
-- `wa_phone_id` [String]
-- `admin_phone` [String]
+- `wallet.allocated_credits` [Int] & `wallet.consumed_credits` [Int]
+- `preferences_weights` [Map] (Tracks boolean RLHF values dynamically like `tech_wordpress: 5`, `hiring_intent: 12`).
 
 ### `campaigns`
-The core matrices for defining target audiences natively.
-- `id` [String] (Auto-generated).
-- `tenant_id` [String]
-- `status` [String] (`active`, `paused`).
-- `bio` [String] (Natural language description of the B2B SaaS).
-- `keywords` [String] (Comma-separated seed queries).
-- `location` [String] (City / State).
-- `gl` [String] (Country code, e.g., 'us', 'in').
+The matrices for defining target audiences natively.
+- `id` [String] / `tenant_id` [String] / `status` [String] 
+- `bio` [String] / `keywords` [String] / `gl` [String] / `location` [String]
 
 ### `leads`
-The AI-extracted targets.
-- `id` [String] (Deterministic hash: SHA256(tenant_id + campaign_id + target_url) to prevent duplication).
+The deeply enriched, universally locked targets.
+- `id` [String] (Deterministic UAR Hash: `tenant_id` + `target_domain`).
 - `tenant_id` [String]
-- `campaign_id` [String]
-- `url` [String]
+- `matched_campaigns` [Array] (Tracks cross-campaign matches via `firestore.ArrayUnion`).
+- `url` [String] (The specific lead entry point).
 - `status` [String] (`processing`, `new`, `contacted`, `converted`, `ignored`).
 - `score` [Int] (1-10 Vertex AI confidence index).
-- `pain_point` [String] (The specific business problem extracted).
-- `dm` [String] (The pre-drafted 2-sentence conversational outreach).
-- `email` [String]
-- `phone` [String]
-- `linkedin` [String]
+- `pain_point` [String], `dm` [String], `email` [String], `linkedin` [String], `phone` [String]
+- `tech_stack_found` [Array] (e.g., `["shopify", "stripe"]`).
+- `hiring_intent_found` [String] (Extracted dynamically).
+- `icebreaker_angle` [String]
 
-### `scraped_cache`
-Cost-reduction mechanism preventing duplicate HTTP scraping across campaigns.
-- `id` [String] (URL sanitized: slashes replaced by underscores).
-- `url` [String]
-- `text` [String] (Truncated text DOM strictly capped at 100KB).
-
-### `usage_metrics`
-Analytical tracking mapping specifically to `tenant_id`.
-- `id` [String] (Maps to `tenant_id`).
-- `gemini_calls` [Int] (Incremented dynamically).
-- `serper_searches` [Int]
+### `global_lead_locks`
+Cross-tenant exclusivity tracking to prevent spamming the same company.
+- `id` [String] (Root level domain like `acme.com`).
+- `locked_until` [Timestamp] (Absolute expiration date of the 14-day lock limit).
 
 ---
 
 ## 4. The Orchestrator Gateway (API & Core Node)
 
-The Orchestrator (`services/orchestrator/main.py`) is written in Python/Flask and serves as the primary gateway.
-
-### Authentication Engine (`authenticate_request`)
-All inbound REST API calls must carry an `Authorization: Bearer <token>` header. The Orchestrator intercepts this, runs `auth.verify_id_token()`, and cross-references the Firebase `users` database. 
-- If the document does not exist, it automatically creates a JIT (Just-In-Time) registration profile marking the user as `pending`.
-- If the user's `role` is not `super_admin` and `is_active` is `False`, the system violently rejects the query.
+The Orchestrator (`services/orchestrator/main.py`) controls strictly gated gateways.
 
 ### REST Endpoints
-*   `GET /api/me`: Returns the user document and deserializes the wallet.
-*   `GET /api/campaigns` & `GET /api/leads`: Strictly sandboxed data retrieval querying `tenant_id`.
-*   `POST/PUT /api/campaigns` & `PUT /api/leads`: Mutation endpoints. Lead updates securely append data to an `interactions` array natively.
-*   `POST /api/settings`: Accepts BYOT tokens from the user. It natively passes the raw token through a symmetric `cryptography.fernet` encryption suite using a global `.env` rotation key before saving to Firestore.
-
-### Background Task Dispatcher (`trigger_daily_sweep`)
-This routine acts as the heartbeat of the entire app. It can be triggered manually or via Cloud Scheduler.
-1. It loops through all `active` campaigns.
-2. It explicitly calculates the `wallet` budget for that specific `tenant_id`.
-3. If valid, it constructs an HTTP POST payload containing `{campaign_id, tenant_id}`.
-4. It attaches the Orchestrator's internal Service Account email as an OIDC identity token for Zero-Trust internal authorization.
-5. It pushes the payload to **Google Cloud Tasks**, handing off execution safely.
+*   `GET /api/me`, `/api/campaigns`, `/api/leads`: Strict user boundaries querying on `tenant_id` logic. 
+*   **The RLHF Backpropagation** (`PUT /api/leads/...`):
+    When a UI button is pushed to set a lead context dynamically to `converted` or `ignored`, the Orchestrator instantly identifies the target's `tech_stack_found` strings and `hiring_intent_found`. It applies native `firestore.Increment(1)` or `-1` to the underlying `preferences_weights` user document.
 
 ### L0 Governance Layer (`/api/l0/...`)
-Accessible strictly to `super_admin`. Allows total infrastructural manipulation:
-- `POST /approve`: Upgrades user access, sets an absolute beta expiration date, and mints standard credits cleanly.
-- `POST /mint`: Incremental dot-notation injection using `firestore.Increment()` securely to avoid document overrides.
-- `POST /suspend`: Instantly detaches user capabilities globally.
-- `GET /trends`: Real-time map-reduce aggregations grouping campaigns by geometric location and intelligent "Domains" (Medical, Finance, Software, etc.) based on substring mapping.
+Exclusivity for `super_admin`: Upgrade, mint credits, or globally suspend instances. Also drives Macro Intelligence data `GET /api/l0/trends` computing global Maps + Dimensions on current active campaigns.
 
 ---
 
-## 5. The Intelligence Pipeline Worker
+## 5. The Intelligence Pipeline Worker (The Quality Moat)
 
-The Pipeline (`services/pipeline-main/main.py`) executes the core lead generation algorithm. It is triggered by Cloud Tasks and operates independently.
+The Pipeline (`services/pipeline-main/main.py`) leverages bleeding-edge operations logic.
 
-### The Algorithmic Flow
-1. **Dynamic Smart Query Generation (`generate_smart_query`)**:
-   - The worker dynamically fetches previously `converted` or `contacted` leads belonging to the tenant.
-   - It sends the previously successful `pain_points` to Gemini to extrapolate structural business trends.
-   - It appends these trends via boolean logic (`AND ("trend" OR "trend")`) to the user's base keywords, whilst attaching a strict exclusion `-blacklist` (e.g. Wikipedia, Jobs, Amazon).
+### 1. Vector 0: The Symptom Discovery Funnel
+Before blindly guessing URLs, the script feeds the user's `bio` to `gemini-1.5-flash` natively asking for extremely specific Google Search dorks regarding companies displaying public symptoms of a problem. These results are merged with user keywords and passed to Serper.
 
-2. **Google Serper Execution**:
-   - Queries `google.serper.dev/search`. Increments `usage_metrics.serper_searches`.
+### 2. Unified Account Resolution (UAR) & Exclusivity Locking
+- When targeting a URL, the script strips domain to `acme.com`. 
+- **Global Lock:** Validates against `global_lead_locks`. Drops execution entirely if another user touched `acme.com` within 14 days.
+- **UAR Hashing:** Attempts atomic Firestore `.create()` using ID `tenant_id_domain`. If an `AlreadyExists` exception throws, it immediately merges the current `campaign_id` into the document's array via `ArrayUnion` and bails out, saving raw API credits.
 
-3. **Ruthless Post-Flight Noise Filter (`filter_serper_noise`)**:
-   - Strips enterprise directories (g2, capterra, zoominfo).
-   - Strips utility pages (`/login`, `/legal`, `forgot password`).
+### 3. Multi-Vector Serper Context Dorking
+Retrieval Augmented Generation structure pulling dynamically:
+- **Vector A (GMB):** Grabs Star Ratings and location address.
+- **Vector B (Social):** LinkedIn/Facebook metadata.
+- **Vector C (Hiring Pulse & Expansion):** Cross-references the domain against `linkedin.com/jobs`, `indeed.com`, `naukri.com`, and `instahyre.com`.
 
-4. **LLM Pre-Filter (`pre_filter_gemini`)**:
-   - Takes the raw Google Snippets and compares them against the user's `bio` using Vertex AI.
-   - Discards irrelevant businesses *before* loading full pages. Returns a clean array of raw HTTP strings.
+### 4. Zero-Cost Python Heuristics (The Predictor Cutoff)
+- **Tech Stack X-Ray:** Natively parses scraped HTML locally looking for explicit SaaS scripts (`cdn.shopify`, `wp-content`, `intercom`) instantly.
+- **Intent Scan:** Reads Vector C snippets natively in Python extracting "lpa", "lakh", "apply today", returning a fast boolean.
+- **RLHF Gate:** Mathematical comparison (`Fit Score`) is applied querying the calculated parameters against `preferences_weights`. If `score <= -3`, the Pipeline structurally `.delete()`s the UAR stub and moves on *without deploying Vertex AI*.
 
-5. **Atomic Lead Lock**:
-   - The system utilizes a SHA256 string `tenant_id_campaign_id_url` as the absolute Firestore ID.
-   - Uses `doc_ref.create()`. If this throws `AlreadyExists`, the loop strictly caught a duplicate run and gracefully safely skips the rest of the execution.
-
-6. **Web Scraping & WAF Evasion (`scrape_url`)**:
-   - Natively checks for Web Application Firewall (WAF) fingerprints (Cloudflare, Incapsula).
-   - Checks if the extracted string length is suspiciously low (JS frameworks).
-   - If trapped, it gracefully reroutes the scrape to `SCRAPER_HEAVY_URL` (a secondary isolated container operating headless Chromium).
-   - The output is ruthlessly sliced to 100,000 characters (`safe_truncate`) to ensure no payload will ever crash Firestore's 1MB hardware limit. Cache hit mapping is verified prior.
-
-7. **Final AI Extraction (`final_score_and_dm`)**:
-   - Gemini receives the truncated DOM and strictly extracts JSON identifying: Name, Pain Point, Email, Phone, LinkedIn, and assigns a Score (0-10).
-   - It uniquely constructs a highly personalized two-sentence WhatsApp DM using psychological B2B hooks based strictly on the user's `bio`.
-
-8. **Meta Push Notification (The V6 Hook)**:
-   - If `score >= 8` (High Value Pipeline Lead), the system decodes the `wa_token` via Fernet interpolation.
-   - It automatically transmits a Meta API push directly to the admin's phone natively injecting Interactive UI Buttons ("✅ Approve & Send", "🚫 Ignore").
+### 5. Final AI Extraction & Communication Push
+- If it passes the filter, Gemini pre-reads all 3 Search Vectors, the raw Tech-Stack variables, and the webpage DOM to formulate a hyper-personalized `"Trojan Horse"` DM angle using exact JSON schema mapping.
+- Automatically connects to Meta WhatsApp and delivers the lead and drafted response strictly if the AI `score >= 8`.
 
 ---
 
@@ -167,23 +117,10 @@ The Pipeline (`services/pipeline-main/main.py`) executes the core lead generatio
 Located in `public/`. Follows raw Vanilla JS standards for ultimate performance and zero-dependency bloat.
 
 ### Caching and Desync Safety
-The Application strictly leverages a Service Worker (`sw.js`) utilizing a **Network-First** strategy.
-To counteract browsers caching internal memory states (specifically for the `/api/me` auth route), `fetch()` calls inject aggressive timestamp rotation payloads (`?rt=17...`) into the target URLs. This mathematically invalidates browser-level HTTP caching while averting Flask CORS-Preflight rejections (which occur if `Cache-Control` is pushed).
+The Application strictly leverages a Service Worker utilizing a Network-First strategy. Updates use dynamic timestamp parameters on API gateways (`?rt=...`) and iteration bumps in `index.html` (`?v=16`) to physically bypass persistent caches dynamically.
 
-### Layout Management
-The Dashboard initializes via `loadDashboard()`.
-- Uses generic hash routing (`#`) natively hooked to `switchTab()` methods to toggle CSS `.hidden` classes.
-- Validates the active user's permissions, dynamically unlocking the L0 global tab specifically if `data.role === super_admin`.
+### Premium DOM Rendering (Enterprise UI Facelift)
+Data structures returned by the Orchestrator mapping `tech_stack_found` or `hiring_intent_found` are translated seamlessly into visual `<span class="badge">` components, generating `🔒 Exclusive Lead`, `🟢 Hiring: True` and cyan `⚡ shopify` badges.
 
-### State Protection
-A global `activeWallet` object holds synchronous memory variables correlating to the user's credit state. This guarantees real-time DOM hydration preventing users from interacting with UI modules if `(allocated - consumed) <= 0`.
-
----
-
-## 7. Security Context & Future Extensions
-
-*   **Zero-Trust:** Pipeline execution rejects any request strictly without verified Service Account origin identity validation.
-*   **Cost Control:** A `limit(30)` boundary actively governs LLM executions inside the Pipeline. The Pipeline explicitly consumes tokens natively back to the Orchestrator via `firestore.Increment()` preventing over-execution.
-*   **DPDP Erasure:** `/purge` completely and entirely eradicates all tracing variables natively attached to a specific user for data compliance.
-
-**End of Document.**
+### Analytics Cartography
+Global data loops natively instantiate dynamic `Chart.js` integrations displaying funnel visualizations (`New`, `Contacted`, `Converted`). Macro maps inherently scan geographic dimensions rendering local B2B trend data structurally to the super admins.
