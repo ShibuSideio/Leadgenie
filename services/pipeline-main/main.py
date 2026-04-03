@@ -2,6 +2,8 @@ import os
 import json
 import httpx
 import hashlib
+import datetime
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from cryptography.fernet import Fernet
 from flask import Flask, request, jsonify
@@ -105,7 +107,6 @@ def pre_filter_gemini(snippets, bio):
     prompt = f"Review these {len(snippets)} search snippets. Based on the user's product bio: '{bio}', discard low-signal companies. YOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads. Do NOT output markdown. Do NOT output bullet points. Every line must start precisely with 'http'.\n\nSnippets: {json.dumps(snippets)}"
     response = model.generate_content(prompt)
     
-    # Aggressively parse only raw HTTP links from Gemini inference
     urls = []
     for line in response.text.split('\n'):
         clean_url = line.strip().replace('- ', '').replace('* ', '').replace('`', '').replace('"', '')
@@ -113,6 +114,53 @@ def pre_filter_gemini(snippets, bio):
              urls.append(clean_url)
     print(f"Gemini approved {len(urls)} URLs matching the B2B criteria.")
     return urls
+
+def extract_root_domain(url):
+    try:
+        netloc = urlparse(url).netloc.lower()
+        if not netloc:
+             netloc = urlparse('http://' + url).netloc.lower()
+        netloc = netloc.replace('www.', '')
+        return netloc
+    except:
+        return ""
+
+def deep_context_serper_dork(domain, tenant_id):
+    if not domain: return ""
+    
+    api_key = get_secret(SERPER_API_KEY_NAME).strip()
+    headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
+    
+    context_data = []
+    
+    def fetch_serper(url, payload):
+        try:
+             db.collection("usage_metrics").document(tenant_id).set({"serper_searches": firestore.Increment(1)}, merge=True)
+             resp = httpx.post(url, headers=headers, json=payload, timeout=15)
+             if resp.status_code == 200: return resp.json()
+        except:
+             pass
+        return {}
+
+    # Vector A: GMB / Local
+    gmb_data = fetch_serper("https://google.serper.dev/places", {"q": domain, "num": 3})
+    for place in gmb_data.get("places", []):
+         context_data.append(f"[GMB] Rating: {place.get('rating', 'N/A')}, Reviews: {place.get('ratingCount', 'N/A')}, Address: {place.get('address', 'N/A')}")
+
+    # Vector B: Social
+    social_query = f"site:linkedin.com/company OR site:facebook.com \"{domain}\""
+    social_data = fetch_serper("https://google.serper.dev/search", {"q": social_query, "num": 3})
+    for org in social_data.get("organic", []):
+         context_data.append(f"[SOCIAL] {org.get('snippet', '')}")
+
+    # Vector C: Hiring Intent
+    hiring_query = f"site:linkedin.com/jobs OR site:indeed.com/cmp \"{domain}\""
+    hiring_data = fetch_serper("https://google.serper.dev/search", {"q": hiring_query, "num": 3})
+    for job in hiring_data.get("organic", []):
+         context_data.append(f"[HIRING] {job.get('snippet', '')}")
+         
+    return " | ".join(context_data)[:3000]
+
 
 def scrape_url(url):
     # Lightweight scrape
@@ -130,27 +178,71 @@ def scrape_url(url):
             if fingerprint in search_blob:
                 raise ValueError(f"WAF block explicitly detected ({fingerprint})")
                 
+        # Tech Stack X-Ray (Zero Cost)
+        html_blob = str(soup).lower()
+        tech_signatures = {
+             "wordpress": "wp-content",
+             "shopify": "cdn.shopify.com",
+             "stripe": "js.stripe.com",
+             "react": "react-root",
+             "hubspot": "js.hs-scripts.com",
+             "salesforce": "force.com",
+             "google analytics": "google-analytics.com",
+             "segment": "cdn.segment.com",
+             "intercom": "widget.intercom.io"
+        }
+        found_tech = [name for name, sig in tech_signatures.items() if sig in html_blob]
+                
         text = soup.get_text(separator=' ', strip=True)
         if len(text) < 500: # Potential JS Heavy page
             raise ValueError("Too little content, likely JS framework")
-        return safe_truncate(text) # Strict truncation
+        return safe_truncate(text), found_tech # Strict truncation
     except Exception as e:
         print(f"Fallback to heavy scraper for {url} due to {str(e)}")
         # Call heavy scraper
         heavy_resp = httpx.post(SCRAPER_HEAVY_URL, json={"url": url}, timeout=45)
         if heavy_resp.status_code == 200:
-            return safe_truncate(heavy_resp.json().get("text", ""))
-        return ""
+            return safe_truncate(heavy_resp.json().get("text", "")), ["Fallback Scraper Used"]
+        return "", []
 
-def final_score_and_dm(text, bio):
-    prompt = f"Score this 1-10 based on campaign goals and product bio: '{bio}'. You must extract contact information. You must identify a specific human decision-maker (Name). If the extracted text is just a generic corporate homepage, an advertisement, or lacks a specific human contact, you MUST score it 0. Do not recommend generic info@ or sales@ emails without a named target. Extract core pain point and write a highly conversational, brief, varied, non-salesy 2-sentence WhatsApp/LinkedIn DM. Format JSON strictly with exact keys: score, pain_point, dm, email, phone, linkedin.\n\nText: {text}"
+def final_score_and_dm(text, bio, context_payload, tech_stack):
+    prompt = f"""You are an Elite B2B Profiler. Score this lead 1-10 based on campaign goals and product bio: '{bio}'. 
+
+You MUST extract contact information. You MUST identify a specific human decision-maker (Name). If the extracted text is just a generic corporate homepage, an advertisement, or lacks a specific human contact, you MUST score it 0. Do not recommend generic info@ or sales@ emails without a named target. 
+
+CONTEXTUAL DORKING DATA:
+{context_payload}
+
+DETECTED TECH STACK:
+{', '.join(tech_stack) if tech_stack else 'None extracted'}
+
+Using all of this context, specifically weigh the Hiring Intent and Tech Stack to write a hyper-personalized "Trojan Horse" Icebreaker. Format JSON strictly with exact keys.
+
+Output schema:
+{{
+  "score": <int>,
+  "pain_point": "<str>",
+  "hiring_intent_found": "<str>",
+  "tech_stack_found": [<list>],
+  "icebreaker_angle": "<str>",
+  "whatsapp_draft": "<str>",
+  "email": "<str>",
+  "phone": "<str>",
+  "linkedin": "<str>"
+}}
+
+Text DOM: {text}
+"""
     result = model.generate_content(prompt)
     try:
         data = json.loads(result.text.replace('```json', '').replace('```', ''))
         return {
             "score": data.get("score", 0),
             "pain_point": data.get("pain_point", "Unknown"),
-            "dm": data.get("dm", "Failed to generate DM"),
+            "hiring_intent_found": data.get("hiring_intent_found", "None"),
+            "tech_stack_found": data.get("tech_stack_found", []),
+            "icebreaker_angle": data.get("icebreaker_angle", ""),
+            "dm": data.get("whatsapp_draft", "Failed to generate DM"),
             "email": data.get("email", ""),
             "phone": data.get("phone", ""),
             "linkedin": data.get("linkedin", "")
@@ -211,6 +303,25 @@ def dispatch():
         
         # Step 3, 4, 5
         for url in filtered_urls[:30]:
+            target_domain = extract_root_domain(url)
+            if not target_domain: continue
+            
+            # --- GLOBAL EXCLUSIVITY LOCK ---
+            lock_ref = db.collection("global_lead_locks").document(target_domain)
+            try:
+                lock_doc = lock_ref.get()
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                if lock_doc.exists:
+                    locked_until = lock_doc.to_dict().get("locked_until")
+                    if locked_until and locked_until > now_utc:
+                        print(f"[EXCLUSIVITY] Silently dropping {url}. Account {target_domain} locked.")
+                        continue
+                
+                lock_ref.set({"locked_until": now_utc + datetime.timedelta(days=14)})
+            except Exception as e:
+                print(f"[LOCK FAIL] {e}")
+                pass
+                
             # Deterministic Deduplication Gateway (Atomic locking)
             lead_id_str = f"{tenant_id}_{campaign_id}_{url}"
             lead_id = hashlib.sha256(lead_id_str.encode('utf-8')).hexdigest()
@@ -234,23 +345,32 @@ def dispatch():
             cache_doc = cache_ref.get()
             
             if cache_doc.exists:
-                text = cache_doc.to_dict().get("text", "")
+                c_data = cache_doc.to_dict()
+                text = c_data.get("text", "")
+                tech_stack = c_data.get("tech_stack", [])
             else:
-                text = scrape_url(url)
+                text, tech_stack = scrape_url(url)
                 if text:
                     # Save to cache explicitly enforcing truncation rule before write
-                    cache_ref.set({"url": url, "text": safe_truncate(text)})
+                    cache_ref.set({"url": url, "text": safe_truncate(text), "tech_stack": tech_stack})
             
             if text:
                 db.collection("usage_metrics").document(tenant_id).set({"gemini_calls": firestore.Increment(1)}, merge=True)
                 db.collection("users").document(tenant_id).set({"wallet": {"consumed_credits": firestore.Increment(1)}}, merge=True)
-                evaluation = final_score_and_dm(text, bio)
+                
+                # --- MULTI-VECTOR SERPER DORKING ---
+                context_payload = deep_context_serper_dork(target_domain, tenant_id)
+                
+                evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
                 if evaluation.get("score", 0) >= 7:
                     # Update the atomic stub securely saving pipeline extraction logic
                     doc_ref.update({
                         "score": evaluation.get("score"),
                         "pain_point": evaluation.get("pain_point"),
                         "dm": evaluation.get("dm"),
+                        "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
+                        "tech_stack_found": evaluation.get("tech_stack_found", []),
+                        "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
                         "email": evaluation.get("email", ""),
                         "phone": evaluation.get("phone", ""),
                         "linkedin": evaluation.get("linkedin", ""),
@@ -279,7 +399,7 @@ def dispatch():
                                 "interactive": {
                                     "type": "button",
                                     "body": {
-                                        "text": f"🔥 Hot Lead Found!\nCompany: {url}\nScore: {evaluation.get('score')}/10\nWhy: {evaluation.get('pain_point')}\n\nDrafted DM: {evaluation.get('dm')}"
+                                        "text": f"🔥 Hot Lead Found!\nCompany: {url}\nScore: {evaluation.get('score')}/10\nWhy: {evaluation.get('pain_point')}\nTech Stack: {', '.join(evaluation.get('tech_stack_found', []))}\nHiring: {evaluation.get('hiring_intent_found', '')}\n\nDrafted DM: {evaluation.get('dm')}"
                                     },
                                     "action": {
                                         "buttons": [
@@ -303,6 +423,9 @@ def dispatch():
                         "score": evaluation.get("score"),
                         "pain_point": evaluation.get("pain_point"),
                         "dm": evaluation.get("dm"),
+                        "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
+                        "tech_stack_found": evaluation.get("tech_stack_found", []),
+                        "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
                         "email": evaluation.get("email", ""),
                         "phone": evaluation.get("phone", ""),
                         "linkedin": evaluation.get("linkedin", ""),
