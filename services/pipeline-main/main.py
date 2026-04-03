@@ -168,10 +168,10 @@ def deep_context_serper_dork(domain, tenant_id):
          context_data.append(f"[SOCIAL] {org.get('snippet', '')}")
 
     # Vector C: Hiring Intent
-    hiring_query = f"site:linkedin.com/jobs OR site:indeed.com/cmp \"{domain}\""
+    hiring_query = f"site:naukri.com/job-listings OR site:instahyre.com/job OR site:linkedin.com/jobs OR site:indeed.com/cmp \"{domain}\""
     hiring_data = fetch_serper("https://google.serper.dev/search", {"q": hiring_query, "num": 3})
     
-    hiring_signatures = ["we are hiring", "job description", "apply today", "openings", "careers", "looking for"]
+    hiring_signatures = ["we are hiring", "job description", "apply today", "openings", "careers", "looking for", "lakh", "lpa", "fresher"]
     native_hiring_intent_found = False
     
     for job in hiring_data.get("organic", []):
