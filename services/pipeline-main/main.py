@@ -52,8 +52,7 @@ def search_serper(query, location=None, gl=None):
 def safe_truncate(text: str) -> str:
     """Enforce strict 100KB text truncation to prevent Firestore 1MB document crashes."""
     return text[:100000]
-
-def generate_smart_query(user_keywords, tenant_id):
+def generate_smart_query(user_keywords, tenant_id, bio):
     historical_phrases = []
     try:
         # Require composite index, graceful fallback to Global
@@ -72,6 +71,17 @@ def generate_smart_query(user_keywords, tenant_id):
         print(f"Historical Composite Mining Exception: {e}")
         historical_phrases = []
 
+    # New: Symptom Discovery Funnel
+    symptom_dorks = []
+    if bio:
+        symptom_prompt = f"The user solves this business problem: '{bio}'. Generate 3 highly specific Google Search operators (using OR/AND/site:) to find companies publicly experiencing symptoms of this problem. Return ONLY a JSON list of 3 strings. Example: [\"operator 1\", \"operator 2\", \"operator 3\"]"
+        try:
+            symptom_resp = GenerativeModel("gemini-1.5-flash").generate_content(symptom_prompt)
+            symptom_dorks = json.loads(symptom_resp.text.replace('```json', '').replace('```', '').strip())
+        except Exception as e:
+            print(f"Symptom Extraction Exception: {e}")
+            pass
+
     smart_queries = []
     blacklist = "-wiki -jobs -careers -investors -support -\"login\" -www.zoominfo.com -www.ibm.com -www.amazon.com"
     historical_str = ""
@@ -82,6 +92,10 @@ def generate_smart_query(user_keywords, tenant_id):
     for kw in user_keywords:
         q = f'("{kw}"){historical_str} {blacklist}'
         smart_queries.append(q)
+        
+    for sd in symptom_dorks:
+        smart_queries.append(f'{sd} {blacklist}')
+        
     return smart_queries
 
 def filter_serper_noise(serper_results):
@@ -126,7 +140,7 @@ def extract_root_domain(url):
         return ""
 
 def deep_context_serper_dork(domain, tenant_id):
-    if not domain: return ""
+    if not domain: return "", False
     
     api_key = get_secret(SERPER_API_KEY_NAME).strip()
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
@@ -156,10 +170,17 @@ def deep_context_serper_dork(domain, tenant_id):
     # Vector C: Hiring Intent
     hiring_query = f"site:linkedin.com/jobs OR site:indeed.com/cmp \"{domain}\""
     hiring_data = fetch_serper("https://google.serper.dev/search", {"q": hiring_query, "num": 3})
+    
+    hiring_signatures = ["we are hiring", "job description", "apply today", "openings", "careers", "looking for"]
+    native_hiring_intent_found = False
+    
     for job in hiring_data.get("organic", []):
-         context_data.append(f"[HIRING] {job.get('snippet', '')}")
+         snippet_lower = job.get('snippet', '').lower()
+         context_data.append(f"[HIRING] {snippet_lower}")
+         if any(sig in snippet_lower for sig in hiring_signatures):
+             native_hiring_intent_found = True
          
-    return " | ".join(context_data)[:3000]
+    return " | ".join(context_data)[:3000], native_hiring_intent_found
 
 
 def scrape_url(url):
@@ -276,12 +297,15 @@ def dispatch():
     all_results = []
     
     # Smart BD Query Injector Native Integration
-    smart_keywords = generate_smart_query(keywords, tenant_id)
+    smart_keywords = generate_smart_query(keywords, tenant_id, bio)
     
     # Telemetry Billing Check
     db.collection("usage_metrics").document(tenant_id).set({
         "serper_searches": firestore.Increment(len(smart_keywords))
     }, merge=True)
+    
+    user_doc = db.collection("users").document(tenant_id).get()
+    preferences_weights = user_doc.to_dict().get("preferences_weights", {}) if user_doc.exists else {}
     
     for kw in smart_keywords:
         # Step 1: Augmented Sweep
@@ -322,22 +346,22 @@ def dispatch():
                 print(f"[LOCK FAIL] {e}")
                 pass
                 
-            # Deterministic Deduplication Gateway (Atomic locking)
-            lead_id_str = f"{tenant_id}_{campaign_id}_{url}"
+            # Deterministic Deduplication Gateway (Unified Account Resolution)
+            lead_id_str = f"{tenant_id}_{target_domain}"
             lead_id = hashlib.sha256(lead_id_str.encode('utf-8')).hexdigest()
             doc_ref = db.collection("leads").document(lead_id)
             
             try:
-                # Atomically ensure one task processes this URL cleanly preventing token burn
                 doc_ref.create({
                     "tenant_id": tenant_id,
-                    "campaign_id": campaign_id,
+                    "matched_campaigns": [campaign_id],
                     "url": url,
                     "status": "processing",
                     "createdAt": firestore.SERVER_TIMESTAMP
                 })
             except AlreadyExists:
-                # Silently catch duplicate invocations safely returning execution cycles
+                print(f"[UAR] Resolved cross-campaign duplicate for {target_domain}. Updating array natively.")
+                doc_ref.update({"matched_campaigns": firestore.ArrayUnion([campaign_id])})
                 continue
 
             # Cache check
@@ -359,7 +383,20 @@ def dispatch():
                 db.collection("users").document(tenant_id).set({"wallet": {"consumed_credits": firestore.Increment(1)}}, merge=True)
                 
                 # --- MULTI-VECTOR SERPER DORKING ---
-                context_payload = deep_context_serper_dork(target_domain, tenant_id)
+                context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
+                
+                # RLHF Python Interceptor Check
+                fit_score = 0
+                if native_hiring_intent:
+                    fit_score += preferences_weights.get("hiring_intent", 0)
+                
+                for tech in tech_stack:
+                    fit_score += preferences_weights.get(f"tech_{tech}", 0)
+                    
+                if fit_score <= -3:
+                    print(f"[RLHF] Target {target_domain} logically dropped (Fit Score: {fit_score}). Saves 1 Vertex Token Sequence.")
+                    doc_ref.delete()
+                    continue
                 
                 evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
                 if evaluation.get("score", 0) >= 7:

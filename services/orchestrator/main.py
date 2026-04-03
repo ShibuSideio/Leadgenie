@@ -396,6 +396,30 @@ def trigger_daily_sweep(path):
                         doc_ref.update({"status": data.get("status"), "updatedAt": firestore.SERVER_TIMESTAMP, "interactions": firestore.ArrayUnion([db_interaction])})
                     else:
                         doc_ref.update(data)
+                        
+                    # RLHF Backpropagation logic (Zero-cost ML loop)
+                    status = data.get("status")
+                    if status in ["converted", "ignored"]:
+                        delta = 1 if status == "converted" else -1
+                        user_ref = db.collection("users").document(tenant_id)
+                        pref_updates = {}
+                        
+                        lead_dict = doc_data.to_dict()
+                        tech_stack = lead_dict.get("tech_stack_found", [])
+                        hiring_intent = lead_dict.get("hiring_intent_found", "")
+                        
+                        if hiring_intent and hiring_intent.lower() != "none":
+                            pref_updates["preferences_weights.hiring_intent"] = firestore.Increment(delta)
+                            
+                        for tech in tech_stack:
+                            pref_updates[f"preferences_weights.tech_{tech}"] = firestore.Increment(delta)
+                            
+                        if pref_updates:
+                            try:
+                                user_ref.set(pref_updates, merge=True)
+                            except Exception as e:
+                                print(f"RLHF Backprop Native Error: {e}")
+                                
                     return jsonify({"status": "success"}), 200
                 return jsonify({"error": "Forbidden"}), 403
                 
