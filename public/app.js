@@ -485,7 +485,8 @@ window.saveEditedCampaign = async function() {
             bio, 
             keywords: keys,
             gl: glInput ? glInput.value : '',
-            location: locationInput ? locationInput.value : ''
+            location: locationInput ? locationInput.value : '',
+            status: 'active'
         };
         const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', payload);
         if(success) {

@@ -42,6 +42,7 @@ def handle_exception(e):
 
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 # Initialize Admin SDK once natively for Thin Client API Authorization
 if not firebase_admin._apps:
@@ -147,12 +148,12 @@ def check_quota(tenant_id):
         if now > beta_expiry:
             return False, 401, "Beta access has expired."
 
-        wallet = data.get("wallet", {})
-        if wallet:
-            allocated = int(wallet.get("allocated_credits", 0))
-            consumed = int(wallet.get("consumed_credits", 0))
-            if (allocated - consumed) <= 0:
-                return False, 402, "Beta quota exhausted. Contact admin to reload."
+        credits = data.get("credits", 0)
+        wallet_balance = data.get("wallet_balance", 0)
+        
+        if credits <= 0 and wallet_balance <= 0:
+            return False, 402, "Beta quota exhausted. Contact admin to reload."
+            
         return True, 200, "OK"
     return False, 401, "Unknown identity."
 
@@ -470,7 +471,7 @@ def trigger_daily_sweep(path):
     if manual_camp_id:
         campaigns = [db.collection("campaigns").document(manual_camp_id)]
     else:
-        campaigns = list(db.collection("campaigns").where(field_path="status", op_string="==", value="active").limit(100).stream())
+        campaigns = list(db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(100).stream())
     
     queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
     
