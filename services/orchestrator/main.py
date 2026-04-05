@@ -261,7 +261,46 @@ def trigger_daily_sweep(path):
             if user_role != "super_admin":
                 return jsonify({"error": "Forbidden L0 Access"}), 403
 
-            if request.path == "/api/l0/trends" and request.method == "GET":
+            if request.path == "/api/l0/telemetry" and request.method == "GET":
+                # Macro Aggregation
+                macro_totals = {}
+                for st in ["new", "contacted", "ignored", "failed", "processing", "completed"]:
+                    q = db.collection("leads").where(field_path="status", op_string="==", value=st)
+                    res = q.count().get()
+                    macro_totals[st] = res[0][0].value
+                
+                total_leads = sum(macro_totals.values())
+                macro_totals["total_leads"] = total_leads
+                
+                # Micro Aggregation
+                tenants = []
+                users = db.collection("users").stream()
+                for user in users:
+                    u_data = user.to_dict()
+                    t_id = u_data.get("tenant_id", user.id)
+                    q2 = db.collection("leads").where(field_path="tenant_id", op_string="==", value=t_id)
+                    res2 = q2.count().get()
+                    leads_gen = res2[0][0].value
+                    
+                    wallet = u_data.get("wallet", {})
+                    wallet_balance = wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0)
+                    
+                    tenants.append({
+                        "email": u_data.get("email", "Unknown"),
+                        "tenant_id": t_id,
+                        "wallet_balance": wallet_balance,
+                        "total_leads_generated": leads_gen
+                    })
+                    
+                return jsonify({
+                    "status": "success",
+                    "data": {
+                        "macro": macro_totals,
+                        "tenants": sorted(tenants, key=lambda x: x.get("total_leads_generated", 0), reverse=True)
+                    }
+                }), 200
+
+            elif request.path == "/api/l0/trends" and request.method == "GET":
                 campaigns = db.collection("campaigns").stream()
                 
                 keyword_map = {}

@@ -151,22 +151,35 @@
             <section id="view-l0-admin" class="glass-panel main-feed hidden">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <h2>L0 Enterprise Governance</h2>
-                    <button class="primary-btn" onclick="fetchL0Data()" style="background:#dc2626;">Refresh Telemetry</button>
+                    <button class="primary-btn" onclick="fetchL0Telemetry()" style="background:#dc2626;">Refresh Telemetry</button>
                 </div>
+                
+                <div style="display:flex; gap:16px; margin-top: 16px;">
+                    <div class="stats-box" style="flex:1; background: #ffffff;">
+                        <h4 style="color:var(--text-muted); font-size:0.8rem;">Total Platform Leads</h4>
+                        <div id="l0-stat-total-leads" style="font-size:1.5rem; font-weight:600; color:var(--text-main);">0</div>
+                    </div>
+                    <div class="stats-box" style="flex:1; background: #ffffff;">
+                        <h4 style="color:var(--text-muted); font-size:0.8rem;">Global Actionable Pulse</h4>
+                        <div id="l0-stat-conversion" style="font-size:1.5rem; font-weight:600; color:var(--text-main);">0%</div>
+                    </div>
+                    <div class="stats-box" style="flex:1; background: #ffffff;">
+                        <h4 style="color:var(--text-muted); font-size:0.8rem;">Active Tenants</h4>
+                        <div id="l0-stat-tenants" style="font-size:1.5rem; font-weight:600; color:var(--text-main);">0</div>
+                    </div>
+                </div>
+
                 <div class="stats-box mt-3" style="background: #ffffff; padding:0; overflow:hidden;">
                     <table style="width:100%; text-align:left; border-collapse: collapse; font-size: 0.9rem;">
                         <thead style="background: rgba(220, 38, 38, 0.05); border-bottom: 1px solid var(--glass-border);">
                             <tr>
-                                <th style="padding: 12px;">Identity (Email / UID)</th>
-                                <th style="padding: 12px;">Role</th>
-                                <th style="padding: 12px;">Status</th>
-                                <th style="padding: 12px;">Wallet</th>
-                                <th style="padding: 12px;">Compute Load</th>
-                                <th style="padding: 12px; text-align:right;">Actions</th>
+                                <th style="padding: 12px; cursor:pointer;" onclick="sortL0Table('email')">User Email ↕</th>
+                                <th style="padding: 12px; cursor:pointer;" onclick="sortL0Table('wallet')">Available Credits ↕</th>
+                                <th style="padding: 12px; text-align:right; cursor:pointer;" onclick="sortL0Table('leads')">Total Leads Generated ↕</th>
                             </tr>
                         </thead>
-                        <tbody id="l0-tenant-table">
-                            <tr><td colspan="6" style="padding:16px; text-align:center;">Awaiting L0 Telemetry Arrays...</td></tr>
+                        <tbody id="l0-telemetry-table">
+                            <tr><td colspan="3" style="padding:16px; text-align:center;">Awaiting L0 Telemetry Arrays...</td></tr>
                         </tbody>
                     </table>
                 </div>
