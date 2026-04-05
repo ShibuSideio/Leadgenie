@@ -752,6 +752,9 @@ window.fetchL0Telemetry = async function() {
             document.getElementById('l0-stat-tenants').innerText = window.l0TelemetryCache.tenants.length;
             
             renderL0Table();
+            
+            // Trigger companion table refresh silently
+            if (typeof fetchMacroTrends === 'function') fetchMacroTrends();
         } else {
             tableBody.innerHTML = '<tr><td colspan="3" style="padding:16px; text-align:center; color: #ef4444;">Access Denied. L0 Privilege Missing.</td></tr>';
         }
