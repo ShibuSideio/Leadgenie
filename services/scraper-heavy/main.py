@@ -10,7 +10,11 @@ async def fetch_page_content(url):
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
-            await page.goto(url, timeout=30000, wait_until="networkidle")
+            # Block heavy non-text resources to prevent OOM kills
+            await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_())
+            
+            # Enforce strict 15s timeout
+            await page.goto(url, timeout=15000, wait_until="domcontentloaded")
             
             # Remove scripts, styles for clean text extraction
             await page.evaluate("""() => {
