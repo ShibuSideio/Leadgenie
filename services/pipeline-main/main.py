@@ -85,7 +85,7 @@ def generate_smart_query(user_keywords, tenant_id, bio):
     # New: Symptom Discovery Funnel
     symptom_dorks = []
     if bio:
-        symptom_prompt = f"The user solves this business problem: '{bio}'. Generate 3 highly specific Google Search operators (using OR/AND/site:) to find companies publicly experiencing symptoms of this problem. Return ONLY a JSON list of 3 strings. Example: [\"operator 1\", \"operator 2\", \"operator 3\"]"
+        symptom_prompt = f"The user solves this business problem: '{bio}'. Generate 3 highly specific Google Search operators to find targets PUBLICLY EXPERIENCING this problem. \nRule 1: You MUST include at least one query targeting social/professional networks using 'site:linkedin.com', 'site:facebook.com', or 'site:reddit.com'. \nRule 2: You MUST append negative keywords to exclude retail/informational sites (e.g., '-shop -cart -amazon -wiki'). \nReturn ONLY a JSON list of 3 strings."
         try:
             symptom_dorks = call_gemini_2_5(symptom_prompt, expect_json=True)
         except Exception as e:
@@ -128,7 +128,7 @@ def pre_filter_gemini(snippets, bio, location_target):
     if not snippets:
         return []
     
-    prompt = f"Review these {len(snippets)} search snippets. Based on the user's product bio: '{bio}', discard low-signal companies. \n\nCRITICAL: Evaluate the business location. If the target location is '{location_target}', and this website explicitly serves a different geographic region (e.g., a Dubai business for a Kochi search), you MUST reject the URL immediately. Return a failed state.\n\nYOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads. Do NOT output markdown. Do NOT output bullet points. Every line must start precisely with 'http'.\n\nSnippets: {json.dumps(snippets)}"
+    prompt = f"CRITICAL INTENT CHECK: Read the user's bio: '{bio}'. Is the website EXPERIENCING the problem the user solves, or are they SELLING a solution to it? You MUST reject any URL that is an SEO blog, a competitor, or a direct-to-consumer (D2C) retail catalog. Only approve targets that match the user's intended value chain.\n\nCRITICAL: Evaluate the business location. If the target location is '{location_target}', and this website explicitly serves a different geographic region (e.g., a Dubai business for a Kochi search), you MUST reject the URL immediately. Return a failed state.\n\nYOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads. Do NOT output markdown. Do NOT output bullet points. Every line must start precisely with 'http'.\n\nSnippets: {json.dumps(snippets)}"
     response_text = call_gemini_2_5(prompt, expect_json=False)
     
     urls = []
@@ -235,10 +235,13 @@ def scrape_url(url):
     except Exception as e:
         print(f"Fallback to heavy scraper for {url} due to {str(e)}")
         # Call heavy scraper
-        heavy_resp = httpx.post(SCRAPER_HEAVY_URL, json={"url": url}, timeout=45)
-        if heavy_resp.status_code == 200:
-            data = heavy_resp.json()
-            return safe_truncate(data.get("text", "")), ["Fallback Scraper Used"], data.get("emails", []), data.get("phones", [])
+        try:
+            heavy_resp = httpx.post(SCRAPER_HEAVY_URL, json={"url": url}, timeout=45)
+            if heavy_resp.status_code == 200:
+                data = heavy_resp.json()
+                return safe_truncate(data.get("text", "")), ["Fallback Scraper Used"], data.get("emails", []), data.get("phones", [])
+        except Exception as he:
+            print(f"Heavy Scraper fatal crash for {url}: {he}")
         return "", [], [], []
 
 def final_score_and_dm(text, bio, context_payload, tech_stack):
@@ -386,121 +389,126 @@ def dispatch():
                 doc_ref.update({"matched_campaigns": firestore.ArrayUnion([campaign_id])})
                 continue
 
-            # Cache check
-            cache_ref = db.collection("scraped_cache").document(url.replace('/','_'))
-            cache_doc = cache_ref.get()
+            try:
+                # Cache check
+                cache_ref = db.collection("scraped_cache").document(url.replace('/','_'))
+                cache_doc = cache_ref.get()
             
-            if cache_doc.exists:
-                c_data = cache_doc.to_dict()
-                text = c_data.get("text", "")
-                tech_stack = c_data.get("tech_stack", [])
-                emails = c_data.get("emails", [])
-                phones = c_data.get("phones", [])
-            else:
-                text, tech_stack, emails, phones = scrape_url(url)
+                if cache_doc.exists:
+                    c_data = cache_doc.to_dict()
+                    text = c_data.get("text", "")
+                    tech_stack = c_data.get("tech_stack", [])
+                    emails = c_data.get("emails", [])
+                    phones = c_data.get("phones", [])
+                else:
+                    text, tech_stack, emails, phones = scrape_url(url)
+                    if text:
+                        # Save to cache explicitly enforcing truncation rule before write
+                        cache_ref.set({"url": url, "text": safe_truncate(text), "tech_stack": tech_stack, "emails": emails, "phones": phones})
+            
                 if text:
-                    # Save to cache explicitly enforcing truncation rule before write
-                    cache_ref.set({"url": url, "text": safe_truncate(text), "tech_stack": tech_stack, "emails": emails, "phones": phones})
-            
-            if text:
-                db.collection("usage_metrics").document(tenant_id).set({"gemini_calls": firestore.Increment(1)}, merge=True)
-                db.collection("users").document(tenant_id).set({"wallet": {"consumed_credits": firestore.Increment(1)}}, merge=True)
+                    db.collection("usage_metrics").document(tenant_id).set({"gemini_calls": firestore.Increment(1)}, merge=True)
+                    db.collection("users").document(tenant_id).set({"wallet": {"consumed_credits": firestore.Increment(1)}}, merge=True)
                 
-                # --- MULTI-VECTOR SERPER DORKING ---
-                context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
+                    # --- MULTI-VECTOR SERPER DORKING ---
+                    context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
                 
-                # RLHF Python Interceptor Check
-                fit_score = 0
-                if native_hiring_intent:
-                    fit_score += preferences_weights.get("hiring_intent", 0)
+                    # RLHF Python Interceptor Check
+                    fit_score = 0
+                    if native_hiring_intent:
+                        fit_score += preferences_weights.get("hiring_intent", 0)
                 
-                for tech in tech_stack:
-                    fit_score += preferences_weights.get(f"tech_{tech}", 0)
+                    for tech in tech_stack:
+                        fit_score += preferences_weights.get(f"tech_{tech}", 0)
                     
-                if fit_score <= -3:
-                    print(f"[RLHF] Target {target_domain} logically dropped (Fit Score: {fit_score}). Saves 1 Vertex Token Sequence.")
-                    doc_ref.delete()
-                    continue
+                    if fit_score <= -3:
+                        print(f"[RLHF] Target {target_domain} logically dropped (Fit Score: {fit_score}). Saves 1 Vertex Token Sequence.")
+                        doc_ref.delete()
+                        continue
                 
-                try:
-                    evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
-                except Exception as e:
-                    db.collection("leads").document(lead_id).update({"status": "failed", "error": str(e)})
-                    continue
+                    try:
+                        evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
+                    except Exception as e:
+                        db.collection("leads").document(lead_id).update({"status": "failed", "error": str(e)})
+                        continue
                     
-                if evaluation.get("score", 0) >= 7:
-                    # Update the atomic stub securely saving pipeline extraction logic
-                    doc_ref.update({
-                        "score": evaluation.get("score"),
-                        "pain_point": evaluation.get("pain_point"),
-                        "dm": evaluation.get("dm"),
-                        "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
-                        "tech_stack_found": evaluation.get("tech_stack_found", []),
-                        "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
-                        "email": emails[0] if emails else evaluation.get("email", ""),
-                        "phone": phones[0] if phones else evaluation.get("phone", ""),
-                        "linkedin": evaluation.get("linkedin", ""),
-                        "status": "new"
-                    })
+                    if evaluation.get("score", 0) >= 7:
+                        # Update the atomic stub securely saving pipeline extraction logic
+                        doc_ref.update({
+                            "score": evaluation.get("score"),
+                            "pain_point": evaluation.get("pain_point"),
+                            "dm": evaluation.get("dm"),
+                            "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
+                            "tech_stack_found": evaluation.get("tech_stack_found", []),
+                            "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
+                            "email": emails[0] if emails else evaluation.get("email", ""),
+                            "phone": phones[0] if phones else evaluation.get("phone", ""),
+                            "linkedin": evaluation.get("linkedin", ""),
+                            "status": "new"
+                        })
                     
-                    # Meta WhatsApp Business API Trigger (V6)
-                    if evaluation.get("score", 0) >= 8:
-                        tenant_doc = db.collection("users").document(tenant_id).get().to_dict() or {}
-                        wa_token_encrypted = tenant_doc.get("wa_token")
-                        wa_phone_id = tenant_doc.get("wa_phone_id")
-                        admin_phone = tenant_doc.get("admin_phone")
+                        # Meta WhatsApp Business API Trigger (V6)
+                        if evaluation.get("score", 0) >= 8:
+                            tenant_doc = db.collection("users").document(tenant_id).get().to_dict() or {}
+                            wa_token_encrypted = tenant_doc.get("wa_token")
+                            wa_phone_id = tenant_doc.get("wa_phone_id")
+                            admin_phone = tenant_doc.get("admin_phone")
                         
-                        wa_token = None
-                        if wa_token_encrypted:
-                            try:
-                                wa_token = cipher_suite.decrypt(wa_token_encrypted.encode()).decode()
-                            except:
-                                wa_token = wa_token_encrypted # Fallback if not encrypted legacy
+                            wa_token = None
+                            if wa_token_encrypted:
+                                try:
+                                    wa_token = cipher_suite.decrypt(wa_token_encrypted.encode()).decode()
+                                except:
+                                    wa_token = wa_token_encrypted # Fallback if not encrypted legacy
                                 
-                        if wa_token and wa_phone_id and admin_phone:
-                            wa_payload = {
-                                "messaging_product": "whatsapp",
-                                "to": admin_phone,
-                                "type": "interactive",
-                                "interactive": {
-                                    "type": "button",
-                                    "body": {
-                                        "text": f"🔥 Hot Lead Found!\nCompany: {url}\nScore: {evaluation.get('score')}/10\nWhy: {evaluation.get('pain_point')}\nTech Stack: {', '.join(evaluation.get('tech_stack_found', []))}\nHiring: {evaluation.get('hiring_intent_found', '')}\n\nDrafted DM: {evaluation.get('dm')}"
-                                    },
-                                    "action": {
-                                        "buttons": [
-                                            {"type": "reply", "reply": {"id": f"approve_{lead_id}", "title": "✅ Approve & Send"}},
-                                            {"type": "reply", "reply": {"id": f"ignore_{lead_id}", "title": "🚫 Ignore"}}
-                                        ]
+                            if wa_token and wa_phone_id and admin_phone:
+                                wa_payload = {
+                                    "messaging_product": "whatsapp",
+                                    "to": admin_phone,
+                                    "type": "interactive",
+                                    "interactive": {
+                                        "type": "button",
+                                        "body": {
+                                            "text": f"🔥 Hot Lead Found!\nCompany: {url}\nScore: {evaluation.get('score')}/10\nWhy: {evaluation.get('pain_point')}\nTech Stack: {', '.join(evaluation.get('tech_stack_found', []))}\nHiring: {evaluation.get('hiring_intent_found', '')}\n\nDrafted DM: {evaluation.get('dm')}"
+                                        },
+                                        "action": {
+                                            "buttons": [
+                                                {"type": "reply", "reply": {"id": f"approve_{lead_id}", "title": "✅ Approve & Send"}},
+                                                {"type": "reply", "reply": {"id": f"ignore_{lead_id}", "title": "🚫 Ignore"}}
+                                            ]
+                                        }
                                     }
                                 }
-                            }
-                            try:
-                                wa_headers = {"Authorization": f"Bearer {wa_token}", "Content-Type": "application/json"}
-                                httpx.post(f"https://graph.facebook.com/v18.0/{wa_phone_id}/messages", json=wa_payload, headers=wa_headers, timeout=5)
-                            except Exception as wa_e:
-                                print(f"WhatsApp Meta POST failed: {wa_e}")
+                                try:
+                                    wa_headers = {"Authorization": f"Bearer {wa_token}", "Content-Type": "application/json"}
+                                    httpx.post(f"https://graph.facebook.com/v18.0/{wa_phone_id}/messages", json=wa_payload, headers=wa_headers, timeout=5)
+                                except Exception as wa_e:
+                                    print(f"WhatsApp Meta POST failed: {wa_e}")
                     
-                    # Store purely for JSON endpoint tracking response formatting locally
-                    lead_doc = {
-                        "tenant_id": tenant_id,
-                        "campaign_id": campaign_id,
-                        "url": url,
-                        "score": evaluation.get("score"),
-                        "pain_point": evaluation.get("pain_point"),
-                        "dm": evaluation.get("dm"),
-                        "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
-                        "tech_stack_found": evaluation.get("tech_stack_found", []),
-                        "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
-                        "email": evaluation.get("email", ""),
-                        "phone": evaluation.get("phone", ""),
-                        "linkedin": evaluation.get("linkedin", ""),
-                        "status": "new"
-                    }
-                    all_results.append(lead_doc)
-                else:
-                    # Delete the atomic document so we don't accidentally ingest phantom rows
-                    doc_ref.delete()
+                        # Store purely for JSON endpoint tracking response formatting locally
+                        lead_doc = {
+                            "tenant_id": tenant_id,
+                            "campaign_id": campaign_id,
+                            "url": url,
+                            "score": evaluation.get("score"),
+                            "pain_point": evaluation.get("pain_point"),
+                            "dm": evaluation.get("dm"),
+                            "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
+                            "tech_stack_found": evaluation.get("tech_stack_found", []),
+                            "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
+                            "email": evaluation.get("email", ""),
+                            "phone": evaluation.get("phone", ""),
+                            "linkedin": evaluation.get("linkedin", ""),
+                            "status": "new"
+                        }
+                        all_results.append(lead_doc)
+                    else:
+                        # Delete the atomic document so we don't accidentally ingest phantom rows
+                        doc_ref.delete()
+            except Exception as loop_e:
+                print(f'Pipeline execution crashed: {loop_e}')
+                db.collection('leads').document(lead_id).update({'status': 'failed', 'error': 'Pipeline execution crashed'})
+                continue
                     
     return jsonify({"processed_leads": len(all_results)}), 200
 

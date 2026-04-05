@@ -285,12 +285,13 @@ def trigger_daily_sweep(path):
                     wallet = u_data.get("wallet", {})
                     wallet_balance = wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0)
                     
-                    tenants.append({
-                        "email": u_data.get("email", "Unknown"),
+                    tenant_info = u_data.copy()
+                    tenant_info.update({
                         "tenant_id": t_id,
                         "wallet_balance": wallet_balance,
                         "total_leads_generated": leads_gen
                     })
+                    tenants.append(tenant_info)
                     
                 return jsonify({
                     "status": "success",

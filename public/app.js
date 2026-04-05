@@ -760,14 +760,41 @@ window.renderL0Table = function() {
     
     let html = '';
     tenants.forEach(t => {
+        const isSuspended = t.is_active === false; 
+        const isPending = t.approval_status === 'pending';
+        const statusColor = isSuspended ? '#ef4444' : (isPending ? '#f59e0b' : '#25D366');
+        const statusBadge = `<strong style="color:${statusColor}">${isSuspended ? 'SUSPENDED' : (isPending ? 'PENDING' : 'ACTIVE')}</strong>`;
+        
+        let actionHTML = '';
+        if (isPending) {
+            actionHTML = `
+                <input type="number" id="approve-days-${t.tenant_id}" value="180" style="width: 45px; padding: 4px; font-size: 0.75rem; border: 1px solid #ccc; border-radius: 4px;" title="Days">
+                <input type="number" id="approve-amt-${t.tenant_id}" value="20000" style="width: 60px; padding: 4px; font-size: 0.75rem; border: 1px solid #ccc; border-radius: 4px;" title="Credits">
+                <button class="primary-btn" style="padding: 4px 8px; font-size:0.75rem;" onclick="approveCredentials('${t.tenant_id}')">APPROVE</button>
+            `;
+        } else {
+            actionHTML = `
+                <input type="number" id="mint-${t.tenant_id}" placeholder="Amt" style="width: 50px; padding: 4px; font-size: 0.75rem; border: 1px solid #ccc; border-radius: 4px;">
+                <button class="secondary-btn" style="padding: 4px 8px; font-size:0.75rem; color:#4F46E5; border-color:#4F46E5" onclick="mintCredentials('${t.tenant_id}')">MINT</button>
+                <button class="secondary-btn" style="padding: 4px 8px; font-size:0.75rem; color:${statusColor}; border-color:${statusColor}" onclick="toggleTenantSuspend('${t.tenant_id}', ${!isSuspended})">
+                    ${isSuspended ? 'UNSUSPEND' : 'SUSPEND'}
+                </button>
+            `;
+        }
+        
         html += `
         <tr style="border-bottom: 1px solid var(--glass-border);">
-            <td style="padding: 12px; font-weight: 500;">${t.email}</td>
+            <td style="padding: 12px; font-weight: 500;">
+                ${t.email || 'No email saved'}<br>
+                <small style="font-family:monospace; color:var(--text-muted);">${(t.tenant_id||'Unknown').substring(0,8)}...</small>
+            </td>
+            <td style="padding: 12px;">${statusBadge}</td>
             <td style="padding: 12px; font-family:monospace;">${(t.wallet_balance || 0).toLocaleString()} CR</td>
             <td style="padding: 12px; text-align:right;">${(t.total_leads_generated || 0).toLocaleString()}</td>
+            <td style="padding: 12px; text-align:right;">${actionHTML}</td>
         </tr>`;
     });
-    tableBody.innerHTML = html || '<tr><td colspan="3" style="padding:16px; text-align:center;">No tenants found.</td></tr>';
+    tableBody.innerHTML = html || '<tr><td colspan="5" style="padding:16px; text-align:center;">No tenants found.</td></tr>';
 }
 
 let rawMacroTrends = null;
