@@ -8,12 +8,14 @@ app = Flask(__name__)
 async def fetch_page_content(url):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        # ignore_https_errors bypasses weak SME SSL cert domains; bypass_csp prevents local scripts locking up headless eval
+        context = await browser.new_context(ignore_https_errors=True, bypass_csp=True)
+        page = await context.new_page()
         try:
             # Block heavy non-text resources to prevent OOM kills
             await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_())
             
-            # Enforce strict 15s timeout
+            # Enforce strict 15s page load timeout
             await page.goto(url, timeout=15000, wait_until="domcontentloaded")
             
             # Remove scripts, styles for clean text extraction
@@ -53,7 +55,15 @@ def scrape():
         
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    text, contacts = loop.run_until_complete(fetch_page_content(url))
+    
+    try:
+        # Wrap the entire Playwright lifecycle in an inescapable kill switch (20s)
+        text, contacts = loop.run_until_complete(asyncio.wait_for(fetch_page_content(url), timeout=20.0))
+    except Exception as e:
+         print(f"Playwright hard kill-switch activated on {url} due to total process freeze: {e}")
+         text, contacts = "", {}
+    finally:
+         loop.close()
     
     # Return up to 100k chars to ensure we don't blow up memory/firebase
     return jsonify({"text": text[:100000], "emails": contacts.get("emails", []), "phones": contacts.get("phones", [])}), 200
