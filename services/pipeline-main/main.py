@@ -290,18 +290,24 @@ Output schema:
 
 Text DOM: {text}
 """
-    data = call_gemini_2_5(prompt, expect_json=True)
-    return {
-        "score": data.get("score", 0),
-        "pain_point": data.get("pain_point", "Unknown"),
-        "hiring_intent_found": data.get("hiring_intent_found", "None"),
-        "tech_stack_found": data.get("tech_stack_found", []),
-        "icebreaker_angle": data.get("icebreaker_angle", ""),
-        "dm": data.get("whatsapp_draft", "Failed to generate DM"),
-        "email": data.get("email", ""),
-        "phone": data.get("phone", ""),
-        "linkedin": data.get("linkedin", "")
-    }
+    try:
+        data = call_gemini_2_5(prompt, expect_json=True)
+        if not isinstance(data, dict):
+            raise ValueError("Parsed JSON is not a dictionary.")
+            
+        return {
+            "score": data.get("score", 0),
+            "pain_point": data.get("pain_point", "Unknown"),
+            "hiring_intent_found": data.get("hiring_intent_found", "None"),
+            "tech_stack_found": data.get("tech_stack_found", []),
+            "icebreaker_angle": data.get("icebreaker_angle", ""),
+            "dm": data.get("whatsapp_draft", "Failed to generate DM"),
+            "email": data.get("email", ""),
+            "phone": data.get("phone", ""),
+            "linkedin": data.get("linkedin", "")
+        }
+    except Exception as e:
+        raise ValueError("LLM Parsing Failure")
 
 @app.route("/dispatch", methods=["POST"])
 def dispatch():
@@ -427,6 +433,15 @@ def dispatch():
                     tech_stack = c_data.get("tech_stack", [])
                     emails = c_data.get("emails", [])
                     phones = c_data.get("phones", [])
+                elif target_domain in SOCIAL_DOMAINS:
+                    snippet_text = ""
+                    for ur in unique_results:
+                        if ur.get("link") == url:
+                            snippet_text = ur.get("snippet", "")
+                            break
+                    text = snippet_text if snippet_text else "Social profile snippet empty."
+                    tech_stack, emails, phones = ["Social Platform Bypass"], [], []
+                    print(f"[SOCIAL SHORT-CIRCUIT] Extracted snippet for {url}")
                 else:
                     try:
                         text, tech_stack, emails, phones = scrape_url(url)
