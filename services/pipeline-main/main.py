@@ -76,7 +76,7 @@ def generate_smart_query(user_keywords, tenant_id, bio):
     if bio:
         symptom_prompt = f"The user solves this business problem: '{bio}'. Generate 3 highly specific Google Search operators (using OR/AND/site:) to find companies publicly experiencing symptoms of this problem. Return ONLY a JSON list of 3 strings. Example: [\"operator 1\", \"operator 2\", \"operator 3\"]"
         try:
-            symptom_resp = GenerativeModel("gemini-1.5-flash").generate_content(symptom_prompt)
+            symptom_resp = GenerativeModel("gemini-2.5-flash").generate_content(symptom_prompt)
             symptom_dorks = json.loads(symptom_resp.text.replace('```json', '').replace('```', '').strip())
         except Exception as e:
             print(f"Symptom Extraction Exception: {e}")
@@ -258,7 +258,7 @@ Text DOM: {text}
         result = model.generate_content(prompt)
     except Exception as e:
         print(f"Vertex Crash natively caught: {e}")
-        return {"score": 0, "status": "failed", "pain_point": "Unknown", "dm": "Failed to parse generation", "email": "", "phone": "", "linkedin": ""}
+        return {"score": 0, "status": "failed", "error": "Vertex AI 2.5 Error", "pain_point": "Unknown", "dm": "Failed to parse generation", "email": "", "phone": "", "linkedin": ""}
 
     try:
         data = json.loads(result.text.replace('```json', '').replace('```', ''))
@@ -411,7 +411,7 @@ def dispatch():
                 
                 evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
                 if evaluation.get("status") == "failed":
-                    doc_ref.update({"status": "failed"})
+                    doc_ref.update({"status": "failed", "error": evaluation.get("error", "Vertex AI 2.5 Error")})
                     continue
                     
                 if evaluation.get("score", 0) >= 7:
