@@ -241,6 +241,8 @@ def final_score_and_dm(text, bio, context_payload, tech_stack):
 
 You MUST extract contact information. You MUST identify a specific human decision-maker (Name). If the extracted text is just a generic corporate homepage, an advertisement, or lacks a specific human contact, you MUST score it 0. Do not recommend generic info@ or sales@ emails without a named target. 
 
+For the "hiring_intent_found" field: Return ONLY the string 'Yes' or 'No'. Do not include any explanation, context, or reasoning. If unknown, return 'No'.
+
 CONTEXTUAL DORKING DATA:
 {context_payload}
 
