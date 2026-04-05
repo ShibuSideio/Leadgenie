@@ -134,12 +134,15 @@ def check_quota(tenant_id):
     user_doc = db.collection("users").document(tenant_id).get()
     if user_doc.exists:
         data = user_doc.to_dict()
-        print(f"[DEBUG-QUOTA] Tenant {tenant_id} Raw Wallet/Credits: approval_status={data.get('approval_status')}, beta_expiry={data.get('beta_expiry')}, credits={data.get('credits')}, wallet_balance={data.get('wallet_balance')}, nested_wallet={data.get('wallet')}")
+        
+        if data.get("role") == "super_admin":
+            return True, 200, "OK"
         
         if data.get("approval_status") != "approved":
             return False, 403, "Your application is under review. Please wait for L0 approval."
             
-        credits = data.get("walletBalance") or data.get("wallet_balance") or data.get("credits") or 0
+        wallet = data.get("wallet", {})
+        credits = wallet.get("allocated_credits", 0)
         
         if credits <= 0:
             return False, 402, "Beta quota exhausted. Contact admin to reload."
@@ -486,17 +489,23 @@ def trigger_daily_sweep(path):
         
         audit_trail.append(f"Evaluating Campaign ID: {campaign_id} for Tenant: {tenant_id}")
         
-        # Safe explicit secondary fetch for telemetry loop as requested natively
         u_doc = db.collection("users").document(tenant_id).get()
-        credits_value = u_doc.to_dict().get("credits", 0) if u_doc.exists else "Unknown"
-        audit_trail.append(f"Fetched User Doc for Tenant. Credits field value: {credits_value}")
+        user_data = u_doc.to_dict() if u_doc.exists else {}
         
-        is_valid, _, err_msg = check_quota(tenant_id)
-        if not is_valid:
-            audit_trail.append(f"🚫 SKIPPED Campaign {campaign_id}. Reason: {err_msg}")
-            continue
-        
-        audit_trail.append(f"✅ QUEUED Campaign {campaign_id}.")
+        role = user_data.get("role")
+        if role == "super_admin":
+            audit_trail.append(f"✅ QUEUED Campaign {campaign_id}. Reason: God Mode (Super Admin bypass).")
+        else:
+            wallet = user_data.get("wallet", {})
+            credits_val = wallet.get("allocated_credits", 0)
+            audit_trail.append(f"Fetched nested wallet for Tenant. Allocated credits constraint: {credits_val}")
+            
+            is_valid, _, err_msg = check_quota(tenant_id)
+            if not is_valid:
+                audit_trail.append(f"🚫 SKIPPED Campaign {campaign_id}. Reason: {err_msg}")
+                continue
+            
+            audit_trail.append(f"✅ QUEUED Campaign {campaign_id}.")
         
         task = {
             "http_request": {
