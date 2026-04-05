@@ -371,15 +371,26 @@ def dispatch():
             target_domain = extract_root_domain(url)
             if not target_domain: continue
             
+            SOCIAL_DOMAINS = ["linkedin.com", "facebook.com", "reddit.com", "instagram.com", "x.com", "twitter.com", "team-bhp.com", "quora.com", "youtube.com"]
+            
+            if target_domain in SOCIAL_DOMAINS:
+                parsed_url = urlparse(url)
+                exact_path = f"{parsed_url.netloc}{parsed_url.path}".lower().replace('www.', '')
+                lock_entity = hashlib.sha256(exact_path.encode('utf-8')).hexdigest()
+                dedupe_target = exact_path
+            else:
+                lock_entity = target_domain
+                dedupe_target = target_domain
+            
             # --- GLOBAL EXCLUSIVITY LOCK ---
-            lock_ref = db.collection("global_lead_locks").document(target_domain)
+            lock_ref = db.collection("global_lead_locks").document(lock_entity)
             try:
                 lock_doc = lock_ref.get()
                 now_utc = datetime.datetime.now(datetime.timezone.utc)
                 if lock_doc.exists:
                     locked_until = lock_doc.to_dict().get("locked_until")
                     if locked_until and locked_until > now_utc:
-                        print(f"[EXCLUSIVITY] Silently dropping {url}. Account {target_domain} locked.")
+                        print(f"[EXCLUSIVITY] Silently dropping {url}. Entity {lock_entity} locked.")
                         continue
                 
                 lock_ref.set({"locked_until": now_utc + datetime.timedelta(days=14)})
@@ -388,7 +399,7 @@ def dispatch():
                 pass
                 
             # Deterministic Deduplication Gateway (Unified Account Resolution)
-            lead_id_str = f"{tenant_id}_{target_domain}"
+            lead_id_str = f"{tenant_id}_{dedupe_target}"
             lead_id = hashlib.sha256(lead_id_str.encode('utf-8')).hexdigest()
             doc_ref = db.collection("leads").document(lead_id)
             
