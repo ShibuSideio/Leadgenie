@@ -3,6 +3,7 @@ import json
 import httpx
 import hashlib
 import datetime
+import concurrent.futures
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from cryptography.fernet import Fernet
@@ -36,7 +37,16 @@ def call_gemini_2_5(prompt: str, expect_json: bool = True):
     model = GenerativeModel("gemini-2.5-flash")
     config = GenerationConfig(response_mime_type="application/json") if expect_json else None
     
-    response = model.generate_content(prompt, generation_config=config)
+    def _invoke_model():
+        return model.generate_content(prompt, generation_config=config)
+        
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_invoke_model)
+            response = future.result(timeout=45.0)
+    except concurrent.futures.TimeoutError:
+        print("Vertex AI execution timed out / quota hang.")
+        raise TimeoutError("Vertex AI timeout")
     
     if expect_json:
         # Native JSON mode eliminates the need for regex/markdown stripping
@@ -436,6 +446,9 @@ def dispatch():
                 
                     try:
                         evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
+                    except TimeoutError:
+                        db.collection("leads").document(lead_id).update({"status": "failed", "error": "Vertex AI timeout"})
+                        continue
                     except Exception as e:
                         db.collection("leads").document(lead_id).update({"status": "failed", "error": str(e)})
                         continue
