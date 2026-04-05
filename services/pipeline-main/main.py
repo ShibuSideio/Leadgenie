@@ -254,7 +254,12 @@ Output schema:
 
 Text DOM: {text}
 """
-    result = model.generate_content(prompt)
+    try:
+        result = model.generate_content(prompt)
+    except Exception as e:
+        print(f"Vertex Crash natively caught: {e}")
+        return {"score": 0, "status": "failed", "pain_point": "Unknown", "dm": "Failed to parse generation", "email": "", "phone": "", "linkedin": ""}
+
     try:
         data = json.loads(result.text.replace('```json', '').replace('```', ''))
         return {
@@ -273,9 +278,15 @@ Text DOM: {text}
 
 @app.route("/dispatch", methods=["POST"])
 def dispatch():
-    data = request.json
-    tenant_id = data.get("tenant_id")
-    campaign_id = data.get("campaign_id")
+    lead_data = request.json
+    tenant_id = lead_data.get("tenant_id")
+    
+    target_campaign_id = lead_data.get("campaign_id") or (lead_data.get("matched_campaigns")[0] if lead_data.get("matched_campaigns") else None)
+    if not target_campaign_id:
+        print("CRITICAL: Dropping Eventarc trigger, no identifiable campaign context.")
+        return jsonify({"error": "Missing campaign_id context"}), 400
+        
+    campaign_id = target_campaign_id
     
     campaign_ref = db.collection("campaigns").document(campaign_id)
     campaign = campaign_ref.get().to_dict()
@@ -399,6 +410,10 @@ def dispatch():
                     continue
                 
                 evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
+                if evaluation.get("status") == "failed":
+                    doc_ref.update({"status": "failed"})
+                    continue
+                    
                 if evaluation.get("score", 0) >= 7:
                     # Update the atomic stub securely saving pipeline extraction logic
                     doc_ref.update({
