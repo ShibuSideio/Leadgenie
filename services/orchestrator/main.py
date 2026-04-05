@@ -459,6 +459,8 @@ def trigger_daily_sweep(path):
     # -----------------------------------------------------------------------------------------
     # Legacy Cloud Scheduler / Manual Execution Triggers
     # -----------------------------------------------------------------------------------------
+    audit_trail = []
+    
     manual_camp_id = None
     if request.method == "POST":
         try:
@@ -468,14 +470,14 @@ def trigger_daily_sweep(path):
         except:
             pass
 
-    print(f"Triggering orchestrator. Manual Mode: {manual_camp_id}")
-    
     if manual_camp_id:
         campaigns = [db.collection("campaigns").document(manual_camp_id)]
     else:
         campaigns = list(db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(100).stream())
     
-    print(f"[DEBUG] Found {len(campaigns)} active campaigns in Firestore.")
+    audit_trail.append("Executed Firestore query for active campaigns.")
+    audit_trail.append(f"Found {len(campaigns)} active campaigns in db.collection('campaigns').")
+    
     queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
     
     count = 0
@@ -491,18 +493,22 @@ def trigger_daily_sweep(path):
 
         tenant_id = campaign_data.get("tenant_id")
         if not tenant_id: 
-            print(f"[DEBUG] 🚫 SKIPPED Campaign {campaign_id}. Reason: Missing tenant_id constraint")
+            audit_trail.append(f"🚫 SKIPPED Campaign {campaign_id}. Reason: Missing tenant_id constraint")
             continue
         
-        print(f"[DEBUG] Evaluating Campaign: {campaign_id} for Tenant: {tenant_id}")
+        audit_trail.append(f"Evaluating Campaign ID: {campaign_id} for Tenant: {tenant_id}")
         
-        print(f"[DEBUG] Checking wallet for Tenant: {tenant_id}")
+        # Safe explicit secondary fetch for telemetry loop as requested natively
+        u_doc = db.collection("users").document(tenant_id).get()
+        credits_value = u_doc.to_dict().get("credits", 0) if u_doc.exists else "Unknown"
+        audit_trail.append(f"Fetched User Doc for Tenant. Credits field value: {credits_value}")
+        
         is_valid, _, err_msg = check_quota(tenant_id)
         if not is_valid:
-            print(f"[DEBUG] 🚫 SKIPPED Campaign {campaign_id}. Reason: {err_msg}")
+            audit_trail.append(f"🚫 SKIPPED Campaign {campaign_id}. Reason: {err_msg}")
             continue
         
-        print(f"[DEBUG] ✅ QUEUED Campaign {campaign_id}")
+        audit_trail.append(f"✅ QUEUED Campaign {campaign_id}.")
         
         task = {
             "http_request": {
@@ -524,4 +530,4 @@ def trigger_daily_sweep(path):
         tasks_client.create_task(request={"parent": queue_path, "task": task})
         count += 1
         
-    return jsonify({"message": f"Successfully queued {count} campaign jobs."}), 200
+    return jsonify({"message": f"Successfully queued {count} campaign jobs.", "audit_trail": audit_trail}), 200
