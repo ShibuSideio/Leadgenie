@@ -12,7 +12,7 @@ import google.auth
 from google.cloud import secretmanager
 from google.api_core.exceptions import AlreadyExists
 import vertexai
-from vertexai.generative_models import GenerativeModel
+from vertexai.generative_models import GenerativeModel, GenerationConfig
 
 app = Flask(__name__)
 db = firestore.Client()
@@ -24,8 +24,19 @@ SERPER_API_KEY_NAME = f"projects/{project_id}/secrets/serper_api_key/versions/la
 FERNET_KEY = os.environ.get("ENCRYPTION_KEY", "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0=")
 cipher_suite = Fernet(FERNET_KEY.encode())
 
-vertexai.init(project=project_id, location="asia-south1")
-model = GenerativeModel("gemini-2.5-flash")
+# Global initialization explicitly routed to the central US cluster
+vertexai.init(location="us-central1")
+
+def call_gemini_2_5(prompt: str, expect_json: bool = True):
+    model = GenerativeModel("gemini-2.5-flash")
+    config = GenerationConfig(response_mime_type="application/json") if expect_json else None
+    
+    response = model.generate_content(prompt, generation_config=config)
+    
+    if expect_json:
+        # Native JSON mode eliminates the need for regex/markdown stripping
+        return json.loads(response.text)
+    return response.text
 
 def get_secret(secret_name):
     response = sm_client.access_secret_version(request={"name": secret_name})
@@ -65,8 +76,8 @@ def generate_smart_query(user_keywords, tenant_id, bio):
         pain_points = [d.to_dict().get("pain_point", "") for d in docs if d.to_dict().get("pain_point")]
         if pain_points:
             prompt = f"Analyze these successful lead extractions. Extract exactly 3 short conceptual B2B phrases identifying high-value trends. Your output must strictly be comma separated only. Do not use quotes or bullets.\n\nData: {json.dumps(pain_points)}"
-            resp = model.generate_content(prompt)
-            historical_phrases = [p.strip() for p in resp.text.split(',') if p.strip()]
+            resp_text = call_gemini_2_5(prompt, expect_json=False)
+            historical_phrases = [p.strip() for p in resp_text.split(',') if p.strip()]
     except Exception as e:
         print(f"Historical Composite Mining Exception: {e}")
         historical_phrases = []
@@ -76,8 +87,7 @@ def generate_smart_query(user_keywords, tenant_id, bio):
     if bio:
         symptom_prompt = f"The user solves this business problem: '{bio}'. Generate 3 highly specific Google Search operators (using OR/AND/site:) to find companies publicly experiencing symptoms of this problem. Return ONLY a JSON list of 3 strings. Example: [\"operator 1\", \"operator 2\", \"operator 3\"]"
         try:
-            symptom_resp = GenerativeModel("gemini-2.5-flash").generate_content(symptom_prompt)
-            symptom_dorks = json.loads(symptom_resp.text.replace('```json', '').replace('```', '').strip())
+            symptom_dorks = call_gemini_2_5(symptom_prompt, expect_json=True)
         except Exception as e:
             print(f"Symptom Extraction Exception: {e}")
             pass
@@ -119,10 +129,10 @@ def pre_filter_gemini(snippets, bio):
         return []
     
     prompt = f"Review these {len(snippets)} search snippets. Based on the user's product bio: '{bio}', discard low-signal companies. YOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads. Do NOT output markdown. Do NOT output bullet points. Every line must start precisely with 'http'.\n\nSnippets: {json.dumps(snippets)}"
-    response = model.generate_content(prompt)
+    response_text = call_gemini_2_5(prompt, expect_json=False)
     
     urls = []
-    for line in response.text.split('\n'):
+    for line in response_text.split('\n'):
         clean_url = line.strip().replace('- ', '').replace('* ', '').replace('`', '').replace('"', '')
         if clean_url.startswith('http'):
              urls.append(clean_url)
@@ -254,27 +264,18 @@ Output schema:
 
 Text DOM: {text}
 """
-    try:
-        result = model.generate_content(prompt)
-    except Exception as e:
-        print(f"Vertex Crash natively caught: {e}")
-        return {"score": 0, "status": "failed", "error": "Vertex AI 2.5 Error", "pain_point": "Unknown", "dm": "Failed to parse generation", "email": "", "phone": "", "linkedin": ""}
-
-    try:
-        data = json.loads(result.text.replace('```json', '').replace('```', ''))
-        return {
-            "score": data.get("score", 0),
-            "pain_point": data.get("pain_point", "Unknown"),
-            "hiring_intent_found": data.get("hiring_intent_found", "None"),
-            "tech_stack_found": data.get("tech_stack_found", []),
-            "icebreaker_angle": data.get("icebreaker_angle", ""),
-            "dm": data.get("whatsapp_draft", "Failed to generate DM"),
-            "email": data.get("email", ""),
-            "phone": data.get("phone", ""),
-            "linkedin": data.get("linkedin", "")
-        }
-    except:
-        return {"score": 0, "pain_point": "Unknown", "dm": "Failed to parse generation", "email": "", "phone": "", "linkedin": ""}
+    data = call_gemini_2_5(prompt, expect_json=True)
+    return {
+        "score": data.get("score", 0),
+        "pain_point": data.get("pain_point", "Unknown"),
+        "hiring_intent_found": data.get("hiring_intent_found", "None"),
+        "tech_stack_found": data.get("tech_stack_found", []),
+        "icebreaker_angle": data.get("icebreaker_angle", ""),
+        "dm": data.get("whatsapp_draft", "Failed to generate DM"),
+        "email": data.get("email", ""),
+        "phone": data.get("phone", ""),
+        "linkedin": data.get("linkedin", "")
+    }
 
 @app.route("/dispatch", methods=["POST"])
 def dispatch():
@@ -409,9 +410,10 @@ def dispatch():
                     doc_ref.delete()
                     continue
                 
-                evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
-                if evaluation.get("status") == "failed":
-                    doc_ref.update({"status": "failed", "error": evaluation.get("error", "Vertex AI 2.5 Error")})
+                try:
+                    evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
+                except Exception as e:
+                    db.collection("leads").document(lead_id).update({"status": "failed", "error": str(e)})
                     continue
                     
                 if evaluation.get("score", 0) >= 7:
