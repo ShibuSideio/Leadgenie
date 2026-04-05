@@ -439,9 +439,19 @@ window.copyMessageAndContact = function(docId, dm) {
     });
 };
 
+window.currentPage = 1;
+window.leadsPerPage = 20;
+
 window.filterLeadsByCampaign = function(campaignId) {
     currentCampaignFilter = campaignId;
+    window.currentPage = 1; // Reset pagination on filter
     renderLeads();
+};
+
+window.changeLeadPage = function(delta) {
+    window.currentPage += delta;
+    renderLeads();
+    document.querySelector('.dashboard-grid')?.scrollIntoView({ behavior: 'smooth' });
 };
 
 function renderLeads() {
@@ -464,8 +474,29 @@ function renderLeads() {
         return;
     }
     
+    // Virtualization / Pagination Window
+    const totalPages = Math.ceil(filteredLeads.length / window.leadsPerPage);
+    if (window.currentPage > totalPages) window.currentPage = totalPages;
+    if (window.currentPage < 1) window.currentPage = 1;
+    
+    const startIdx = (window.currentPage - 1) * window.leadsPerPage;
+    const endIdx = startIdx + window.leadsPerPage;
+    const paginatedLeads = filteredLeads.slice(startIdx, endIdx);
+    
     leadsList.innerHTML = '';
-    filteredLeads.forEach(lead => leadsList.appendChild(createLeadCard(lead.id || lead.doc_id, lead)));
+    paginatedLeads.forEach(lead => leadsList.appendChild(createLeadCard(lead.id || lead.doc_id, lead)));
+    
+    // Inject Pagination Controls natively
+    const paginationControls = document.createElement('div');
+    paginationControls.className = 'pagination-controls';
+    paginationControls.style = "display:flex; justify-content:space-between; align-items:center; margin-top:20px; padding:16px; background:var(--glass-bg); border-radius:12px; border:1px solid var(--glass-border);";
+    
+    paginationControls.innerHTML = `
+        <button class="secondary-btn" onclick="changeLeadPage(-1)" ${window.currentPage === 1 ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''}>← Previous</button>
+        <span style="font-size:0.9rem; font-weight:500; color:var(--text-main);">Page ${window.currentPage} of ${totalPages} <span style="color:var(--text-muted);">(${filteredLeads.length} total)</span></span>
+        <button class="primary-btn" onclick="changeLeadPage(1)" ${window.currentPage === totalPages ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''}>Next →</button>
+    `;
+    leadsList.appendChild(paginationControls);
 }
 
 // TOAST UI ENGINE

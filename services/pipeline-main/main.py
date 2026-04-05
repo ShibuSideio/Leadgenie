@@ -15,6 +15,11 @@ import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
 
 app = Flask(__name__)
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({"status": "healthy", "version": "12.99.1", "location": "us-central1"}), 200
+
 db = firestore.Client()
 project_id = os.environ.get("PROJECT_ID", "sideio-leads-v16")
 sm_client = secretmanager.SecretManagerServiceClient()
@@ -60,9 +65,12 @@ def search_serper(query, location=None, gl=None):
     print(f"SERPER API AUTH OR RATE LIMIT CRASH HTTP {response.status_code}: {response.text}")
     return []
 
-def safe_truncate(text: str) -> str:
-    """Enforce strict 100KB text truncation to prevent Firestore 1MB document crashes."""
-    return text[:100000]
+def safe_truncate(text: str, max_bytes: int = 100000) -> str:
+    """Enforce strict byte-level truncation to prevent Firestore 1MB document crashes."""
+    encoded = text.encode('utf-8', errors='ignore')
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode('utf-8', errors='ignore')
 def generate_smart_query(user_keywords, tenant_id, bio):
     historical_phrases = []
     try:

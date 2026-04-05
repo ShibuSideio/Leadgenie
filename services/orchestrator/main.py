@@ -3,6 +3,7 @@ import json
 import urllib.request
 import time
 import datetime
+from google.protobuf import timestamp_pb2
 from flask import Flask, request, jsonify, make_response
 from google.cloud import tasks_v2
 from cryptography.fernet import Fernet
@@ -577,6 +578,12 @@ def trigger_daily_sweep(path):
                 "service_account_email": sa_email,
                 "audience": base_url_audience
             }
+            
+        # V12.99.1 Guardrail: Stagger executions by 30 seconds to prevent Serper/OOM spike
+        d = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=count * 30)
+        timestamp = timestamp_pb2.Timestamp()
+        timestamp.FromDatetime(d)
+        task["schedule_time"] = timestamp
         
         tasks_client.create_task(request={"parent": queue_path, "task": task})
         count += 1
