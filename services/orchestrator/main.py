@@ -134,6 +134,8 @@ def check_quota(tenant_id):
     user_doc = db.collection("users").document(tenant_id).get()
     if user_doc.exists:
         data = user_doc.to_dict()
+        print(f"[DEBUG-QUOTA] Tenant {tenant_id} Raw Wallet/Credits: approval_status={data.get('approval_status')}, beta_expiry={data.get('beta_expiry')}, credits={data.get('credits')}, wallet_balance={data.get('wallet_balance')}, nested_wallet={data.get('wallet')}")
+        
         if data.get("approval_status") != "approved":
             return False, 403, "Your application is under review. Please wait for L0 approval."
             
@@ -473,6 +475,7 @@ def trigger_daily_sweep(path):
     else:
         campaigns = list(db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(100).stream())
     
+    print(f"[DEBUG] Found {len(campaigns)} active campaigns in Firestore.")
     queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
     
     count = 0
@@ -487,11 +490,19 @@ def trigger_daily_sweep(path):
            campaign_id = camp_doc.id
 
         tenant_id = campaign_data.get("tenant_id")
-        if not tenant_id: continue
-        
-        is_valid, _, _ = check_quota(tenant_id)
-        if not is_valid:
+        if not tenant_id: 
+            print(f"[DEBUG] 🚫 SKIPPED Campaign {campaign_id}. Reason: Missing tenant_id constraint")
             continue
+        
+        print(f"[DEBUG] Evaluating Campaign: {campaign_id} for Tenant: {tenant_id}")
+        
+        print(f"[DEBUG] Checking wallet for Tenant: {tenant_id}")
+        is_valid, _, err_msg = check_quota(tenant_id)
+        if not is_valid:
+            print(f"[DEBUG] 🚫 SKIPPED Campaign {campaign_id}. Reason: {err_msg}")
+            continue
+        
+        print(f"[DEBUG] ✅ QUEUED Campaign {campaign_id}")
         
         task = {
             "http_request": {
