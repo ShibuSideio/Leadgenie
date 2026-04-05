@@ -4,3 +4,5 @@ Flask==3.0.0
 gunicorn==21.2.0
 firebase-admin>=6.5.0
 cryptography==41.0.7
+google-cloud-kms==2.21.3
+google-cloud-secret-manager==2.16.2

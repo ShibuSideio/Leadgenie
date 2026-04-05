@@ -6,7 +6,10 @@ import datetime
 from google.protobuf import timestamp_pb2
 from flask import Flask, request, jsonify, make_response
 from google.cloud import tasks_v2
+from google.cloud import secretmanager
+from google.cloud import kms
 from cryptography.fernet import Fernet
+import base64
 
 app = Flask(__name__)
 ALLOWED_ORIGINS = ["https://lead-sniper-prod.web.app", "https://lead-sniper-prod.firebaseapp.com"]
@@ -144,8 +147,11 @@ def check_quota(tenant_id):
             
         wallet = data.get("wallet", {})
         credits = wallet.get("allocated_credits", 0)
+        consumed = wallet.get("consumed_credits", 0)
         
-        if credits <= 0:
+        shard_sum = sum(shard.to_dict().get("consumed_credits", 0) for shard in db.collection("users").document(tenant_id).collection("wallet_shards").stream())
+        
+        if (credits - consumed - shard_sum) <= 0:
             return False, 402, "Beta quota exhausted. Contact admin to reload."
             
         return True, 200, "OK"
@@ -216,10 +222,15 @@ def get_me():
     user_doc = db.collection("users").document(uid).get()
     if user_doc.exists:
         data = user_doc.to_dict()
+        wallet = data.get("wallet", {"allocated_credits": 0, "consumed_credits": 0})
+        
+        shard_sum = sum(shard.to_dict().get("consumed_credits", 0) for shard in db.collection("users").document(uid).collection("wallet_shards").stream())
+        wallet["consumed_credits"] += shard_sum
+        
         return jsonify({
             "status": "success", 
             "data": data, 
-            "wallet": data.get("wallet", {"allocated_credits": 0, "consumed_credits": 0})
+            "wallet": wallet
         }), 200
     return jsonify({"error": "User structure missing"}), 404
 
@@ -284,7 +295,8 @@ def trigger_daily_sweep(path):
                     leads_gen = res2[0][0].value
                     
                     wallet = u_data.get("wallet", {})
-                    wallet_balance = wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0)
+                    shard_sum = sum(shard.to_dict().get("consumed_credits", 0) for shard in db.collection("users").document(t_id).collection("wallet_shards").stream())
+                    wallet_balance = wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0) - shard_sum
                     
                     tenant_info = u_data.copy()
                     tenant_info.update({
@@ -467,8 +479,23 @@ def trigger_daily_sweep(path):
                 if wa_phone_id: settings_update["wa_phone_id"] = wa_phone_id
                 if admin_phone: settings_update["admin_phone"] = admin_phone
                 if wa_token_raw:
-                    encrypted_token = cipher_suite.encrypt(wa_token_raw.encode()).decode()
-                    settings_update["wa_token"] = encrypted_token
+                    encrypted_token = None
+                    try:
+                        sm_client = secretmanager.SecretManagerServiceClient()
+                        # Fallback to hardcoded pipeline if not set
+                        project_id_conf = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+                        key_name = sm_client.access_secret_version(request={"name": f"projects/{project_id_conf}/secrets/kms_wa_key_path/versions/latest"}).payload.data.decode("UTF-8").strip()
+                        
+                        kms_client = kms.KeyManagementServiceClient()
+                        response = kms_client.encrypt(
+                            request={'name': key_name, 'plaintext': wa_token_raw.encode('utf-8')}
+                        )
+                        encrypted_token = base64.b64encode(response.ciphertext).decode('utf-8')
+                        settings_update["wa_token"] = encrypted_token
+                    except Exception as e:
+                        print(f"KMS Encryption Failed: {e}. Falling back to symmetric Fernet.")
+                        encrypted_token = cipher_suite.encrypt(wa_token_raw.encode()).decode()
+                        settings_update["wa_token"] = encrypted_token
                 
                 if settings_update:
                     settings_update["updatedAt"] = firestore.SERVER_TIMESTAMP
@@ -536,7 +563,9 @@ def trigger_daily_sweep(path):
             audit_trail.append(f"✅ QUEUED Campaign {campaign_id}. Reason: God Mode (Super Admin bypass).")
         else:
             wallet = user_data.get("wallet", {})
-            credits_val = wallet.get("allocated_credits", 0)
+            credits_val = wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0)
+            shard_sum = sum(shard.to_dict().get("consumed_credits", 0) for shard in db.collection("users").document(tenant_id).collection("wallet_shards").stream())
+            credits_val -= shard_sum
             audit_trail.append(f"Fetched nested wallet for Tenant. Allocated credits constraint: {credits_val}")
             
             is_valid, _, err_msg = check_quota(tenant_id)

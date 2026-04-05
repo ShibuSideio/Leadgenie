@@ -2,12 +2,14 @@ import os
 import asyncio
 from flask import Flask, request, jsonify
 from playwright.async_api import async_playwright
+from google.cloud import tasks_v2
+import json
 
 app = Flask(__name__)
 
 async def fetch_page_content(url):
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--single-process", "--no-sandbox", "--no-zygote"])
         # ignore_https_errors bypasses weak SME SSL cert domains; bypass_csp prevents local scripts locking up headless eval
         context = await browser.new_context(ignore_https_errors=True, bypass_csp=True)
         page = await context.new_page()
@@ -65,8 +67,43 @@ def scrape():
     finally:
          loop.close()
     
-    # Return up to 100k chars to ensure we don't blow up memory/firebase
-    return jsonify({"text": text[:100000], "emails": contacts.get("emails", []), "phones": contacts.get("phones", [])}), 200
+    # Decoupled Webhook Callback via Cloud Tasks
+    payload = {
+        "text": text[:100000] if text else "",
+        "emails": contacts.get("emails", []) if contacts else [],
+        "phones": contacts.get("phones", []) if contacts else [],
+        "lead_id": data.get("lead_id"),
+        "tenant_id": data.get("tenant_id"),
+        "campaign_id": data.get("campaign_id"),
+        "bio": data.get("bio"),
+        "url": url,
+        "target_domain": data.get("target_domain"),
+        "preferences_weights": data.get("preferences_weights", {})
+    }
+    
+    try:
+        tasks_client = tasks_v2.CloudTasksClient()
+        # Fallback to defaults since env vars might be loose in scraper-heavy initially
+        project = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+        location = os.environ.get("LOCATION", "asia-south1")
+        queue = os.environ.get("QUEUE", "lead-pipeline-queue")
+        parent = tasks_client.queue_path(project, location, queue)
+        
+        base_url = os.environ.get("PIPELINE_BASE_URL", "https://lead-pipeline-main-abc.a.run.app")
+        
+        task_def = {
+            "http_request": {
+                "http_method": tasks_v2.HttpMethod.POST,
+                "url": f"{base_url}/finalize",
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps(payload).encode()
+            }
+        }
+        tasks_client.create_task(parent=parent, task=task_def)
+    except Exception as hook_e:
+        print(f"Failed to queue finalize webhook: {hook_e}")
+
+    return jsonify({"status": "queued_to_finalize"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

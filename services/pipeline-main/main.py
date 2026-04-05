@@ -1,4 +1,5 @@
 import os
+import random
 import json
 import httpx
 import hashlib
@@ -11,7 +12,8 @@ from flask import Flask, request, jsonify
 from google.cloud import firestore
 import google.auth
 from google.cloud import secretmanager
-from google.api_core.exceptions import AlreadyExists
+from google.api_core.exceptions import AlreadyExists, ResourceExhausted
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
 
@@ -23,6 +25,9 @@ def health_check():
 
 db = firestore.Client()
 project_id = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+PROJECT_ID = project_id
+LOCATION = os.environ.get("LOCATION", "asia-south1")
+QUEUE = os.environ.get("QUEUE", "lead-pipeline-queue")
 sm_client = secretmanager.SecretManagerServiceClient()
 
 SCRAPER_HEAVY_URL = os.environ.get("SCRAPER_HEAVY_URL", "https://scraper-heavy-abc.a.run.app/scrape")
@@ -37,6 +42,7 @@ def call_gemini_2_5(prompt: str, expect_json: bool = True):
     model = GenerativeModel("gemini-2.5-flash")
     config = GenerationConfig(response_mime_type="application/json") if expect_json else None
     
+    @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5), retry=retry_if_exception_type(ResourceExhausted))
     def _invoke_model():
         return model.generate_content(prompt, generation_config=config)
         
@@ -252,15 +258,7 @@ def scrape_url(url):
         return safe_truncate(text), found_tech, extracted_emails, extracted_phones # Strict truncation
     except Exception as e:
         print(f"Fallback to heavy scraper for {url} due to {str(e)}")
-        # Call heavy scraper
-        try:
-            heavy_resp = httpx.post(SCRAPER_HEAVY_URL, json={"url": url}, timeout=45)
-            if heavy_resp.status_code == 200:
-                data = heavy_resp.json()
-                return safe_truncate(data.get("text", "")), ["Fallback Scraper Used"], data.get("emails", []), data.get("phones", [])
-        except Exception as he:
-            print(f"Heavy Scraper fatal crash for {url}: {he}")
-        return "", [], [], []
+        raise ValueError("DEFERRED")
 
 def final_score_and_dm(text, bio, context_payload, tech_stack):
     prompt = f"""You are an Elite B2B Profiler. Score this lead 1-10 based on campaign goals and product bio: '{bio}'. 
@@ -419,14 +417,39 @@ def dispatch():
                     emails = c_data.get("emails", [])
                     phones = c_data.get("phones", [])
                 else:
-                    text, tech_stack, emails, phones = scrape_url(url)
+                    try:
+                        text, tech_stack, emails, phones = scrape_url(url)
+                    except ValueError as e:
+                        if str(e) == "DEFERRED":
+                            print(f"[DEFERRED] Queueing async task to scraper-heavy for {url}")
+                            # Dispatch Cloud Task
+                            from google.cloud import tasks_v2
+                            tasks_client = tasks_v2.CloudTasksClient()
+                            parent = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+                            task = {
+                                "http_request": {
+                                    "http_method": tasks_v2.HttpMethod.POST,
+                                    "url": SCRAPER_HEAVY_URL,
+                                    "headers": {"Content-Type": "application/json"},
+                                    "body": json.dumps({
+                                        "url": url, "lead_id": lead_id, "tenant_id": tenant_id, 
+                                        "campaign_id": campaign_id, "bio": bio, "target_domain": target_domain,
+                                        "preferences_weights": preferences_weights
+                                    }).encode()
+                                }
+                            }
+                            tasks_client.create_task(parent=parent, task=task)
+                            continue
+                        text, tech_stack, emails, phones = "", [], [], []
+                        
                     if text:
                         # Save to cache explicitly enforcing truncation rule before write
                         cache_ref.set({"url": url, "text": safe_truncate(text), "tech_stack": tech_stack, "emails": emails, "phones": phones})
             
                 if text:
-                    db.collection("usage_metrics").document(tenant_id).set({"gemini_calls": firestore.Increment(1)}, merge=True)
-                    db.collection("users").document(tenant_id).set({"wallet": {"consumed_credits": firestore.Increment(1)}}, merge=True)
+                    shard_id = random.randint(0, 9)
+                    db.collection("usage_metrics").document(tenant_id).collection("shards").document(str(shard_id)).set({"gemini_calls": firestore.Increment(1)}, merge=True)
+                    db.collection("users").document(tenant_id).collection("wallet_shards").document(str(shard_id)).set({"consumed_credits": firestore.Increment(1)}, merge=True)
                 
                     # --- MULTI-VECTOR SERPER DORKING ---
                     context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
@@ -532,6 +555,120 @@ def dispatch():
                 continue
                     
     return jsonify({"processed_leads": len(all_results)}), 200
+
+@app.route("/finalize", methods=["POST"])
+def finalize():
+    # Receive decoupled webhook from scraper-heavy
+    data = request.json
+    text = data.get("text", "")
+    emails = data.get("emails", [])
+    phones = data.get("phones", [])
+    lead_id = data.get("lead_id")
+    tenant_id = data.get("tenant_id")
+    campaign_id = data.get("campaign_id")
+    bio = data.get("bio", "")
+    url = data.get("url", "")
+    target_domain = data.get("target_domain", "")
+    preferences_weights = data.get("preferences_weights", {})
+    tech_stack = ["Fallback Scraper Used"]
+    
+    if not lead_id or not tenant_id:
+        return jsonify({"error": "Missing crucial context"}), 400
+        
+    doc_ref = db.collection("leads").document(lead_id)
+    if not text:
+        doc_ref.delete()
+        return jsonify({"status": "dropped empty text"}), 200
+        
+    try:
+        # Re-enter processing flow
+        cache_ref = db.collection("scraped_cache").document(url.replace('/','_'))
+        cache_ref.set({"url": url, "text": safe_truncate(text), "tech_stack": tech_stack, "emails": emails, "phones": phones})
+        
+        shard_id = random.randint(0, 9)
+        db.collection("usage_metrics").document(tenant_id).collection("shards").document(str(shard_id)).set({"gemini_calls": firestore.Increment(1)}, merge=True)
+        db.collection("users").document(tenant_id).collection("wallet_shards").document(str(shard_id)).set({"consumed_credits": firestore.Increment(1)}, merge=True)
+        
+        context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
+        
+        try:
+            evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
+        except TimeoutError:
+            doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
+            return jsonify({"status": "timeout"}), 200
+        except Exception as e:
+            doc_ref.update({"status": "failed", "error": str(e)})
+            return jsonify({"status": "failed"}), 200
+        
+        if evaluation.get("score", 0) >= 7:
+            doc_ref.update({
+                "score": evaluation.get("score"),
+                "pain_point": evaluation.get("pain_point"),
+                "dm": evaluation.get("dm"),
+                "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
+                "tech_stack_found": evaluation.get("tech_stack_found", []),
+                "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
+                "email": emails[0] if emails else evaluation.get("email", ""),
+                "phone": phones[0] if phones else evaluation.get("phone", ""),
+                "linkedin": evaluation.get("linkedin", ""),
+                "status": "new"
+            })
+            
+            # Simplified WhatsApp Meta Call (V13)
+            if evaluation.get("score", 0) >= 8:
+                tenant_doc = db.collection("users").document(tenant_id).get().to_dict() or {}
+                wa_token_encrypted = tenant_doc.get("wa_token")
+                wa_phone_id = tenant_doc.get("wa_phone_id")
+                admin_phone = tenant_doc.get("admin_phone")
+                
+                wa_token = None
+                if wa_token_encrypted:
+                    try:
+                        from google.cloud import kms
+                        import base64
+                        kms_client = kms.KeyManagementServiceClient()
+                        key_name = get_secret("kms_wa_key_path").strip()
+                        ciphertext = base64.b64decode(wa_token_encrypted)
+                        response = kms_client.decrypt(
+                            request={'name': key_name, 'ciphertext': ciphertext}
+                        )
+                        wa_token = response.plaintext.decode('utf-8')
+                    except Exception as e:
+                        print(f"KMS Decryption failed: {e}. Attempting Fernet fallback.")
+                        try:
+                            wa_token = cipher_suite.decrypt(wa_token_encrypted.encode()).decode()
+                        except:
+                            wa_token = wa_token_encrypted
+                        
+                if wa_token and wa_phone_id and admin_phone:
+                    wa_payload = {
+                        "messaging_product": "whatsapp",
+                        "to": admin_phone,
+                        "type": "interactive",
+                        "interactive": {
+                            "type": "button",
+                            "body": {
+                                "text": f"🔥 Hot Lead Found!\nCompany: {url}\nScore: {evaluation.get('score')}/10\nWhy: {evaluation.get('pain_point')}\nTech Stack: {', '.join(evaluation.get('tech_stack_found', []))}\nHiring: {evaluation.get('hiring_intent_found', '')}\n\nDrafted DM: {evaluation.get('dm')}"
+                            },
+                            "action": {
+                                "buttons": [
+                                    {"type": "reply", "reply": {"id": f"approve_{lead_id}", "title": "✅ Approve"}},
+                                    {"type": "reply", "reply": {"id": f"ignore_{lead_id}", "title": "🚫 Ignore"}}
+                                ]
+                            }
+                        }
+                    }
+                    try:
+                        httpx.post(f"https://graph.facebook.com/v18.0/{wa_phone_id}/messages", json=wa_payload, headers={"Authorization": f"Bearer {wa_token}", "Content-Type": "application/json"}, timeout=5)
+                    except:
+                        pass
+        else:
+            doc_ref.delete()
+            
+    except Exception as hook_err:
+        doc_ref.update({"status": "failed", "error": "Finalize webhook crash"})
+        
+    return jsonify({"status": "finalized"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
