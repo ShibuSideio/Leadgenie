@@ -327,8 +327,11 @@ def dispatch():
     preferences_weights = user_doc.to_dict().get("preferences_weights", {}) if user_doc.exists else {}
     
     for kw in smart_keywords:
+        # Campaign geo-target query appending
+        search_query = f"{kw} AND {location}" if location and location != "all" else kw
+        
         # Step 1: Augmented Sweep
-        raw_results = search_serper(kw, location=location if location else None, gl=gl if gl else None)
+        raw_results = search_serper(search_query, location=location if location else None, gl=gl if gl else None)
         
         # Step 2: Ruthless Post-Flight Filter
         filtered_results = filter_serper_noise(raw_results)
