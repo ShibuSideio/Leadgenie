@@ -291,9 +291,14 @@ function createLeadCard(docId, lead) {
     
     const statusColor = lead.status === 'completed' ? 'var(--success)' : (lead.status === 'ignored' ? '#ef4444' : 'var(--text-muted)');
     
-    let hiringBadge = (lead.hiring_intent_found && lead.hiring_intent_found !== "None") ? `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; margin-right:6px; border:1px solid #a7f3d0">🟢 Hiring: ${lead.hiring_intent_found}</span>` : '';
-    let techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0) ? lead.tech_stack_found.map(tech => `<span style="font-size:0.75rem; background:#f0fdfa; color:#0d9488; padding:2px 6px; border-radius:4px; margin-right:6px; border:1px solid #99f6e4">⚡ ${tech}</span>`).join('') : '';
-    let exclusiveBadge = `<span style="font-size:0.75rem; background:#fef2f2; color:#dc2626; padding:2px 6px; border-radius:4px; margin-right:6px; border:1px solid #fecaca">🔒 Exclusive Lead</span>`;
+    let hiringIntent = lead.hiring_intent_found || '';
+    let hiringBadge = '';
+    if (hiringIntent === 'Yes') {
+        hiringBadge = `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; border:1px solid #a7f3d0">🟢 Hiring</span>`;
+    }
+    
+    let techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0) ? lead.tech_stack_found.map(tech => `<span style="font-size:0.75rem; background:transparent; color:#6b7280; padding:2px 6px; border-radius:4px; border:1px solid #e5e7eb">⚡ ${tech}</span>`).join('') : '';
+    let exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">🔒 Exclusive Lead</span>`;
 
     card.innerHTML = `
         <div class="lead-header">
@@ -304,7 +309,7 @@ function createLeadCard(docId, lead) {
             <div class="score">Score: ${lead.score || 0}/10</div>
         </div>
         <div class="pain-point">" ${lead.pain_point || 'Analyzing sentiment...'} "</div>
-        <div class="premium-badges" style="margin-top: 8px; margin-bottom: 8px; font-weight: 500;">
+        <div class="premium-badges" style="margin-top: 8px; margin-bottom: 8px; font-weight: 500; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
             ${exclusiveBadge}
             ${hiringBadge}
             ${techBadges}
