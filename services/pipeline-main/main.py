@@ -124,11 +124,11 @@ def filter_serper_noise(serper_results):
         
     return clean_results
 
-def pre_filter_gemini(snippets, bio):
+def pre_filter_gemini(snippets, bio, location_target):
     if not snippets:
         return []
     
-    prompt = f"Review these {len(snippets)} search snippets. Based on the user's product bio: '{bio}', discard low-signal companies. YOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads. Do NOT output markdown. Do NOT output bullet points. Every line must start precisely with 'http'.\n\nSnippets: {json.dumps(snippets)}"
+    prompt = f"Review these {len(snippets)} search snippets. Based on the user's product bio: '{bio}', discard low-signal companies. \n\nCRITICAL: Evaluate the business location. If the target location is '{location_target}', and this website explicitly serves a different geographic region (e.g., a Dubai business for a Kochi search), you MUST reject the URL immediately. Return a failed state.\n\nYOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads. Do NOT output markdown. Do NOT output bullet points. Every line must start precisely with 'http'.\n\nSnippets: {json.dumps(snippets)}"
     response_text = call_gemini_2_5(prompt, expect_json=False)
     
     urls = []
@@ -227,14 +227,19 @@ def scrape_url(url):
         text = soup.get_text(separator=' ', strip=True)
         if len(text) < 500: # Potential JS Heavy page
             raise ValueError("Too little content, likely JS framework")
-        return safe_truncate(text), found_tech # Strict truncation
+            
+        extracted_emails = list({a['href'].replace('mailto:', '').split('?')[0].strip() for a in soup.find_all('a', href=True) if a['href'].startswith('mailto:')})
+        extracted_phones = list({a['href'].replace('tel:', '').strip() for a in soup.find_all('a', href=True) if a['href'].startswith('tel:')})
+
+        return safe_truncate(text), found_tech, extracted_emails, extracted_phones # Strict truncation
     except Exception as e:
         print(f"Fallback to heavy scraper for {url} due to {str(e)}")
         # Call heavy scraper
         heavy_resp = httpx.post(SCRAPER_HEAVY_URL, json={"url": url}, timeout=45)
         if heavy_resp.status_code == 200:
-            return safe_truncate(heavy_resp.json().get("text", "")), ["Fallback Scraper Used"]
-        return "", []
+            data = heavy_resp.json()
+            return safe_truncate(data.get("text", "")), ["Fallback Scraper Used"], data.get("emails", []), data.get("phones", [])
+        return "", [], [], []
 
 def final_score_and_dm(text, bio, context_payload, tech_stack):
     prompt = f"""You are an Elite B2B Profiler. Score this lead 1-10 based on campaign goals and product bio: '{bio}'. 
@@ -337,7 +342,7 @@ def dispatch():
                 unique_results.append(r)
                 
         # Step 3: LLM Pre-Filter
-        filtered_urls = pre_filter_gemini(unique_results, bio)
+        filtered_urls = pre_filter_gemini(unique_results, bio, location)
         
         # Step 3, 4, 5
         for url in filtered_urls[:30]:
@@ -386,11 +391,13 @@ def dispatch():
                 c_data = cache_doc.to_dict()
                 text = c_data.get("text", "")
                 tech_stack = c_data.get("tech_stack", [])
+                emails = c_data.get("emails", [])
+                phones = c_data.get("phones", [])
             else:
-                text, tech_stack = scrape_url(url)
+                text, tech_stack, emails, phones = scrape_url(url)
                 if text:
                     # Save to cache explicitly enforcing truncation rule before write
-                    cache_ref.set({"url": url, "text": safe_truncate(text), "tech_stack": tech_stack})
+                    cache_ref.set({"url": url, "text": safe_truncate(text), "tech_stack": tech_stack, "emails": emails, "phones": phones})
             
             if text:
                 db.collection("usage_metrics").document(tenant_id).set({"gemini_calls": firestore.Increment(1)}, merge=True)
@@ -427,8 +434,8 @@ def dispatch():
                         "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
                         "tech_stack_found": evaluation.get("tech_stack_found", []),
                         "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
-                        "email": evaluation.get("email", ""),
-                        "phone": evaluation.get("phone", ""),
+                        "email": emails[0] if emails else evaluation.get("email", ""),
+                        "phone": phones[0] if phones else evaluation.get("phone", ""),
                         "linkedin": evaluation.get("linkedin", ""),
                         "status": "new"
                     })

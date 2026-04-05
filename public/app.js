@@ -257,20 +257,27 @@ async function loadLeads() {
         rawLeadsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
         
         let cNew = 0, cContact= 0, cConvert = 0;
+        let cDiscovered = rawLeadsCache.length;
+        let cActionable = 0, cIgnored = 0;
 
         rawLeadsCache.forEach(l => {
-            if (l.status === 'ignored') return; // Exclude entirely
+            if (l.status === 'ignored') {
+                cIgnored++;
+                return;
+            }
+            if (l.status === 'new' || !l.status) cActionable++;
+            
             if (l.status === 'contacted') { cContact++; }
             else if (l.status === 'converted') { cConvert++; }
             else { cNew++; }
         });
         
-        const elProsp = document.getElementById('stat-prospects');
-        const elMsg = document.getElementById('stat-messaged');
-        const elRep = document.getElementById('stat-replies');
-        if (elProsp) elProsp.innerText = cNew;
-        if (elMsg) elMsg.innerText = cContact;
-        if (elRep) elRep.innerText = cConvert;
+        const elDisc = document.getElementById('stat-discovered');
+        const elAct = document.getElementById('stat-actionable');
+        const elIgn = document.getElementById('stat-ignored');
+        if (elDisc) elDisc.innerText = cDiscovered;
+        if (elAct) elAct.innerText = cActionable;
+        if (elIgn) elIgn.innerText = cIgnored;
         
         initAnalyticsChart(cNew, cContact, cConvert);
         renderLeads();
@@ -297,8 +304,21 @@ function createLeadCard(docId, lead) {
         hiringBadge = `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; border:1px solid #a7f3d0">🟢 Hiring</span>`;
     }
     
-    let techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0) ? lead.tech_stack_found.map(tech => `<span style="font-size:0.75rem; background:transparent; color:#6b7280; padding:2px 6px; border-radius:4px; border:1px solid #e5e7eb">⚡ ${tech}</span>`).join('') : '';
+    const techDict = {
+        'stripe': 'Takes Online Payments',
+        'wordpress': 'Active Content/Blog',
+        'shopify': 'E-Commerce Store',
+        'salesforce': 'Enterprise CRM',
+        'hubspot': 'Marketing Automation',
+        'google analytics': 'Tracks Analytics',
+        'segment': 'Customer Data Platform',
+        'intercom': 'Live Chat Support',
+        'react': 'Modern Web App'
+    };
+    
+    let techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0) ? lead.tech_stack_found.map(tech => `<span style="font-size:0.75rem; background:transparent; color:#6b7280; padding:2px 6px; border-radius:4px; border:1px solid #e5e7eb">⚡ ${techDict[tech.toLowerCase()] || tech}</span>`).join('') : '';
     let exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">🔒 Exclusive Lead</span>`;
+    let competitorBadge = lead.competitor_match ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">🎯 Competitor Intercept: ${lead.competitor_match}</span>` : '';
 
     card.innerHTML = `
         <div class="lead-header">
@@ -311,12 +331,18 @@ function createLeadCard(docId, lead) {
         <div class="pain-point">" ${lead.pain_point || 'Analyzing sentiment...'} "</div>
         <div class="premium-badges" style="margin-top: 8px; margin-bottom: 8px; font-weight: 500; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
             ${exclusiveBadge}
+            ${competitorBadge}
             ${hiringBadge}
             ${techBadges}
         </div>
         <div class="dm-draft">${lead.dm || 'Drafting variation...'}</div>
+        <div class="contact-info" style="margin-top: 8px; margin-bottom: 8px; font-size: 0.85rem; color: var(--text-main); font-weight: 500;">
+            ${lead.email ? `📧 <a href="mailto:${lead.email}" target="_blank" style="color:#2563eb; text-decoration:none;">${lead.email}</a> &nbsp;` : ''} 
+            ${lead.phone ? `📞 <a href="tel:${lead.phone}" style="color:#2563eb; text-decoration:none;">${lead.phone}</a>` : ''}
+            ${!lead.email && !lead.phone ? `<span style="color:var(--text-muted); font-style:italic;">No Contact Info Found</span>` : ''}
+        </div>
         <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'contacted')" title="Mark as Contacted">✅ Contacted</button>
+            <button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${(lead.dm || '').replace(/`/g, '\\`').replace(/'/g, "\\'")}\`)" title="Copy Message">📋 Copy Message</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">🚫 Ignore</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">🎯 Converted</button>
             <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${encodeURIComponent(JSON.stringify(lead.interactions || []))}')" title="Audit Log">🕒 View Timeline Logs</button>
@@ -324,6 +350,16 @@ function createLeadCard(docId, lead) {
     `;
     return card;
 }
+
+window.copyMessageAndContact = function(docId, dm) {
+    navigator.clipboard.writeText(dm).then(() => {
+        showToast("Message Copied to Clipboard", "success");
+        updateLeadStatus(docId, "contacted");
+    }).catch(err => {
+        console.error("Clipboard failed", err);
+        showToast("Failed to copy", "error");
+    });
+};
 
 window.filterLeadsByCampaign = function(campaignId) {
     currentCampaignFilter = campaignId;

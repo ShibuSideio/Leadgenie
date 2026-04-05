@@ -16,12 +16,27 @@ async def fetch_page_content(url):
             await page.evaluate("""() => {
                 document.querySelectorAll('script, style, noscript, nav, footer, iframe').forEach(el => el.remove());
             }""")
-            
+
+            # Contact Harvesting
+            contacts = await page.evaluate("""() => {
+                let emails = new Set();
+                let phones = new Set();
+                document.querySelectorAll('a[href^="mailto:"]').forEach(a => {
+                    let email = a.href.replace('mailto:', '').split('?')[0].trim();
+                    if (email) emails.add(email);
+                });
+                document.querySelectorAll('a[href^="tel:"]').forEach(a => {
+                    let phone = a.href.replace('tel:', '').replace(/[^\\d+]/g, '').trim();
+                    if (phone) phones.add(phone);
+                });
+                return { emails: Array.from(emails), phones: Array.from(phones) };
+            }""")
+
             text = await page.evaluate("() => document.body.innerText")
-            return text
+            return text, contacts
         except Exception as e:
             print(f"Error scraping {url}: {str(e)}")
-            return ""
+            return "", {"emails": [], "phones": []}
         finally:
             await browser.close()
 
@@ -34,10 +49,10 @@ def scrape():
         
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    text = loop.run_until_complete(fetch_page_content(url))
+    text, contacts = loop.run_until_complete(fetch_page_content(url))
     
     # Return up to 100k chars to ensure we don't blow up memory/firebase
-    return jsonify({"text": text[:100000]}), 200
+    return jsonify({"text": text[:100000], "emails": contacts.get("emails", []), "phones": contacts.get("phones", [])}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
