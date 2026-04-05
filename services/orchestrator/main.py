@@ -187,7 +187,7 @@ def handle_purge(request):
     db.collection("tenants").document(tenant_id).delete()
     return jsonify({"message": f"Successfully erased tenant {tenant_id} data completely"}), 200
 
-@app.route('/api/me', methods=['GET', 'OPTIONS'])
+@app.route('/api/me', methods=['GET', 'PUT', 'OPTIONS'])
 def get_me():
     if request.method == 'OPTIONS':
         return '', 204
@@ -197,6 +197,20 @@ def get_me():
         return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
     except Exception as e:
         return jsonify({"error": "Internal Error", "message": str(e)}), 500
+
+    if request.method == 'PUT':
+        payload = request.json or {}
+        updates = {}
+        if "agreed_to_terms" in payload:
+            from google.cloud import firestore
+            updates["agreed_to_terms"] = firestore.SERVER_TIMESTAMP
+        if "crm_webhook_url" in payload:
+            updates["crm_webhook_url"] = payload.get("crm_webhook_url")
+            
+        if updates:
+            db.collection("users").document(uid).update(updates)
+            return jsonify({"status": "success", "message": "Updated details"}), 200
+        return jsonify({"status": "success", "message": "No updates applied"}), 200
 
     user_doc = db.collection("users").document(uid).get()
     if user_doc.exists:

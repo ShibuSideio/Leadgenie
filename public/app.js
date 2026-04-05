@@ -117,7 +117,31 @@ async function loadMe() {
             const w = payload.wallet || data.wallet || {allocated_credits: 0, consumed_credits: 0};
             activeWallet = w;
             const el = document.getElementById('wallet-balance');
-            if (el) el.innerText = (w.allocated_credits || 0) - (w.consumed_credits || 0);
+            const credits = (w.allocated_credits || 0) - (w.consumed_credits || 0);
+            if (el) el.innerText = credits;
+            
+            const alertBanner = document.getElementById('wallet-alert-banner');
+            const newCampBtn = document.querySelector('button[onclick="openNewCampaignModal()"]');
+            if (credits <= 0) {
+                if (alertBanner) { alertBanner.innerText = "🛑 Wallet Empty: You have 0 credits. Upgrade your account to continue sweeping."; alertBanner.classList.remove('hidden'); }
+                if (newCampBtn) { newCampBtn.innerText = "Upgrade Plan (0 Credits)"; newCampBtn.disabled = true; newCampBtn.style.background = "#94a3b8"; }
+            } else if (credits < 50) {
+                if (alertBanner) alertBanner.classList.remove('hidden');
+            } else {
+                if (alertBanner) alertBanner.classList.add('hidden');
+                if (newCampBtn) { newCampBtn.innerText = "+ Find New Clients"; newCampBtn.disabled = false; newCampBtn.style.background = "var(--primary)"; }
+            }
+
+            if (!data.agreed_to_terms) {
+                const tosModal = document.getElementById('tos-modal');
+                if (tosModal) tosModal.classList.remove('hidden');
+            }
+
+            const hookInput = document.getElementById('crm-webhook-url');
+            if (hookInput && data.crm_webhook_url) {
+                hookInput.value = data.crm_webhook_url;
+            }
+            window.currentUserData = data;
             
         }
     } catch(e) { console.error('Failed to load wallet', e); }
@@ -323,7 +347,7 @@ function createLeadCard(docId, lead) {
     card.innerHTML = `
         <div class="lead-header">
             <div>
-                <strong><a href="${lead.url || '#'}" target="_blank" style="color: var(--text-main); text-decoration: none;">${urlHostname}</a></strong> • ${lead.source || 'Organic Search'} 
+                <strong><a href="${lead.url || '#'}" target="_blank" style="color: var(--text-main); text-decoration: none;">${urlHostname} ↗</a></strong> • ${lead.source || 'Organic Search'} 
                 <span style="margin-left:8px; font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(lead.status || 'new').toUpperCase()}</span>
             </div>
             <div class="score">Score: ${lead.score || 0}/10</div>
@@ -343,6 +367,7 @@ function createLeadCard(docId, lead) {
         </div>
         <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
             <button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${(lead.dm || '').replace(/`/g, '\\`').replace(/'/g, "\\'")}\`)" title="Copy Message">📋 Copy Message</button>
+            <button class="action-btn" onclick="pushToCRM('${docId}', \`${encodeURIComponent(JSON.stringify(lead)).replace(/'/g, "\\'")}\`)" style="color: #4f46e5; border-color: #c7d2fe; background: #e0e7ff;">☁️ Push to CRM</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">🚫 Ignore</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">🎯 Converted</button>
             <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${encodeURIComponent(JSON.stringify(lead.interactions || []))}')" title="Audit Log">🕒 View Timeline Logs</button>
@@ -350,6 +375,59 @@ function createLeadCard(docId, lead) {
     `;
     return card;
 }
+
+window.pushToCRM = async function(docId, leadStr) {
+    const userUrl = window.currentUserData?.crm_webhook_url;
+    if (!userUrl) { showToast("No CRM Hook Configured in Settings", "error"); return; }
+    try {
+        const lead = JSON.parse(decodeURIComponent(leadStr));
+        await fetch(userUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            mode: 'no-cors',
+            body: JSON.stringify({ event: 'lead_pushed', lead: lead })
+        });
+        showToast("Signal fired to CRM Integration", "success");
+    } catch (e) {
+        console.error("CRM Push failure", e);
+        showToast("Hook connection failed", "error");
+    }
+};
+
+window.saveCRMWebhook = async function() {
+    const user = firebase.auth().currentUser;
+    const url = document.getElementById('crm-webhook-url').value.trim();
+    if (!user || !url) return;
+    try {
+        const token = await user.getIdToken();
+        const response = await fetch(`${API_BASE}/api/me`, {
+            method: 'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ crm_webhook_url: url })
+        });
+        if (response.ok) {
+            if (window.currentUserData) window.currentUserData.crm_webhook_url = url;
+            showToast("CRM Integration Locked", "success");
+        } else showToast("Failed to save webhook", "error");
+    } catch(e) { console.error(e); }
+};
+
+window.agreeToTerms = async function() {
+    const user = firebase.auth().currentUser;
+    if (!user) return;
+    try {
+        const token = await user.getIdToken();
+        const response = await fetch(`${API_BASE}/api/me`, {
+            method: 'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agreed_to_terms: true })
+        });
+        if (response.ok) {
+            document.getElementById('tos-modal').classList.add('hidden');
+            showToast("Compliance agreement signed", "success");
+        } else showToast("Backend sync failed", "error");
+    } catch(e) { console.error(e); }
+};
 
 window.copyMessageAndContact = function(docId, dm) {
     navigator.clipboard.writeText(dm).then(() => {
@@ -367,21 +445,6 @@ window.filterLeadsByCampaign = function(campaignId) {
 };
 
 function renderLeads() {
-    if (rawLeadsCache.length === 0) {
-        leadsList.innerHTML = `
-            <div class="lead-card" style="text-align: center; padding: 40px; border: none; background: transparent; box-shadow: none;">
-                <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">🚀</div>
-                <h3 style="color: var(--text-main); margin-bottom: 8px;">Let's Grow Your Business</h3>
-                <p style="color: var(--text-muted); font-size: 0.95rem; line-height: 1.5;">
-                    Your dashboard is ready and secure.<br>
-                    No leads found matching this filter.
-                </p>
-            </div>
-        `;
-        return;
-    }
-    
-    leadsList.innerHTML = '';
     const filteredLeads = rawLeadsCache.filter(lead => {
         if (lead.status === 'ignored') return false;
         if (currentCampaignFilter !== 'all' && lead.campaign_id !== currentCampaignFilter) return false;
@@ -389,10 +452,20 @@ function renderLeads() {
     });
     
     if (filteredLeads.length === 0) {
-         leadsList.innerHTML = '<div class="lead-card" style="text-align:center; padding: 24px; color: var(--text-muted);">No leads currently discovered for this campaign. The AI is still searching.</div>';
-         return;
+        leadsList.innerHTML = `
+            <div class="lead-card" style="text-align: center; padding: 40px; border: none; background: transparent; box-shadow: none;">
+                <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">🚀</div>
+                <h3 style="color: var(--text-main); margin-bottom: 8px;">Your pipeline is clean.</h3>
+                <p style="color: var(--text-muted); font-size: 0.95rem; line-height: 1.5;">
+                    Configure your targeting and hit 'Find New Clients' to start a sweep.
+                </p>
+            </div>
+        `;
+        return;
     }
-    filteredLeads.forEach(lead => leadsList.appendChild(createLeadCard(lead.id, lead)));
+    
+    leadsList.innerHTML = '';
+    filteredLeads.forEach(lead => leadsList.appendChild(createLeadCard(lead.id || lead.doc_id, lead)));
 }
 
 // TOAST UI ENGINE
