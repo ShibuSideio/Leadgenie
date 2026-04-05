@@ -832,11 +832,12 @@ let rawMacroTrends = null;
 let macroChartObj = null;
 
 window.fetchMacroTrends = async function() {
-    const tableBody = document.getElementById('macro-keywords-table').querySelector('tbody');
+    const tableBody = document.getElementById('campaign-intelligence-table');
+    if(!tableBody) return;
     try {
         const user = firebase.auth().currentUser;
         if (!user) return;
-        tableBody.innerHTML = '<tr><td colspan="2" style="padding:16px; text-align:center;">Calculating AI Map-Reduce Vectors...</td></tr>';
+        tableBody.innerHTML = '<tr><td colspan="5" style="padding:16px; text-align:center;">Fetching Campaign Intelligence Constraints...</td></tr>';
         
         const token = await user.getIdToken();
         const response = await fetch(`${API_BASE}/api/l0/trends`, {
@@ -847,94 +848,46 @@ window.fetchMacroTrends = async function() {
         if (response.ok) {
             const payload = await response.json();
             rawMacroTrends = payload.data || {};
-            
-            // Populate select dropdowns initially
-            const geoMap = rawMacroTrends.geo_distribution || {};
-            const countries = new Set();
-            const states = new Set();
-            
-            Object.keys(geoMap).forEach(key => {
-                if (key === 'global') return;
-                const parts = key.split('|');
-                if (parts[0]) countries.add(parts[0].toUpperCase());
-            });
-            
-            const countryEl = document.getElementById('macro-filter-country');
-            if (countryEl && countryEl.options.length === 1) {
-                Array.from(countries).sort().forEach(c => {
-                    const opt = document.createElement('option');
-                    opt.value = c.toLowerCase();
-                    opt.innerText = c;
-                    countryEl.appendChild(opt);
-                });
-            }
             renderMacroTrends();
         } else {
-            tableBody.innerHTML = '<tr><td colspan="2" style="padding:16px; text-align:center; color:#ef4444;">Access Denied. L0 Privilege Missing.</td></tr>';
+            tableBody.innerHTML = '<tr><td colspan="5" style="padding:16px; text-align:center; color:#ef4444;">Access Denied. L0 Privilege Missing.</td></tr>';
         }
     } catch (e) {
-        tableBody.innerHTML = '<tr><td colspan="2" style="padding:16px; text-align:center; color:#ef4444;">Gateway Error.</td></tr>';
+        tableBody.innerHTML = '<tr><td colspan="5" style="padding:16px; text-align:center; color:#ef4444;">Gateway Error.</td></tr>';
     }
 };
 
 window.renderMacroTrends = function() {
-    if (!rawMacroTrends) return;
+    const tableBody = document.getElementById('campaign-intelligence-table');
+    if (!rawMacroTrends || !tableBody) return;
     
-    const country = document.getElementById('macro-filter-country').value;
-    const gKey = country === 'global' ? '' : country.toLowerCase();
+    const campaigns = rawMacroTrends.campaign_trends || [];
     
-    let aggregateDomains = {"Medical/Pharma":0, "Retail/B2C":0, "Finance":0, "Software/Agency":0, "Real Estate":0, "Corporate/Other":0};
-    const tableBody = document.getElementById('macro-keywords-table').querySelector('tbody');
-    
-    // Sum domains matching filter
-    const domainMap = rawMacroTrends.domain_mapping || {};
-    Object.keys(domainMap).forEach(dKey => {
-        if (!gKey || dKey.startsWith(gKey)) {
-            const counts = domainMap[dKey];
-            Object.keys(counts).forEach(ind => {
-                if (aggregateDomains[ind] !== undefined) aggregateDomains[ind] += counts[ind];
-            });
-        }
-    });
-    
-    // Draw Chart
-    const ctx = document.getElementById('macroDomainChart');
-    if (ctx) {
-        const labels = Object.keys(aggregateDomains);
-        const data = Object.values(aggregateDomains);
-        
-        if (macroChartObj) {
-            macroChartObj.data.datasets[0].data = data;
-            macroChartObj.update();
-        } else {
-            macroChartObj = new Chart(ctx, {
-                type: 'bar',
-                data: {
-                    labels: labels,
-                    datasets: [{
-                        label: 'Active Leads Operations',
-                        data: data,
-                        backgroundColor: '#4F46E5',
-                        borderRadius: 4
-                    }]
-                },
-                options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } }
-            });
-        }
+    if (campaigns.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="5" style="padding:16px; text-align:center;">No tracking data available.</td></tr>';
+        return;
     }
     
-    // Draw Keywords (only global for now to prevent expensive client-side correlation loops, usually backend correlates this strictly)
-    const kwArr = rawMacroTrends.global_keywords || [];
-    if (kwArr.length === 0) {
-        tableBody.innerHTML = '<tr><td colspan="2" style="padding:16px; text-align:center;">No tracking data available.</td></tr>';
-    } else {
-        tableBody.innerHTML = kwArr.slice(0, 15).map(k => `
-            <tr style="border-bottom: 1px solid var(--glass-border);">
-                <td style="padding: 8px;">${k.keyword}</td>
-                <td style="padding: 8px; text-align:right; font-weight:bold; color:var(--primary)">${k.count}</td>
-            </tr>
-        `).join('');
-    }
+    tableBody.innerHTML = campaigns.map(c => `
+        <tr style="border-bottom: 1px solid var(--glass-border);">
+            <td style="padding: 12px; font-weight: 500;">
+                ${c.email}<br>
+                <small style="font-family:monospace; color:var(--text-muted); font-size:0.75rem;">${(c.tenant_id||'').substring(0,8)}</small>
+            </td>
+            <td style="padding: 12px; font-weight: 500;">
+                ${c.name}
+            </td>
+            <td style="padding: 12px;">
+                <div style="font-size:0.85rem; max-height: 4.8em; overflow:hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;" title="${(c.bio||'').replace(/"/g, '&quot;')}">${c.bio}</div>
+            </td>
+            <td style="padding: 12px; font-size:0.8rem; font-family:monospace; color:var(--primary);">
+                ${c.keywords}
+            </td>
+            <td style="padding: 12px; text-align:right; font-weight:bold; color:var(--success);">
+                ${(c.leads_generated||0).toLocaleString()}
+            </td>
+        </tr>
+    `).join('');
 };
 
 window.toggleTenantSuspend = async function(uid, isCurrentlyActive) {
@@ -948,7 +901,7 @@ window.toggleTenantSuspend = async function(uid, isCurrentlyActive) {
             body: JSON.stringify({ uid: uid, is_active: !isCurrentlyActive })
         });
         showToast('Telemetry Command Accepted', 'info');
-        fetchL0Data();
+        fetchL0Telemetry();
     } catch(err) {
         showToast('Super Admin action explicitly failed.', 'error');
     }
@@ -968,7 +921,7 @@ window.approveCredentials = async function(tenantId) {
         });
         if (resp.ok) {
             showToast(`Approved ${tenantId}.`, 'success');
-            fetchL0Data();
+            fetchL0Telemetry();
         } else {
             showToast('Failed to approve.', 'error');
         }
