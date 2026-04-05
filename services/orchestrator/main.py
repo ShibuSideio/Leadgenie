@@ -139,21 +139,9 @@ def check_quota(tenant_id):
         if data.get("approval_status") != "approved":
             return False, 403, "Your application is under review. Please wait for L0 approval."
             
-        beta_expiry = data.get("beta_expiry")
-        if not beta_expiry:
-            return False, 401, "Beta access has expired."
-            
-        now = datetime.datetime.now(datetime.timezone.utc)
-        if hasattr(beta_expiry, 'tzinfo') and beta_expiry.tzinfo is None:
-             beta_expiry = beta_expiry.replace(tzinfo=datetime.timezone.utc)
-             
-        if now > beta_expiry:
-            return False, 401, "Beta access has expired."
-
-        credits = data.get("credits", 0)
-        wallet_balance = data.get("wallet_balance", 0)
+        credits = data.get("walletBalance") or data.get("wallet_balance") or data.get("credits") or 0
         
-        if credits <= 0 and wallet_balance <= 0:
+        if credits <= 0:
             return False, 402, "Beta quota exhausted. Contact admin to reload."
             
         return True, 200, "OK"
