@@ -459,6 +459,16 @@ def trigger_daily_sweep(path):
                         for tech in tech_stack:
                             pref_updates[f"preferences_weights.tech_{tech}"] = firestore.Increment(delta)
                             
+                        if status == "ignored":
+                            import re
+                            pain_point = lead_dict.get("pain_point", "")
+                            words = list(set(re.findall(r'\b\w{4,}\b', pain_point.lower())))
+                            extracted = words[:3]
+                            if isinstance(tech_stack, list) and tech_stack:
+                                extracted.extend([t.lower() for t in tech_stack[:2]])
+                            if extracted:
+                                pref_updates["dynamic_blocklist"] = firestore.ArrayUnion(extracted)
+                            
                         if pref_updates:
                             try:
                                 user_ref.set(pref_updates, merge=True)

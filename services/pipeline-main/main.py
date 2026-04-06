@@ -626,6 +626,25 @@ def dispatch():
                 continue
                     
     return jsonify({"processed_leads": len(all_results)}), 200
+def extract_dense_payload(text, bio):
+    import re
+    paragraphs = [p.strip() for p in text.split('\n') if len(p.strip()) > 30]
+    bio_words = set(re.findall(r'\b\w{4,}\b', bio.lower()))
+    about_us_terms = {"we are", "founded", "team", "mission", "services", "our goal", "about us"}
+    
+    scored_paragraphs = []
+    for p in paragraphs:
+        raw_p = p.lower()
+        score = 0
+        for term in about_us_terms:
+            if term in raw_p:
+                score += 3
+        words = set(re.findall(r'\b\w{4,}\b', raw_p))
+        score += len(words.intersection(bio_words))
+        scored_paragraphs.append((score, p))
+        
+    scored_paragraphs.sort(key=lambda x: x[0], reverse=True)
+    return "\n\n".join([p for s, p in scored_paragraphs[:10]])
 
 @app.route("/finalize", methods=["POST"])
 def finalize():
@@ -657,6 +676,20 @@ def finalize():
         return jsonify({"status": "blocked by waf"}), 200
         
     try:
+        # Python Fast-Fail Gate
+        tenant_doc = db.collection("users").document(tenant_id).get().to_dict() or {}
+        global_b2b_blocklist = ['add to cart', 'shopping bag', 'checkout', 'shipping policy', 'return policy', 'in stock']
+        dynamic_blocklist = tenant_doc.get("dynamic_blocklist", [])
+        b2b_blacklist = global_b2b_blocklist + [str(x).lower() for x in dynamic_blocklist]
+        
+        fail_score = sum(text.lower().count(term) for term in b2b_blacklist)
+        if fail_score > 3:
+            doc_ref.update({"status": "failed", "error": "Dropped by Python Heuristics (Cost Saved)"})
+            return jsonify({"status": "heuristic_drop"}), 200
+
+        # Token Reduction via Density Extraction
+        dense_text = extract_dense_payload(text, bio)
+
         # Re-enter processing flow
         import datetime
         expire_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30)
@@ -664,7 +697,7 @@ def finalize():
         
         cache_ref.set({
             "url": url, 
-            "text": safe_truncate(text), 
+            "text": safe_truncate(dense_text), 
             "tech_stack": tech_stack, 
             "emails": emails, 
             "phones": phones,
@@ -678,7 +711,7 @@ def finalize():
         context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
         
         try:
-            evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
+            evaluation = final_score_and_dm(dense_text, bio, context_payload, tech_stack)
         except TimeoutError:
             doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
             return jsonify({"status": "timeout"}), 200
