@@ -15,7 +15,7 @@ from google.cloud import secretmanager
 from google.api_core.exceptions import AlreadyExists, ResourceExhausted
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 import vertexai
-from vertexai.generative_models import GenerativeModel, GenerationConfig
+from vertexai.generative_models import GenerativeModel, GenerationConfig, Schema, Type
 
 app = Flask(__name__)
 
@@ -38,9 +38,12 @@ cipher_suite = Fernet(FERNET_KEY.encode())
 # Global initialization explicitly routed to the central US cluster
 vertexai.init(location="us-central1")
 
-def call_gemini_2_5(prompt: str, expect_json: bool = True):
+def call_gemini_2_5(prompt: str, expect_json: bool = True, response_schema=None):
     model = GenerativeModel("gemini-2.5-flash")
-    config = GenerationConfig(response_mime_type="application/json") if expect_json else None
+    if expect_json:
+        config = GenerationConfig(response_mime_type="application/json", response_schema=response_schema)
+    else:
+        config = None
     
     @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5), retry=retry_if_exception_type(ResourceExhausted))
     def _invoke_model():
@@ -290,8 +293,32 @@ Output schema:
 
 Text DOM: {text}
 """
+    schema = Schema(
+        type=Type.OBJECT,
+        properties={
+            "score": Schema(type=Type.INTEGER),
+            "dm": Schema(type=Type.STRING),
+            "pain_point": Schema(type=Type.STRING),
+            "icebreaker_angle": Schema(type=Type.STRING),
+            "hiring_intent_found": Schema(
+                type=Type.STRING,
+                enum=["Yes", "No"]
+            ),
+            "tech_stack_found": Schema(
+                type=Type.ARRAY,
+                items=Schema(type=Type.STRING),
+                description="Only include real, verified software technologies (e.g., 'wordpress', 'shopify', 'stripe'). Do NOT include internal system notes."
+            ),
+            "whatsapp_draft": Schema(type=Type.STRING),
+            "email": Schema(type=Type.STRING),
+            "phone": Schema(type=Type.STRING),
+            "linkedin": Schema(type=Type.STRING)
+        },
+        required=["score", "dm", "pain_point", "icebreaker_angle", "hiring_intent_found", "tech_stack_found"]
+    )
+    
     try:
-        data = call_gemini_2_5(prompt, expect_json=True)
+        data = call_gemini_2_5(prompt, expect_json=True, response_schema=schema)
         if not isinstance(data, dict):
             raise ValueError("Parsed JSON is not a dictionary.")
             

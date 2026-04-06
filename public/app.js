@@ -456,7 +456,7 @@ window.changeLeadPage = function(delta) {
 
 function renderLeads() {
     const filteredLeads = rawLeadsCache.filter(lead => {
-        if (lead.status === 'ignored') return false;
+        if (!['new', 'contacted', 'converted'].includes(lead.status || 'new')) return false;
         if (currentCampaignFilter !== 'all' && lead.campaign_id !== currentCampaignFilter) return false;
         return true;
     });
@@ -464,10 +464,10 @@ function renderLeads() {
     if (filteredLeads.length === 0) {
         leadsList.innerHTML = `
             <div class="lead-card" style="text-align: center; padding: 40px; border: none; background: transparent; box-shadow: none;">
-                <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">🚀</div>
-                <h3 style="color: var(--text-main); margin-bottom: 8px;">Your pipeline is clean.</h3>
+                <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">⏳</div>
+                <h3 style="color: var(--text-main); margin-bottom: 8px;">Hunting for leads...</h3>
                 <p style="color: var(--text-muted); font-size: 0.95rem; line-height: 1.5;">
-                    Configure your targeting and hit 'Find New Clients' to start a sweep.
+                    We are actively scanning the web for targets matching your criteria. Check back in a few minutes.
                 </p>
             </div>
         `;
