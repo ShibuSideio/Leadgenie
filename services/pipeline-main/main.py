@@ -658,8 +658,18 @@ def finalize():
         
     try:
         # Re-enter processing flow
+        import datetime
+        expire_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30)
         cache_ref = db.collection("scraped_cache").document(url.replace('/','_'))
-        cache_ref.set({"url": url, "text": safe_truncate(text), "tech_stack": tech_stack, "emails": emails, "phones": phones})
+        
+        cache_ref.set({
+            "url": url, 
+            "text": safe_truncate(text), 
+            "tech_stack": tech_stack, 
+            "emails": emails, 
+            "phones": phones,
+            "expireAt": expire_at
+        }, merge=True)
         
         shard_id = random.randint(0, 9)
         db.collection("usage_metrics").document(tenant_id).collection("shards").document(str(shard_id)).set({"gemini_calls": firestore.Increment(1)}, merge=True)
