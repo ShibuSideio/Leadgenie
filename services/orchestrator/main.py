@@ -399,7 +399,7 @@ def trigger_daily_sweep(path):
     # -----------------------------------------------------------------------------------------
     # REST API Gateway Protocol (Frontend Database Mutations)
     # -----------------------------------------------------------------------------------------
-    if request.path.startswith("/api/") and request.method in ["POST", "PUT"]:
+    if request.path.startswith("/api/") and not request.path.startswith("/api/internal/") and request.method in ["POST", "PUT"]:
         try:
             uid, tenant_id, user_role = authenticate_request(request)
             data = request.json or {}
