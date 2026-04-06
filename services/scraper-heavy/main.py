@@ -3,14 +3,27 @@ import asyncio
 from flask import Flask, request, jsonify
 from playwright.async_api import async_playwright
 from google.cloud import tasks_v2
+from google.cloud import secretmanager
 import json
 
 app = Flask(__name__)
 
-DECODO_STANDARD_PROXY = os.environ.get("DECODO_STANDARD_PROXY")
-DECODO_PREMIUM_PROXY = os.environ.get("DECODO_PREMIUM_PROXY")
+def get_secret(secret_id):
+    project_id = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+    try:
+        client = secretmanager.SecretManagerServiceClient()
+        name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
+        response = client.access_secret_version(request={"name": name})
+        return response.payload.data.decode("UTF-8").strip()
+    except Exception as e:
+        print(f"Secret Manager fetch failed for {secret_id}: {e}. Falling back to os.environ.")
+        return os.environ.get(secret_id)
+
 
 async def fetch_page_content(url):
+    DECODO_STANDARD_PROXY = get_secret("DECODO_STANDARD_PROXY")
+    DECODO_PREMIUM_PROXY = get_secret("DECODO_PREMIUM_PROXY")
+
     args = ["--disable-dev-shm-usage", "--single-process", "--no-sandbox", "--no-zygote"]
     
     async with async_playwright() as p:
