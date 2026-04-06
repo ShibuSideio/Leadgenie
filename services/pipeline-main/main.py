@@ -38,8 +38,8 @@ cipher_suite = Fernet(FERNET_KEY.encode())
 # Global initialization explicitly routed to the central US cluster
 vertexai.init(location="us-central1")
 
-def call_gemini_2_5(prompt: str, expect_json: bool = True, response_schema=None):
-    model = GenerativeModel("gemini-2.5-flash")
+def call_gemini_2_5(prompt: str, expect_json: bool = True, response_schema=None, system_instruction=None):
+    model = GenerativeModel("gemini-2.5-flash", system_instruction=system_instruction)
     if expect_json:
         config = GenerationConfig(response_mime_type="application/json", response_schema=response_schema)
     else:
@@ -263,7 +263,7 @@ def scrape_url(url):
         print(f"Fallback to heavy scraper for {url} due to {str(e)}")
         raise ValueError("DEFERRED")
 
-def final_score_and_dm(text, bio, context_payload, tech_stack):
+def final_score_and_dm(text, bio, context_payload, tech_stack, historical_dms=None):
     prompt = f"""You are an Elite B2B Profiler. Score this lead 1-10 based on campaign goals and product bio: '{bio}'. 
 
 You MUST extract contact information. You MUST identify a specific human decision-maker (Name). If the extracted text is just a generic corporate homepage, an advertisement, or lacks a specific human contact, you MUST score it 0. Do not recommend generic info@ or sales@ emails without a named target. 
@@ -275,24 +275,18 @@ CONTEXTUAL DORKING DATA:
 
 DETECTED TECH STACK:
 {', '.join(tech_stack) if tech_stack else 'None extracted'}
+"""
 
+    if historical_dms:
+        prompt += f"\nHere are examples of past successful messages that converted: {historical_dms}. Match this tone and length strictly.\n"
+
+    prompt += f"""
 Using all of this context, specifically weigh the Hiring Intent and Tech Stack to write a hyper-personalized "Trojan Horse" Icebreaker. Format JSON strictly with exact keys.
-
-Output schema:
-{{
-  "score": <int>,
-  "pain_point": "<str>",
-  "hiring_intent_found": "<str>",
-  "tech_stack_found": [<list>],
-  "icebreaker_angle": "<str>",
-  "whatsapp_draft": "<str>",
-  "email": "<str>",
-  "phone": "<str>",
-  "linkedin": "<str>"
-}}
 
 Text DOM: {text}
 """
+    sys_inst = "You are an Elite B2B Profiler. Your mandate is to extract factual enterprise data and draft concise, highly-converting outreach messages. Do not use fluff, robotic greetings, or marketing jargon. Be ruthless, analytical, and highly specific to the provided text."
+
     schema = Schema(
         type=Type.OBJECT,
         properties={
@@ -312,13 +306,20 @@ Text DOM: {text}
             "whatsapp_draft": Schema(type=Type.STRING),
             "email": Schema(type=Type.STRING),
             "phone": Schema(type=Type.STRING),
-            "linkedin": Schema(type=Type.STRING)
+            "linkedin": Schema(type=Type.STRING),
+            "decision_maker_name": Schema(type=Type.STRING, description="Specific human name found, else 'Unknown'"),
+            "decision_maker_title": Schema(type=Type.STRING, description="Title of the decision maker, else 'Unknown'"),
+            "company_size_tier": Schema(
+                type=Type.STRING, 
+                description="Must be strictly one of: 'Startup', 'Mid-Market', 'Enterprise', or 'Unknown'"
+            ),
+            "primary_objection_hypothesis": Schema(type=Type.STRING, description="A 1-sentence prediction of why they might reject our bio/pitch based on their site context.")
         },
-        required=["score", "dm", "pain_point", "icebreaker_angle", "hiring_intent_found", "tech_stack_found"]
+        required=["score", "dm", "pain_point", "icebreaker_angle", "hiring_intent_found", "tech_stack_found", "decision_maker_name", "decision_maker_title", "company_size_tier", "primary_objection_hypothesis"]
     )
     
     try:
-        data = call_gemini_2_5(prompt, expect_json=True, response_schema=schema)
+        data = call_gemini_2_5(prompt, expect_json=True, response_schema=schema, system_instruction=sys_inst)
         if not isinstance(data, dict):
             raise ValueError("Parsed JSON is not a dictionary.")
             
@@ -328,10 +329,14 @@ Text DOM: {text}
             "hiring_intent_found": data.get("hiring_intent_found", "None"),
             "tech_stack_found": data.get("tech_stack_found", []),
             "icebreaker_angle": data.get("icebreaker_angle", ""),
-            "dm": data.get("whatsapp_draft", "Failed to generate DM"),
+            "dm": data.get("dm", data.get("whatsapp_draft", "Failed to generate DM")),
             "email": data.get("email", ""),
             "phone": data.get("phone", ""),
-            "linkedin": data.get("linkedin", "")
+            "linkedin": data.get("linkedin", ""),
+            "decision_maker_name": data.get("decision_maker_name", "Unknown"),
+            "decision_maker_title": data.get("decision_maker_title", "Unknown"),
+            "company_size_tier": data.get("company_size_tier", "Unknown"),
+            "primary_objection_hypothesis": data.get("primary_objection_hypothesis", "Unknown")
         }
     except Exception as e:
         raise ValueError("LLM Parsing Failure")
@@ -711,7 +716,10 @@ def finalize():
         context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
         
         try:
-            evaluation = final_score_and_dm(dense_text, bio, context_payload, tech_stack)
+            docs = db.collection("leads").where("tenant_id", "==", tenant_id).where("status", "==", "converted").order_by("updatedAt", direction=firestore.Query.DESCENDING).limit(3).stream()
+            historical_dms = [doc.to_dict().get("dm") for doc in docs if doc.to_dict().get("dm")]
+            
+            evaluation = final_score_and_dm(dense_text, bio, context_payload, tech_stack, historical_dms)
         except TimeoutError:
             doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
             return jsonify({"status": "timeout"}), 200
@@ -730,6 +738,10 @@ def finalize():
                 "email": emails[0] if emails else evaluation.get("email", ""),
                 "phone": phones[0] if phones else evaluation.get("phone", ""),
                 "linkedin": evaluation.get("linkedin", ""),
+                "decision_maker_name": evaluation.get("decision_maker_name", "Unknown"),
+                "decision_maker_title": evaluation.get("decision_maker_title", "Unknown"),
+                "company_size_tier": evaluation.get("company_size_tier", "Unknown"),
+                "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
                 "status": "new"
             })
             
