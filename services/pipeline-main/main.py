@@ -15,7 +15,11 @@ from google.cloud import secretmanager
 from google.api_core.exceptions import AlreadyExists, ResourceExhausted
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 import vertexai
-from vertexai.generative_models import GenerativeModel, GenerationConfig, Schema, Type
+try:
+    from vertexai.generative_models import GenerativeModel, GenerationConfig, Schema, Type
+except ImportError:
+    # Enterprise fallback for preview namespaces
+    from vertexai.preview.generative_models import GenerativeModel, GenerationConfig, Schema, Type
 
 app = Flask(__name__)
 

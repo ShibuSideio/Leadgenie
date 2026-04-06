@@ -1,11 +1,13 @@
-google-cloud-firestore==2.14.0
-google-cloud-secret-manager==2.16.2
+google-cloud-firestore>=2.14.0
+google-cloud-secret-manager>=2.16.2
 grpcio==1.60.0
-google-cloud-aiplatform>=1.52.0
+google-cloud-aiplatform>=1.45.0
+firebase-admin>=6.5.0
+google-api-core>=2.17.1
 Flask==3.0.0
 gunicorn==21.2.0
 httpx==0.26.0
 beautifulsoup4==4.12.3
 cryptography==41.0.7
 tenacity==8.2.3
-google-cloud-tasks==2.14.2
+google-cloud-tasks>=2.14.2
