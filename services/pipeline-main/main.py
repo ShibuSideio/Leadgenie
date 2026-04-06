@@ -297,9 +297,9 @@ Text DOM: {text}
         type=Type.OBJECT,
         properties={
             "score": Schema(type=Type.INTEGER),
-            "dm": Schema(type=Type.STRING),
-            "pain_point": Schema(type=Type.STRING),
-            "icebreaker_angle": Schema(type=Type.STRING),
+            "dm": Schema(type=Type.STRING, description="If the scraped text does not represent a valid B2B prospect or lacks sufficient information to draft a message, you MUST output the exact string 'N/A' for this field. Do not leave it blank or null."),
+            "pain_point": Schema(type=Type.STRING, description="If the scraped text does not represent a valid B2B prospect or lacks sufficient information to draft a message, you MUST output the exact string 'N/A' for this field. Do not leave it blank or null."),
+            "icebreaker_angle": Schema(type=Type.STRING, description="If the scraped text does not represent a valid B2B prospect or lacks sufficient information to draft a message, you MUST output the exact string 'N/A' for this field. Do not leave it blank or null."),
             "hiring_intent_found": Schema(
                 type=Type.STRING,
                 enum=["Yes", "No"]
