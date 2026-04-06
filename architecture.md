@@ -1,4 +1,4 @@
-# Lead Sniper / Sideio Smart Growth (V12.99.1)
+# Lead Sniper / Sideio Smart Growth (V13.08)
 **Full Technical Specification Document (TSD)**
 
 ---
@@ -50,14 +50,14 @@ The tenant anchor containing strict L0 definitions, monetization quotas, and RLH
   "tenant_id": "uid_from_firebase_auth",
   "agreed_to_terms": "2026-04-01T12:00:00Z", // Required for platform access
   "crm_webhook_url": "https://hooks.zapier.com/hooks/catch/...", 
-  "wa_token": "gAAAAAB...", // Encrypted via Fernet in memory
+  "wa_token": "gAAAAAB...", // Encrypted natively via Google Cloud KMS 
   "wa_phone_id": "123456789",
   "admin_phone": "13125550199",
   "is_active": true,
   "approval_status": "approved", // Enum: pending, approved, rejected
   "wallet": {
     "allocated_credits": 20000,
-    "consumed_credits": 314
+    "consumed_credits": 314 // Base value; actual consumption is dynamically calculated across 10 Firestore shards in users/{tenant_id}/wallet_shards/{0-9} to bypass write-contention lock errors.
   },
   "preferences_weights": {
     "hiring_intent": 2,
@@ -128,7 +128,7 @@ The fundamental atomic execution target strictly generated and evolved by the pi
 
 ### Step 2: Cloud Task Queuing
 **Location:** `services/orchestrator/main.py::trigger_pipeline_worker`
-- **Execution:** Constructs a Google Cloud Task JSON execution pointing natively to `pipeline-main`.
+- **Execution:** Constructs a Google Cloud Task JSON execution pointing natively to `pipeline-main/dispatch`.
 - **Payload:**
 ```json
 {
@@ -168,19 +168,20 @@ payload_dict = {"q": f"{base_query} AND {campaign_location}", "num": 20, "locati
 ```text
 CRITICAL INTENT CHECK: Read the user's bio: '{bio}'. Is the website EXPERIENCING the problem the user solves, or are they SELLING a solution to it? You MUST reject any URL that is an SEO blog, a competitor, or a direct-to-consumer (D2C) retail catalog. Only approve targets that match the user's intended value chain.
 
+COMPETITOR & MANUFACTURER BAN: You MUST reject manufacturers, wholesalers, and suppliers who already produce or sell products in the user's industry. Only approve END-USERS.
+
+SOCIAL PLATFORM RULE: If the URL is from a social network or forum, DO NOT evaluate the host platform. You must evaluate the INTENT of the specific post or user snippet.
+
 CRITICAL: Evaluate the business location. If the target location is '{location_target}', and this website explicitly serves a different geographic region (e.g., a Dubai business for a Kochi search), you MUST reject the URL immediately. Return a failed state.
 
 YOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads.
 ```
 
-### Step 6: Heavy Scraping
-**Location:** `services/scraper-heavy/main.py::fetch_page_content`
-- **Execution:** Active instantiation.
-- **Interception Logic:** 
-```python
-await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_())
-await page.goto(url, timeout=15000, wait_until="domcontentloaded")
-```
+### Step 6: Heavy Scraping (Decoupled Async Webhook)
+**Location:** `services/scraper-heavy/main.py::scrape`
+- **Execution:** `pipeline-main` drops a `DEFERRED` task gracefully into Cloud Tasks natively routed to `scraper-heavy`. Playwright opens headless chromium targeting the DOM.
+- **Short-Circuit Bypass:** If the target URL string-matches a social domain (via `.endswith()`), the engine completely skips Playwright, grabs the organic search snippet natively, and jumps straight to Vertex evaluation.
+- **Callback Loop:** Scraping executes in total isolation with explicit `--disable-dev-shm-usage` resource aborts. Upon success, `scraper-heavy` queues a Cloud Task back to `pipeline-main/finalize` delivering the DOM payloads to Vertex.
 - **Contact Extraction:** 
 Native DOM interaction avoiding string-scrape limits:
 ```javascript
@@ -189,7 +190,8 @@ document.querySelectorAll('a[href^="mailto:"]').forEach(...)
 
 ### Step 7: Final Enrichment & DM Drafting
 **Location:** `services/pipeline-main/main.py::final_score_and_dm`
-- **Execution:** Reads truncated DOM content and generates final fields.
+- **Execution:** Reads truncated DOM content and generates final fields using Python `tenacity` exponential backoff libraries to instantly catch Vertex AI API rate limit drops.
+- **Data Compliance:** Statically locked into `vertexai.generative_models.Schema` rejecting JSON format hallucinations natively.
 - **Exact Prompt:**
 ```text
 You are an Elite B2B Profiler. Score this lead 1-10 based on campaign goals and product bio: '{bio}'.
@@ -248,16 +250,14 @@ To prevent silent lead isolation within the `"processing"` execution state, the 
 
 **Location:** `services/pipeline-main/main.py`
 
-### 5.1 Scraper Fallback Defense
-The heavy Playwright scraper utilizes a native REST fallback execution protected by a dual try-catch map guaranteeing it never breaks the parent executing thread on `TimeoutError` or connection saturation logic.
+### 5.1 Playwright Resource Defense
+The heavy Playwright scraper utilizes a native asynchronous web hook and is equipped with strict Chromium flags (`--single-process`, `--no-sandbox`) enveloped by a hard 20-second `asyncio.wait_for(...)` absolute kill-switch. If a site completely locks Chromium DOM execution, the worker returns empty and prevents OOM.
 ```python
-    except Exception as e: # Parent lightweight exception
-        try:
-            heavy_resp = httpx.post(SCRAPER_HEAVY_URL, json={"url": url}, timeout=45)
-            # ...
-        except Exception as he:
-            print(f"Heavy Scraper fatal crash for {url}: {he}")
-        return "", [], [], [] # Safely proceeds with empty state
+    try:
+        # standard scrape loop
+    except asyncio.TimeoutError:
+        print(f"Watchdog Hard Timeout Reached. Chromium process force killed.")
+        return "", [], [], []
 ```
 
 ### 5.2 The Unified Loop Crash Handler
@@ -272,10 +272,17 @@ The entirety of the parsing, deduplication, cache routing, DB saving, and AI tra
                 print(f"Pipeline execution crashed: {loop_e}")
                 db.collection("leads").document(lead_id).update({
                     "status": "failed", 
-                    "error": "Pipeline execution crashed"
+                    "error": str(loop_e) # Safe LLM parse strings mapping
                 })
                 continue
 ```
+
+---
+
+## 6. ENTERPRISE KMS ENVELOPE ENCRYPTION
+
+All Meta WhatsApp integrations strictly wrap API tokens dynamically through the Google Cloud Key Management Service.
+- **Execution:** The Orchestrator leverages `google-cloud-secret-manager` and `google-cloud-kms` to pull the `sideio-wa-key` ring dynamically from memory, failing over to legacy Fernet strictly for cached sessions. Key operations are performed remotely avoiding raw strings in memory.
 
 ---
 
@@ -288,6 +295,7 @@ The Client UX focuses exclusively on native interaction rendering, converting ma
     *   *Discovered Today:* Total documents generated in a 24-hr sequence.
     *   *Actionable:* Lead documents strictly evaluated as `status == 'new'`.
     *   *Ignored:* Lead documents mapped with `status == 'ignored'`.
+*   **Pure Leads UI:** The React feed strictly drops temporary `processing` or `failed` leads visually via `.filter()`. If zero actionable leads exist, it renders an optimistic `Hunting for leads...` loading state empty fallback.
 *   **Semantic Tech Badges:** The React client identifies specific technology stack sets native to the extracted `tech_stack_found` array payload and overlays structured metadata Badges dynamically atop the HTML Card sequence (e.g., rendering the HubSpot or React icon).
 *   **Competitor Intercept:** Native UI conditionals flag any URL domains matching known B2B aggregator entities implicitly.
 *   **Single-Click Execution:** Deprecating the legacy Autonomous WhatsApp Auto-Send, the UI now features a `Copy Message` invocation. It actively copies the Generative AI drafted `dm` text to the user's native system Clipboard and immediately triggers a PUT mapping the lead to `"status": "contacted"`.
