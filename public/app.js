@@ -663,10 +663,20 @@ window.saveCampaignAction = async function() {
     const keysInput = document.getElementById('camp-keys');
     const glInput = document.getElementById('camp-gl');
     const locationInput = document.getElementById('camp-location');
+    const targetUrlsInput = document.getElementById('camp-target-urls');
     
     if (!nameInput || !keysInput || !nameInput.value || !keysInput.value) {
         showToast('Campaign Name and Keywords are required', 'error');
         return;
+    }
+    
+    let targetUrls = [];
+    if (targetUrlsInput && targetUrlsInput.value.trim().length > 0) {
+        targetUrls = targetUrlsInput.value.split('\n').map(u => u.trim()).filter(u => u.length > 0);
+        if (targetUrls.length > 10) {
+            showToast('Warning: Only the first 10 URLs will be prioritized.', 'error');
+            targetUrls = targetUrls.slice(0, 10);
+        }
     }
     
     showToast('Setting up your search...', 'info');
@@ -677,6 +687,7 @@ window.saveCampaignAction = async function() {
             keywords: keysInput.value,
             gl: glInput ? glInput.value : '',
             location: locationInput ? locationInput.value : '',
+            target_urls: targetUrls,
             status: 'active'
         });
         if(success) {
@@ -685,6 +696,7 @@ window.saveCampaignAction = async function() {
             nameInput.value = ''; bioInput.value = ''; keysInput.value = '';
             if (glInput) glInput.value = '';
             if (locationInput) locationInput.value = '';
+            if (targetUrlsInput) targetUrlsInput.value = '';
             loadDashboard();
         }
     } catch(err) {

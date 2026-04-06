@@ -351,6 +351,8 @@ def dispatch():
     campaign_ref = db.collection("campaigns").document(campaign_id)
     campaign = campaign_ref.get().to_dict()
     bio = campaign.get("bio", "")
+    target_urls = campaign.get("target_urls", [])
+    user_urls = target_urls[:10] if isinstance(target_urls, list) else []
     
     location = campaign.get("location", "").strip()
     gl = campaign.get("gl", "").strip()
@@ -397,10 +399,21 @@ def dispatch():
                 unique_results.append(r)
                 
         # Step 3: LLM Pre-Filter
-        filtered_urls = pre_filter_gemini(unique_results, bio, location)
+        approved_serper_urls = pre_filter_gemini(unique_results, bio, location)
+        
+        # Merge & Deduplicate
+        seen_urls = set()
+        combined_urls = []
+        for u in user_urls + approved_serper_urls:
+            if u not in seen_urls:
+                seen_urls.add(u)
+                combined_urls.append(u)
+                
+        # The Cap
+        final_execution_urls = combined_urls[:20]
         
         # Step 3, 4, 5
-        for url in filtered_urls[:30]:
+        for url in final_execution_urls:
             target_domain = extract_root_domain(url)
             if not target_domain: continue
             
