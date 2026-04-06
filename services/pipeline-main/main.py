@@ -155,7 +155,7 @@ def pre_filter_gemini(snippets, bio, location_target):
     if not snippets:
         return []
     
-    prompt = f"CRITICAL INTENT CHECK: Read the user's bio: '{bio}'. Is the website EXPERIENCING the problem the user solves, or are they SELLING a solution to it? You MUST reject any URL that is an SEO blog, a competitor, or a direct-to-consumer (D2C) retail catalog. You MUST reject any URL that is a business directory, aggregator, yellow pages, or marketplace (e.g., JustDial, Alibaba, Yelp, IndiaMart, ExportersIndia). These are not end-buyers. Only approve the direct websites of individual businesses. Only approve targets that match the user's intended value chain.\n\nSOCIAL PLATFORM RULE: If the URL is from a social network or forum (e.g., linkedin.com, facebook.com, reddit.com, quora.com), DO NOT evaluate the host platform. You must evaluate the INTENT of the specific post or user snippet. If the snippet shows a human or local business asking for help or discussing the symptom, APPROVE the URL. Do not reject Reddit just because Reddit itself is not your target B2B buyer.\n\nCRITICAL: Evaluate the business location. If the target location is '{location_target}', and this website explicitly serves a different geographic region (e.g., a Dubai business for a Kochi search), you MUST reject the URL immediately. Return a failed state.\n\nYOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads. Do NOT output markdown. Do NOT output bullet points. Every line must start precisely with 'http'.\n\nSnippets: {json.dumps(snippets)}"
+    prompt = f"CRITICAL INTENT CHECK: Read the user's bio: '{bio}'. Is the website EXPERIENCING the problem the user solves, or are they SELLING a solution to it? You MUST reject any URL that is an SEO blog, a competitor, or a direct-to-consumer (D2C) retail catalog. You MUST reject any URL that is a business directory, aggregator, yellow pages, or marketplace (e.g., JustDial, Alibaba, Yelp, IndiaMart, ExportersIndia). These are not end-buyers. Only approve the direct websites of individual businesses. Only approve targets that match the user's intended value chain.\n\nCOMPETITOR & MANUFACTURER BAN: You MUST reject manufacturers, wholesalers, and suppliers who already produce or sell products in the user's industry. If the user sells car care products, you MUST reject a company that manufactures car shampoo. Only approve END-USERS of the product/service.\n\nSOCIAL PLATFORM RULE: If the URL is from a social network or forum (e.g., linkedin.com, facebook.com, reddit.com, quora.com), DO NOT evaluate the host platform. You must evaluate the INTENT of the specific post or user snippet. If the snippet shows a human or local business asking for help or discussing the symptom, APPROVE the URL. Do not reject Reddit just because Reddit itself is not your target B2B buyer.\n\nCRITICAL: Evaluate the business location. If the target location is '{location_target}', and this website explicitly serves a different geographic region (e.g., a Dubai business for a Kochi search), you MUST reject the URL immediately. Return a failed state.\n\nYOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads. Do NOT output markdown. Do NOT output bullet points. Every line must start precisely with 'http'.\n\nSnippets: {json.dumps(snippets)}"
     response_text = call_gemini_2_5(prompt, expect_json=False)
     
     urls = []
@@ -419,7 +419,7 @@ def dispatch():
             
             SOCIAL_DOMAINS = ["linkedin.com", "facebook.com", "reddit.com", "instagram.com", "x.com", "twitter.com", "team-bhp.com", "quora.com", "youtube.com"]
             
-            if target_domain in SOCIAL_DOMAINS:
+            if any(target_domain.endswith(social) for social in SOCIAL_DOMAINS):
                 parsed_url = urlparse(url)
                 exact_path = f"{parsed_url.netloc}{parsed_url.path}".lower().replace('www.', '')
                 lock_entity = hashlib.sha256(exact_path.encode('utf-8')).hexdigest()
@@ -473,7 +473,7 @@ def dispatch():
                     tech_stack = c_data.get("tech_stack", [])
                     emails = c_data.get("emails", [])
                     phones = c_data.get("phones", [])
-                elif target_domain in SOCIAL_DOMAINS:
+                elif any(target_domain.endswith(social) for social in SOCIAL_DOMAINS):
                     snippet_text = ""
                     for ur in unique_results:
                         if ur.get("link") == url:
