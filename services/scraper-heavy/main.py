@@ -7,23 +7,67 @@ import json
 
 app = Flask(__name__)
 
+DECODO_STANDARD_PROXY = os.environ.get("DECODO_STANDARD_PROXY")
+DECODO_PREMIUM_PROXY = os.environ.get("DECODO_PREMIUM_PROXY")
+
 async def fetch_page_content(url):
+    args = ["--disable-dev-shm-usage", "--single-process", "--no-sandbox", "--no-zygote"]
+    
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--single-process", "--no-sandbox", "--no-zygote"])
-        # ignore_https_errors bypasses weak SME SSL cert domains; bypass_csp prevents local scripts locking up headless eval
-        context = await browser.new_context(ignore_https_errors=True, bypass_csp=True)
-        page = await context.new_page()
+        # Standard Intercept (Low-Cost)
+        kw = {}
+        if DECODO_STANDARD_PROXY:
+            kw["proxy"] = {"server": DECODO_STANDARD_PROXY}
+            
+        browser = await p.chromium.launch(headless=True, args=args, **kw)
         try:
+            context = await browser.new_context(ignore_https_errors=True, bypass_csp=True)
+            page = await context.new_page()
+            
             # Block heavy non-text resources to prevent OOM kills
             await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_())
             
-            # Enforce strict 15s page load timeout
-            await page.goto(url, timeout=15000, wait_until="domcontentloaded")
+            response = await page.goto(url, timeout=15000, wait_until="domcontentloaded")
             
-            # Remove scripts, styles for clean text extraction
-            await page.evaluate("""() => {
-                document.querySelectorAll('script, style, noscript, nav, footer, iframe').forEach(el => el.remove());
-            }""")
+            # Friction Detection
+            waf_blocked = False
+            if response and response.status in [403, 429, 503]:
+                waf_blocked = True
+                
+            text, title = "", ""
+            try:
+                text = await page.evaluate("() => document.body.innerText")
+                title = await page.title()
+            except Exception:
+                pass
+                
+            if not waf_blocked:
+                dom_str = (text + " " + title).lower()
+                waf_keywords = ["just a moment...", "attention required", "cf-browser-verification", "ray id"]
+                if any(k in dom_str for k in waf_keywords):
+                    waf_blocked = True
+                    
+            # Premium Fallback (High-Cost)
+            if waf_blocked and DECODO_PREMIUM_PROXY:
+                print(f"WAF Friction Detected for {url}. Initializing DECODO_PREMIUM_PROXY bypass.")
+                await browser.close()
+                kw_prem = {"proxy": {"server": DECODO_PREMIUM_PROXY}}
+                browser = await p.chromium.launch(headless=True, args=args, **kw_prem)
+                context = await browser.new_context(ignore_https_errors=True, bypass_csp=True)
+                page = await context.new_page()
+                await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_())
+                
+                await page.goto(url, timeout=15000, wait_until="domcontentloaded")
+                # Native delay resolving JS challenge logic
+                await page.wait_for_timeout(3000)
+
+            # Execution Cleans up
+            try:
+                await page.evaluate("""() => {
+                    document.querySelectorAll('script, style, noscript, nav, footer, iframe').forEach(el => el.remove());
+                }""")
+            except Exception:
+                pass
 
             # Contact Harvesting
             contacts = await page.evaluate("""() => {
@@ -40,13 +84,17 @@ async def fetch_page_content(url):
                 return { emails: Array.from(emails), phones: Array.from(phones) };
             }""")
 
-            text = await page.evaluate("() => document.body.innerText")
-            return text, contacts
+            final_text = await page.evaluate("() => document.body.innerText")
+            return final_text, contacts
+            
         except Exception as e:
             print(f"Error scraping {url}: {str(e)}")
             return "", {"emails": [], "phones": []}
         finally:
-            await browser.close()
+            try:
+                await browser.close()
+            except Exception:
+                pass
 
 @app.route("/scrape", methods=["POST"])
 def scrape():

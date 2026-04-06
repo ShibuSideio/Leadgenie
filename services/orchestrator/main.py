@@ -514,91 +514,100 @@ def trigger_daily_sweep(path):
         return handle_purge(request)
 
     # -----------------------------------------------------------------------------------------
-    # Legacy Cloud Scheduler / Manual Execution Triggers
+    # Master Cron Continuous Sweep (5-Minute Interval)
     # -----------------------------------------------------------------------------------------
-    audit_trail = []
-    
-    manual_camp_id = None
-    if request.method == "POST":
+    if request.path == "/api/internal/cron/sweep" and request.method == "POST":
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing OIDC token"}), 401
+            
+        token = auth_header.split("Bearer ")[1]
         try:
-            data = request.json
-            if data and "campaign_id" in data:
-                manual_camp_id = data["campaign_id"]
-        except:
-            pass
-
-    if manual_camp_id:
-        campaigns = [db.collection("campaigns").document(manual_camp_id)]
-    else:
-        campaigns = list(db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(100).stream())
-    
-    audit_trail.append("Executed Firestore query for active campaigns.")
-    audit_trail.append(f"Found {len(campaigns)} active campaigns in db.collection('campaigns').")
-    
-    queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
-    
-    count = 0
-    for camp_doc in campaigns:
-        if manual_camp_id:
-           camp_snap = camp_doc.get()
-           if not camp_snap.exists: continue
-           campaign_data = camp_snap.to_dict()
-           campaign_id = manual_camp_id
-        else:
-           campaign_data = camp_doc.to_dict()
-           campaign_id = camp_doc.id
-
-        tenant_id = campaign_data.get("tenant_id")
-        if not tenant_id: 
-            audit_trail.append(f"🚫 SKIPPED Campaign {campaign_id}. Reason: Missing tenant_id constraint")
-            continue
-        
-        audit_trail.append(f"Evaluating Campaign ID: {campaign_id} for Tenant: {tenant_id}")
-        
-        u_doc = db.collection("users").document(tenant_id).get()
-        user_data = u_doc.to_dict() if u_doc.exists else {}
-        
-        role = user_data.get("role")
-        if role == "super_admin":
-            audit_trail.append(f"✅ QUEUED Campaign {campaign_id}. Reason: God Mode (Super Admin bypass).")
-        else:
-            wallet = user_data.get("wallet", {})
-            credits_val = wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0)
-            shard_sum = sum(shard.to_dict().get("consumed_credits", 0) for shard in db.collection("users").document(tenant_id).collection("wallet_shards").stream())
-            credits_val -= shard_sum
-            audit_trail.append(f"Fetched nested wallet for Tenant. Allocated credits constraint: {credits_val}")
+            from google.oauth2 import id_token
+            from google.auth.transport import requests as google_requests
+            claim = id_token.verify_oauth2_token(token, google_requests.Request())
+        except Exception as e:
+            return jsonify({"error": "Invalid OIDC token", "details": str(e)}), 403
             
-            is_valid, _, err_msg = check_quota(tenant_id)
-            if not is_valid:
-                audit_trail.append(f"🚫 SKIPPED Campaign {campaign_id}. Reason: {err_msg}")
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        # Pull active campaigns with an aggressive limit of 500
+        campaigns = list(db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(500).stream())
+        
+        audit_trail = ["Executed Master Cron Sweep targeting 500 active campaigns."]
+        queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+        count = 0
+        import random
+        
+        for camp_doc in campaigns:
+            campaign_data = camp_doc.to_dict()
+            campaign_id = camp_doc.id
+            
+            # The Graceful Fallback check for missing schema
+            next_drip_due = campaign_data.get("next_drip_due")
+            if next_drip_due and hasattr(next_drip_due, "timestamp"):
+                next_drip_due_dt = next_drip_due
+                if next_drip_due_dt.tzinfo is None:
+                    next_drip_due_dt = next_drip_due_dt.replace(tzinfo=datetime.timezone.utc)
+                if next_drip_due_dt > now_utc:
+                    continue # Not due yet! Skip it.
+
+            tenant_id = campaign_data.get("tenant_id")
+            if not tenant_id: 
                 continue
+                
+            u_doc = db.collection("users").document(tenant_id).get()
+            user_data = u_doc.to_dict() if u_doc.exists else {}
             
-            audit_trail.append(f"✅ QUEUED Campaign {campaign_id}.")
-        
-        task = {
-            "http_request": {
-                "http_method": tasks_v2.HttpMethod.POST,
-                "url": PIPELINE_URL,
-                "headers": {"Content-type": "application/json"},
-                "body": json.dumps({"tenant_id": tenant_id, "campaign_id": campaign_id}).encode()
-            }
-        }
-        
-        sa_email = get_service_account_email().strip()
-        if sa_email:
-            base_url_audience = PIPELINE_URL.split('/dispatch')[0]
-            task["http_request"]["oidc_token"] = {
-                "service_account_email": sa_email,
-                "audience": base_url_audience
+            role = user_data.get("role")
+            if role != "super_admin":
+                wallet = user_data.get("wallet", {})
+                credits_val = wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0)
+                shard_sum = sum(shard.to_dict().get("consumed_credits", 0) for shard in db.collection("users").document(tenant_id).collection("wallet_shards").stream())
+                credits_val -= shard_sum
+                
+                is_valid, _, err_msg = check_quota(tenant_id)
+                if not is_valid:
+                    audit_trail.append(f"🚫 SKIPPED Campaign {campaign_id}. Reason: {err_msg}")
+                    continue
+            
+            task = {
+                "http_request": {
+                    "http_method": tasks_v2.HttpMethod.POST,
+                    "url": PIPELINE_URL,
+                    "headers": {"Content-type": "application/json"},
+                    "body": json.dumps({"tenant_id": tenant_id, "campaign_id": campaign_id}).encode()
+                }
             }
             
-        # V12.99.1 Guardrail: Stagger executions by 30 seconds to prevent Serper/OOM spike
-        d = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=count * 30)
-        timestamp = timestamp_pb2.Timestamp()
-        timestamp.FromDatetime(d)
-        task["schedule_time"] = timestamp
-        
-        tasks_client.create_task(request={"parent": queue_path, "task": task})
-        count += 1
-        
-    return jsonify({"message": f"Successfully queued {count} campaign jobs.", "audit_trail": audit_trail}), 200
+            sa_email = get_service_account_email().strip()
+            if sa_email:
+                base_url_audience = PIPELINE_URL.split('/dispatch')[0]
+                task["http_request"]["oidc_token"] = {
+                    "service_account_email": sa_email,
+                    "audience": base_url_audience
+                }
+                
+            # Jitter Math: Stagger tasks continuously over the next 300 seconds
+            jitter_seconds = random.randint(1, 290)
+            d = now_utc + datetime.timedelta(seconds=jitter_seconds)
+            timestamp = timestamp_pb2.Timestamp()
+            timestamp.FromDatetime(d)
+            task["schedule_time"] = timestamp
+            
+            tasks_client.create_task(request={"parent": queue_path, "task": task})
+            
+            # Database Update (Self-Healing) + Dynamic Schema Mapping
+            drip_interval_minutes = int(campaign_data.get("drip_interval_minutes", 60))
+            new_due_date = now_utc + datetime.timedelta(minutes=drip_interval_minutes)
+            camp_doc.reference.update({
+                "next_drip_due": new_due_date,
+                "drip_interval_minutes": drip_interval_minutes
+            })
+            
+            count += 1
+            audit_trail.append(f"✅ QUEUED Campaign {campaign_id} with delay {jitter_seconds}s. Next cron iteration set for {new_due_date}.")
+            
+        return jsonify({"message": f"Sweep complete. Dispatched {count} background tasks.", "audit_trail": audit_trail}), 200
+
+    return jsonify({"error": "Not Found"}), 404
