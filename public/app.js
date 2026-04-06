@@ -432,6 +432,16 @@ window.agreeToTerms = async function() {
 window.copyMessageAndContact = function(docId, dm) {
     navigator.clipboard.writeText(dm).then(() => {
         showToast("Message Copied to Clipboard", "success");
+        
+        // Optimistic UI updates
+        rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
+        const cardEl = document.getElementById(docId);
+        if(cardEl) {
+            virtualObserver.unobserve(cardEl);
+            cardEl.remove();
+        }
+        
+        // Background DB Sync
         updateLeadStatus(docId, "contacted");
     }).catch(err => {
         console.error("Clipboard failed", err);
@@ -454,6 +464,29 @@ window.changeLeadPage = function(delta) {
     document.querySelector('.dashboard-grid')?.scrollIntoView({ behavior: 'smooth' });
 };
 
+let virtualObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+        if(entry.isIntersecting) {
+            if(!entry.target.hasAttribute('data-rendered')) {
+                const leadId = entry.target.getAttribute('data-lead-id');
+                const lead = rawLeadsCache.find(l => (l.id || l.doc_id) === leadId);
+                if (lead) {
+                    entry.target.innerHTML = generateLeadInnerHtml(leadId, lead);
+                    entry.target.setAttribute('data-rendered', 'true');
+                    entry.target.style.height = 'auto';
+                }
+            }
+        } else {
+            if(entry.target.hasAttribute('data-rendered')) {
+                const rect = entry.target.getBoundingClientRect();
+                entry.target.style.height = `${Math.max(150, rect.height)}px`;
+                entry.target.innerHTML = '';
+                entry.target.removeAttribute('data-rendered');
+            }
+        }
+    });
+}, { rootMargin: "800px" });
+
 function renderLeads() {
     const filteredLeads = rawLeadsCache.filter(lead => {
         if (!['new', 'contacted', 'converted'].includes(lead.status || 'new')) return false;
@@ -474,29 +507,20 @@ function renderLeads() {
         return;
     }
     
-    // Virtualization / Pagination Window
-    const totalPages = Math.ceil(filteredLeads.length / window.leadsPerPage);
-    if (window.currentPage > totalPages) window.currentPage = totalPages;
-    if (window.currentPage < 1) window.currentPage = 1;
-    
-    const startIdx = (window.currentPage - 1) * window.leadsPerPage;
-    const endIdx = startIdx + window.leadsPerPage;
-    const paginatedLeads = filteredLeads.slice(startIdx, endIdx);
-    
     leadsList.innerHTML = '';
-    paginatedLeads.forEach(lead => leadsList.appendChild(createLeadCard(lead.id || lead.doc_id, lead)));
+    virtualObserver.disconnect();
     
-    // Inject Pagination Controls natively
-    const paginationControls = document.createElement('div');
-    paginationControls.className = 'pagination-controls';
-    paginationControls.style = "display:flex; justify-content:space-between; align-items:center; margin-top:20px; padding:16px; background:var(--glass-bg); border-radius:12px; border:1px solid var(--glass-border);";
-    
-    paginationControls.innerHTML = `
-        <button class="secondary-btn" onclick="changeLeadPage(-1)" ${window.currentPage === 1 ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''}>← Previous</button>
-        <span style="font-size:0.9rem; font-weight:500; color:var(--text-main);">Page ${window.currentPage} of ${totalPages} <span style="color:var(--text-muted);">(${filteredLeads.length} total)</span></span>
-        <button class="primary-btn" onclick="changeLeadPage(1)" ${window.currentPage === totalPages ? 'disabled style="opacity:0.5; cursor:not-allowed;"' : ''}>Next →</button>
-    `;
-    leadsList.appendChild(paginationControls);
+    // Strict DOM Virtualization implementation
+    filteredLeads.forEach(lead => {
+         const wrapper = document.createElement('div');
+         wrapper.className = 'lead-card';
+         wrapper.style.minHeight = '180px';
+         wrapper.id = lead.id || lead.doc_id;
+         wrapper.setAttribute('data-lead-id', lead.id || lead.doc_id);
+         
+         leadsList.appendChild(wrapper);
+         virtualObserver.observe(wrapper);
+    });
 }
 
 // TOAST UI ENGINE
@@ -732,9 +756,17 @@ window.switchTab = function(tabName) {
     }
 };
 
+window.lastL0FetchTime = 0;
 window.l0TelemetryCache = { macro: {}, tenants: [], sortKey: 'leads', sortDesc: true };
 
 window.fetchL0Telemetry = async function() {
+    const now = Date.now();
+    if (now - window.lastL0FetchTime < 30000 && window.l0TelemetryCache.tenants.length > 0) {
+        console.log("L0 Telemetry debounced natively.");
+        return; // debounce heartbeat
+    }
+    window.lastL0FetchTime = now;
+    
     const tableBody = document.getElementById('l0-telemetry-table');
     try {
         const user = firebase.auth().currentUser;
