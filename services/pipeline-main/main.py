@@ -513,6 +513,11 @@ def dispatch():
                         cache_ref.set({"url": url, "text": safe_truncate(text), "tech_stack": tech_stack, "emails": emails, "phones": phones})
             
                 if text:
+                    bot_keywords = ["Cloudflare Ray ID", "Please verify you are human", "Enable JavaScript and cookies to continue", "Checking if the site connection is secure", "Access Denied", "403 Forbidden"]
+                    if any(keyword.lower() in text.lower() for keyword in bot_keywords):
+                        doc_ref.update({"status": "failed", "error": "Blocked by Cloudflare/WAF"})
+                        continue
+                        
                     shard_id = random.randint(0, 9)
                     db.collection("usage_metrics").document(tenant_id).collection("shards").document(str(shard_id)).set({"gemini_calls": firestore.Increment(1)}, merge=True)
                     db.collection("users").document(tenant_id).collection("wallet_shards").document(str(shard_id)).set({"consumed_credits": firestore.Increment(1)}, merge=True)
@@ -645,6 +650,11 @@ def finalize():
     if not text:
         doc_ref.delete()
         return jsonify({"status": "dropped empty text"}), 200
+        
+    bot_keywords = ["Cloudflare Ray ID", "Please verify you are human", "Enable JavaScript and cookies to continue", "Checking if the site connection is secure", "Access Denied", "403 Forbidden"]
+    if any(keyword.lower() in text.lower() for keyword in bot_keywords):
+        doc_ref.update({"status": "failed", "error": "Blocked by Cloudflare/WAF"})
+        return jsonify({"status": "blocked by waf"}), 200
         
     try:
         # Re-enter processing flow
