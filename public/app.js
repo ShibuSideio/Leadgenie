@@ -482,9 +482,9 @@ window.changeLeadPage = function(delta) {
 // ---------------------------------------------------------------------------
 function generateLeadInnerHtml(docId, lead) {
     // ── Phase 5: Enterprise Dossier fields (backward-compatible fallbacks) ──
-    const targetName           = lead.decision_maker_name        || 'Unknown';
-    const companySize          = lead.company_size_tier          || 'Unknown';
-    const primaryObjection     = lead.primary_objection_hypothesis || 'Unknown';
+    const targetName       = (!lead.decision_maker_name        || lead.decision_maker_name        === 'N/A') ? 'Data unavailable on scanned domain'                         : lead.decision_maker_name;
+    const companySize      = (!lead.company_size_tier          || lead.company_size_tier          === 'N/A') ? 'Requires secondary analysis'                                 : lead.company_size_tier;
+    const primaryObjection = (!lead.primary_objection_hypothesis || lead.primary_objection_hypothesis === 'N/A') ? 'Insufficient data to generate confident hypothesis'    : lead.primary_objection_hypothesis;
     const icebreakerAngle      = lead.icebreaker_angle           || '';
 
     // ── Standard lead fields ─────────────────────────────────────────────────
