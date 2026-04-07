@@ -90,7 +90,32 @@ def safe_truncate(text: str, max_bytes: int = 100000) -> str:
     if len(encoded) <= max_bytes:
         return text
     return encoded[:max_bytes].decode('utf-8', errors='ignore')
-def generate_smart_query(user_keywords, tenant_id, bio):
+
+# ---------------------------------------------------------------------------
+# V14: SYNAPTIC ROUTER — Vector-to-Platform Dork Map
+# Maps a sourcing vector string to platform-specific Google Search operators.
+# Injected into generate_smart_query() to dynamically tailor search topology.
+# ---------------------------------------------------------------------------
+VECTOR_PLATFORM_MAP = {
+    "Social/Forum Listening": [
+        "site:reddit.com",
+        "site:quora.com",
+        "site:facebook.com/groups"
+    ],
+    "Review Hijacking": [
+        "site:tripadvisor.com",
+        "site:trustpilot.com"
+    ],
+    "Maps/GMB Targeting": [
+        "site:google.com/maps",
+        '"near me"'
+    ],
+    "Classic B2B": [
+        "site:linkedin.com/company"
+    ]
+}
+
+def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None):
     historical_phrases = []
     try:
         # Require composite index, graceful fallback to Global
@@ -133,6 +158,13 @@ def generate_smart_query(user_keywords, tenant_id, bio):
     for sd in symptom_dorks:
         smart_queries.append(f'{sd} {blacklist}')
         
+    # V14: Inject vector-specific platform dorks AFTER base queries
+    if sourcing_vector and sourcing_vector in VECTOR_PLATFORM_MAP:
+        for platform_dork in VECTOR_PLATFORM_MAP[sourcing_vector]:
+            dork_q = f'{platform_dork}{historical_str} {blacklist}'
+            smart_queries.append(dork_q)
+        print(f"[SYNAPTIC ROUTER] Appended {len(VECTOR_PLATFORM_MAP[sourcing_vector])} platform dorks for vector: '{sourcing_vector}'")
+
     return smart_queries
 
 def filter_serper_noise(serper_results):
@@ -152,19 +184,66 @@ def filter_serper_noise(serper_results):
     return clean_results
 
 def pre_filter_gemini(snippets, bio, location_target):
+    """
+    V14: Returns a tiered dict {"High": [...urls], "Medium": [...urls]}.
+    Low-confidence URLs are silently dropped.
+    Uses strict JSON schema enforcement — no flat URL list hallucinations.
+    """
     if not snippets:
-        return []
-    
-    prompt = f"CRITICAL INTENT CHECK: Read the user's bio: '{bio}'. Is the website EXPERIENCING the problem the user solves, or are they SELLING a solution to it? You MUST reject any URL that is an SEO blog, a competitor, or a direct-to-consumer (D2C) retail catalog. You MUST reject any URL that is a business directory, aggregator, yellow pages, or marketplace (e.g., JustDial, Alibaba, Yelp, IndiaMart, ExportersIndia). These are not end-buyers. Only approve the direct websites of individual businesses. Only approve targets that match the user's intended value chain.\n\nCOMPETITOR & MANUFACTURER BAN: You MUST reject manufacturers, wholesalers, and suppliers who already produce or sell products in the user's industry. If the user sells car care products, you MUST reject a company that manufactures car shampoo. Only approve END-USERS of the product/service.\n\nSOCIAL PLATFORM RULE: If the URL is from a social network or forum (e.g., linkedin.com, facebook.com, reddit.com, quora.com), DO NOT evaluate the host platform. You must evaluate the INTENT of the specific post or user snippet. If the snippet shows a human or local business asking for help or discussing the symptom, APPROVE the URL. Do not reject Reddit just because Reddit itself is not your target B2B buyer.\n\nCRITICAL: Evaluate the business location. If the target location is '{location_target}', and this website explicitly serves a different geographic region (e.g., a Dubai business for a Kochi search), you MUST reject the URL immediately. Return a failed state.\n\nYOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-value leads. Do NOT output markdown. Do NOT output bullet points. Every line must start precisely with 'http'.\n\nSnippets: {json.dumps(snippets)}"
-    response_text = call_gemini_2_5(prompt, expect_json=False)
-    
-    urls = []
-    for line in response_text.split('\n'):
-        clean_url = line.strip().replace('- ', '').replace('* ', '').replace('`', '').replace('"', '')
-        if clean_url.startswith('http'):
-             urls.append(clean_url)
-    print(f"Gemini approved {len(urls)} URLs matching the B2B criteria.")
-    return urls
+        return {"High": [], "Medium": []}
+
+    tiering_schema = {
+        "type": "ARRAY",
+        "items": {
+            "type": "OBJECT",
+            "properties": {
+                "url":             {"type": "STRING"},
+                "confidence_tier": {"type": "STRING", "enum": ["High", "Medium", "Low"]},
+                "reason":          {"type": "STRING"}
+            },
+            "required": ["url", "confidence_tier", "reason"]
+        }
+    }
+
+    prompt = f"""CONFIDENCE TIERING GATE: Evaluate each URL below against the user's business context.
+
+USER BIO: '{bio}'
+TARGET LOCATION: '{location_target}'
+
+Assign each URL a confidence_tier using STRICTLY these definitions:
+- High: The target is EXPLICITLY experiencing the pain point the user solves, has confirmed B2B intent, AND is in the correct geographic region.
+- Medium: Ambiguous intent OR ambiguous location, but clearly in a highly relevant industry vertical. Worth human review.
+- Low: Competitor, manufacturer, distributor, directory (JustDial, Alibaba, Yelp, IndiaMart), SEO blog, D2C retail, or completely unrelated.
+
+SOCIAL PLATFORM RULE: For Reddit, Quora, Facebook, LinkedIn — evaluate the SPECIFIC POST INTENT, not the platform itself. A Reddit post asking for help = High/Medium. The Reddit homepage = Low.
+
+GEO RULE: If a business explicitly serves a region other than '{location_target}', mark as Low.
+
+Snippets to evaluate:
+{json.dumps(snippets)}"""
+
+    try:
+        tiered_results = call_gemini_2_5(prompt, expect_json=True, response_schema=tiering_schema)
+        if not isinstance(tiered_results, list):
+            raise ValueError("Expected list from tiering gate")
+    except Exception as e:
+        print(f"[TIER GATE] Gemini tiering failed: {e}. Falling back to empty result.")
+        return {"High": [], "Medium": []}
+
+    output = {"High": [], "Medium": []}
+    for item in tiered_results:
+        tier = item.get("confidence_tier", "Low")
+        url  = item.get("url", "").strip()
+        if not url.startswith("http"):
+            continue
+        if tier == "High":
+            output["High"].append(url)
+        elif tier == "Medium":
+            output["Medium"].append(url)
+        # Low: silently drop
+
+    print(f"[TIER GATE] High={len(output['High'])}, Medium={len(output['Medium'])}, Low dropped.")
+    return output
 
 def extract_root_domain(url):
     try:
@@ -264,11 +343,20 @@ def scrape_url(url):
         raise ValueError("DEFERRED")
 
 def final_score_and_dm(text, bio, context_payload, tech_stack, historical_dms=None):
-    prompt = f"""You are an Elite B2B Profiler. Score this lead 1-10 based on campaign goals and product bio: '{bio}'. 
+    """
+    V14: Polymorphic contact schema — no flat email/phone/linkedin fields.
+    Vertex AI returns contact_endpoints array with strict platform enum.
+    Adds intent_signal: why this lead was chosen by the pipeline.
+    """
+    prompt = f"""You are an Elite B2B Extraction Engine. Score this lead 1-10 based on campaign goals and product bio: '{bio}'.
 
-You MUST extract contact information. You MUST identify a specific human decision-maker (Name). If the extracted text is just a generic corporate homepage, an advertisement, or lacks a specific human contact, you MUST score it 0. Do not recommend generic info@ or sales@ emails without a named target. 
+You MUST identify a specific human decision-maker. If the text is a generic homepage, ad, or has no identifiable human contact, score it 0.
 
-For the "hiring_intent_found" field: Return ONLY the string 'Yes' or 'No'. Do not include any explanation, context, or reasoning. If unknown, return 'No'.
+For hiring_intent_found: Return ONLY 'Yes' or 'No'. No explanation.
+
+For contact_endpoints: Extract ALL reachable contact surfaces found in the text. Each must have a 'platform' from the strict enum and its corresponding 'uri' (email address, profile URL, phone number, handle, map listing URL). Do NOT invent contacts — only extract what is explicitly present.
+
+For intent_signal: Write one precise sentence explaining the specific signal in this content that indicates they need the user's solution. Be ruthless and specific.
 
 CONTEXTUAL DORKING DATA:
 {context_payload}
@@ -278,22 +366,33 @@ DETECTED TECH STACK:
 """
 
     if historical_dms:
-        prompt += f"\nHere are examples of past successful messages that converted: {historical_dms}. Match this tone and length strictly.\n"
+        prompt += f"\nPast successful converted messages (match tone and length strictly): {historical_dms}\n"
 
-    prompt += f"""
-Using all of this context, specifically weigh the Hiring Intent and Tech Stack to write a hyper-personalized "Trojan Horse" Icebreaker. Format JSON strictly with exact keys.
+    prompt += f"\nUsing all context, write a hyper-personalized Trojan Horse outreach message targeting the identified pain point.\n\nText DOM:\n{text}"
 
-Text DOM: {text}
-"""
-    sys_inst = "You are an Elite B2B Profiler. Your mandate is to extract factual enterprise data and draft concise, highly-converting outreach messages. Do not use fluff, robotic greetings, or marketing jargon. Be ruthless, analytical, and highly specific to the provided text."
+    sys_inst = "You are an Elite B2B Extraction Engine. Extract factual data and draft concise, high-converting outreach. Be ruthless, specific, and analytical. Never use fluff or generic greetings."
 
+    # V14: Strict polymorphic contact schema — enum-locked platform field
     schema = {
         "type": "OBJECT",
         "properties": {
             "score": {"type": "INTEGER"},
-            "dm": {"type": "STRING", "description": "If the scraped text does not represent a valid B2B prospect or lacks sufficient information to draft a message, you MUST output the exact string 'N/A' for this field. Do not leave it blank or null."},
-            "pain_point": {"type": "STRING", "description": "If the scraped text does not represent a valid B2B prospect or lacks sufficient information to draft a message, you MUST output the exact string 'N/A' for this field. Do not leave it blank or null."},
-            "icebreaker_angle": {"type": "STRING", "description": "If the scraped text does not represent a valid B2B prospect or lacks sufficient information to draft a message, you MUST output the exact string 'N/A' for this field. Do not leave it blank or null."},
+            "dm": {
+                "type": "STRING",
+                "description": "Drafted outreach message. Output exact string 'N/A' if insufficient data."
+            },
+            "pain_point": {
+                "type": "STRING",
+                "description": "Specific pain point extracted. Output 'N/A' if insufficient data."
+            },
+            "icebreaker_angle": {
+                "type": "STRING",
+                "description": "The tactical angle for the icebreaker. Output 'N/A' if insufficient data."
+            },
+            "intent_signal": {
+                "type": "STRING",
+                "description": "One precise sentence: the specific signal in the content proving they need the user's solution."
+            },
             "hiring_intent_found": {
                 "type": "STRING",
                 "enum": ["Yes", "No"]
@@ -301,45 +400,72 @@ Text DOM: {text}
             "tech_stack_found": {
                 "type": "ARRAY",
                 "items": {"type": "STRING"},
-                "description": "Only include real, verified software technologies (e.g., 'wordpress', 'shopify', 'stripe'). Do NOT include internal system notes."
+                "description": "Only verified software technologies found in the HTML. No internal notes."
             },
-            "whatsapp_draft": {"type": "STRING"},
-            "email": {"type": "STRING"},
-            "phone": {"type": "STRING"},
-            "linkedin": {"type": "STRING"},
-            "decision_maker_name": {"type": "STRING", "description": "Specific human name found, else 'Unknown'"},
-            "decision_maker_title": {"type": "STRING", "description": "Title of the decision maker, else 'Unknown'"},
+            "contact_endpoints": {
+                "type": "ARRAY",
+                "description": "ALL reachable contact surfaces found. Only extract explicitly present contacts.",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "platform": {
+                            "type": "STRING",
+                            "enum": ["instagram", "reddit", "whatsapp", "gmb", "email", "linkedin", "facebook", "other"]
+                        },
+                        "uri": {
+                            "type": "STRING",
+                            "description": "The email address, profile URL, phone number, map link, or handle."
+                        }
+                    },
+                    "required": ["platform", "uri"]
+                }
+            },
+            "decision_maker_name": {
+                "type": "STRING",
+                "description": "Specific human name found in the text. Use 'Unknown' if not found."
+            },
+            "decision_maker_title": {
+                "type": "STRING",
+                "description": "Title of the decision maker. Use 'Unknown' if not found."
+            },
             "company_size_tier": {
-                "type": "STRING", 
-                "description": "Must be strictly one of: 'Startup', 'Mid-Market', 'Enterprise', or 'Unknown'"
+                "type": "STRING",
+                "description": "Strictly one of: 'Startup', 'Mid-Market', 'Enterprise', 'Unknown'."
             },
-            "primary_objection_hypothesis": {"type": "STRING", "description": "A 1-sentence prediction of why they might reject our bio/pitch based on their site context."}
+            "primary_objection_hypothesis": {
+                "type": "STRING",
+                "description": "One sentence: why they might reject the pitch based on their site context."
+            }
         },
-        "required": ["score", "dm", "pain_point", "icebreaker_angle", "hiring_intent_found", "tech_stack_found", "decision_maker_name", "decision_maker_title", "company_size_tier", "primary_objection_hypothesis"]
+        "required": [
+            "score", "dm", "pain_point", "icebreaker_angle", "intent_signal",
+            "hiring_intent_found", "tech_stack_found", "contact_endpoints",
+            "decision_maker_name", "decision_maker_title",
+            "company_size_tier", "primary_objection_hypothesis"
+        ]
     }
-    
+
     try:
         data = call_gemini_2_5(prompt, expect_json=True, response_schema=schema, system_instruction=sys_inst)
         if not isinstance(data, dict):
             raise ValueError("Parsed JSON is not a dictionary.")
-            
+
         return {
-            "score": data.get("score", 0),
-            "pain_point": data.get("pain_point", "Unknown"),
-            "hiring_intent_found": data.get("hiring_intent_found", "None"),
-            "tech_stack_found": data.get("tech_stack_found", []),
-            "icebreaker_angle": data.get("icebreaker_angle", ""),
-            "dm": data.get("dm", data.get("whatsapp_draft", "Failed to generate DM")),
-            "email": data.get("email", ""),
-            "phone": data.get("phone", ""),
-            "linkedin": data.get("linkedin", ""),
-            "decision_maker_name": data.get("decision_maker_name", "Unknown"),
-            "decision_maker_title": data.get("decision_maker_title", "Unknown"),
-            "company_size_tier": data.get("company_size_tier", "Unknown"),
+            "score":                        data.get("score", 0),
+            "pain_point":                   data.get("pain_point", "Unknown"),
+            "hiring_intent_found":          data.get("hiring_intent_found", "No"),
+            "tech_stack_found":             data.get("tech_stack_found", []),
+            "icebreaker_angle":             data.get("icebreaker_angle", ""),
+            "intent_signal":                data.get("intent_signal", ""),
+            "dm":                           data.get("dm", "Failed to generate DM"),
+            "contact_endpoints":            data.get("contact_endpoints", []),
+            "decision_maker_name":          data.get("decision_maker_name", "Unknown"),
+            "decision_maker_title":         data.get("decision_maker_title", "Unknown"),
+            "company_size_tier":            data.get("company_size_tier", "Unknown"),
             "primary_objection_hypothesis": data.get("primary_objection_hypothesis", "Unknown")
         }
     except Exception as e:
-        raise ValueError("LLM Parsing Failure")
+        raise ValueError(f"LLM Parsing Failure: {e}")
 
 @app.route("/dispatch", methods=["POST"])
 def dispatch():
@@ -358,7 +484,11 @@ def dispatch():
     bio = campaign.get("bio", "")
     target_urls = campaign.get("target_urls", [])
     user_urls = target_urls[:10] if isinstance(target_urls, list) else []
-    
+
+    # V14: Read cached sourcing vector (set by orchestrator on campaign create/update)
+    sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
+    print(f"[SYNAPTIC ROUTER] Campaign {campaign_id} → sourcing vector: '{sourcing_vector}'")
+
     location = campaign.get("location", "").strip()
     gl = campaign.get("gl", "").strip()
     
@@ -375,7 +505,7 @@ def dispatch():
     all_results = []
     
     # Smart BD Query Injector Native Integration
-    smart_keywords = generate_smart_query(keywords, tenant_id, bio)
+    smart_keywords = generate_smart_query(keywords, tenant_id, bio, sourcing_vector)
     
     # Telemetry Billing Check
     db.collection("usage_metrics").document(tenant_id).set({
@@ -403,9 +533,35 @@ def dispatch():
                 seen.add(r.get("link"))
                 unique_results.append(r)
                 
-        # Step 3: LLM Pre-Filter
-        approved_serper_urls = pre_filter_gemini(unique_results, bio, location)
-        
+        # Step 3: V14 Confidence Tiering Gate
+        tiered = pre_filter_gemini(unique_results, bio, location)
+        high_urls   = tiered.get("High", [])
+        medium_urls = tiered.get("Medium", [])
+
+        # Build URL→tier lookup for writing confidence_tier to lead doc
+        url_to_tier = {u: "UserProvided" for u in user_urls}
+        for u in high_urls:   url_to_tier[u] = "High"
+        for u in medium_urls: url_to_tier[u] = "Medium"
+
+        # V14: Velocity-gated Medium tier (env-configurable threshold)
+        velocity_threshold = int(os.environ.get("VELOCITY_THRESHOLD", "10"))
+        try:
+            cutoff_24h = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
+            recent_count = (
+                db.collection("leads")
+                .where("tenant_id", "==", tenant_id)
+                .where("status", "==", "new")
+                .where("createdAt", ">=", cutoff_24h)
+                .count().get()[0][0].value
+            )
+        except Exception as vel_e:
+            print(f"[VELOCITY] Count query failed: {vel_e}. Defaulting to allow Medium.")
+            recent_count = 0
+
+        allow_medium = recent_count < velocity_threshold
+        approved_serper_urls = high_urls + (medium_urls if allow_medium else [])
+        print(f"[VELOCITY] recent_new={recent_count}, threshold={velocity_threshold}, allow_medium={allow_medium}")
+
         # Merge & Deduplicate
         seen_urls = set()
         combined_urls = []
@@ -413,7 +569,7 @@ def dispatch():
             if u not in seen_urls:
                 seen_urls.add(u)
                 combined_urls.append(u)
-                
+
         # The Cap
         final_execution_urls = combined_urls[:20]
         
@@ -553,18 +709,34 @@ def dispatch():
                         continue
                     
                     if evaluation.get("score", 0) >= 7:
-                        # Update the atomic stub securely saving pipeline extraction logic
+                        # V14: Polymorphic contact merge — LLM endpoints + DOM-scraped contacts
+                        contact_endpoints = list(evaluation.get("contact_endpoints", []))
+                        existing_uris = {e["uri"] for e in contact_endpoints}
+                        for em in (emails or [])[:3]:
+                            if em and em not in existing_uris:
+                                contact_endpoints.append({"platform": "email", "uri": em})
+                                existing_uris.add(em)
+                        for ph in (phones or [])[:2]:
+                            if ph and ph not in existing_uris:
+                                contact_endpoints.append({"platform": "other", "uri": ph})
+                                existing_uris.add(ph)
+
                         doc_ref.update({
-                            "score": evaluation.get("score"),
-                            "pain_point": evaluation.get("pain_point"),
-                            "dm": evaluation.get("dm"),
-                            "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
-                            "tech_stack_found": evaluation.get("tech_stack_found", []),
-                            "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
-                            "email": emails[0] if emails else evaluation.get("email", ""),
-                            "phone": phones[0] if phones else evaluation.get("phone", ""),
-                            "linkedin": evaluation.get("linkedin", ""),
-                            "status": "new"
+                            "score":                        evaluation.get("score"),
+                            "pain_point":                   evaluation.get("pain_point"),
+                            "dm":                           evaluation.get("dm"),
+                            "intent_signal":                evaluation.get("intent_signal", ""),
+                            "hiring_intent_found":          evaluation.get("hiring_intent_found", ""),
+                            "tech_stack_found":             evaluation.get("tech_stack_found", []),
+                            "icebreaker_angle":             evaluation.get("icebreaker_angle", ""),
+                            "contact_endpoints":            contact_endpoints,
+                            "decision_maker_name":          evaluation.get("decision_maker_name", "Unknown"),
+                            "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
+                            "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
+                            "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
+                            "sourcing_vector":              sourcing_vector,
+                            "confidence_tier":              url_to_tier.get(url, "High"),
+                            "status":                       "new"
                         })
                     
                         # Meta WhatsApp Business API Trigger (V6)
@@ -728,21 +900,32 @@ def finalize():
             return jsonify({"status": "failed"}), 200
         
         if evaluation.get("score", 0) >= 7:
+            # V14: Polymorphic contact merge — LLM endpoints + Playwright-scraped contacts
+            contact_endpoints = list(evaluation.get("contact_endpoints", []))
+            existing_uris = {e["uri"] for e in contact_endpoints}
+            for em in (emails or [])[:3]:
+                if em and em not in existing_uris:
+                    contact_endpoints.append({"platform": "email", "uri": em})
+                    existing_uris.add(em)
+            for ph in (phones or [])[:2]:
+                if ph and ph not in existing_uris:
+                    contact_endpoints.append({"platform": "other", "uri": ph})
+                    existing_uris.add(ph)
+
             doc_ref.update({
-                "score": evaluation.get("score"),
-                "pain_point": evaluation.get("pain_point"),
-                "dm": evaluation.get("dm"),
-                "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
-                "tech_stack_found": evaluation.get("tech_stack_found", []),
-                "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
-                "email": emails[0] if emails else evaluation.get("email", ""),
-                "phone": phones[0] if phones else evaluation.get("phone", ""),
-                "linkedin": evaluation.get("linkedin", ""),
-                "decision_maker_name": evaluation.get("decision_maker_name", "Unknown"),
-                "decision_maker_title": evaluation.get("decision_maker_title", "Unknown"),
-                "company_size_tier": evaluation.get("company_size_tier", "Unknown"),
+                "score":                        evaluation.get("score"),
+                "pain_point":                   evaluation.get("pain_point"),
+                "dm":                           evaluation.get("dm"),
+                "intent_signal":                evaluation.get("intent_signal", ""),
+                "hiring_intent_found":          evaluation.get("hiring_intent_found", ""),
+                "tech_stack_found":             evaluation.get("tech_stack_found", []),
+                "icebreaker_angle":             evaluation.get("icebreaker_angle", ""),
+                "contact_endpoints":            contact_endpoints,
+                "decision_maker_name":          evaluation.get("decision_maker_name", "Unknown"),
+                "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
+                "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
                 "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
-                "status": "new"
+                "status":                       "new"
             })
             
             # Simplified WhatsApp Meta Call (V13)

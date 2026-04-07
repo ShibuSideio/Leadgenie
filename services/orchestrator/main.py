@@ -3,6 +3,7 @@ import json
 import urllib.request
 import time
 import datetime
+import httpx
 from google.protobuf import timestamp_pb2
 from flask import Flask, request, jsonify, make_response
 from google.cloud import tasks_v2
@@ -10,9 +11,13 @@ from google.cloud import secretmanager
 from google.cloud import kms
 from cryptography.fernet import Fernet
 import base64
+import vertexai
+from vertexai.generative_models import GenerativeModel, GenerationConfig
 
 app = Flask(__name__)
 ALLOWED_ORIGINS = ["https://lead-sniper-prod.web.app", "https://lead-sniper-prod.firebaseapp.com"]
+
+vertexai.init(location="us-central1")
 
 @app.before_request
 def handle_preflight():
@@ -156,6 +161,60 @@ def check_quota(tenant_id):
             
         return True, 200, "OK"
     return False, 401, "Unknown identity."
+
+# ---------------------------------------------------------------------------
+# V14: SYNAPTIC ROUTER HELPERS
+# ---------------------------------------------------------------------------
+
+def get_vector_weights():
+    """
+    Reads the global sourcing success weights from system_telemetry/vector_weights.
+    Returns a dict, or sensible defaults if the document doesn't exist yet.
+    """
+    try:
+        doc = db.collection("system_telemetry").document("vector_weights").get()
+        if doc.exists:
+            return doc.to_dict()
+    except Exception as e:
+        print(f"[VECTOR WEIGHTS] Failed to read system_telemetry: {e}")
+    return {
+        "Classic B2B": 10,
+        "Social/Forum Listening": 8,
+        "Review Hijacking": 5,
+        "Maps/GMB Targeting": 3
+    }
+
+def classify_sourcing_vector(bio, industry_weights):
+    """
+    V14: Gated LLM call — fires ONLY on campaign create/update, result cached on campaign doc.
+    Classifies the optimal sourcing vector for a given bio using global success weights.
+    """
+    if not bio:
+        return "Classic B2B"
+    try:
+        prompt = f"""Based on this user's business bio: '{bio}', and the global sourcing success weights for this industry: {json.dumps(industry_weights)},
+select the single optimal digital sourcing vector to find the most relevant prospects.
+
+Choose STRICTLY ONE of: "Social/Forum Listening", "Review Hijacking", "Classic B2B", "Maps/GMB Targeting".
+
+- Social/Forum Listening: Best for service businesses where prospects post problems on Reddit, Quora, Facebook groups.
+- Review Hijacking: Best for local businesses or hospitality where negative reviews signal pain.
+- Maps/GMB Targeting: Best for brick-and-mortar or geo-restricted service areas.
+- Classic B2B: Best for enterprise, SaaS, or professional services.
+
+Output ONLY the chosen vector string. No explanation, no punctuation, no markdown."""
+
+        model = GenerativeModel("gemini-2.5-flash")
+        response = model.generate_content(
+            prompt,
+            generation_config=GenerationConfig(temperature=0.1)
+        )
+        vector = response.text.strip().strip('"')
+        valid_vectors = {"Social/Forum Listening", "Review Hijacking", "Classic B2B", "Maps/GMB Targeting"}
+        return vector if vector in valid_vectors else "Classic B2B"
+    except Exception as e:
+        print(f"[SYNAPTIC ROUTER] Vector classification failed: {e}. Defaulting to Classic B2B.")
+        return "Classic B2B"
 
 def sanitize_document(doc):
     """
@@ -416,6 +475,15 @@ def trigger_daily_sweep(path):
                 data['createdAt'] = firestore.SERVER_TIMESTAMP
                 data['updatedAt'] = firestore.SERVER_TIMESTAMP
                 update_time, doc_ref = db.collection("campaigns").add(data)
+
+                # V14: Gate the LLM vector classification to campaign creation only
+                bio = data.get("bio", "")
+                if bio:
+                    weights = get_vector_weights()
+                    vector = classify_sourcing_vector(bio, weights)
+                    doc_ref.update({"sourcing_vector": vector})
+                    print(f"[SYNAPTIC ROUTER] Campaign {doc_ref.id} classified as: '{vector}'")
+
                 return jsonify({"status": "success", "id": doc_ref.id}), 201
                 
             elif request.path.startswith("/api/campaigns/") and request.method == "PUT":
@@ -425,6 +493,11 @@ def trigger_daily_sweep(path):
                 doc_data = doc_ref.get()
                 if doc_data.exists and doc_data.to_dict().get('tenant_id') == tenant_id:
                     data['updatedAt'] = firestore.SERVER_TIMESTAMP
+                    # V14: Re-classify sourcing vector if bio is being updated
+                    if 'bio' in data and data['bio']:
+                        weights = get_vector_weights()
+                        data['sourcing_vector'] = classify_sourcing_vector(data['bio'], weights)
+                        print(f"[SYNAPTIC ROUTER] Campaign {doc_id} re-classified as: '{data['sourcing_vector']}'")
                     doc_ref.update(data)
                     return jsonify({"status": "success"}), 200
                 return jsonify({"error": "Forbidden"}), 403
@@ -474,7 +547,25 @@ def trigger_daily_sweep(path):
                                 user_ref.set(pref_updates, merge=True)
                             except Exception as e:
                                 print(f"RLHF Backprop Native Error: {e}")
-                                
+
+                    # V14: Headless CRM Egress — stripped payload, no raw DOM
+                    if status == "converted":
+                        try:
+                            user_crm_doc = db.collection("users").document(tenant_id).get().to_dict() or {}
+                            crm_webhook_url = user_crm_doc.get("crm_webhook_url")
+                            if crm_webhook_url:
+                                crm_payload = {
+                                    "lead_id":          doc_id,
+                                    "score":            lead_dict.get("score"),
+                                    "dm":               lead_dict.get("dm"),
+                                    "intent_signal":    lead_dict.get("intent_signal", ""),
+                                    "contact_endpoints":lead_dict.get("contact_endpoints", [])
+                                }
+                                httpx.post(crm_webhook_url, json=crm_payload, timeout=5)
+                                print(f"[CRM EGRESS] Stripped payload fired for lead {doc_id}.")
+                        except Exception as crm_e:
+                            print(f"[CRM EGRESS] Webhook failed: {crm_e}")
+
                     return jsonify({"status": "success"}), 200
                 return jsonify({"error": "Forbidden"}), 403
                 
@@ -619,5 +710,163 @@ def trigger_daily_sweep(path):
             audit_trail.append(f"✅ QUEUED Campaign {campaign_id} with delay {jitter_seconds}s. Next cron iteration set for {new_due_date}.")
             
         return jsonify({"message": f"Sweep complete. Dispatched {count} background tasks.", "audit_trail": audit_trail}), 200
+
+    # -----------------------------------------------------------------------------------------
+    # V14: REVERSE-RLHF — Headless Conversion Feedback Endpoint
+    # Auth: X-API-Key (static key from Secret Manager, bypasses Firebase UI Auth)
+    # -----------------------------------------------------------------------------------------
+    if request.path == "/api/telemetry/conversion_feedback" and request.method == "POST":
+        api_key = request.headers.get("X-API-Key")
+        if not api_key:
+            return jsonify({"error": "Unauthorized", "message": "Missing X-API-Key header."}), 401
+        try:
+            stored_key = sm_client.access_secret_version(
+                request={"name": f"projects/{PROJECT_ID}/secrets/api_gateway_key/versions/latest"}
+            ).payload.data.decode("UTF-8").strip()
+        except Exception as e:
+            print(f"[REVERSE-RLHF] Secret Manager fetch failed: {e}")
+            return jsonify({"error": "Internal Error", "message": "Key validation unavailable."}), 500
+
+        if api_key != stored_key:
+            return jsonify({"error": "Forbidden", "message": "Invalid API key."}), 403
+
+        data       = request.json or {}
+        lead_id    = data.get("lead_id")
+        status     = data.get("status")
+        if not lead_id or status not in ["converted", "rejected"]:
+            return jsonify({"error": "Bad Request", "message": "Requires lead_id and status: converted|rejected"}), 400
+
+        lead_doc = db.collection("leads").document(lead_id).get()
+        if not lead_doc.exists:
+            return jsonify({"error": "Not Found", "message": f"Lead {lead_id} not found."}), 404
+
+        lead_dict       = lead_doc.to_dict()
+        tenant_id       = lead_dict.get("tenant_id")
+        tech_stack      = lead_dict.get("tech_stack_found", [])
+        sourcing_vector = lead_dict.get("sourcing_vector", "Classic B2B")
+        hiring_intent   = lead_dict.get("hiring_intent_found", "No")
+        delta           = 1 if status == "converted" else -1
+
+        # 1. Tenant RLHF backpropagation
+        pref_updates = {}
+        if hiring_intent == "Yes":
+            pref_updates["preferences_weights.hiring_intent"] = firestore.Increment(delta)
+        for tech in tech_stack:
+            pref_updates[f"preferences_weights.tech_{tech}"] = firestore.Increment(delta)
+        if status == "rejected":
+            import re
+            pain_point = lead_dict.get("pain_point", "")
+            words = list(set(re.findall(r'\b\w{4,}\b', pain_point.lower())))[:3]
+            if words:
+                pref_updates["dynamic_blocklist"] = firestore.ArrayUnion(words)
+        if tenant_id and pref_updates:
+            try:
+                db.collection("users").document(tenant_id).set(pref_updates, merge=True)
+            except Exception as e:
+                print(f"[REVERSE-RLHF] Tenant backprop failed: {e}")
+
+        # 2. Global vector_weights update
+        try:
+            db.collection("system_telemetry").document("vector_weights").set(
+                {sourcing_vector: firestore.Increment(delta)}, merge=True
+            )
+        except Exception as e:
+            print(f"[REVERSE-RLHF] Global vector update failed: {e}")
+
+        # 3. Update lead status
+        try:
+            db.collection("leads").document(lead_id).update(
+                {"status": status, "updatedAt": firestore.SERVER_TIMESTAMP}
+            )
+        except Exception as e:
+            print(f"[REVERSE-RLHF] Lead status update failed: {e}")
+
+        return jsonify({"status": "ok", "delta": delta, "vector": sourcing_vector}), 200
+
+    # -----------------------------------------------------------------------------------------
+    # V14: AI REFLECTION LOOP — Weekly Global Auto-Tuning (OIDC-protected cron)
+    # -----------------------------------------------------------------------------------------
+    if request.path == "/api/internal/cron/reflection" and request.method == "POST":
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing OIDC token"}), 401
+        token = auth_header.split("Bearer ")[1]
+        try:
+            from google.oauth2 import id_token
+            from google.auth.transport import requests as google_requests
+            id_token.verify_oauth2_token(token, google_requests.Request())
+        except Exception as e:
+            return jsonify({"error": "Invalid OIDC token", "details": str(e)}), 403
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        cutoff  = now_utc - datetime.timedelta(days=7)
+
+        # Sample global converted and failed leads (past 7 days) — strictly PII-scrubbed
+        scrubbed = []
+        for outcome_status in ["converted", "failed"]:
+            try:
+                docs = (
+                    db.collection("leads")
+                    .where("status", "==", outcome_status)
+                    .where("updatedAt", ">=", cutoff)
+                    .limit(50)
+                    .stream()
+                )
+                for doc in docs:
+                    d = doc.to_dict()
+                    scrubbed.append({
+                        "outcome":          d.get("status"),
+                        "score":            d.get("score"),
+                        "sourcing_vector":  d.get("sourcing_vector", "Classic B2B"),
+                        "confidence_tier":  d.get("confidence_tier", "High"),
+                        "hiring_intent":    d.get("hiring_intent_found", "No"),
+                        "tech_stack":       d.get("tech_stack_found", []),
+                        "company_size":     d.get("company_size_tier", "Unknown"),
+                        # Truncated pain point — no names, emails, URLs, phones
+                        "pain_theme":       (d.get("pain_point") or "")[:80]
+                    })
+            except Exception as e:
+                print(f"[REFLECTION] Sampling failed for status={outcome_status}: {e}")
+
+        if not scrubbed:
+            return jsonify({"status": "no_data", "message": "Insufficient sample for reflection."}), 200
+
+        current_weights = get_vector_weights()
+
+        reflection_prompt = f"""You are a global B2B outreach intelligence system performing a weekly strategic audit.
+
+Analyze these {len(scrubbed)} anonymized lead outcomes from the past 7 days to identify emerging platform intent trends.
+
+CURRENT VECTOR WEIGHTS:
+{json.dumps(current_weights, indent=2)}
+
+LEAD OUTCOMES (fully PII-scrubbed — no names, emails, URLs, or phone numbers):
+{json.dumps(scrubbed, indent=2)}
+
+Based on which sourcing_vector values are correlated with more 'converted' outcomes vs 'failed' outcomes:
+1. Identify which vectors are over-performing and which are under-performing.
+2. Output ONLY a valid JSON object with updated integer weights for each vector.
+
+Vector keys MUST be exactly: "Classic B2B", "Social/Forum Listening", "Review Hijacking", "Maps/GMB Targeting".
+Example output: {{"Classic B2B": 14, "Social/Forum Listening": 11, "Review Hijacking": 4, "Maps/GMB Targeting": 6}}"""
+
+        try:
+            model    = GenerativeModel("gemini-1.5-pro")
+            response = model.generate_content(
+                reflection_prompt,
+                generation_config=GenerationConfig(response_mime_type="application/json")
+            )
+            new_weights = json.loads(response.text)
+            if not isinstance(new_weights, dict):
+                raise ValueError("Reflection output is not a JSON object.")
+            # Validate keys
+            valid_keys = {"Classic B2B", "Social/Forum Listening", "Review Hijacking", "Maps/GMB Targeting"}
+            new_weights = {k: int(v) for k, v in new_weights.items() if k in valid_keys}
+        except Exception as e:
+            return jsonify({"error": "Reflection LLM failed", "details": str(e)}), 500
+
+        db.collection("system_telemetry").document("vector_weights").set(new_weights)
+        print(f"[REFLECTION] vector_weights updated: {new_weights}")
+        return jsonify({"status": "reflection_complete", "sample_size": len(scrubbed), "new_weights": new_weights}), 200
 
     return jsonify({"error": "Not Found"}), 404
