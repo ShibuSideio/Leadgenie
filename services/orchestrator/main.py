@@ -851,7 +851,7 @@ Vector keys MUST be exactly: "Classic B2B", "Social/Forum Listening", "Review Hi
 Example output: {{"Classic B2B": 14, "Social/Forum Listening": 11, "Review Hijacking": 4, "Maps/GMB Targeting": 6}}"""
 
         try:
-            model    = GenerativeModel("gemini-1.5-pro")
+            model    = GenerativeModel("gemini-2.5-flash")
             response = model.generate_content(
                 reflection_prompt,
                 generation_config=GenerationConfig(response_mime_type="application/json")
