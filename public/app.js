@@ -441,21 +441,70 @@ window.agreeToTerms = async function() {
 window.copyMessageAndContact = function(docId, dm) {
     navigator.clipboard.writeText(dm).then(() => {
         showToast("Message Copied to Clipboard", "success");
-        
-        // Optimistic UI updates
+
+        // Optimistic UI
         rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
         const cardEl = document.getElementById(docId);
-        if(cardEl) {
+        if (cardEl) {
             virtualObserver.unobserve(cardEl);
             cardEl.remove();
         }
-        
-        // Background DB Sync
         updateLeadStatus(docId, "contacted");
     }).catch(err => {
         console.error("Clipboard failed", err);
         showToast("Failed to copy", "error");
     });
+};
+
+// ---------------------------------------------------------------------------
+// V14: SMART CONTACT ACTION
+// Primary CTA handler: copies DM, opens URI, marks lead as contacted.
+// ---------------------------------------------------------------------------
+window.smartContactAction = function(docId, dm, uri, platform) {
+    // 1. Copy the drafted message to clipboard
+    navigator.clipboard.writeText(dm).catch(err => console.warn('Clipboard fail:', err));
+
+    // 2. Optimistic UI dismiss
+    rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
+    const cardEl = document.getElementById(docId);
+    if (cardEl) {
+        virtualObserver.unobserve(cardEl);
+        cardEl.remove();
+    }
+
+    // 3. Open the URI (mailto, https, etc.)
+    if (uri) {
+        const isEmail = platform === 'email' || uri.includes('@');
+        const href = isEmail ? `mailto:${uri}` : uri;
+        window.open(href, '_blank', 'noopener,noreferrer');
+    }
+
+    showToast('Message copied — opening contact...', 'success');
+    updateLeadStatus(docId, 'contacted');
+};
+
+// ---------------------------------------------------------------------------
+// V14: ALT-CONTACTS DROPDOWN TOGGLE
+// ---------------------------------------------------------------------------
+window.toggleAltContacts = function(wrapperId) {
+    const wrapper  = document.getElementById(wrapperId);
+    if (!wrapper) return;
+    const toggle   = wrapper.querySelector('.alt-contacts-toggle');
+    const dropdown = wrapper.querySelector('.alt-contacts-dropdown');
+    const isOpen   = dropdown.classList.contains('open');
+    dropdown.classList.toggle('open', !isOpen);
+    if (toggle) toggle.classList.toggle('open', !isOpen);
+    // Close on click outside
+    if (!isOpen) {
+        const closeHandler = (e) => {
+            if (!wrapper.contains(e.target)) {
+                dropdown.classList.remove('open');
+                if (toggle) toggle.classList.remove('open');
+                document.removeEventListener('click', closeHandler);
+            }
+        };
+        setTimeout(() => document.addEventListener('click', closeHandler), 0);
+    }
 };
 
 window.currentPage = 1;
@@ -474,26 +523,59 @@ window.changeLeadPage = function(delta) {
 };
 
 // ---------------------------------------------------------------------------
-// ENTERPRISE DOSSIER RENDERER
-// Called by the virtual IntersectionObserver to hydrate a placeholder wrapper.
-// Returns an HTML *string* (not a DOM node). Signature must match line 483:
-//   generateLeadInnerHtml(leadId, lead)
-// Phase 5 backward-compat fields fall back gracefully when absent from document.
+// ENTERPRISE DOSSIER RENDERER — V14 POLYMORPHIC SCHEMA
 // ---------------------------------------------------------------------------
-function generateLeadInnerHtml(docId, lead) {
-    // ── Phase 5: Enterprise Dossier fields (backward-compatible fallbacks) ──
-    const targetName       = (!lead.decision_maker_name        || lead.decision_maker_name        === 'N/A') ? 'Data unavailable on scanned domain'                         : lead.decision_maker_name;
-    const companySize      = (!lead.company_size_tier          || lead.company_size_tier          === 'N/A') ? 'Requires secondary analysis'                                 : lead.company_size_tier;
-    const primaryObjection = (!lead.primary_objection_hypothesis || lead.primary_objection_hypothesis === 'N/A') ? 'Insufficient data to generate confident hypothesis'    : lead.primary_objection_hypothesis;
-    const icebreakerAngle      = lead.icebreaker_angle           || '';
 
-    // ── Standard lead fields ─────────────────────────────────────────────────
+// Platform metadata: icon, label, CTA text for each endpoint type
+const PLATFORM_META = {
+    whatsapp:  { icon: '💬', label: 'WhatsApp',   cta: 'Message on WhatsApp',  priority: 1 },
+    instagram: { icon: '📸', label: 'Instagram',  cta: 'DM on Instagram',      priority: 2 },
+    linkedin:  { icon: '💼', label: 'LinkedIn',   cta: 'Connect on LinkedIn',  priority: 2 },
+    facebook:  { icon: '📘', label: 'Facebook',   cta: 'Message on Facebook',  priority: 3 },
+    email:     { icon: '📧', label: 'Email',      cta: 'Send Email',           priority: 4 },
+    gmb:       { icon: '📍', label: 'GMB',        cta: 'Open Maps Profile',    priority: 4 },
+    reddit:    { icon: '🔴', label: 'Reddit',     cta: 'Open Reddit Profile',  priority: 5 },
+    other:     { icon: '🔗', label: 'Contact',    cta: 'Open Contact',         priority: 6 }
+};
+
+/**
+ * Resolves the primary endpoint from a contact_endpoints array
+ * using the hierarchy: WhatsApp → Instagram/LinkedIn → Email → Reddit/Forums → Other
+ */
+function getContactHierarchy(endpoints) {
+    if (!endpoints || endpoints.length === 0) return null;
+    return [...endpoints].sort((a, b) => {
+        const pa = (PLATFORM_META[a.platform] || PLATFORM_META.other).priority;
+        const pb = (PLATFORM_META[b.platform] || PLATFORM_META.other).priority;
+        return pa - pb;
+    })[0];
+}
+
+function generateLeadInnerHtml(docId, lead) {
+    // ── Enterprise Dossier fields ─────────────────────────────────────────────
+    const targetName       = (!lead.decision_maker_name        || lead.decision_maker_name        === 'N/A') ? 'Data unavailable on scanned domain'                       : lead.decision_maker_name;
+    const companySize      = (!lead.company_size_tier          || lead.company_size_tier          === 'N/A') ? 'Requires secondary analysis'                               : lead.company_size_tier;
+    const primaryObjection = (!lead.primary_objection_hypothesis || lead.primary_objection_hypothesis === 'N/A') ? 'Insufficient data to generate confident hypothesis'  : lead.primary_objection_hypothesis;
+    const icebreakerAngle  = lead.icebreaker_angle || '';
+
+    // ── URL ───────────────────────────────────────────────────────────────────
     let urlHostname = 'Unknown URL';
     try { if (lead.url) urlHostname = new URL(lead.url).hostname; } catch(e) {}
 
-    const statusColor = lead.status === 'completed'
-        ? 'var(--success)'
+    const statusColor = lead.status === 'completed' ? 'var(--success)'
         : (lead.status === 'ignored' ? '#ef4444' : 'var(--text-muted)');
+
+    // ── V14: Intent Signal (replaces plain pain_point at top of card) ─────────
+    const intentSignal = lead.intent_signal || lead.pain_point || '';
+    const intentSignalHtml = intentSignal
+        ? `<div class="intent-signal">${intentSignal}</div>`
+        : '';
+
+    // ── Confidence Tier badge ────────────────────────────────────────────────
+    const tierClass  = lead.confidence_tier === 'Medium' ? 'tier-medium' : 'tier-high';
+    const tierBadge  = lead.confidence_tier
+        ? `<span class="tier-badge ${tierClass}">${lead.confidence_tier === 'High' ? '✓' : '~'} ${lead.confidence_tier}</span>`
+        : '';
 
     // ── Badges ────────────────────────────────────────────────────────────────
     const hiringBadge = (lead.hiring_intent_found === 'Yes')
@@ -514,12 +596,9 @@ function generateLeadInnerHtml(docId, lead) {
         : '';
 
     const exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">🔒 Exclusive Lead</span>`;
-
     const competitorBadge = lead.competitor_match
         ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">🎯 Competitor Intercept: ${lead.competitor_match}</span>`
         : '';
-
-    // ── Phase 5: Dossier badges (only rendered when data is present) ──────────
     const targetNameBadge = (lead.decision_maker_name)
         ? `<span style="font-size:0.75rem; background:#eff6ff; color:#1d4ed8; padding:2px 6px; border-radius:4px; border:1px solid #bfdbfe">👤 ${targetName}</span>`
         : '';
@@ -527,18 +606,52 @@ function generateLeadInnerHtml(docId, lead) {
         ? `<span style="font-size:0.75rem; background:#fefce8; color:#854d0e; padding:2px 6px; border-radius:4px; border:1px solid #fef08a">🏢 ${companySize}</span>`
         : '';
 
-    // ── Contact info ─────────────────────────────────────────────────────────
-    const emailHtml = lead.email
-        ? `📧 <a href="mailto:${lead.email}" target="_blank" style="color:#2563eb; text-decoration:none;">${lead.email}</a> &nbsp;`
-        : '';
-    const phoneHtml = lead.phone
-        ? `📞 <a href="tel:${lead.phone}" style="color:#2563eb; text-decoration:none;">${lead.phone}</a>`
-        : '';
-    const noContactHtml = (!lead.email && !lead.phone)
-        ? `<span style="color:var(--text-muted); font-style:italic;">No Contact Info Found</span>`
-        : '';
+    // ── V14: Polymorphic Contact Endpoints ───────────────────────────────────
+    const endpoints     = Array.isArray(lead.contact_endpoints) ? lead.contact_endpoints.filter(e => e && e.uri) : [];
+    const primary       = getContactHierarchy(endpoints);
+    const altEndpoints  = primary ? endpoints.filter(e => e !== primary) : endpoints;
+    const altDropId     = `alt-${docId}`;
 
-    // ── Icebreaker / Objection rows (Phase 5 — conditionally shown) ──────────
+    // Safe-encode DM for onclick attribute
+    const safeDm = (lead.dm || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/'/g, "\\'");
+
+    let primaryCtaHtml = '';
+    if (primary) {
+        const meta   = PLATFORM_META[primary.platform] || PLATFORM_META.other;
+        const safeUri = encodeURIComponent(primary.uri);
+        primaryCtaHtml = `<button class="smart-cta-btn"
+            onclick="smartContactAction('${docId}', \`${safeDm}\`, decodeURIComponent('${safeUri}'), '${primary.platform}')"
+            title="${meta.cta}">${meta.icon} ${meta.cta}</button>`;
+    } else {
+        // No endpoints: fallback to legacy copy behaviour
+        primaryCtaHtml = `<button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${safeDm}\`)" title="Copy Message">📋 Copy Message</button>`;
+    }
+
+    // Alt-contacts dropdown (only if there are secondary endpoints)
+    let altDropdownHtml = '';
+    if (altEndpoints.length > 0) {
+        const altItems = altEndpoints.map(ep => {
+            const m = PLATFORM_META[ep.platform] || PLATFORM_META.other;
+            const safeUri = encodeURIComponent(ep.uri);
+            const shortUri = ep.uri.length > 30 ? ep.uri.substring(0, 28) + '…' : ep.uri;
+            return `<button class="alt-contact-item"
+                onclick="smartContactAction('${docId}', \`${safeDm}\`, decodeURIComponent('${safeUri}'), '${ep.platform}')">
+                <span class="platform-icon">${m.icon}</span>
+                <span>${m.label}</span>
+                <span class="platform-uri">${shortUri}</span>
+            </button>`;
+        }).join('');
+
+        altDropdownHtml = `<div class="alt-contacts-wrapper" id="${altDropId}">
+            <button class="alt-contacts-toggle" onclick="toggleAltContacts('${altDropId}')">
+                +${altEndpoints.length}
+                <svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="alt-contacts-dropdown">${altItems}</div>
+        </div>`;
+    }
+
+    // ── Icebreaker / Objection rows ───────────────────────────────────────────
     const icebreakerRow = icebreakerAngle
         ? `<div style="margin-top:8px; font-size:0.85rem; color:#4f46e5; font-style:italic; padding:6px 10px; background:rgba(79,70,229,0.05); border-left:3px solid #6366f1; border-radius:0 4px 4px 0;">
                💡 Icebreaker: ${icebreakerAngle}
@@ -550,20 +663,26 @@ function generateLeadInnerHtml(docId, lead) {
            </div>`
         : '';
 
-    // ── Safe serialisation for inline onclick handlers ────────────────────────
-    const safeDm      = (lead.dm || '').replace(/`/g, '\\`').replace(/'/g, "\\'");
-    const safeLeadEnc = encodeURIComponent(JSON.stringify(lead)).replace(/'/g, "\\'");
-    const safeEvents  = encodeURIComponent(JSON.stringify(lead.interactions || []));
+    // ── Safe serialisation for timeline ──────────────────────────────────────
+    const safeEvents = encodeURIComponent(JSON.stringify(lead.interactions || []));
+    const safeLeadEnc = encodeURIComponent(JSON.stringify({
+        id: lead.id,
+        score: lead.score,
+        dm: lead.dm,
+        intent_signal: lead.intent_signal,
+        contact_endpoints: lead.contact_endpoints
+    })).replace(/'/g, "\\'");
 
     return `
         <div class="lead-header">
             <div>
                 <strong><a href="${lead.url || '#'}" target="_blank" style="color: var(--text-main); text-decoration: none;">${urlHostname} ↗</a></strong> • ${lead.source || 'Organic Search'}
                 <span style="margin-left:8px; font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(lead.status || 'new').toUpperCase()}</span>
+                ${tierBadge}
             </div>
             <div class="score">Score: ${lead.score || 0}/10</div>
         </div>
-        <div class="pain-point">" ${lead.pain_point || 'Analyzing sentiment...'} "</div>
+        ${intentSignalHtml}
         <div class="premium-badges" style="margin-top: 8px; margin-bottom: 8px; font-weight: 500; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
             ${exclusiveBadge}
             ${competitorBadge}
@@ -575,15 +694,13 @@ function generateLeadInnerHtml(docId, lead) {
         ${icebreakerRow}
         ${objectionRow}
         <div class="dm-draft">${lead.dm || 'Drafting variation...'}</div>
-        <div class="contact-info" style="margin-top: 8px; margin-bottom: 8px; font-size: 0.85rem; color: var(--text-main); font-weight: 500;">
-            ${emailHtml}${phoneHtml}${noContactHtml}
-        </div>
         <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
-            <button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${safeDm}\`)" title="Copy Message">📋 Copy Message</button>
-            <button class="action-btn" onclick="pushToCRM('${docId}', \`${safeLeadEnc}\`)" style="color: #4f46e5; border-color: #c7d2fe; background: #e0e7ff;">☁️ Push to CRM</button>
+            ${primaryCtaHtml}
+            ${altDropdownHtml}
+            <button class="action-btn" onclick="pushToCRM('${docId}', '${safeLeadEnc}')" style="color: #4f46e5; border-color: #c7d2fe; background: #e0e7ff;">☁️ Push to CRM</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">🚫 Ignore</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">🎯 Converted</button>
-            <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${safeEvents}')" title="Audit Log">🕒 View Timeline Logs</button>
+            <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${safeEvents}')" title="Audit Log">🕒 Timeline</button>
         </div>
     `;
 }

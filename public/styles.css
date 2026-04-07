@@ -356,3 +356,164 @@ hr {
 .toast.success { border-left: 4px solid var(--success); }
 .toast.info { border-left: 4px solid var(--primary); }
 .toast.error { border-left: 4px solid #ef4444; }
+
+/* ============================================================
+   V14: POLYMORPHIC CONTACT UI
+   ============================================================ */
+
+/* Intent Signal — prominent quote block replacing pain_point display */
+.intent-signal {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: #1e40af;
+    background: linear-gradient(135deg, #eff6ff, #e0f2fe);
+    border-left: 4px solid #3b82f6;
+    border-radius: 0 8px 8px 0;
+    padding: 10px 14px;
+    margin-bottom: 14px;
+    line-height: 1.5;
+    position: relative;
+}
+.intent-signal::before {
+    content: '📡 Why This Lead';
+    display: block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #3b82f6;
+    margin-bottom: 4px;
+}
+
+/* Confidence Tier badge */
+.tier-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 20px;
+    letter-spacing: 0.03em;
+}
+.tier-high   { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+.tier-medium { background: #fef9c3; color: #854d0e; border: 1px solid #fef08a; }
+
+/* Smart CTA — primary action button */
+.smart-cta-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--primary);
+    color: #fff;
+    padding: 9px 18px;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    font-weight: 600;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.16,1,0.3,1);
+    box-shadow: 0 4px 12px rgba(79,70,229,0.25);
+}
+.smart-cta-btn:hover {
+    background: var(--primary-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(79,70,229,0.35);
+}
+
+/* Alt-contacts dropdown wrapper */
+.alt-contacts-wrapper {
+    position: relative;
+    display: inline-block;
+}
+
+/* Chevron toggle pill */
+.alt-contacts-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(241,245,249,0.9);
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 8px;
+    padding: 8px 11px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s;
+    line-height: 1;
+}
+.alt-contacts-toggle:hover {
+    background: #e2e8f0;
+    color: var(--text-main);
+}
+/* Chevron SVG inline */
+.alt-contacts-toggle svg {
+    width: 12px;
+    height: 12px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 2.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: transform 0.2s;
+}
+.alt-contacts-toggle.open svg {
+    transform: rotate(180deg);
+}
+
+/* Dropdown panel */
+.alt-contacts-dropdown {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    min-width: 220px;
+    background: #fff;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+    padding: 6px 0;
+    z-index: 200;
+}
+.alt-contacts-dropdown.open {
+    display: block;
+    animation: fadeUp 0.15s cubic-bezier(0.16,1,0.3,1);
+}
+
+/* Individual alt-contact pills inside dropdown */
+.alt-contact-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 14px;
+    font-size: 0.85rem;
+    color: var(--text-main);
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    width: 100%;
+    text-align: left;
+    font-family: 'Inter', sans-serif;
+    font-weight: 500;
+    transition: background 0.15s;
+}
+.alt-contact-item:hover {
+    background: #f8fafc;
+}
+.alt-contact-item .platform-icon {
+    font-size: 1rem;
+    width: 20px;
+    text-align: center;
+    flex-shrink: 0;
+}
+.alt-contact-item .platform-uri {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 140px;
+}
+
