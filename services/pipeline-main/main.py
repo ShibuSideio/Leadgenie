@@ -116,15 +116,19 @@ VECTOR_PLATFORM_MAP = {
 }
 
 def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None):
+    """
+    V14.1: Intent Expansion Engine.
+    Translates raw keywords into platform-native conversational queries
+    via Gemini before constructing Google Dork strings.
+    Literal keyword passthrough is deprecated.
+    """
     historical_phrases = []
     try:
-        # Require composite index, graceful fallback to Global
         query = db.collection("leads").where("tenant_id", "==", tenant_id).where("status", "in", ["contacted", "converted"]).limit(20)
         docs = list(query.stream())
         if not docs:
             query = db.collection("leads").where("status", "in", ["contacted", "converted"]).limit(20)
             docs = list(query.stream())
-            
         pain_points = [d.to_dict().get("pain_point", "") for d in docs if d.to_dict().get("pain_point")]
         if pain_points:
             prompt = f"Analyze these successful lead extractions. Extract exactly 3 short conceptual B2B phrases identifying high-value trends. Your output must strictly be comma separated only. Do not use quotes or bullets.\n\nData: {json.dumps(pain_points)}"
@@ -134,7 +138,7 @@ def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None):
         print(f"Historical Composite Mining Exception: {e}")
         historical_phrases = []
 
-    # New: Symptom Discovery Funnel
+    # --- Symptom Discovery Funnel (bio-driven dorks) ---
     symptom_dorks = []
     if bio:
         symptom_prompt = f"The user solves this business problem: '{bio}'. Generate 3 highly specific Google Search operators to find targets PUBLICLY EXPERIENCING this problem. \nRule 1: You MUST include at least one query targeting social/professional networks using 'site:linkedin.com', 'site:facebook.com', or 'site:reddit.com'. \nRule 2: You MUST append negative keywords to exclude retail/informational sites (e.g., '-shop -cart -amazon -wiki'). \nReturn ONLY a JSON list of 3 strings."
@@ -142,23 +146,52 @@ def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None):
             symptom_dorks = call_gemini_2_5(symptom_prompt, expect_json=True)
         except Exception as e:
             print(f"Symptom Extraction Exception: {e}")
-            pass
 
-    smart_queries = []
     blacklist = "-wiki -jobs -careers -investors -support -\"login\" -www.zoominfo.com -www.ibm.com -www.amazon.com"
     historical_str = ""
     if historical_phrases:
         phrases_escaped = [f'"{p}"' for p in historical_phrases[:3]]
         historical_str = " AND (" + " OR ".join(phrases_escaped) + ")"
-        
-    for kw in user_keywords:
-        q = f'("{kw}"){historical_str} {blacklist}'
-        smart_queries.append(q)
-        
+
+    smart_queries = []
+
+    # -----------------------------------------------------------------------
+    # V14.1: INTENT EXPANSION ENGINE
+    # Deprecates literal keyword passthrough.
+    # Gemini translates raw audience keywords into 3 platform-native
+    # conversational queries that real humans use on the chosen vector.
+    # -----------------------------------------------------------------------
+    keyword_str = ", ".join(user_keywords) if user_keywords else ""
+    if keyword_str:
+        vector_label = sourcing_vector or "Classic B2B"
+        intent_prompt = f"""You are an Intent Expansion Engine. The user is targeting this audience: '{keyword_str}'. The current digital platform vector is: '{vector_label}'.
+
+Translate the user's target audience into exactly 3 natural-language, conversational queries that real humans actually type on this specific platform.
+
+Platform-specific rules:
+- If the vector is 'Social/Forum Listening': write queries as raw, first-person or question-style forum posts (e.g. 'how to waive IELTS requirement', 'universities that accept without English test').
+- If the vector is 'Review Hijacking': write queries as review search terms or complaint phrases (e.g. 'problems with', 'disappointed by', 'looking for alternative to').
+- If the vector is 'Maps/GMB Targeting': write geo-intent phrases (e.g. 'best [service] near me', '[service] in [city]').
+- If the vector is 'Classic B2B': use professional industry terminology (e.g. 'enterprise [solution] provider', '[industry] workflow optimization').
+
+Output ONLY a JSON array of exactly 3 strings. No explanation, no markdown."""
+        try:
+            translated_queries = call_gemini_2_5(intent_prompt, expect_json=True)
+            if isinstance(translated_queries, list):
+                for tq in translated_queries[:3]:
+                    if isinstance(tq, str) and tq.strip():
+                        smart_queries.append(f'"{tq.strip()}"{historical_str} {blacklist}')
+                print(f"[INTENT ENGINE] Translated '{keyword_str}' → {len(smart_queries)} platform-native queries for '{vector_label}'")
+        except Exception as e:
+            print(f"[INTENT ENGINE] Translation failed: {e}. Falling back to literal keywords.")
+            # Graceful fallback: use raw keywords if Gemini fails
+            for kw in user_keywords:
+                smart_queries.append(f'("{kw}"){historical_str} {blacklist}')
+
     for sd in symptom_dorks:
         smart_queries.append(f'{sd} {blacklist}')
-        
-    # V14: Inject vector-specific platform dorks AFTER base queries
+
+    # V14: Inject vector-specific platform dorks AFTER translated queries
     if sourcing_vector and sourcing_vector in VECTOR_PLATFORM_MAP:
         for platform_dork in VECTOR_PLATFORM_MAP[sourcing_vector]:
             dork_q = f'{platform_dork}{historical_str} {blacklist}'
@@ -205,19 +238,32 @@ def pre_filter_gemini(snippets, bio, location_target):
         }
     }
 
-    prompt = f"""CONFIDENCE TIERING GATE: Evaluate each URL below against the user's business context.
+    prompt = f"""CONFIDENCE TIERING GATE: Evaluate each URL snippet against the user's business context.
 
 USER BIO: '{bio}'
 TARGET LOCATION: '{location_target}'
 
-Assign each URL a confidence_tier using STRICTLY these definitions:
-- High: The target is EXPLICITLY experiencing the pain point the user solves, has confirmed B2B intent, AND is in the correct geographic region.
-- Medium: Ambiguous intent OR ambiguous location, but clearly in a highly relevant industry vertical. Worth human review.
-- Low: Competitor, manufacturer, distributor, directory (JustDial, Alibaba, Yelp, IndiaMart), SEO blog, D2C retail, or completely unrelated.
+# STEP 1 — PERSONA CLASSIFICATION (execute this first, before evaluating any URL)
+Read the USER BIO and classify the user as:
+- B2B Vendor: sells tools, services, or software TO businesses or professionals.
+- B2C Service Provider: sells help, coaching, advice, or services DIRECTLY to individual consumers or students.
 
-SOCIAL PLATFORM RULE: For Reddit, Quora, Facebook, LinkedIn — evaluate the SPECIFIC POST INTENT, not the platform itself. A Reddit post asking for help = High/Medium. The Reddit homepage = Low.
+# STEP 2 — PERSONA-LOCKED TIERING RULES
+Apply the correct ruleset based on the persona you classified:
 
-GEO RULE: If a business explicitly serves a region other than '{location_target}', mark as Low.
+IF B2B Vendor:
+- High: The URL belongs to a business or professional entity that is EXPLICITLY experiencing the pain point the user solves, correct intent, correct geo.
+- Medium: Ambiguous intent or geo, but clearly a relevant industry vertical.
+- Low: Competitor, manufacturer, directory, aggregator (JustDial, Alibaba, Yelp, IndiaMart), SEO blog, D2C retail.
+
+IF B2C Service Provider:
+- High: The URL or snippet belongs to an INDIVIDUAL (not a company) who is EXPLICITLY expressing the pain point, frustration, or need in their own words.
+- Medium: Ambiguous individual, or individual whose need is implied but not explicit.
+- Low: Agency, university admin page, corporate entity, competitor, directory, or any organisational URL. Route ALL institutional/agency results to Low — B2C providers target individuals, not organisations.
+
+# STEP 3 — UNIVERSAL RULES (always apply)
+SOCIAL PLATFORM RULE: For Reddit, Quora, Facebook, LinkedIn — evaluate the SPECIFIC POST or COMMENT INTENT, not the platform. An individual asking for help = High/Medium. Platform homepage = Low.
+GEO RULE: If a target explicitly serves a different region than '{location_target}', mark as Low.
 
 Snippets to evaluate:
 {json.dumps(snippets)}"""
@@ -342,21 +388,65 @@ def scrape_url(url):
         print(f"Fallback to heavy scraper for {url} due to {str(e)}")
         raise ValueError("DEFERRED")
 
-def final_score_and_dm(text, bio, context_payload, tech_stack, historical_dms=None):
+def final_score_and_dm(text, bio, context_payload, tech_stack, historical_dms=None, source_url=None):
     """
-    V14: Polymorphic contact schema — no flat email/phone/linkedin fields.
-    Vertex AI returns contact_endpoints array with strict platform enum.
-    Adds intent_signal: why this lead was chosen by the pipeline.
+    V14.1: Persona Value-Chain Matrix + Polymorphic URI hardening.
+    - Infers B2B/B2C persona from bio and aligns DM tone accordingly.
+    - Forces social profile link extraction from forum DOMs.
+    - Strict contact_endpoints schema with enum-locked platform field.
     """
-    prompt = f"""You are an Elite B2B Extraction Engine. Score this lead 1-10 based on campaign goals and product bio: '{bio}'.
+    # Detect social/forum origin for the URI hardening rule
+    social_domains = ["reddit.com", "quora.com", "facebook.com", "linkedin.com", "instagram.com"]
+    is_social_source = source_url and any(d in source_url.lower() for d in social_domains)
+    social_platform = "other"
+    if source_url:
+        if "reddit.com"    in source_url: social_platform = "reddit"
+        elif "quora.com"   in source_url: social_platform = "other"
+        elif "facebook.com" in source_url: social_platform = "facebook"
+        elif "linkedin.com" in source_url: social_platform = "linkedin"
+        elif "instagram.com" in source_url: social_platform = "instagram"
 
-You MUST identify a specific human decision-maker. If the text is a generic homepage, ad, or has no identifiable human contact, score it 0.
+    social_uri_rule = ""
+    if is_social_source:
+        social_uri_rule = f"""
 
+SOCIAL PROFILE URI RULE (MANDATORY — this source is from a social/forum platform):
+The source URL '{source_url}' originates from a social network or forum.
+You MUST extract the URL of the original poster's user profile from the DOM text.
+Map this profile link to the contact_endpoints array using the correct platform enum ('{social_platform}').
+Do NOT return an empty contact_endpoints array if a user profile link is present in the text.
+Look for patterns like '/u/', '/user/', '/profile/', '@username', or any author attribution link."""
+
+    prompt = f"""You are an Elite Extraction Engine with dynamic persona intelligence.
+
+# STEP 1 — PERSONA CLASSIFICATION
+Before scoring, classify the user based on their bio: '{bio}'.
+- B2B Vendor: sells tools, software, or services TO other businesses.
+- B2C Service Provider: sells coaching, advice, or services DIRECTLY to individual consumers or students.
+
+# STEP 2 — PERSONA-LOCKED SCORING & EXTRACTION
+Score this lead 1-10 based on how well it matches the bio above.
+
+IF B2B Vendor:
+- The ideal target is a business decision-maker experiencing the user's stated pain point.
+- A generic homepage, ad, or content without a human contact MUST score 0.
+- Outreach (dm field) MUST use professional B2B tone: direct, outcome-driven, no fluff.
+
+IF B2C Service Provider:
+- The ideal target is an INDIVIDUAL (not a company) who has explicitly expressed the need in their own words.
+- Corporate pages, university sites, agencies, or competitor pages MUST score 0.
+- Outreach (dm field) MUST be warm, personal, direct-to-consumer. DO NOT write enterprise software pitches or B2B jargon.
+- Example: A career counselor should send a personal offer of help, NOT an ROI pitch.
+
+# STEP 3 — EXTRACTION RULES
 For hiring_intent_found: Return ONLY 'Yes' or 'No'. No explanation.
 
-For contact_endpoints: Extract ALL reachable contact surfaces found in the text. Each must have a 'platform' from the strict enum and its corresponding 'uri' (email address, profile URL, phone number, handle, map listing URL). Do NOT invent contacts — only extract what is explicitly present.
+For contact_endpoints: Extract ALL reachable contact surfaces explicitly present in the text.
+Each endpoint must have a 'platform' from the strict enum and a 'uri' (email, profile URL, phone, map URL, handle).
+Do NOT invent contacts. Only extract what is explicitly present in the DOM.
+{social_uri_rule}
 
-For intent_signal: Write one precise sentence explaining the specific signal in this content that indicates they need the user's solution. Be ruthless and specific.
+For intent_signal: Write one precise sentence explaining the specific signal in this content that proves they need the user's solution.
 
 CONTEXTUAL DORKING DATA:
 {context_payload}
@@ -368,9 +458,9 @@ DETECTED TECH STACK:
     if historical_dms:
         prompt += f"\nPast successful converted messages (match tone and length strictly): {historical_dms}\n"
 
-    prompt += f"\nUsing all context, write a hyper-personalized Trojan Horse outreach message targeting the identified pain point.\n\nText DOM:\n{text}"
+    prompt += f"\nUsing all context, write a hyper-personalized outreach message aligned to the persona above, targeting the identified pain point.\n\nText DOM:\n{text}"
 
-    sys_inst = "You are an Elite B2B Extraction Engine. Extract factual data and draft concise, high-converting outreach. Be ruthless, specific, and analytical. Never use fluff or generic greetings."
+    sys_inst = "You are an Elite Extraction Engine. Extract factual data with precision and draft concise, high-converting outreach. Adapt your tone strictly to the user's persona (B2B/B2C). Never hallucinate contacts. Never use fluff or generic greetings."
 
     # V14: Strict polymorphic contact schema — enum-locked platform field
     schema = {
@@ -700,7 +790,7 @@ def dispatch():
                         continue
                 
                     try:
-                        evaluation = final_score_and_dm(text, bio, context_payload, tech_stack)
+                        evaluation = final_score_and_dm(text, bio, context_payload, tech_stack, source_url=url)
                     except TimeoutError:
                         db.collection("leads").document(lead_id).update({"status": "failed", "error": "Vertex AI timeout"})
                         continue
@@ -891,7 +981,7 @@ def finalize():
             docs = db.collection("leads").where("tenant_id", "==", tenant_id).where("status", "==", "converted").order_by("updatedAt", direction=firestore.Query.DESCENDING).limit(3).stream()
             historical_dms = [doc.to_dict().get("dm") for doc in docs if doc.to_dict().get("dm")]
             
-            evaluation = final_score_and_dm(dense_text, bio, context_payload, tech_stack, historical_dms)
+            evaluation = final_score_and_dm(dense_text, bio, context_payload, tech_stack, historical_dms, source_url=url)
         except TimeoutError:
             doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
             return jsonify({"status": "timeout"}), 200
