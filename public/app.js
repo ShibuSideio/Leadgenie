@@ -473,6 +473,121 @@ window.changeLeadPage = function(delta) {
     document.querySelector('.dashboard-grid')?.scrollIntoView({ behavior: 'smooth' });
 };
 
+// ---------------------------------------------------------------------------
+// ENTERPRISE DOSSIER RENDERER
+// Called by the virtual IntersectionObserver to hydrate a placeholder wrapper.
+// Returns an HTML *string* (not a DOM node). Signature must match line 483:
+//   generateLeadInnerHtml(leadId, lead)
+// Phase 5 backward-compat fields fall back gracefully when absent from document.
+// ---------------------------------------------------------------------------
+function generateLeadInnerHtml(docId, lead) {
+    // ── Phase 5: Enterprise Dossier fields (backward-compatible fallbacks) ──
+    const targetName           = lead.decision_maker_name        || 'Unknown';
+    const companySize          = lead.company_size_tier          || 'Unknown';
+    const primaryObjection     = lead.primary_objection_hypothesis || 'Unknown';
+    const icebreakerAngle      = lead.icebreaker_angle           || '';
+
+    // ── Standard lead fields ─────────────────────────────────────────────────
+    let urlHostname = 'Unknown URL';
+    try { if (lead.url) urlHostname = new URL(lead.url).hostname; } catch(e) {}
+
+    const statusColor = lead.status === 'completed'
+        ? 'var(--success)'
+        : (lead.status === 'ignored' ? '#ef4444' : 'var(--text-muted)');
+
+    // ── Badges ────────────────────────────────────────────────────────────────
+    const hiringBadge = (lead.hiring_intent_found === 'Yes')
+        ? `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; border:1px solid #a7f3d0">🟢 Hiring</span>`
+        : '';
+
+    const techDict = {
+        'stripe': 'Takes Online Payments', 'wordpress': 'Active Content/Blog',
+        'shopify': 'E-Commerce Store',     'salesforce': 'Enterprise CRM',
+        'hubspot': 'Marketing Automation', 'google analytics': 'Tracks Analytics',
+        'segment': 'Customer Data Platform', 'intercom': 'Live Chat Support',
+        'react': 'Modern Web App'
+    };
+    const techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0)
+        ? lead.tech_stack_found.map(t =>
+            `<span style="font-size:0.75rem; background:transparent; color:#6b7280; padding:2px 6px; border-radius:4px; border:1px solid #e5e7eb">⚡ ${techDict[t.toLowerCase()] || t}</span>`
+          ).join('')
+        : '';
+
+    const exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">🔒 Exclusive Lead</span>`;
+
+    const competitorBadge = lead.competitor_match
+        ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">🎯 Competitor Intercept: ${lead.competitor_match}</span>`
+        : '';
+
+    // ── Phase 5: Dossier badges (only rendered when data is present) ──────────
+    const targetNameBadge = (lead.decision_maker_name)
+        ? `<span style="font-size:0.75rem; background:#eff6ff; color:#1d4ed8; padding:2px 6px; border-radius:4px; border:1px solid #bfdbfe">👤 ${targetName}</span>`
+        : '';
+    const companySizeBadge = (lead.company_size_tier)
+        ? `<span style="font-size:0.75rem; background:#fefce8; color:#854d0e; padding:2px 6px; border-radius:4px; border:1px solid #fef08a">🏢 ${companySize}</span>`
+        : '';
+
+    // ── Contact info ─────────────────────────────────────────────────────────
+    const emailHtml = lead.email
+        ? `📧 <a href="mailto:${lead.email}" target="_blank" style="color:#2563eb; text-decoration:none;">${lead.email}</a> &nbsp;`
+        : '';
+    const phoneHtml = lead.phone
+        ? `📞 <a href="tel:${lead.phone}" style="color:#2563eb; text-decoration:none;">${lead.phone}</a>`
+        : '';
+    const noContactHtml = (!lead.email && !lead.phone)
+        ? `<span style="color:var(--text-muted); font-style:italic;">No Contact Info Found</span>`
+        : '';
+
+    // ── Icebreaker / Objection rows (Phase 5 — conditionally shown) ──────────
+    const icebreakerRow = icebreakerAngle
+        ? `<div style="margin-top:8px; font-size:0.85rem; color:#4f46e5; font-style:italic; padding:6px 10px; background:rgba(79,70,229,0.05); border-left:3px solid #6366f1; border-radius:0 4px 4px 0;">
+               💡 Icebreaker: ${icebreakerAngle}
+           </div>`
+        : '';
+    const objectionRow = (lead.primary_objection_hypothesis)
+        ? `<div style="margin-top:6px; font-size:0.82rem; color:#b45309; padding:4px 10px; background:#fffbeb; border-left:3px solid #f59e0b; border-radius:0 4px 4px 0;">
+               ⚠️ Likely Objection: ${primaryObjection}
+           </div>`
+        : '';
+
+    // ── Safe serialisation for inline onclick handlers ────────────────────────
+    const safeDm      = (lead.dm || '').replace(/`/g, '\\`').replace(/'/g, "\\'");
+    const safeLeadEnc = encodeURIComponent(JSON.stringify(lead)).replace(/'/g, "\\'");
+    const safeEvents  = encodeURIComponent(JSON.stringify(lead.interactions || []));
+
+    return `
+        <div class="lead-header">
+            <div>
+                <strong><a href="${lead.url || '#'}" target="_blank" style="color: var(--text-main); text-decoration: none;">${urlHostname} ↗</a></strong> • ${lead.source || 'Organic Search'}
+                <span style="margin-left:8px; font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(lead.status || 'new').toUpperCase()}</span>
+            </div>
+            <div class="score">Score: ${lead.score || 0}/10</div>
+        </div>
+        <div class="pain-point">" ${lead.pain_point || 'Analyzing sentiment...'} "</div>
+        <div class="premium-badges" style="margin-top: 8px; margin-bottom: 8px; font-weight: 500; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
+            ${exclusiveBadge}
+            ${competitorBadge}
+            ${hiringBadge}
+            ${targetNameBadge}
+            ${companySizeBadge}
+            ${techBadges}
+        </div>
+        ${icebreakerRow}
+        ${objectionRow}
+        <div class="dm-draft">${lead.dm || 'Drafting variation...'}</div>
+        <div class="contact-info" style="margin-top: 8px; margin-bottom: 8px; font-size: 0.85rem; color: var(--text-main); font-weight: 500;">
+            ${emailHtml}${phoneHtml}${noContactHtml}
+        </div>
+        <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
+            <button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${safeDm}\`)" title="Copy Message">📋 Copy Message</button>
+            <button class="action-btn" onclick="pushToCRM('${docId}', \`${safeLeadEnc}\`)" style="color: #4f46e5; border-color: #c7d2fe; background: #e0e7ff;">☁️ Push to CRM</button>
+            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">🚫 Ignore</button>
+            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">🎯 Converted</button>
+            <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${safeEvents}')" title="Audit Log">🕒 View Timeline Logs</button>
+        </div>
+    `;
+}
+
 let virtualObserver = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
         if(entry.isIntersecting) {

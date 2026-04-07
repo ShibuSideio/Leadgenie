@@ -1,15 +1,41 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
     // -------------------------------------------------------------
-    // ABSOLUTE DATABASE LOCKDOWN: MULTI-TENANT THIN CLIENT ARCHITECTURE
+    // V13.22: REAL-TIME WEBSOCKET ARCHITECTURE
     // -------------------------------------------------------------
-    // All direct frontend Firestore polling is mathematically blocked.
-    // Real-time synchronization is revoked.
-    // 
-    // Data ingress and egress strictly flows through the Orchestrator API Gateway
-    // utilizing the Firebase Admin SDK to bypass these constraints securely.
-    
+    // Authenticated users may read/write ONLY their own tenant data.
+    // resource.data is used for reads/updates (document exists).
+    // request.resource.data is used for creates (document doesn't exist yet).
+    // Everything else remains locked down.
+
+    match /leads/{document} {
+      // Read: document must exist and belong to the authenticated user
+      allow read: if request.auth != null
+                  && resource.data.tenant_id == request.auth.uid;
+
+      // Create: new document must declare this user as the tenant
+      allow create: if request.auth != null
+                    && request.resource.data.tenant_id == request.auth.uid;
+
+      // Update / Delete: existing document must belong to the authenticated user
+      allow update, delete: if request.auth != null
+                             && resource.data.tenant_id == request.auth.uid;
+    }
+
+    match /campaigns/{document} {
+      allow read: if request.auth != null
+                  && resource.data.tenant_id == request.auth.uid;
+
+      allow create: if request.auth != null
+                    && request.resource.data.tenant_id == request.auth.uid;
+
+      allow update, delete: if request.auth != null
+                             && resource.data.tenant_id == request.auth.uid;
+    }
+
+    // Catch-all: deny everything not explicitly permitted above
     match /{document=**} {
       allow read, write: if false;
     }

@@ -64,6 +64,7 @@ The tenant anchor containing strict L0 definitions, monetization quotas, and RLH
     "tech_wordpress": -5,
     "tech_react": 1
   },
+  "dynamic_blocklist": ["checkout", "add to cart"], // Auto-populated by RLHF Ignored leads
   "createdAt": "2026-03-01T12:00:00Z",
   "updatedAt": "2026-04-05T12:00:00Z"
 }
@@ -102,6 +103,10 @@ The fundamental atomic execution target strictly generated and evolved by the pi
   "dm": "Hey Name, noticed... ",
   "hiring_intent_found": "Yes",
   "tech_stack_found": ["react", "hubspot"],
+  "decision_maker_name": "John Doe",
+  "decision_maker_title": "VP of Operations",
+  "company_size_tier": "Mid-Market",
+  "primary_objection_hypothesis": "They might lack budget for external enterprise tooling.",
   "email": "hr@techcorp.com",
   "phone": "3125550199",
   "linkedin": "https://linkedin.com/in/...",
@@ -119,7 +124,7 @@ The fundamental atomic execution target strictly generated and evolved by the pi
 
 ---
 
-## 3. THE 7-STEP PIPELINE EXECUTION FLOW (Code-Level)
+## 3. THE 8-STEP PIPELINE EXECUTION FLOW (Code-Level)
 
 ### Step 1: Orchestrator Trigger
 **Location:** `services/orchestrator/main.py::execute_campaign`
@@ -182,13 +187,20 @@ YOUR OUTPUT MUST BE STRICTLY A LINE-BY-LINE LIST OF ONLY URLs matching high-valu
 - **Execution:** `pipeline-main` drops a `DEFERRED` task gracefully into Cloud Tasks natively routed to `scraper-heavy`. Playwright opens headless chromium targeting the DOM.
 - **Short-Circuit Bypass:** If the target URL string-matches a social domain (via `.endswith()`), the engine completely skips Playwright, grabs the organic search snippet natively, and jumps straight to Vertex evaluation.
 - **Callback Loop:** Scraping executes in total isolation with explicit `--disable-dev-shm-usage` resource aborts. Upon success, `scraper-heavy` queues a Cloud Task back to `pipeline-main/finalize` delivering the DOM payloads to Vertex.
+- **Proxy & Secret Vault Execution:** Chromium execution binds routing matrix topologies directly from `google-cloud-secret-manager` (Decodo Standard/Premium networks), preventing WAF blocks and bypassing basic Auth environment exposure.
 - **Contact Extraction:** 
 Native DOM interaction avoiding string-scrape limits:
 ```javascript
 document.querySelectorAll('a[href^="mailto:"]').forEach(...)
 ```
 
-### Step 7: Final Enrichment & DM Drafting
+### Step 7: Python Fast-Fail Gate & NLP Density Extraction
+**Location:** `services/pipeline-main/main.py::finalize`
+- **Native TTL Caches:** The payload first hits `scraped_cache` where Firestores native TTL purges the document seamlessly 30 days after `expireAt` without crons.
+- **Python Fast-Fail Guard:** Prior to LLM allocation, Python natively scans the blob against the user's `dynamic_blocklist` and a global b2b blacklist. Bouncing storefronts drops execution saving Vertex budget.
+- **Density Extraction:** `extract_dense_payload()` evaluates the massive DOM blob ranking standard paragraphs directly against keyword arrays natively lifting the top 10 most relevant bounds, effectively shrinking context windows.
+
+### Step 8: Final Enterprise Schema Extraction & DM Drafting
 **Location:** `services/pipeline-main/main.py::final_score_and_dm`
 - **Execution:** Reads truncated DOM content and generates final fields using Python `tenacity` exponential backoff libraries to instantly catch Vertex AI API rate limit drops.
 - **Data Compliance:** Statically locked into `vertexai.generative_models.Schema` rejecting JSON format hallucinations natively.
@@ -212,6 +224,8 @@ The system is self-optimizing out-of-the-box utilizing existing reads strictly b
 ### The UI Trigger Loop
 **Location:** `services/orchestrator/main.py` lines 448-471 `elif request.path.startswith("/api/leads/")`.
 When the UI triggers `Ignore` or `Converted`, the orchestrator natively executes mathematical backpropagation:
+- **Dynamic Array Blocklists:** If a lead is Ignored, standard B2B taxonomy is injected into the user's `dynamic_blocklist` array using `firestore.ArrayUnion`, creating a self-teaching heuristic wall.
+- **Preference Scaling:**
 ```python
 delta = 1 if status == "converted" else -1
 for tech in tech_stack:
@@ -241,6 +255,11 @@ if fit_score <= -3:
     doc_ref.delete()
     continue
 ```
+
+### Function Map C: Few-Shot Conversion Context Injection
+**Location:** `services/pipeline-main/main.py` inside `final_score_and_dm`.
+Just before building the icebreaker, the pipeline fetches the tenant's last 3 leads explicitly marked `status == "converted"`. It injects their DMs directly into the prompt instructing Vertex AI to strictly mimic proven phrasing.
+
 
 ---
 
@@ -277,6 +296,11 @@ The entirety of the parsing, deduplication, cache routing, DB saving, and AI tra
                 continue
 ```
 
+### Function Map C: Few-Shot Conversion Context Injection
+**Location:** `services/pipeline-main/main.py` inside `final_score_and_dm`.
+Just before building the icebreaker, the pipeline fetches the tenant's last 3 leads explicitly marked `status == "converted"`. It injects their DMs directly into the prompt instructing Vertex AI to strictly mimic proven phrasing.
+
+
 ---
 
 ## 6. ENTERPRISE KMS ENVELOPE ENCRYPTION
@@ -286,7 +310,7 @@ All Meta WhatsApp integrations strictly wrap API tokens dynamically through the 
 
 ---
 
-## 6. FRONTEND UX & TELEMETRY (React)
+## 7. FRONTEND UX & TELEMETRY (Vanilla JS)
 
 The Client UX focuses exclusively on native interaction rendering, converting machine telemetry directly into actionable execution funnels. Data binds locally dynamically from Firebase.
 
@@ -295,9 +319,11 @@ The Client UX focuses exclusively on native interaction rendering, converting ma
     *   *Discovered Today:* Total documents generated in a 24-hr sequence.
     *   *Actionable:* Lead documents strictly evaluated as `status == 'new'`.
     *   *Ignored:* Lead documents mapped with `status == 'ignored'`.
-*   **Pure Leads UI:** The React feed strictly drops temporary `processing` or `failed` leads visually via `.filter()`. If zero actionable leads exist, it renders an optimistic `Hunting for leads...` loading state empty fallback.
-*   **Semantic Tech Badges:** The React client identifies specific technology stack sets native to the extracted `tech_stack_found` array payload and overlays structured metadata Badges dynamically atop the HTML Card sequence (e.g., rendering the HubSpot or React icon).
+*   **Pure Leads UI:** The Vanilla pipeline strictly drops temporary `processing` or `failed` leads visually via `.filter()`. If zero actionable leads exist, it renders an optimistic `Hunting for leads...` loading state empty fallback.
+*   **Semantic Tech Badges:** The Javascript core identifies specific technology stack sets native to the extracted `tech_stack_found` array payload and overlays structured metadata Badges dynamically atop the HTML Card sequence (e.g., rendering the HubSpot or React icon).
 *   **Competitor Intercept:** Native UI conditionals flag any URL domains matching known B2B aggregator entities implicitly.
+*   **Single-Click Optimistic Drops:** The `Copy Message` invocation mimics React state behavior natively. When fired, it detaches the targeted Lead ID from the intersection virtualizer, drops it from local caching, and physically removes the DOM card instantly (Optimistic UI), letting the backend asynchronous fire complete invisibly.
+*   **Virtual DOM Offload:** Rather than looping native lists, the application wraps all objects inside an `IntersectionObserver`. Only the 10-15 viewport targets are actively hydrated with heavy DOM templates, while obscured elements revert to height-bound skeletons, protecting structural FPS rates on heavy 500-lead arrays.
 *   **Single-Click Execution:** Deprecating the legacy Autonomous WhatsApp Auto-Send, the UI now features a `Copy Message` invocation. It actively copies the Generative AI drafted `dm` text to the user's native system Clipboard and immediately triggers a PUT mapping the lead to `"status": "contacted"`.
 *   **CRM Webhook Push:** Integrating via `fetch(crm_webhook_url, { mode: 'no-cors' })`, the CRM Push button acts as a dynamic pass-through relay enabling Webhook.site and Zapier integrators immediately.
 
@@ -305,3 +331,4 @@ The Client UX focuses exclusively on native interaction rendering, converting ma
 The system utilizes optimized localized structural sorting strictly to bypass Firebase cost overhead for tenant queries.
 *   **Macro Analytics:** By querying `db.collection("leads").where(...).count()`, the `/api/l0/telemetry` endpoint calculates total global scale without ever executing thousands of document reads natively.
 *   **In-Memory UI Sorting:** The L0 Governance telemetry table utilizes `window.sortL0Table('email' | 'wallet' | 'leads')` within Javascript. This intercepts the DOM table representation and inherently sorts the JSON arrays directly in the client's vRAM, entirely bypassing backend query execution costs.
+*   **Debounced Telemetry Lock:** The L0 dashboard utilizes a native memory debounce lock. A 30-second epoch validation prevents admin spammers from infinitely querying the massive document tables via the UI Refresh button.
