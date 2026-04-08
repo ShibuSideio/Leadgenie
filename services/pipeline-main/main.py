@@ -641,7 +641,14 @@ def produce():
     )
 
     # ── Step 4: Serper Execution ─────────────────────────────────────────────
-    raw_urls = []
+    # P2: Track snippet text alongside each URL for walled-garden hand-off
+    SOCIAL_DOMAINS_PRODUCER = ["reddit.com", "linkedin.com", "facebook.com",
+                                "instagram.com", "x.com", "twitter.com",
+                                "quora.com", "youtube.com", "team-bhp.com"]
+
+    raw_urls    = []       # ordered list of raw URLs
+    snippet_db  = {}       # url → {"title": ..., "snippet": ...} for hand-off
+
     for kw in smart_keywords:
         search_query = f"{kw} AND {location}" if location and location != "all" else kw
         raw_results  = search_serper(search_query, location=location or None, gl=gl or None)
@@ -650,18 +657,47 @@ def produce():
             link = r.get("link")
             if link and link not in raw_urls:
                 raw_urls.append(link)
+                # Capture snippet for later scraped_cache persistence
+                snippet_db[link] = {
+                    "title":   r.get("title",   ""),
+                    "snippet": r.get("snippet", "")
+                }
 
     # Also include target_urls from campaign doc as first-class candidates
     target_urls = campaign.get("target_urls", [])
     for u in (target_urls[:10] if isinstance(target_urls, list) else []):
         if u not in raw_urls:
             raw_urls.insert(0, u)
+            if u not in snippet_db:
+                snippet_db[u] = {"title": "", "snippet": ""}
 
     fetched_count = len(raw_urls)
     print(f"[FUNNEL] Campaign: {campaign_id} | Producer: Fetched {fetched_count} URLs")
 
-    # ── Native Global Deduplication against leads collection ─────────────────
-    # Build SHA-256 set of all known lead IDs for this tenant
+    # ── P2: Persist Serper snippets to scraped_cache for social/walled-garden URLs ──
+    # This is the hand-off point. The Consumer will read these from Firestore
+    # instead of receiving an empty snippet_map.
+    for surl, meta in snippet_db.items():
+        s_domain = extract_root_domain(surl)
+        is_social_url = any(s_domain.endswith(d) for d in SOCIAL_DOMAINS_PRODUCER)
+        combined_text = f"{meta['title']}\n{meta['snippet']}".strip()
+        if is_social_url and combined_text:
+            try:
+                cache_key = surl.replace('/', '_')
+                db.collection("scraped_cache").document(cache_key).set({
+                    "url":      surl,
+                    "text":     combined_text,
+                    "source":   "serper_snippet",
+                    "tech_stack": [],
+                    "emails":   [],
+                    "phones":   []
+                }, merge=True)
+            except Exception as se:
+                print(f"[PRODUCER] Snippet persist failed for {surl}: {se}")
+
+    # ── P0: Native Global Deduplication — path-aware for social domains ───────
+    # Previously: all reddit threads hashed to SHA256(tenant_reddit.com)
+    # Fix: social URLs hash by full URL; B2B URLs still hash by domain.
     existing_ids = set()
     try:
         known_docs = db.collection("leads").where(
@@ -671,17 +707,21 @@ def produce():
             d = doc.to_dict()
             u = d.get("url", "")
             if u:
-                domain = extract_root_domain(u)
-                lead_id = hashlib.sha256(f"{tenant_id}_{domain}".encode()).hexdigest()
-                existing_ids.add(lead_id)
-                existing_ids.add(u)  # also track raw URL
+                d_domain   = extract_root_domain(u)
+                is_social  = any(d_domain.endswith(s) for s in SOCIAL_DOMAINS_PRODUCER)
+                dedup_key  = u if is_social else d_domain   # ← FIX: full URL for social
+                lead_id_ex = hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
+                existing_ids.add(lead_id_ex)
+                existing_ids.add(u)  # also track raw URL as secondary guard
     except Exception as dedup_e:
         print(f"[PRODUCER] Dedup query failed: {dedup_e}. Continuing without dedup.")
 
     fresh_urls = []
     for url in raw_urls:
-        domain    = extract_root_domain(url)
-        lead_id_h = hashlib.sha256(f"{tenant_id}_{domain}".encode()).hexdigest()
+        f_domain  = extract_root_domain(url)
+        is_social = any(f_domain.endswith(s) for s in SOCIAL_DOMAINS_PRODUCER)
+        dedup_key = url if is_social else f_domain          # ← FIX: full URL for social
+        lead_id_h = hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
         if lead_id_h not in existing_ids and url not in existing_ids:
             fresh_urls.append(url)
 
@@ -755,13 +795,33 @@ def dispatch():
     user_doc             = db.collection("users").document(tenant_id).get()
     preferences_weights  = user_doc.to_dict().get("preferences_weights", {}) if user_doc.exists else {}
 
-    # Build a minimal snippet map (needed for social short-circuit path)
-    # For drip processing, snippets come from scraped_cache hits only
+    # ── P2: Hydrate snippet_map from scraped_cache (Producer hand-off) ────────
+    # The Producer wrote Serper snippets to scraped_cache with source=serper_snippet.
+    # Load them now so the social short-circuit path has real context.
     snippet_map = {}
+    for batch_url in batch_urls:
+        b_domain   = extract_root_domain(batch_url)
+        is_social  = any(b_domain.endswith(s) for s in ["reddit.com", "linkedin.com", "facebook.com",
+                                                          "instagram.com", "x.com", "twitter.com",
+                                                          "quora.com", "youtube.com", "team-bhp.com"])
+        if is_social:
+            try:
+                cache_key = batch_url.replace('/', '_')
+                cdoc = db.collection("scraped_cache").document(cache_key).get()
+                if cdoc.exists:
+                    cached_text = cdoc.to_dict().get("text", "")
+                    if cached_text:
+                        snippet_map[batch_url] = cached_text
+            except Exception as sm_e:
+                print(f"[CONSUMER] snippet_map hydration failed for {batch_url}: {sm_e}")
 
     # ── Step 5: Confidence Tiering Gate ─────────────────────────────────────
-    # We feed the batch URLs as synthetic snippet objects into pre_filter_gemini
-    synthetic_snippets = [{"link": u, "snippet": "", "title": ""} for u in batch_urls]
+    # Feed batch URLs into pre_filter_gemini. Include snippet text where available
+    # so the tiering LLM has real context (not just bare URLs) for social leads.
+    synthetic_snippets = [
+        {"link": u, "snippet": snippet_map.get(u, ""), "title": ""}
+        for u in batch_urls
+    ]
     tiered = pre_filter_gemini(synthetic_snippets, bio, location)
     high_urls   = tiered.get("High", [])
     medium_urls = tiered.get("Medium", [])
@@ -859,10 +919,21 @@ def dispatch():
                 emails     = c_data.get("emails", [])
                 phones     = c_data.get("phones", [])
             elif is_social:
-                # Social short-circuit: use any cached snippet or empty string
-                text       = snippet_map.get(url, "Social profile snippet empty.")
-                tech_stack = ["Social Platform Bypass"]
-                print(f"[SOCIAL SHORT-CIRCUIT] Using snippet for {url}")
+                # ── P2: Social short-circuit — read from hydrated snippet_map ──
+                # snippet_map was loaded from scraped_cache (Producer hand-off) at
+                # the top of dispatch(). It contains real Serper title+snippet text.
+                raw_snippet = snippet_map.get(url, "")
+                if raw_snippet:
+                    text       = raw_snippet
+                    tech_stack = ["Social Platform Bypass"]
+                    print(f"[SOCIAL SHORT-CIRCUIT] Real snippet ({len(text)} chars) for {url}")
+                else:
+                    # ── P3: No snippet available — ghost state prevention ──────
+                    # Do NOT leave doc in 'processing'. Mark dropped and skip.
+                    print(f"[SOCIAL SHORT-CIRCUIT] No snippet available for {url} — marking dropped.")
+                    doc_ref.update({"status": "dropped_no_context", "error": "No Serper snippet in cache"})
+                    scrape_failed += 1
+                    continue
             else:
                 try:
                     text, tech_stack, emails, phones = scrape_url(url)
@@ -888,8 +959,11 @@ def dispatch():
                         }
                         _tc.create_task(parent=_parent, task=_task)
                         continue
+                    # ── P3: Non-DEFERRED scrape failure — mark failed, do not ghost ──
+                    print(f"[SCRAPE FAIL] {url}: {e}")
+                    doc_ref.update({"status": "failed_scrape", "error": str(e)})
                     scrape_failed += 1
-                    text, tech_stack, emails, phones = "", [], [], []
+                    continue  # ← was: text="", now we skip entirely
 
                 if text:
                     cache_ref.set({"url": url, "text": safe_truncate(text),
@@ -935,7 +1009,15 @@ def dispatch():
                     scrape_failed += 1
                     continue
 
-                if evaluation.get("score", 0) >= 7:
+                # ── P4: Dynamic acceptance threshold ─────────────────────────
+                # Snippet-sourced leads (< 500 chars) lack DOM depth.
+                # Gemini cannot confidently score them >= 7 even with clear intent.
+                # Lower to >= 6 for thin payloads so snippet leads are not mass-dropped.
+                is_thin_payload = len(text.strip()) < 500
+                accept_threshold = 6 if is_thin_payload else 7
+                print(f"[THRESHOLD] Payload: {len(text)} chars → threshold: {accept_threshold} (thin={is_thin_payload})")
+
+                if evaluation.get("score", 0) >= accept_threshold:
                     contact_endpoints = list(evaluation.get("contact_endpoints", []))
                     existing_uris     = {e["uri"] for e in contact_endpoints}
                     for em in (emails or [])[:3]:
@@ -1004,8 +1086,13 @@ def dispatch():
 
                     all_results.append({"url": url, "score": evaluation.get("score")})
                 else:
+                    # Score below threshold — clean delete (not a ghost)
+                    print(f"[SCORE GATE] {url} scored {evaluation.get('score', 0)} < {accept_threshold}. Deleting stub.")
                     doc_ref.delete()
             else:
+                # ── P3: text is empty after all code paths — ghost state prevention ──
+                print(f"[DEAD PAYLOAD] No text for {url} after all paths. Marking failed_scrape.")
+                doc_ref.update({"status": "failed_scrape", "error": "Empty DOM — no cache, no snippet, no scrape"})
                 scrape_failed += 1
 
         except Exception as loop_e:
