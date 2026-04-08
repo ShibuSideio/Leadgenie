@@ -1,4 +1,4 @@
-google-cloud-firestore==2.14.0
+﻿google-cloud-firestore==2.14.0
 google-cloud-tasks==2.15.0
 Flask==3.0.0
 gunicorn==21.2.0
@@ -8,4 +8,5 @@ google-cloud-kms==2.21.3
 google-cloud-secret-manager==2.16.2
 google-auth>=2.22.0
 google-cloud-aiplatform>=1.45.0
+google-protobuf>=4.21.0
 httpx==0.26.0

@@ -159,22 +159,30 @@ def validate_and_update_lead(payload_dict: dict, doc_ref) -> bool:
               f"(engine={validated.origin_engine}, score={validated.score})")
 
         # ── Ontology Map upsert (Phase 1) ──────────────────────────────
-        # Executed ONLY after a successful Pydantic-validated write (Option A ruling).
-        # Avoids polluting the brain with failed/ghost leads.
+        # CORRECTNESS: read-then-write to preserve RLHF-trained baseline_weight.
+        # merge=True with baseline_weight: 1.0 would silently reset RLHF weights
+        # every time a domain produces a new lead. The read adds 1 Firestore op
+        # but protects ontology signal integrity.
         source_url = payload_dict.get('source_url', '')
         base_path  = parse_base_path(source_url)
         if base_path and base_path != 'unknown':
             try:
-                ontology_ref = db.collection('ontology_map').document(base_path)
-                ontology_ref.set(
-                    {
+                ontology_ref  = db.collection('ontology_map').document(base_path)
+                ontology_snap = ontology_ref.get()
+                if ontology_snap.exists:
+                    # Domain known: only update yield + timestamp (preserve RLHF weight)
+                    ontology_ref.update({
+                        'total_yield': firestore.Increment(1),
+                        'last_seen':   firestore.SERVER_TIMESTAMP,
+                    })
+                else:
+                    # New domain: initialize with neutral baseline_weight
+                    ontology_ref.set({
                         'base_path':       base_path,
-                        'total_yield':     firestore.Increment(1),
-                        'baseline_weight': 1.0,      # only written on creation (merge=True)
-                        'last_seen':       firestore.SERVER_TIMESTAMP
-                    },
-                    merge=True   # increment total_yield; preserve existing baseline_weight
-                )
+                        'total_yield':     1,
+                        'baseline_weight': 1.0,
+                        'last_seen':       firestore.SERVER_TIMESTAMP,
+                    })
                 print(f"[ONTOLOGY] Upserted {base_path}")
             except Exception as oe:
                 print(f"[ONTOLOGY] Upsert failed for {base_path}: {oe}")

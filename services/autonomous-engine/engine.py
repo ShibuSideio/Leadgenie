@@ -156,8 +156,7 @@ class TriangulationEngine:
                 funding_data=funding_map[domain],
                 final_score=final_score,
                 is_exploration=True,
-                explore_token_tracker=lambda t: setattr(self, "_last_explore_tk", t),
-            )
+                            )
             if wrote:
                 cache_written += 1
                 explore_tk_used += TOKENS_PER_CALL  # conservative estimate
@@ -323,15 +322,19 @@ Respond ONLY in strict JSON:
             log.info(f"[CACHE] Written to predictive_cache: {payload['id']} "
                      f"score={validated.score}, exploration={payload.get('is_exploration')}")
 
-            # Ontology upsert
+            # Ontology upsert — read-then-write to preserve RLHF baseline_weight
             base_path = parse_base_path(payload["source_url"])
             if base_path and base_path != "unknown":
                 try:
-                    self.db.collection("ontology_map").document(base_path).set(
-                        {"base_path": base_path, "total_yield": firestore.Increment(1),
-                         "baseline_weight": 1.0, "last_seen": firestore.SERVER_TIMESTAMP},
-                        merge=True
-                    )
+                    ont_ref  = self.db.collection("ontology_map").document(base_path)
+                    ont_snap = ont_ref.get()
+                    if ont_snap.exists:
+                        ont_ref.update({"total_yield": firestore.Increment(1),
+                                        "last_seen":   firestore.SERVER_TIMESTAMP})
+                    else:
+                        ont_ref.set({"base_path": base_path, "total_yield": 1,
+                                     "baseline_weight": 1.0,
+                                     "last_seen": firestore.SERVER_TIMESTAMP})
                 except Exception as oe:
                     log.warning(f"[ONTOLOGY] Upsert failed: {oe}")
             return True
@@ -343,3 +346,4 @@ Respond ONLY in strict JSON:
             payload_copy["schema_error"] = str(ve)
             cache_ref.set(payload_copy, merge=True)
             return False
+

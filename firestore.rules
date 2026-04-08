@@ -1,41 +1,77 @@
-rules_version = '2';
+﻿rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
     // -------------------------------------------------------------
-    // V13.22: REAL-TIME WEBSOCKET ARCHITECTURE
+    // Core helpers
     // -------------------------------------------------------------
-    // Authenticated users may read/write ONLY their own tenant data.
-    // resource.data is used for reads/updates (document exists).
-    // request.resource.data is used for creates (document doesn't exist yet).
-    // Everything else remains locked down.
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
 
+    // -------------------------------------------------------------
+    // LEADS — tenant-scoped read/write
+    // -------------------------------------------------------------
     match /leads/{document} {
-      // Read: document must exist and belong to the authenticated user
-      allow read: if request.auth != null
-                  && resource.data.tenant_id == request.auth.uid;
-
-      // Create: new document must declare this user as the tenant
+      allow read:   if request.auth != null
+                    && resource.data.tenant_id == request.auth.uid;
       allow create: if request.auth != null
                     && request.resource.data.tenant_id == request.auth.uid;
-
-      // Update / Delete: existing document must belong to the authenticated user
       allow update, delete: if request.auth != null
                              && resource.data.tenant_id == request.auth.uid;
     }
 
+    // -------------------------------------------------------------
+    // CAMPAIGNS — tenant-scoped read/write
+    // -------------------------------------------------------------
     match /campaigns/{document} {
-      allow read: if request.auth != null
-                  && resource.data.tenant_id == request.auth.uid;
-
+      allow read:   if request.auth != null
+                    && resource.data.tenant_id == request.auth.uid;
       allow create: if request.auth != null
                     && request.resource.data.tenant_id == request.auth.uid;
-
       allow update, delete: if request.auth != null
                              && resource.data.tenant_id == request.auth.uid;
     }
 
+    // -------------------------------------------------------------
+    // USERS — tenant may read/update only own profile document
+    // Subcollections (predictive_cache): backend-only via Admin SDK
+    // -------------------------------------------------------------
+    match /users/{uid} {
+      allow read:   if isOwner(uid);
+      allow update: if isOwner(uid);
+      // No client-side create/delete (handled by backend Admin SDK)
+
+      // predictive_cache subcollection: BACKEND ONLY (Admin SDK bypasses rules)
+      // Client-side deny protects raw V16 intelligence from direct API access
+      match /predictive_cache/{cacheDoc} {
+        allow read, write: if false;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // BACKEND-ONLY COLLECTIONS
+    // All writes via Admin SDK (Cloud Run services) — client deny hardened
+    // -------------------------------------------------------------
+    match /ontology_map/{document} {
+      allow read, write: if false;  // Admin SDK only
+    }
+
+    match /autonomous_dedup/{document} {
+      allow read, write: if false;  // Admin SDK only
+    }
+
+    match /system_config/{document} {
+      allow read, write: if false;  // Admin SDK only
+    }
+
+    match /system_telemetry/{document} {
+      allow read, write: if false;  // Admin SDK only
+    }
+
+    // -------------------------------------------------------------
     // Catch-all: deny everything not explicitly permitted above
+    // -------------------------------------------------------------
     match /{document=**} {
       allow read, write: if false;
     }

@@ -1,4 +1,4 @@
-steps:
+﻿steps:
 # ---------------------------------------------------------------------
 # Microservice 1: Orchestrator
 # ---------------------------------------------------------------------
@@ -8,7 +8,17 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/lead-orchestrator']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args: ['run', 'deploy', 'orchestrator', '--image', 'gcr.io/$PROJECT_ID/lead-orchestrator', '--region', 'asia-south1', '--memory', '256Mi', '--allow-unauthenticated', '--set-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch']
+  args:
+  - run
+  - deploy
+  - orchestrator
+  - --image=gcr.io/$PROJECT_ID/lead-orchestrator
+  - --region=asia-south1
+  - --memory=256Mi
+  - --allow-unauthenticated
+  - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
+  - >-
+    --set-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch
 
 # ---------------------------------------------------------------------
 # Microservice 2: Pipeline Main
@@ -19,9 +29,17 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/lead-pipeline-main']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args: ['run', 'deploy', 'lead-pipeline-main', '--image', 'gcr.io/$PROJECT_ID/lead-pipeline-main', '--region', 'asia-south1', '--memory', '512Mi', '--no-allow-unauthenticated', '--service-account', 'lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com']
+  args:
+  - run
+  - deploy
+  - lead-pipeline-main
+  - --image=gcr.io/$PROJECT_ID/lead-pipeline-main
+  - --region=asia-south1
+  - --memory=512Mi
+  - --no-allow-unauthenticated
+  - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
 
-# Removed fragile bash orchestrator build module
+# ---------------------------------------------------------------------
 # Microservice 3: Scraper Heavy (Playwright)
 # ---------------------------------------------------------------------
 - name: 'gcr.io/cloud-builders/docker'
@@ -30,7 +48,16 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/scraper-heavy']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args: ['run', 'deploy', 'scraper-heavy', '--image', 'gcr.io/$PROJECT_ID/scraper-heavy', '--region', 'asia-south1', '--memory', '2Gi', '--min-instances', '0', '--no-allow-unauthenticated', '--service-account', 'scraper-heavy-sa@$PROJECT_ID.iam.gserviceaccount.com']
+  args:
+  - run
+  - deploy
+  - scraper-heavy
+  - --image=gcr.io/$PROJECT_ID/scraper-heavy
+  - --region=asia-south1
+  - --memory=2Gi
+  - --min-instances=0
+  - --no-allow-unauthenticated
+  - --service-account=scraper-heavy-sa@$PROJECT_ID.iam.gserviceaccount.com
 
 # ---------------------------------------------------------------------
 # Microservice 4: WhatsApp Webhook
@@ -41,7 +68,15 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/whatsapp-webhook']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args: ['run', 'deploy', 'whatsapp-webhook', '--image', 'gcr.io/$PROJECT_ID/whatsapp-webhook', '--region', 'asia-south1', '--memory', '128Mi', '--allow-unauthenticated', '--service-account', 'whatsapp-webhook-sa@$PROJECT_ID.iam.gserviceaccount.com']
+  args:
+  - run
+  - deploy
+  - whatsapp-webhook
+  - --image=gcr.io/$PROJECT_ID/whatsapp-webhook
+  - --region=asia-south1
+  - --memory=128Mi
+  - --allow-unauthenticated
+  - --service-account=whatsapp-webhook-sa@$PROJECT_ID.iam.gserviceaccount.com
 
 # ---------------------------------------------------------------------
 # Microservice 5: Email Summary
@@ -52,14 +87,126 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/email-summary']
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
-  args: ['run', 'deploy', 'email-summary', '--image', 'gcr.io/$PROJECT_ID/email-summary', '--region', 'asia-south1', '--memory', '128Mi', '--no-allow-unauthenticated', '--service-account', 'email-summary-sa@$PROJECT_ID.iam.gserviceaccount.com']
+  args:
+  - run
+  - deploy
+  - email-summary
+  - --image=gcr.io/$PROJECT_ID/email-summary
+  - --region=asia-south1
+  - --memory=128Mi
+  - --no-allow-unauthenticated
+  - --service-account=email-summary-sa@$PROJECT_ID.iam.gserviceaccount.com
 
 # ---------------------------------------------------------------------
-# Firebase Frontend & Eventarc Deployment
+# Microservice 6: V16 Autonomous Engine (Cloud Run JOB — not a Service)
+# Phase 3: nightly triangulation + predictive_cache population
 # ---------------------------------------------------------------------
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'gcr.io/$PROJECT_ID/autonomous-engine', './services/autonomous-engine']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'gcr.io/$PROJECT_ID/autonomous-engine']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: bash
+  args:
+  - '-c'
+  - |
+    # Create or update the Cloud Run Job (idempotent)
+    if gcloud run jobs describe autonomous-engine --region=asia-south1 --project=$PROJECT_ID 2>/dev/null; then
+      gcloud run jobs update autonomous-engine \
+        --image=gcr.io/$PROJECT_ID/autonomous-engine \
+        --region=asia-south1 \
+        --memory=512Mi \
+        --task-timeout=3600 \
+        --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com \
+        --set-env-vars="PROJECT_ID=$PROJECT_ID,MOCK_MODE=false,DISCOVERY_ALLOCATION=0.15"
+    else
+      gcloud run jobs create autonomous-engine \
+        --image=gcr.io/$PROJECT_ID/autonomous-engine \
+        --region=asia-south1 \
+        --memory=512Mi \
+        --task-timeout=3600 \
+        --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com \
+        --set-env-vars="PROJECT_ID=$PROJECT_ID,MOCK_MODE=false,DISCOVERY_ALLOCATION=0.15"
+    fi
 
 # ---------------------------------------------------------------------
-# Firebase Frontend Deployment
+# Cloud Scheduler Jobs (idempotent create-or-update)
+# Phase 1-4: ontology decay, reflection, cron sweep, autonomous engine
+# NOTE: Scheduler requires orchestrator URL. Fetched dynamically below.
+# ---------------------------------------------------------------------
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: bash
+  args:
+  - '-c'
+  - |
+    ORCH_URL=$(gcloud run services describe orchestrator --region=asia-south1 --project=$PROJECT_ID --format='value(status.url)')
+    SA="lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com"
+
+    # 1. Pipeline Sweep — every 5 minutes (Cartographer heartbeat)
+    if gcloud scheduler jobs describe pipeline-sweep --location=asia-south1 --project=$PROJECT_ID 2>/dev/null; then
+      gcloud scheduler jobs update http pipeline-sweep \
+        --location=asia-south1 --schedule="*/5 * * * *" \
+        --uri="$ORCH_URL/api/internal/cron/sweep" \
+        --message-body="{}" --http-method=POST \
+        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+    else
+      gcloud scheduler jobs create http pipeline-sweep \
+        --location=asia-south1 --schedule="*/5 * * * *" \
+        --uri="$ORCH_URL/api/internal/cron/sweep" \
+        --message-body="{}" --http-method=POST \
+        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+    fi
+
+    # 2. AI Reflection Loop — weekly Sunday 02:00 UTC
+    if gcloud scheduler jobs describe ai-reflection --location=asia-south1 --project=$PROJECT_ID 2>/dev/null; then
+      gcloud scheduler jobs update http ai-reflection \
+        --location=asia-south1 --schedule="0 2 * * 0" \
+        --uri="$ORCH_URL/api/internal/cron/reflection" \
+        --message-body="{}" --http-method=POST \
+        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+    else
+      gcloud scheduler jobs create http ai-reflection \
+        --location=asia-south1 --schedule="0 2 * * 0" \
+        --uri="$ORCH_URL/api/internal/cron/reflection" \
+        --message-body="{}" --http-method=POST \
+        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+    fi
+
+    # 3. Ontology Decay — 1st of every month at 00:00 UTC
+    if gcloud scheduler jobs describe ontology-decay --location=asia-south1 --project=$PROJECT_ID 2>/dev/null; then
+      gcloud scheduler jobs update http ontology-decay \
+        --location=asia-south1 --schedule="0 0 1 * *" \
+        --uri="$ORCH_URL/api/internal/cron/ontology-decay" \
+        --message-body="{}" --http-method=POST \
+        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+    else
+      gcloud scheduler jobs create http ontology-decay \
+        --location=asia-south1 --schedule="0 0 1 * *" \
+        --uri="$ORCH_URL/api/internal/cron/ontology-decay" \
+        --message-body="{}" --http-method=POST \
+        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+    fi
+
+    # 4. V16 Autonomous Engine — daily at 03:00 UTC (Cloud Run Job trigger)
+    JOB_NAME="projects/$PROJECT_ID/locations/asia-south1/jobs/autonomous-engine"
+    if gcloud scheduler jobs describe autonomous-engine-trigger --location=asia-south1 --project=$PROJECT_ID 2>/dev/null; then
+      gcloud scheduler jobs update http autonomous-engine-trigger \
+        --location=asia-south1 --schedule="0 3 * * *" \
+        --uri="https://run.googleapis.com/v2/$JOB_NAME:run" \
+        --message-body="{}" --http-method=POST \
+        --oauth-service-account-email=$SA
+    else
+      gcloud scheduler jobs create http autonomous-engine-trigger \
+        --location=asia-south1 --schedule="0 3 * * *" \
+        --uri="https://run.googleapis.com/v2/$JOB_NAME:run" \
+        --message-body="{}" --http-method=POST \
+        --oauth-service-account-email=$SA
+    fi
+
+    echo "Cloud Scheduler jobs provisioned successfully."
+
+# ---------------------------------------------------------------------
+# Firebase Frontend & Firestore Rules/Indexes Deployment
 # ---------------------------------------------------------------------
 - name: 'node:20'
   entrypoint: 'bash'
