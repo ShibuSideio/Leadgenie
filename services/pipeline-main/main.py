@@ -147,10 +147,14 @@ def validate_and_update_lead(payload_dict: dict, doc_ref) -> bool:
 
     Both dispatch() and finalize() must pass their final dicts through here
     instead of calling doc_ref.update() directly.
+
+    Uses set(merge=True) universally:
+      - Cartographer: updates an existing stub document (equivalent to update())
+      - Autonomous Engine: creates a fresh document without any prior stub
     """
     try:
         validated = LeadPayload(**payload_dict)
-        doc_ref.update(validated.to_firestore_dict())
+        doc_ref.set(validated.to_firestore_dict(), merge=True)
         print(f"[CONTRACT] ✓ Validated lead {payload_dict.get('id', '?')} "
               f"(engine={validated.origin_engine}, score={validated.score})")
 
@@ -184,7 +188,7 @@ def validate_and_update_lead(payload_dict: dict, doc_ref) -> bool:
         dead_letter["schema_error"]      = str(ve)
         dead_letter["schema_error_time"] = firestore.SERVER_TIMESTAMP
         try:
-            doc_ref.update(dead_letter)
+            doc_ref.set(dead_letter, merge=True)  # set(merge=True): safe for stub or fresh doc
         except Exception as dl_e:
             print(f"[CONTRACT] Dead-letter write also failed: {dl_e}")
         return False
