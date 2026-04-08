@@ -8,4 +8,4 @@ google-cloud-kms==2.21.3
 google-cloud-secret-manager==2.16.2
 google-auth>=2.22.0
 google-cloud-aiplatform>=1.45.0
-httpx==0.26.0
+httpx>=0.26.0
