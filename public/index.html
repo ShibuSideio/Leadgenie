@@ -260,7 +260,7 @@
             <input type="text" id="edit-camp-keys" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             
             <label style="font-size: 0.8rem; color: var(--text-muted);">Geographic Targeting</label>
-            <div style="display:flex; gap: 8px; margin-bottom: 24px;">
+            <div style="display:flex; gap: 8px; margin-bottom: 12px;">
                 <select id="edit-camp-gl" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; background: white;">
                     <option value="">Global</option>
                     <option value="us">United States</option>
@@ -271,7 +271,10 @@
                 </select>
                 <input type="text" id="edit-camp-location" placeholder="City, State" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             </div>
-            
+
+            <label style="font-size: 0.8rem; color: var(--text-muted);">Priority Target Websites (Max 10)</label>
+            <textarea id="edit-camp-target-urls" placeholder="Paste specific URLs to prioritize (one per line). Leave blank to use AI discovery only." class="full-width" rows="3" style="margin-bottom: 24px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; resize: vertical;"></textarea>
+
             <div style="display:flex; gap: 12px;">
                 <button class="primary-btn full-width" onclick="saveEditedCampaign()">Update Engine</button>
                 <button class="secondary-btn full-width" onclick="closeEditModal()">Cancel</button>

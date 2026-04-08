@@ -199,7 +199,7 @@ async function loadCampaigns() {
                     <td style="padding: 12px;"><i style="color:var(--text-muted); font-size:0.85rem">${camp.keywords || 'N/A'}</i></td>
                     <td style="padding: 12px;">${statusBadge}</td>
                     <td style="padding: 12px; text-align:right;">
-                        <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; margin-right: 4px;" onclick="openEditModal('${id}', '${(camp.name || '').replace(/'/g, "\\'")}', '${(camp.bio || '').replace(/'/g, "\\'")}', '${(camp.keywords || '').replace(/'/g, "\\'")}', '${(camp.gl || '').replace(/'/g, "\\'")}', '${(camp.location || '').replace(/'/g, "\\'")}')">Edit</button>
+                        <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; margin-right: 4px;" onclick="openEditModal('${id}', '${(camp.name || '').replace(/'/g, "\\'")}', '${(camp.bio || '').replace(/'/g, "\\'")}', '${(camp.keywords || '').replace(/'/g, "\\'")}', '${(camp.gl || '').replace(/'/g, "\\'")}', '${(camp.location || '').replace(/'/g, "\\'")}', ${JSON.stringify(camp.target_urls || [])})">Edit</button>
                         <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; border-color: ${statusColor}; color: ${statusColor}" onclick="toggleCampaignStatus('${id}', '${camp.status}')">${isActive ? 'Pause' : 'Resume'}</button>
                     </td>
                 </tr>
@@ -472,10 +472,22 @@ window.smartContactAction = function(docId, dm, uri, platform) {
         cardEl.remove();
     }
 
-    // 3. Open the URI (mailto, https, etc.)
+    // 3. Open the URI — Phase 2: Relative Path Defence
     if (uri) {
-        const isEmail = platform === 'email' || uri.includes('@');
-        const href = isEmail ? `mailto:${uri}` : uri;
+        const isEmail = platform === 'email' || (uri.includes('@') && !uri.startsWith('http'));
+        const isPhone = platform === 'other' && /^[\d\s+()\-]{6,}$/.test(uri);
+        let href;
+        if (isEmail) {
+            href = `mailto:${uri}`;
+        } else if (isPhone) {
+            href = `tel:${uri}`;
+        } else if (/^(https?:\/\/|mailto:|tel:)/i.test(uri)) {
+            // URI already has a valid protocol — use as-is
+            href = uri;
+        } else {
+            // Relative path / naked domain guard: prepend https://
+            href = `https://${uri}`;
+        }
         window.open(href, '_blank', 'noopener,noreferrer');
     }
 
@@ -633,12 +645,22 @@ function generateLeadInnerHtml(docId, lead) {
         const altItems = altEndpoints.map(ep => {
             const m = PLATFORM_META[ep.platform] || PLATFORM_META.other;
             const safeUri = encodeURIComponent(ep.uri);
-            const shortUri = ep.uri.length > 30 ? ep.uri.substring(0, 28) + '…' : ep.uri;
+            // V14.2: Platform-aware label (Phone: ..., Email: ..., WhatsApp: ...)
+            let displayLabel;
+            const isPhone = ep.platform === 'other' && /^[\d\s+()\-]{6,}$/.test(ep.uri);
+            const isEmail = ep.platform === 'email' || (ep.uri.includes('@') && !ep.uri.startsWith('http'));
+            if (isPhone) {
+                displayLabel = `Phone: ${ep.uri}`;
+            } else if (isEmail) {
+                displayLabel = `Email: ${ep.uri}`;
+            } else {
+                const shortUri = ep.uri.length > 26 ? ep.uri.substring(0, 24) + '…' : ep.uri;
+                displayLabel = `${m.label}: ${shortUri}`;
+            }
             return `<button class="alt-contact-item"
                 onclick="smartContactAction('${docId}', \`${safeDm}\`, decodeURIComponent('${safeUri}'), '${ep.platform}')">
                 <span class="platform-icon">${m.icon}</span>
-                <span>${m.label}</span>
-                <span class="platform-uri">${shortUri}</span>
+                <span class="platform-uri">${displayLabel}</span>
             </button>`;
         }).join('');
 
@@ -731,7 +753,13 @@ let virtualObserver = new IntersectionObserver((entries) => {
 function renderLeads() {
     const filteredLeads = rawLeadsCache.filter(lead => {
         if (!['new', 'contacted', 'converted'].includes(lead.status || 'new')) return false;
-        if (currentCampaignFilter !== 'all' && lead.campaign_id !== currentCampaignFilter) return false;
+        // V14.2: Fix campaign filter — leads now use matched_campaigns[] array, not campaign_id scalar
+        if (currentCampaignFilter !== 'all') {
+            const matched = Array.isArray(lead.matched_campaigns)
+                ? lead.matched_campaigns.includes(currentCampaignFilter)
+                : lead.campaign_id === currentCampaignFilter; // legacy fallback
+            if (!matched) return false;
+        }
         return true;
     });
     
@@ -798,7 +826,7 @@ window.viewLeadTimeline = function(eventsJson) {
     } catch(e) { console.error('Timeline Schema Sync Error', e); }
 };
 
-window.openEditModal = function(id, name, bio, keywords, gl, location) {
+window.openEditModal = function(id, name, bio, keywords, gl, location, targetUrls) {
     document.getElementById('edit-camp-id').value = id;
     document.getElementById('edit-camp-name').value = name;
     document.getElementById('edit-camp-bio').value = bio;
@@ -807,6 +835,9 @@ window.openEditModal = function(id, name, bio, keywords, gl, location) {
     const locEl = document.getElementById('edit-camp-location');
     if (glEl) glEl.value = gl;
     if (locEl) locEl.value = location;
+    // V14.2: Populate target URLs if present
+    const targetUrlsEl = document.getElementById('edit-camp-target-urls');
+    if (targetUrlsEl) targetUrlsEl.value = Array.isArray(targetUrls) ? targetUrls.join('\n') : (targetUrls || '');
     document.getElementById('edit-campaign-modal').classList.remove('hidden');
 };
 
@@ -885,17 +916,29 @@ window.saveEditedCampaign = async function() {
     const keys = document.getElementById('edit-camp-keys').value;
     const glInput = document.getElementById('edit-camp-gl');
     const locationInput = document.getElementById('edit-camp-location');
-    
+    const targetUrlsInput = document.getElementById('edit-camp-target-urls');
+
     if (!name || !keys) return showToast('Name and Keywords required', 'error');
-    
+
+    // V14.2: Parse target URLs textarea
+    let targetUrls = [];
+    if (targetUrlsInput && targetUrlsInput.value.trim()) {
+        targetUrls = targetUrlsInput.value.split('\n').map(u => u.trim()).filter(u => u.length > 0);
+        if (targetUrls.length > 10) {
+            showToast('Warning: Only the first 10 URLs will be used.', 'error');
+            targetUrls = targetUrls.slice(0, 10);
+        }
+    }
+
     showToast('Pushing updates to AI Engine...', 'info');
     try {
-        const payload = { 
-            name, 
-            bio, 
+        const payload = {
+            name,
+            bio,
             keywords: keys,
             gl: glInput ? glInput.value : '',
             location: locationInput ? locationInput.value : '',
+            target_urls: targetUrls,
             status: 'active'
         };
         const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', payload);

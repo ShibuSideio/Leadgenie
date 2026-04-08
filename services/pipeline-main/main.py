@@ -442,7 +442,21 @@ IF B2C Service Provider:
 For hiring_intent_found: Return ONLY 'Yes' or 'No'. No explanation.
 
 For contact_endpoints: Extract ALL reachable contact surfaces explicitly present in the text.
-Each endpoint must have a 'platform' from the strict enum and a 'uri' (email, profile URL, phone, map URL, handle).
+Each endpoint must have a 'platform' from the strict enum and a 'uri'.
+
+URI PROTOCOL RULE (MANDATORY): Every URI MUST include its full protocol prefix. Never return a naked domain:
+- Web profile URLs: must start with https:// (e.g. https://reddit.com/user/johndoe, https://linkedin.com/in/jane)
+- Email addresses: return ONLY the email string (e.g. hello@company.com), the frontend will prefix mailto:
+- Phone numbers: return ONLY the digits/number string, the frontend will prefix tel:
+- If a URI would be a naked domain (e.g. 'reddit.com' with no path), DO NOT include it.
+
+REDDIT TARGETING RULE (MANDATORY — only applies when source is Reddit):
+You MUST extract the href of the original poster's author attribution link (e.g. https://reddit.com/user/[username]).
+If the poster's profile URL cannot be found in the DOM, do NOT invent one. Instead, omit this endpoint entirely.
+A generic 'https://reddit.com' URI with no username path is useless and MUST NOT be returned.
+
+PHONE DEDUPLICATION RULE: If the DOM contains more than 3 telephone numbers, return ONLY the first 2 in contact_endpoints. Excess numbers create UI clutter.
+
 Do NOT invent contacts. Only extract what is explicitly present in the DOM.
 {social_uri_rule}
 
