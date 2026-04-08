@@ -1149,7 +1149,7 @@ def finalize():
         
     doc_ref = db.collection("leads").document(lead_id)
     if not text:
-        doc_ref.delete()
+        doc_ref.update({"status": "failed_scrape", "error": "scraper-heavy returned empty text"})
         return jsonify({"status": "dropped empty text"}), 200
         
     bot_keywords = ["Cloudflare Ray ID", "Please verify you are human", "Enable JavaScript and cookies to continue", "Checking if the site connection is secure", "Access Denied", "403 Forbidden"]
@@ -1190,6 +1190,10 @@ def finalize():
         db.collection("usage_metrics").document(tenant_id).collection("shards").document(str(shard_id)).set({"gemini_calls": firestore.Increment(1)}, merge=True)
         db.collection("users").document(tenant_id).collection("wallet_shards").document(str(shard_id)).set({"consumed_credits": firestore.Increment(1)}, merge=True)
         
+        # Fetch sourcing_vector from the lead doc (scraper-heavy payload doesn't include it)
+        lead_doc_data   = doc_ref.get().to_dict() or {}
+        sourcing_vector = lead_doc_data.get("sourcing_vector", "Classic B2B")
+
         context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id, sourcing_vector)
         
         try:
@@ -1204,7 +1208,14 @@ def finalize():
             doc_ref.update({"status": "failed", "error": str(e)})
             return jsonify({"status": "failed"}), 200
         
-        if evaluation.get("score", 0) >= 7:
+        # P4: Dynamic threshold — scraper-heavy always provides full DOM text, so
+        # dense_text >= 500 chars is expected; standard >= 7 applies.
+        # Guard for edge cases where Playwright returned a thin extract.
+        is_thin_payload  = len(dense_text.strip()) < 500
+        accept_threshold = 6 if is_thin_payload else 7
+        print(f"[FINALIZE THRESHOLD] Payload: {len(dense_text)} chars → threshold: {accept_threshold}")
+
+        if evaluation.get("score", 0) >= accept_threshold:
             # V14: Polymorphic contact merge — LLM endpoints + Playwright-scraped contacts
             contact_endpoints = list(evaluation.get("contact_endpoints", []))
             existing_uris = {e["uri"] for e in contact_endpoints}
