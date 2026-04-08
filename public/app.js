@@ -62,12 +62,21 @@ logoutBtn.addEventListener('click', () => {
 async function loadDashboard() {
     const user = firebase.auth().currentUser;
     if (!user) return;
-    
+
     await Promise.all([
         loadMe(),
         loadCampaigns(),
         loadLeads()
     ]);
+
+    // V15.1 HOTFIX: crmAutoOpen resolved here — inside the real loadDashboard,
+    // NOT via a recursive override. loadMe() must have run first so
+    // window.currentUserData (and .role) is populated before switchTab checks it.
+    if (window.crmAutoOpen) {
+        window.crmAutoOpen = false;
+        // switchTab contains its own super_admin gate; no recursion possible.
+        switchTab('crm-test');
+    }
 }
 
 let activeWallet = { allocated_credits: 0, consumed_credits: 0 };
@@ -309,11 +318,26 @@ async function loadLeads() {
                 initAnalyticsChart(cNew, cContact, cConvert);
                 renderLeads();
             }, (error) => {
-                console.error("Firestore onSnapshot Error:", error);
-                if (error.code === 'permission-denied') {
-                    // Could be unapproved or missing index
-                    console.warn("Client reads restricted by firestore rules.");
+                console.error('[Firestore] onSnapshot Error:', error);
+                if (error.code === 'failed-precondition') {
+                    // Missing composite index for (tenant_id, is_in_crm).
+                    // DO NOT retry — show actionable toast and stop.
+                    const msg = 'Firestore index missing for CRM feed filter. Check GCP Console to create the composite index for (tenant_id, is_in_crm).';
+                    console.error('[Firestore] Missing index:', msg);
+                    showToast('Feed index missing — see console for index link.', 'error');
+                    leadsList.innerHTML = `<div class="lead-card" style="color:#f59e0b; border-color:#f59e0b; padding:16px;">
+                        ⚠️ Firestore composite index required.<br>
+                        <small>Open the browser console for the GCP link to auto-create it (takes ~1 min).</small>
+                    </div>`;
+                    return; // Hard stop — no retry, no recursion.
                 }
+                if (error.code === 'permission-denied') {
+                    console.warn('[Firestore] Permission denied — check firestore.rules or approval_status.');
+                    return;
+                }
+                // All other errors: log + display, no retry.
+                console.error('[Firestore] Unhandled snapshot error:', error.code, error.message);
+                showToast('Live feed error — refresh to reconnect.', 'error');
             });
         
     } catch (error) {
@@ -1694,13 +1718,8 @@ window.saveCrmNote = async function(id) {
         }
     } catch(e) { showToast('Failed to save note', 'error'); }
 };
-
-// ── Auto-open CRM if hash was set before auth resolved ───────────────────────
-const _origLoadDashboard = loadDashboard;
-async function loadDashboard() {
-    await _origLoadDashboard();
-    if (window.crmAutoOpen) {
-        window.crmAutoOpen = false;
-        switchTab('crm-test');
-    }
-}
+// NOTE: The loadDashboard override that previously lived here was removed in
+// V15.1 HOTFIX. It caused infinite recursion due to JS function-declaration
+// hoisting: the 'original' reference captured the hoisted new declaration,
+// making _origLoadDashboard === the new loadDashboard (self-reference).
+// The crmAutoOpen check is now inlined directly in loadDashboard() above.
