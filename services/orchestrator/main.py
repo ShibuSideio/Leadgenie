@@ -100,6 +100,95 @@ def parse_base_path(url: str) -> str:
     except Exception:
         return 'unknown'
 
+
+# ---------------------------------------------------------------------------
+# EPSILON-GREEDY ROUTER HELPERS (Phase 4)
+# ---------------------------------------------------------------------------
+
+def _get_router_config(db) -> dict:
+    """
+    Fetches exploit_ratio and discovery_allocation from system_config/router.
+    Auto-initializes the document with safe defaults on first run.
+    Defaults: exploit_ratio=0.10 (10% Autonomous), discovery_allocation=0.15.
+    """
+    ref = db.collection('system_config').document('router')
+    doc = ref.get()
+    if not doc.exists:
+        # Node 1: Initialize on first call (idempotent)
+        defaults = {
+            'exploit_ratio':        0.10,
+            'discovery_allocation': 0.15,
+            'initialized_at':       firestore.SERVER_TIMESTAMP,
+        }
+        ref.set(defaults)
+        print("[ROUTER] system_config/router initialized with defaults.")
+        return defaults
+    return doc.to_dict()
+
+
+def _pop_from_predictive_cache(tenant_id: str, db, count: int) -> list:
+    """
+    Pops up to `count` leads from users/{tenant_id}/predictive_cache.
+    Sort: score DESC (highest quality first).
+    Semantics: TRUE MOVE — each popped doc is written to main leads collection
+    and immediately deleted from the cache. No stale copies left.
+
+    Returns list of lead dicts that were successfully moved.
+    """
+    if count <= 0:
+        return []
+
+    cache_col = (
+        db.collection('users')
+        .document(tenant_id)
+        .collection('predictive_cache')
+    )
+
+    try:
+        # Exclude already-expired entries and sort by score DESC
+        cache_docs = (
+            cache_col
+            .where(filter=FieldFilter('status', '==', 'new'))
+            .order_by('score', direction='DESCENDING')
+            .limit(count)
+            .stream()
+        )
+        cache_docs = list(cache_docs)
+    except Exception as e:
+        print(f"[ROUTER] predictive_cache query failed for {tenant_id}: {e}")
+        return []
+
+    promoted = []
+    batch    = db.batch()
+
+    for cache_doc in cache_docs:
+        lead_data = cache_doc.to_dict()
+        lead_id   = cache_doc.id
+
+        # Promote to main leads collection with status=new
+        lead_data['status']    = 'new'
+        lead_data['promotedAt'] = firestore.SERVER_TIMESTAMP
+        # Extend TTL from 72h cache to 90-day DPDP window
+        lead_data['expire_at'] = (
+            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=90)
+        )
+
+        leads_ref = db.collection('leads').document(lead_id)
+        batch.set(leads_ref, lead_data, merge=True)
+
+        # Immediately delete from predictive_cache (true move)
+        batch.delete(cache_col.document(lead_id))
+        promoted.append(lead_data)
+
+    try:
+        batch.commit()
+        print(f"[ROUTER] Promoted {len(promoted)} autonomous leads from cache -> leads for {tenant_id}")
+    except Exception as e:
+        print(f"[ROUTER] Batch commit failed for {tenant_id}: {e}")
+        return []
+
+    return promoted
+
 def get_service_account_email():
     url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
     for attempt in range(1, 4):
@@ -527,6 +616,114 @@ def trigger_daily_sweep(path):
 
                 return jsonify({"status": "success", "id": doc_ref.id}), 201
                 
+            elif (request.path.startswith("/api/campaigns/")
+                  and request.path.endswith("/run")
+                  and request.method == "POST"):
+                # ── EPSILON-GREEDY ROUTER (Phase 4) ──────────────────────────
+                # Intercepts the user-triggered "Find Clients" action.
+                # Blends V16 Autonomous (predictive_cache) + V14 Cartographer (Serper).
+                campaign_id = request.path.split("/")[-2]  # /api/campaigns/{id}/run
+                camp_ref    = db.collection("campaigns").document(campaign_id)
+                camp_doc    = camp_ref.get()
+
+                if not camp_doc.exists or camp_doc.to_dict().get("tenant_id") != tenant_id:
+                    return jsonify({"error": "Forbidden"}), 403
+
+                camp_data   = camp_doc.to_dict()
+                batch_size  = int(camp_data.get("lead_target", data.get("batch_size", 10)))
+
+                # Quota check
+                role = (db.collection("users").document(tenant_id).get().to_dict() or {}).get("role")
+                if role != "super_admin":
+                    is_valid, status_code, err_msg = check_quota(tenant_id)
+                    if not is_valid:
+                        return jsonify({"error": err_msg}), status_code
+
+                # Fetch router config (auto-initializes system_config/router if missing)
+                router_cfg     = _get_router_config(db)
+                exploit_ratio  = float(router_cfg.get("exploit_ratio", 0.10))
+
+                # Epsilon-Greedy quota math
+                autonomous_target  = max(0, round(batch_size * exploit_ratio))
+                cartographer_target = batch_size - autonomous_target
+
+                print(f"[ROUTER] batch={batch_size} | "
+                      f"autonomous_target={autonomous_target} | "
+                      f"cartographer_target={cartographer_target} | "
+                      f"exploit_ratio={exploit_ratio}")
+
+                audit_trail = []
+
+                # ── Step A: EXPLOIT — pop from predictive_cache ──────────────
+                promoted = []
+                if autonomous_target > 0:
+                    promoted = _pop_from_predictive_cache(tenant_id, db, autonomous_target)
+                    deficit  = autonomous_target - len(promoted)
+                    if deficit > 0:
+                        # Cache miss: dynamically reallocate deficit to Cartographer
+                        cartographer_target += deficit
+                        print(f"[ROUTER] Cache deficit={deficit}. "
+                              f"Cartographer target adjusted to {cartographer_target}")
+                        audit_trail.append(
+                            f"Cache deficit: {deficit} reallocated to Cartographer."
+                        )
+                    audit_trail.append(
+                        f"Autonomous: {len(promoted)}/{autonomous_target} leads promoted from cache."
+                    )
+
+                # ── Step B: EXPLORE — enqueue Cartographer for remainder ──────
+                produce_dispatched = 0
+                if cartographer_target > 0:
+                    try:
+                        sa_email    = get_service_account_email().strip()
+                        base_url    = PIPELINE_URL.split('/dispatch')[0]
+                        queue_path  = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+                        import random
+                        jitter      = random.randint(1, 30)
+                        sched_t     = timestamp_pb2.Timestamp()
+                        sched_t.FromDatetime(
+                            datetime.datetime.now(datetime.timezone.utc)
+                            + datetime.timedelta(seconds=jitter)
+                        )
+                        task_body = {
+                            "tenant_id":   tenant_id,
+                            "campaign_id": campaign_id,
+                            "lead_target": cartographer_target,
+                        }
+                        t = {
+                            "http_request": {
+                                "http_method": tasks_v2.HttpMethod.POST,
+                                "url": f"{base_url}/produce",
+                                "headers": {"Content-Type": "application/json"},
+                                "body": json.dumps(task_body).encode()
+                            }
+                        }
+                        if sa_email:
+                            t["http_request"]["oidc_token"] = {
+                                "service_account_email": sa_email,
+                                "audience": base_url
+                            }
+                        t["schedule_time"] = sched_t
+                        tasks_client.create_task(request={"parent": queue_path, "task": t})
+                        produce_dispatched = 1
+                        audit_trail.append(
+                            f"Cartographer: producer queued for {cartographer_target} leads "
+                            f"(jitter={jitter}s)."
+                        )
+                    except Exception as task_err:
+                        print(f"[ROUTER] Cloud Tasks enqueue failed: {task_err}")
+                        audit_trail.append(f"Cartographer enqueue failed: {task_err}")
+
+                return jsonify({
+                    "status":               "router_dispatched",
+                    "batch_size":           batch_size,
+                    "exploit_ratio":        exploit_ratio,
+                    "autonomous_promoted":  len(promoted),
+                    "cartographer_queued":  cartographer_target,
+                    "producer_dispatched":  produce_dispatched,
+                    "audit_trail":          audit_trail,
+                }), 200
+
             elif request.path.startswith("/api/campaigns/") and request.method == "PUT":
                 doc_id = request.path.split("/")[-1]
                 # Secure Authorization Enforcement: Document MUST logically belong to Tenant

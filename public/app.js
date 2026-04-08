@@ -1078,24 +1078,54 @@ window.saveCampaignAction = async function() {
     
     showToast('Setting up your search...', 'info');
     try {
-        const success = await performApiMutation(`/api/campaigns`, 'POST', {
-            name: nameInput.value,
-            bio: bioInput.value,
-            keywords: keysInput.value,
-            gl: glInput ? glInput.value : '',
-            location: locationInput ? locationInput.value : '',
-            target_urls: targetUrls,
-            status: 'active'
+        // Step 1: Create the campaign
+        const user  = auth.currentUser;
+        if (!user) return;
+        const token = await user.getIdToken();
+        const createResp = await fetch(`${API_BASE}/api/campaigns`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name:        nameInput.value,
+                bio:         bioInput.value,
+                keywords:    keysInput.value,
+                gl:          glInput ? glInput.value : '',
+                location:    locationInput ? locationInput.value : '',
+                target_urls: targetUrls,
+                status:      'active'
+            })
         });
-        if(success) {
-            document.getElementById('new-campaign-modal').classList.add('hidden');
-            showToast('System is now looking for clients!', 'success');
-            nameInput.value = ''; bioInput.value = ''; keysInput.value = '';
-            if (glInput) glInput.value = '';
-            if (locationInput) locationInput.value = '';
-            if (targetUrlsInput) targetUrlsInput.value = '';
-            loadDashboard();
+        if (!createResp.ok) throw new Error('Campaign creation failed');
+        const createData = await createResp.json();
+        const campaignId = createData.id;
+
+        // Step 2: Fire Epsilon-Greedy Router for immediate first batch
+        let routerMsg = 'System is now looking for clients!';
+        if (campaignId) {
+            try {
+                const routerResp = await fetch(`${API_BASE}/api/campaigns/${campaignId}/run`, {
+                    method:  'POST',
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body:    JSON.stringify({})
+                });
+                if (routerResp.ok) {
+                    const r = await routerResp.json();
+                    const v16  = r.autonomous_promoted  || 0;
+                    const v14  = r.cartographer_queued  || 0;
+                    routerMsg = `Engine dispatched: ⚡ ${v16} Predictive + 🔍 ${v14} Cartographer leads`;
+                }
+            } catch (routerErr) {
+                console.warn('[ROUTER] Router call failed, Cartographer sweep will pick up:', routerErr);
+            }
         }
+
+        document.getElementById('new-campaign-modal').classList.add('hidden');
+        showToast(routerMsg, 'success');
+        nameInput.value = ''; bioInput.value = ''; keysInput.value = '';
+        if (glInput) glInput.value = '';
+        if (locationInput) locationInput.value = '';
+        if (targetUrlsInput) targetUrlsInput.value = '';
+        loadDashboard();
     } catch(err) {
         showToast('Failed to save campaign. Check API permissions.', 'error');
     }
