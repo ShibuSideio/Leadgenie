@@ -266,6 +266,7 @@ async function loadLeads() {
         unsubscribeLeads = firebase.firestore()
             .collection('leads')
             .where('tenant_id', '==', user.uid)
+            .where('is_in_crm', '==', false)  // V15: Main feed = raw intelligence only (not yet pushed to CRM)
             .onSnapshot((snapshot) => {
                 rawLeadsCache = [];
                 snapshot.forEach(doc => {
@@ -396,18 +397,18 @@ window.pushToCRM = async function(docId, leadStr) {
             notes: []
         });
         if (success) {
-            // Optimistic UI: disable + restyle button
-            if (btn) {
-                btn.textContent = '✅ In CRM';
-                btn.classList.add('in-crm');
-                btn.disabled = true;
-                btn.onclick = null;
+            // Optimistic UI: remove the entire lead card from the DOM immediately
+            const cardEl = document.getElementById(docId);
+            if (cardEl) {
+                virtualObserver.unobserve(cardEl);
+                cardEl.remove();
             }
-            // Update cache so re-renders don't re-enable it
-            const lead = rawLeadsCache.find(l => (l.id || l.doc_id) === docId);
-            if (lead) lead.is_in_crm = true;
-            showToast('Lead pushed to CRM pipeline — open /crm-test to manage it.', 'success');
-            // Optional webhook fire (legacy integration)
+            // Prune from rawLeadsCache so re-renders stay clean
+            rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
+
+            showToast('Lead filed in CRM — navigate to #crm-test to manage it.', 'success');
+
+            // Optional legacy webhook fire
             const userUrl = window.currentUserData?.crm_webhook_url;
             if (userUrl) {
                 try {
@@ -1057,7 +1058,12 @@ window.switchTab = function(tabName) {
         if(document.getElementById('tab-macro')) document.getElementById('tab-macro').classList.add('active');
         fetchMacroTrends();
     } else if(tabName === 'crm-test') {
-        // V15: Hidden CRM sandbox route — no nav link shown
+        // V15: L0 super_admin only — no nav link exposed to regular users
+        const isAdmin = window.currentUserData?.role === 'super_admin';
+        if (!isAdmin) {
+            showToast('CRM module is restricted to L0 administrators.', 'error');
+            return;
+        }
         const crmView = document.getElementById('view-crm-test');
         if (crmView) {
             crmView.classList.remove('hidden');
@@ -1066,14 +1072,19 @@ window.switchTab = function(tabName) {
     }
 };
 
-// V15: Hash-based hidden route for /crm-test
+// V15: Hash-based hidden route for #crm-test (L0 admin only)
 window.addEventListener('hashchange', () => {
     if (window.location.hash === '#crm-test' && firebase.auth().currentUser) {
-        switchTab('crm-test');
+        // Gate: only super_admin can access
+        if (window.currentUserData?.role === 'super_admin') {
+            switchTab('crm-test');
+        } else {
+            console.warn('[CRM] Access denied: not super_admin');
+        }
     }
 });
 if (window.location.hash === '#crm-test') {
-    // Deferred until auth is ready (onAuthStateChanged will call loadDashboard first)
+    // Deferred until auth + loadMe resolve (loadDashboard sets window.currentUserData)
     window.crmAutoOpen = true;
 }
 
