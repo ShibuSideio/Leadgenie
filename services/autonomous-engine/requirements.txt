@@ -1,4 +1,4 @@
-﻿google-cloud-firestore>=2.14.0
+﻿google-cloud-firestore==2.14.0
 google-cloud-aiplatform>=1.45.0
 firebase-admin>=6.5.0
 pydantic>=2.0.0
@@ -6,4 +6,4 @@ httpx>=0.26.0
 tenacity>=8.2.3
 feedparser>=6.0.11
 google-auth>=2.22.0
-grpcio>=1.60.0
+grpcio==1.60.0
