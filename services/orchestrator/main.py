@@ -631,85 +631,112 @@ def trigger_daily_sweep(path):
             return jsonify({"error": "Invalid OIDC token", "details": str(e)}), 403
             
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-        
+
         # Pull active campaigns with an aggressive limit of 500
         campaigns = list(db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(500).stream())
-        
-        audit_trail = ["Executed Master Cron Sweep targeting 500 active campaigns."]
-        queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
-        count = 0
+
+        audit_trail = ["Executed V14.4 Dual-Mode Sweep (Producer=24h / Consumer=4h)."]
+        queue_path  = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+        sa_email    = get_service_account_email().strip()
+        base_url    = PIPELINE_URL.split('/dispatch')[0]   # base URL without /dispatch
+        produce_url = f"{base_url}/produce"
+        consume_url = f"{base_url}/dispatch"
+
+        produce_dispatched = 0
+        consume_dispatched = 0
         import random
-        
+
         for camp_doc in campaigns:
             campaign_data = camp_doc.to_dict()
-            campaign_id = camp_doc.id
-            
-            # The Graceful Fallback check for missing schema
-            next_drip_due = campaign_data.get("next_drip_due")
-            if next_drip_due and hasattr(next_drip_due, "timestamp"):
-                next_drip_due_dt = next_drip_due
-                if next_drip_due_dt.tzinfo is None:
-                    next_drip_due_dt = next_drip_due_dt.replace(tzinfo=datetime.timezone.utc)
-                if next_drip_due_dt > now_utc:
-                    continue # Not due yet! Skip it.
-
-            tenant_id = campaign_data.get("tenant_id")
-            if not tenant_id: 
+            campaign_id   = camp_doc.id
+            tenant_id     = campaign_data.get("tenant_id")
+            if not tenant_id:
                 continue
-                
-            u_doc = db.collection("users").document(tenant_id).get()
-            user_data = u_doc.to_dict() if u_doc.exists else {}
-            
-            role = user_data.get("role")
+
+            # Wallet / quota check
+            role = (db.collection("users").document(tenant_id).get().to_dict() or {}).get("role")
             if role != "super_admin":
-                wallet = user_data.get("wallet", {})
-                credits_val = wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0)
-                shard_sum = sum(shard.to_dict().get("consumed_credits", 0) for shard in db.collection("users").document(tenant_id).collection("wallet_shards").stream())
-                credits_val -= shard_sum
-                
                 is_valid, _, err_msg = check_quota(tenant_id)
                 if not is_valid:
-                    audit_trail.append(f"🚫 SKIPPED Campaign {campaign_id}. Reason: {err_msg}")
+                    audit_trail.append(f"🚫 SKIPPED {campaign_id}: {err_msg}")
                     continue
-            
-            task = {
-                "http_request": {
-                    "http_method": tasks_v2.HttpMethod.POST,
-                    "url": PIPELINE_URL,
-                    "headers": {"Content-type": "application/json"},
-                    "body": json.dumps({"tenant_id": tenant_id, "campaign_id": campaign_id}).encode()
+
+            def _oidc_task(url, payload):
+                t = {
+                    "http_request": {
+                        "http_method": tasks_v2.HttpMethod.POST,
+                        "url": url,
+                        "headers": {"Content-Type": "application/json"},
+                        "body": json.dumps(payload).encode()
+                    }
                 }
-            }
-            
-            sa_email = get_service_account_email().strip()
-            if sa_email:
-                base_url_audience = PIPELINE_URL.split('/dispatch')[0]
-                task["http_request"]["oidc_token"] = {
-                    "service_account_email": sa_email,
-                    "audience": base_url_audience
-                }
-                
-            # Jitter Math: Stagger tasks continuously over the next 300 seconds
-            jitter_seconds = random.randint(1, 290)
-            d = now_utc + datetime.timedelta(seconds=jitter_seconds)
-            timestamp = timestamp_pb2.Timestamp()
-            timestamp.FromDatetime(d)
-            task["schedule_time"] = timestamp
-            
-            tasks_client.create_task(request={"parent": queue_path, "task": task})
-            
-            # Database Update (Self-Healing) + Dynamic Schema Mapping
-            drip_interval_minutes = int(campaign_data.get("drip_interval_minutes", 60))
-            new_due_date = now_utc + datetime.timedelta(minutes=drip_interval_minutes)
-            camp_doc.reference.update({
-                "next_drip_due": new_due_date,
-                "drip_interval_minutes": drip_interval_minutes
-            })
-            
-            count += 1
-            audit_trail.append(f"✅ QUEUED Campaign {campaign_id} with delay {jitter_seconds}s. Next cron iteration set for {new_due_date}.")
-            
-        return jsonify({"message": f"Sweep complete. Dispatched {count} background tasks.", "audit_trail": audit_trail}), 200
+                if sa_email:
+                    t["http_request"]["oidc_token"] = {
+                        "service_account_email": sa_email,
+                        "audience": base_url
+                    }
+                return t
+
+            # ── PRODUCER: fire once every 24 hours ───────────────────────────
+            PRODUCE_INTERVAL_H = 24
+            next_produce_due   = campaign_data.get("next_produce_due")
+            produce_due = True
+            if next_produce_due and hasattr(next_produce_due, "timestamp"):
+                npd = next_produce_due
+                if npd.tzinfo is None:
+                    npd = npd.replace(tzinfo=datetime.timezone.utc)
+                if npd > now_utc:
+                    produce_due = False
+
+            if produce_due:
+                jitter  = random.randint(1, 120)
+                sched_t = timestamp_pb2.Timestamp()
+                sched_t.FromDatetime(now_utc + datetime.timedelta(seconds=jitter))
+                task    = _oidc_task(produce_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
+                task["schedule_time"] = sched_t
+                tasks_client.create_task(request={"parent": queue_path, "task": task})
+                camp_doc.reference.update({
+                    "next_produce_due": now_utc + datetime.timedelta(hours=PRODUCE_INTERVAL_H)
+                })
+                produce_dispatched += 1
+                audit_trail.append(f"🏭 PRODUCER queued for {campaign_id} (jitter={jitter}s, next in {PRODUCE_INTERVAL_H}h)")
+
+            # ── CONSUMER: fire every 4 hours, only if queue has items ────────
+            DRIP_INTERVAL_H  = 4
+            next_drip_due    = campaign_data.get("next_drip_due")
+            drip_due = True
+            if next_drip_due and hasattr(next_drip_due, "timestamp"):
+                ndd = next_drip_due
+                if ndd.tzinfo is None:
+                    ndd = ndd.replace(tzinfo=datetime.timezone.utc)
+                if ndd > now_utc:
+                    drip_due = False
+
+            queue_depth = len(campaign_data.get("unprocessed_queue", []))
+
+            if drip_due:
+                if queue_depth == 0:
+                    audit_trail.append(f"⏸ CONSUMER skipped {campaign_id}: queue empty (depth=0)")
+                else:
+                    jitter  = random.randint(1, 290)
+                    sched_t = timestamp_pb2.Timestamp()
+                    sched_t.FromDatetime(now_utc + datetime.timedelta(seconds=jitter))
+                    task    = _oidc_task(consume_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
+                    task["schedule_time"] = sched_t
+                    tasks_client.create_task(request={"parent": queue_path, "task": task})
+                    camp_doc.reference.update({
+                        "next_drip_due":          now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H),
+                        "drip_interval_minutes":  DRIP_INTERVAL_H * 60
+                    })
+                    consume_dispatched += 1
+                    audit_trail.append(f"⚙️ CONSUMER queued for {campaign_id} (queue_depth={queue_depth}, jitter={jitter}s, next in {DRIP_INTERVAL_H}h)")
+
+        return jsonify({
+            "message":            f"V14.4 Sweep: {produce_dispatched} producers + {consume_dispatched} consumers dispatched.",
+            "produce_dispatched": produce_dispatched,
+            "consume_dispatched": consume_dispatched,
+            "audit_trail":        audit_trail
+        }), 200
 
     # -----------------------------------------------------------------------------------------
     # V14: REVERSE-RLHF — Headless Conversion Feedback Endpoint

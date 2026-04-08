@@ -571,342 +571,428 @@ DETECTED TECH STACK:
     except Exception as e:
         raise ValueError(f"LLM Parsing Failure: {e}")
 
-@app.route("/dispatch", methods=["POST"])
-def dispatch():
+@app.route("/produce", methods=["POST"])
+def produce():
+    """
+    V14.4: THE PRODUCER — 24-Hour Serper Fetch Job.
+    Runs Intent Translation (Step 3) and Serper Execution (Step 4).
+    Deduplicates against global leads collection.
+    Writes unprocessed URLs to campaigns/{id}.unprocessed_queue.
+    Does NOT call the Gemini Gate. Halts here.
+    """
     lead_data = request.json
-    tenant_id = lead_data.get("tenant_id")
-    
-    target_campaign_id = lead_data.get("campaign_id") or (lead_data.get("matched_campaigns")[0] if lead_data.get("matched_campaigns") else None)
-    if not target_campaign_id:
-        print("CRITICAL: Dropping Eventarc trigger, no identifiable campaign context.")
-        return jsonify({"error": "Missing campaign_id context"}), 400
-        
-    campaign_id = target_campaign_id
-    
-    campaign_ref = db.collection("campaigns").document(campaign_id)
-    campaign = campaign_ref.get().to_dict()
-    bio = campaign.get("bio", "")
-    target_urls = campaign.get("target_urls", [])
-    user_urls = target_urls[:10] if isinstance(target_urls, list) else []
+    tenant_id   = lead_data.get("tenant_id")
+    campaign_id = lead_data.get("campaign_id")
+    if not tenant_id or not campaign_id:
+        print(f"[PRODUCER] CRITICAL: Missing tenant_id or campaign_id. Aborting.")
+        return jsonify({"error": "Missing campaign_id or tenant_id"}), 400
 
-    # V14: Read cached sourcing vector (set by orchestrator on campaign create/update)
+    campaign_ref  = db.collection("campaigns").document(campaign_id)
+    campaign      = campaign_ref.get().to_dict() or {}
+    bio           = campaign.get("bio", "")
     sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
+    location      = campaign.get("location", "").strip()
+    gl            = campaign.get("gl", "").strip()
+
+    raw_keywords  = campaign.get("keywords", "")
+    keywords      = [k.strip() for k in raw_keywords.split(',') if k.strip()] \
+                    if isinstance(raw_keywords, str) else raw_keywords
+
+    if not keywords:
+        print(f"[PRODUCER] Campaign {campaign_id}: empty keywords. Aborting.")
+        return jsonify({"error": "Empty keywords matrix"}), 400
+
     print(f"[SYNAPTIC ROUTER] Campaign {campaign_id} → sourcing vector: '{sourcing_vector}'")
 
-    location = campaign.get("location", "").strip()
-    gl = campaign.get("gl", "").strip()
-    
-    raw_keywords = campaign.get("keywords", "")
-    if isinstance(raw_keywords, str):
-        keywords = [k.strip() for k in raw_keywords.split(',') if k.strip()]
-    else:
-        keywords = raw_keywords
-    
-    if not keywords:
-        print(f"CRITICAL ERROR: Campaign {campaign_id} has empty keywords matrix. Pipeline aborted.")
-        return jsonify({"error": "Empty keywords matrix"}), 400
-        
-    all_results = []
-    
-    # Smart BD Query Injector Native Integration
+    # ── Step 3: Intent Translation + Smart Query Generation ─────────────────
     smart_keywords = generate_smart_query(keywords, tenant_id, bio, sourcing_vector)
-    
-    # Telemetry Billing Check
-    db.collection("usage_metrics").document(tenant_id).set({
-        "serper_searches": firestore.Increment(len(smart_keywords))
-    }, merge=True)
-    
-    user_doc = db.collection("users").document(tenant_id).get()
-    preferences_weights = user_doc.to_dict().get("preferences_weights", {}) if user_doc.exists else {}
-    
+
+    # Telemetry billing
+    db.collection("usage_metrics").document(tenant_id).set(
+        {"serper_searches": firestore.Increment(len(smart_keywords))}, merge=True
+    )
+
+    # ── Step 4: Serper Execution ─────────────────────────────────────────────
+    raw_urls = []
     for kw in smart_keywords:
-        # Campaign geo-target query appending
         search_query = f"{kw} AND {location}" if location and location != "all" else kw
-        
-        # Step 1: Augmented Sweep
-        raw_results = search_serper(search_query, location=location if location else None, gl=gl if gl else None)
-        
-        # Step 2: Ruthless Post-Flight Filter
-        filtered_results = filter_serper_noise(raw_results)
-        
-        # URL Deduplication
-        unique_results = []
-        seen = set()
-        for r in filtered_results:
-            if r.get("link") not in seen:
-                seen.add(r.get("link"))
-                unique_results.append(r)
-                
-        # Step 3: V14 Confidence Tiering Gate
-        tiered = pre_filter_gemini(unique_results, bio, location)
-        high_urls   = tiered.get("High", [])
-        medium_urls = tiered.get("Medium", [])
+        raw_results  = search_serper(search_query, location=location or None, gl=gl or None)
+        filtered     = filter_serper_noise(raw_results)
+        for r in filtered:
+            link = r.get("link")
+            if link and link not in raw_urls:
+                raw_urls.append(link)
 
-        # Build URL→tier lookup for writing confidence_tier to lead doc
-        url_to_tier = {u: "UserProvided" for u in user_urls}
-        for u in high_urls:   url_to_tier[u] = "High"
-        for u in medium_urls: url_to_tier[u] = "Medium"
+    # Also include target_urls from campaign doc as first-class candidates
+    target_urls = campaign.get("target_urls", [])
+    for u in (target_urls[:10] if isinstance(target_urls, list) else []):
+        if u not in raw_urls:
+            raw_urls.insert(0, u)
 
-        # V14: Velocity-gated Medium tier (env-configurable threshold)
-        velocity_threshold = int(os.environ.get("VELOCITY_THRESHOLD", "10"))
+    fetched_count = len(raw_urls)
+    print(f"[FUNNEL] Campaign: {campaign_id} | Producer: Fetched {fetched_count} URLs")
+
+    # ── Native Global Deduplication against leads collection ─────────────────
+    # Build SHA-256 set of all known lead IDs for this tenant
+    existing_ids = set()
+    try:
+        known_docs = db.collection("leads").where(
+            "tenant_id", "==", tenant_id
+        ).select(["url"]).stream()
+        for doc in known_docs:
+            d = doc.to_dict()
+            u = d.get("url", "")
+            if u:
+                domain = extract_root_domain(u)
+                lead_id = hashlib.sha256(f"{tenant_id}_{domain}".encode()).hexdigest()
+                existing_ids.add(lead_id)
+                existing_ids.add(u)  # also track raw URL
+    except Exception as dedup_e:
+        print(f"[PRODUCER] Dedup query failed: {dedup_e}. Continuing without dedup.")
+
+    fresh_urls = []
+    for url in raw_urls:
+        domain    = extract_root_domain(url)
+        lead_id_h = hashlib.sha256(f"{tenant_id}_{domain}".encode()).hexdigest()
+        if lead_id_h not in existing_ids and url not in existing_ids:
+            fresh_urls.append(url)
+
+    duped_count  = fetched_count - len(fresh_urls)
+    queued_count = len(fresh_urls)
+    print(f"[FUNNEL] Campaign: {campaign_id} | Producer: Fetched {fetched_count} URLs | Deduplicated: {duped_count} | Queued: {queued_count}")
+
+    # ── Write to unprocessed_queue (additive merge, cap at 200) ─────────────
+    current_queue = campaign.get("unprocessed_queue", [])
+    combined = list(dict.fromkeys(current_queue + fresh_urls))  # preserve order, dedupe
+    combined = combined[:200]  # hard cap to prevent runaway growth
+
+    campaign_ref.update({
+        "unprocessed_queue":  combined,
+        "last_produced_at":   firestore.SERVER_TIMESTAMP,
+    })
+
+    print(f"[PRODUCER] Campaign {campaign_id}: queue now has {len(combined)} URLs.")
+    return jsonify({
+        "status":        "produced",
+        "fetched":       fetched_count,
+        "deduplicated":  duped_count,
+        "queued":        queued_count,
+        "queue_depth":   len(combined)
+    }), 200
+
+
+@app.route("/dispatch", methods=["POST"])
+def dispatch():
+    """
+    V14.4: THE CONSUMER — 4-Hour Drip Processor.
+    Pops exactly 10 URLs from campaigns/{id}.unprocessed_queue (destructive read).
+    Runs Step 5 (Gemini Confidence Gate) and Step 6 (Playwright Scraper).
+    Does NOT call Serper. If queue is empty, exits gracefully.
+    """
+    lead_data = request.json
+    tenant_id = lead_data.get("tenant_id")
+
+    target_campaign_id = lead_data.get("campaign_id") or (
+        lead_data.get("matched_campaigns")[0] if lead_data.get("matched_campaigns") else None
+    )
+    if not target_campaign_id:
+        print("[CONSUMER] CRITICAL: No identifiable campaign context. Dropping task.")
+        return jsonify({"error": "Missing campaign_id context"}), 400
+
+    campaign_id  = target_campaign_id
+    campaign_ref = db.collection("campaigns").document(campaign_id)
+    campaign     = campaign_ref.get().to_dict() or {}
+    bio          = campaign.get("bio", "")
+    sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
+    location     = campaign.get("location", "").strip()
+
+    # ── Destructive Queue Pop (Batch of 10) — Race Condition Safe ────────────
+    # We immediately write the queue MINUS the batch before processing begins.
+    # This prevents double-processing if two tasks fire concurrently.
+    current_queue = campaign.get("unprocessed_queue", [])
+
+    if not current_queue:
+        print(f"[CONSUMER] Campaign {campaign_id}: unprocessed_queue is empty. Exiting gracefully.")
+        return jsonify({"status": "queue_empty", "processed": 0}), 200
+
+    BATCH_SIZE    = 10
+    batch_urls    = current_queue[:BATCH_SIZE]
+    remaining     = current_queue[BATCH_SIZE:]
+
+    # Atomic destructive read — remove batch from queue immediately
+    campaign_ref.update({"unprocessed_queue": remaining})
+
+    print(f"[FUNNEL] Campaign: {campaign_id} | Consumer: Processing Batch of {len(batch_urls)} URLs")
+
+    user_doc             = db.collection("users").document(tenant_id).get()
+    preferences_weights  = user_doc.to_dict().get("preferences_weights", {}) if user_doc.exists else {}
+
+    # Build a minimal snippet map (needed for social short-circuit path)
+    # For drip processing, snippets come from scraped_cache hits only
+    snippet_map = {}
+
+    # ── Step 5: Confidence Tiering Gate ─────────────────────────────────────
+    # We feed the batch URLs as synthetic snippet objects into pre_filter_gemini
+    synthetic_snippets = [{"link": u, "snippet": "", "title": ""} for u in batch_urls]
+    tiered = pre_filter_gemini(synthetic_snippets, bio, location)
+    high_urls   = tiered.get("High", [])
+    medium_urls = tiered.get("Medium", [])
+
+    velocity_threshold = int(os.environ.get("VELOCITY_THRESHOLD", "10"))
+    try:
+        cutoff_24h   = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
+        recent_count = (
+            db.collection("leads")
+            .where("tenant_id", "==", tenant_id)
+            .where("status",    "==", "new")
+            .where("createdAt", ">=", cutoff_24h)
+            .count().get()[0][0].value
+        )
+    except Exception as vel_e:
+        print(f"[VELOCITY] Count query failed: {vel_e}. Defaulting to allow Medium.")
+        recent_count = 0
+
+    allow_medium      = recent_count < velocity_threshold
+    approved_urls     = high_urls + (medium_urls if allow_medium else [])
+    gate_rejected     = len(batch_urls) - len(approved_urls)
+    print(f"[FUNNEL] Campaign: {campaign_id} | Gate (Step 5) Rejected: {gate_rejected} | Passed to Scraper: {len(approved_urls)}")
+
+    url_to_tier = {u: "High" for u in high_urls}
+    url_to_tier.update({u: "Medium" for u in medium_urls})
+
+    # ── Step 6: Playwright Scraper + Gemini Extraction ──────────────────────
+    SOCIAL_DOMAINS = ["linkedin.com", "facebook.com", "reddit.com", "instagram.com",
+                      "x.com", "twitter.com", "team-bhp.com", "quora.com", "youtube.com"]
+
+    all_results    = []
+    scrape_success = 0
+    scrape_failed  = 0
+
+    for url in approved_urls:
+        target_domain = extract_root_domain(url)
+        if not target_domain:
+            continue
+
+        # Social path detection
+        is_social = any(target_domain.endswith(s) for s in SOCIAL_DOMAINS)
+        if is_social:
+            parsed_url  = urlparse(url)
+            exact_path  = f"{parsed_url.netloc}{parsed_url.path}".lower().replace('www.', '')
+            lock_entity = hashlib.sha256(exact_path.encode()).hexdigest()
+            dedupe_target = exact_path
+        else:
+            lock_entity   = target_domain
+            dedupe_target = target_domain
+
+        # Global Exclusivity Lock
+        lock_ref  = db.collection("global_lead_locks").document(lock_entity)
         try:
-            cutoff_24h = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
-            recent_count = (
-                db.collection("leads")
-                .where("tenant_id", "==", tenant_id)
-                .where("status", "==", "new")
-                .where("createdAt", ">=", cutoff_24h)
-                .count().get()[0][0].value
-            )
-        except Exception as vel_e:
-            print(f"[VELOCITY] Count query failed: {vel_e}. Defaulting to allow Medium.")
-            recent_count = 0
+            lock_doc  = lock_ref.get()
+            now_utc   = datetime.datetime.now(datetime.timezone.utc)
+            if lock_doc.exists:
+                locked_until = lock_doc.to_dict().get("locked_until")
+                if locked_until and locked_until > now_utc:
+                    print(f"[EXCLUSIVITY] Dropping {url}. Entity {lock_entity} locked.")
+                    continue
+            lock_ref.set({"locked_until": now_utc + datetime.timedelta(days=14)})
+        except Exception as le:
+            print(f"[LOCK FAIL] {le}")
 
-        allow_medium = recent_count < velocity_threshold
-        approved_serper_urls = high_urls + (medium_urls if allow_medium else [])
-        print(f"[VELOCITY] recent_new={recent_count}, threshold={velocity_threshold}, allow_medium={allow_medium}")
+        # Deterministic Dedup Gateway
+        lead_id_str = f"{tenant_id}_{dedupe_target}"
+        lead_id     = hashlib.sha256(lead_id_str.encode()).hexdigest()
+        doc_ref     = db.collection("leads").document(lead_id)
 
-        # Merge & Deduplicate
-        seen_urls = set()
-        combined_urls = []
-        for u in user_urls + approved_serper_urls:
-            if u not in seen_urls:
-                seen_urls.add(u)
-                combined_urls.append(u)
+        try:
+            doc_ref.create({
+                "tenant_id":        tenant_id,
+                "matched_campaigns": [campaign_id],
+                "url":              url,
+                "confidence_tier":  url_to_tier.get(url, "High"),
+                "sourcing_vector":  sourcing_vector,
+                "status":           "processing",
+                "createdAt":        firestore.SERVER_TIMESTAMP
+            })
+        except AlreadyExists:
+            print(f"[UAR] Cross-campaign duplicate for {target_domain}. Updating matched_campaigns.")
+            doc_ref.update({"matched_campaigns": firestore.ArrayUnion([campaign_id])})
+            continue
 
-        # The Cap
-        final_execution_urls = combined_urls[:20]
-        
-        # Step 3, 4, 5
-        for url in final_execution_urls:
-            target_domain = extract_root_domain(url)
-            if not target_domain: continue
-            
-            SOCIAL_DOMAINS = ["linkedin.com", "facebook.com", "reddit.com", "instagram.com", "x.com", "twitter.com", "team-bhp.com", "quora.com", "youtube.com"]
-            
-            if any(target_domain.endswith(social) for social in SOCIAL_DOMAINS):
-                parsed_url = urlparse(url)
-                exact_path = f"{parsed_url.netloc}{parsed_url.path}".lower().replace('www.', '')
-                lock_entity = hashlib.sha256(exact_path.encode('utf-8')).hexdigest()
-                dedupe_target = exact_path
+        try:
+            # Cache check
+            cache_ref  = db.collection("scraped_cache").document(url.replace('/', '_'))
+            cache_doc  = cache_ref.get()
+            text, tech_stack, emails, phones = "", [], [], []
+
+            if cache_doc.exists:
+                c_data     = cache_doc.to_dict()
+                text       = c_data.get("text", "")
+                tech_stack = c_data.get("tech_stack", [])
+                emails     = c_data.get("emails", [])
+                phones     = c_data.get("phones", [])
+            elif is_social:
+                # Social short-circuit: use any cached snippet or empty string
+                text       = snippet_map.get(url, "Social profile snippet empty.")
+                tech_stack = ["Social Platform Bypass"]
+                print(f"[SOCIAL SHORT-CIRCUIT] Using snippet for {url}")
             else:
-                lock_entity = target_domain
-                dedupe_target = target_domain
-            
-            # --- GLOBAL EXCLUSIVITY LOCK ---
-            lock_ref = db.collection("global_lead_locks").document(lock_entity)
-            try:
-                lock_doc = lock_ref.get()
-                now_utc = datetime.datetime.now(datetime.timezone.utc)
-                if lock_doc.exists:
-                    locked_until = lock_doc.to_dict().get("locked_until")
-                    if locked_until and locked_until > now_utc:
-                        print(f"[EXCLUSIVITY] Silently dropping {url}. Entity {lock_entity} locked.")
+                try:
+                    text, tech_stack, emails, phones = scrape_url(url)
+                    scrape_success += 1
+                except ValueError as e:
+                    if str(e) == "DEFERRED":
+                        print(f"[DEFERRED] Queueing async task to scraper-heavy for {url}")
+                        from google.cloud import tasks_v2 as _tv2
+                        _tc = _tv2.CloudTasksClient()
+                        _parent = _tc.queue_path(PROJECT_ID, LOCATION, QUEUE)
+                        _task = {
+                            "http_request": {
+                                "http_method": _tv2.HttpMethod.POST,
+                                "url": SCRAPER_HEAVY_URL,
+                                "headers": {"Content-Type": "application/json"},
+                                "body": json.dumps({
+                                    "url": url, "lead_id": lead_id, "tenant_id": tenant_id,
+                                    "campaign_id": campaign_id, "bio": bio,
+                                    "target_domain": target_domain,
+                                    "preferences_weights": preferences_weights
+                                }).encode()
+                            }
+                        }
+                        _tc.create_task(parent=_parent, task=_task)
                         continue
-                
-                lock_ref.set({"locked_until": now_utc + datetime.timedelta(days=14)})
-            except Exception as e:
-                print(f"[LOCK FAIL] {e}")
-                pass
-                
-            # Deterministic Deduplication Gateway (Unified Account Resolution)
-            lead_id_str = f"{tenant_id}_{dedupe_target}"
-            lead_id = hashlib.sha256(lead_id_str.encode('utf-8')).hexdigest()
-            doc_ref = db.collection("leads").document(lead_id)
-            
-            try:
-                doc_ref.create({
-                    "tenant_id": tenant_id,
-                    "matched_campaigns": [campaign_id],
-                    "url": url,
-                    "status": "processing",
-                    "createdAt": firestore.SERVER_TIMESTAMP
-                })
-            except AlreadyExists:
-                print(f"[UAR] Resolved cross-campaign duplicate for {target_domain}. Updating array natively.")
-                doc_ref.update({"matched_campaigns": firestore.ArrayUnion([campaign_id])})
-                continue
+                    scrape_failed += 1
+                    text, tech_stack, emails, phones = "", [], [], []
 
-            try:
-                # Cache check
-                cache_ref = db.collection("scraped_cache").document(url.replace('/','_'))
-                cache_doc = cache_ref.get()
-            
-                if cache_doc.exists:
-                    c_data = cache_doc.to_dict()
-                    text = c_data.get("text", "")
-                    tech_stack = c_data.get("tech_stack", [])
-                    emails = c_data.get("emails", [])
-                    phones = c_data.get("phones", [])
-                elif any(target_domain.endswith(social) for social in SOCIAL_DOMAINS):
-                    snippet_text = ""
-                    for ur in unique_results:
-                        if ur.get("link") == url:
-                            snippet_text = ur.get("snippet", "")
-                            break
-                    text = snippet_text if snippet_text else "Social profile snippet empty."
-                    tech_stack, emails, phones = ["Social Platform Bypass"], [], []
-                    print(f"[SOCIAL SHORT-CIRCUIT] Extracted snippet for {url}")
-                else:
-                    try:
-                        text, tech_stack, emails, phones = scrape_url(url)
-                    except ValueError as e:
-                        if str(e) == "DEFERRED":
-                            print(f"[DEFERRED] Queueing async task to scraper-heavy for {url}")
-                            # Dispatch Cloud Task
-                            from google.cloud import tasks_v2
-                            tasks_client = tasks_v2.CloudTasksClient()
-                            parent = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
-                            task = {
-                                "http_request": {
-                                    "http_method": tasks_v2.HttpMethod.POST,
-                                    "url": SCRAPER_HEAVY_URL,
-                                    "headers": {"Content-Type": "application/json"},
-                                    "body": json.dumps({
-                                        "url": url, "lead_id": lead_id, "tenant_id": tenant_id, 
-                                        "campaign_id": campaign_id, "bio": bio, "target_domain": target_domain,
-                                        "preferences_weights": preferences_weights
-                                    }).encode()
+                if text:
+                    cache_ref.set({"url": url, "text": safe_truncate(text),
+                                   "tech_stack": tech_stack, "emails": emails, "phones": phones})
+
+            if text:
+                bot_keywords = ["Cloudflare Ray ID", "Please verify you are human",
+                                "Enable JavaScript and cookies to continue",
+                                "Checking if the site connection is secure",
+                                "Access Denied", "403 Forbidden"]
+                if any(kw.lower() in text.lower() for kw in bot_keywords):
+                    doc_ref.update({"status": "failed", "error": "Blocked by Cloudflare/WAF"})
+                    scrape_failed += 1
+                    continue
+
+                shard_id = random.randint(0, 9)
+                db.collection("usage_metrics").document(tenant_id).collection("shards") \
+                    .document(str(shard_id)).set({"gemini_calls": firestore.Increment(1)}, merge=True)
+                db.collection("users").document(tenant_id).collection("wallet_shards") \
+                    .document(str(shard_id)).set({"consumed_credits": firestore.Increment(1)}, merge=True)
+
+                context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
+
+                # RLHF Fit Score
+                fit_score = 0
+                if native_hiring_intent:
+                    fit_score += preferences_weights.get("hiring_intent", 0)
+                for tech in tech_stack:
+                    fit_score += preferences_weights.get(f"tech_{tech}", 0)
+                if fit_score <= -3:
+                    print(f"[RLHF] Dropping {target_domain} (fit_score={fit_score}).")
+                    doc_ref.delete()
+                    continue
+
+                try:
+                    evaluation = final_score_and_dm(text, bio, context_payload, tech_stack, source_url=url)
+                except TimeoutError:
+                    db.collection("leads").document(lead_id).update({"status": "failed", "error": "Vertex AI timeout"})
+                    scrape_failed += 1
+                    continue
+                except Exception as e:
+                    db.collection("leads").document(lead_id).update({"status": "failed", "error": str(e)})
+                    scrape_failed += 1
+                    continue
+
+                if evaluation.get("score", 0) >= 7:
+                    contact_endpoints = list(evaluation.get("contact_endpoints", []))
+                    existing_uris     = {e["uri"] for e in contact_endpoints}
+                    for em in (emails or [])[:3]:
+                        if em and em not in existing_uris:
+                            contact_endpoints.append({"platform": "email", "uri": em})
+                            existing_uris.add(em)
+                    for ph in (phones or [])[:2]:
+                        if ph and ph not in existing_uris:
+                            contact_endpoints.append({"platform": "other", "uri": ph})
+                            existing_uris.add(ph)
+
+                    doc_ref.update({
+                        "score":                        evaluation.get("score"),
+                        "pain_point":                   evaluation.get("pain_point"),
+                        "dm":                           evaluation.get("dm"),
+                        "intent_signal":                evaluation.get("intent_signal", ""),
+                        "hiring_intent_found":          evaluation.get("hiring_intent_found", ""),
+                        "tech_stack_found":             evaluation.get("tech_stack_found", []),
+                        "icebreaker_angle":             evaluation.get("icebreaker_angle", ""),
+                        "contact_endpoints":            contact_endpoints,
+                        "decision_maker_name":          evaluation.get("decision_maker_name", "Unknown"),
+                        "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
+                        "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
+                        "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
+                        "sourcing_vector":              sourcing_vector,
+                        "confidence_tier":              url_to_tier.get(url, "High"),
+                        "status":                       "new"
+                    })
+
+                    scrape_success += 1
+
+                    # Meta WhatsApp Business API Trigger
+                    if evaluation.get("score", 0) >= 8:
+                        tenant_doc       = db.collection("users").document(tenant_id).get().to_dict() or {}
+                        wa_token_encrypted = tenant_doc.get("wa_token")
+                        wa_phone_id      = tenant_doc.get("wa_phone_id")
+                        admin_phone      = tenant_doc.get("admin_phone")
+                        wa_token         = None
+                        if wa_token_encrypted:
+                            try:
+                                wa_token = cipher_suite.decrypt(wa_token_encrypted.encode()).decode()
+                            except:
+                                wa_token = wa_token_encrypted
+                        if wa_token and wa_phone_id and admin_phone:
+                            wa_payload = {
+                                "messaging_product": "whatsapp",
+                                "to": admin_phone, "type": "interactive",
+                                "interactive": {
+                                    "type": "button",
+                                    "body": {"text": f"🔥 Hot Lead!\n{url}\nScore: {evaluation.get('score')}/10\n{evaluation.get('pain_point')}\n\nDM: {evaluation.get('dm')}"},
+                                    "action": {"buttons": [
+                                        {"type": "reply", "reply": {"id": f"approve_{lead_id}", "title": "✅ Approve"}},
+                                        {"type": "reply", "reply": {"id": f"ignore_{lead_id}",  "title": "🚫 Ignore"}}
+                                    ]}
                                 }
                             }
-                            tasks_client.create_task(parent=parent, task=task)
-                            continue
-                        text, tech_stack, emails, phones = "", [], [], []
-                        
-                    if text:
-                        # Save to cache explicitly enforcing truncation rule before write
-                        cache_ref.set({"url": url, "text": safe_truncate(text), "tech_stack": tech_stack, "emails": emails, "phones": phones})
-            
-                if text:
-                    bot_keywords = ["Cloudflare Ray ID", "Please verify you are human", "Enable JavaScript and cookies to continue", "Checking if the site connection is secure", "Access Denied", "403 Forbidden"]
-                    if any(keyword.lower() in text.lower() for keyword in bot_keywords):
-                        doc_ref.update({"status": "failed", "error": "Blocked by Cloudflare/WAF"})
-                        continue
-                        
-                    shard_id = random.randint(0, 9)
-                    db.collection("usage_metrics").document(tenant_id).collection("shards").document(str(shard_id)).set({"gemini_calls": firestore.Increment(1)}, merge=True)
-                    db.collection("users").document(tenant_id).collection("wallet_shards").document(str(shard_id)).set({"consumed_credits": firestore.Increment(1)}, merge=True)
-                
-                    # --- MULTI-VECTOR SERPER DORKING ---
-                    context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
-                
-                    # RLHF Python Interceptor Check
-                    fit_score = 0
-                    if native_hiring_intent:
-                        fit_score += preferences_weights.get("hiring_intent", 0)
-                
-                    for tech in tech_stack:
-                        fit_score += preferences_weights.get(f"tech_{tech}", 0)
-                    
-                    if fit_score <= -3:
-                        print(f"[RLHF] Target {target_domain} logically dropped (Fit Score: {fit_score}). Saves 1 Vertex Token Sequence.")
-                        doc_ref.delete()
-                        continue
-                
-                    try:
-                        evaluation = final_score_and_dm(text, bio, context_payload, tech_stack, source_url=url)
-                    except TimeoutError:
-                        db.collection("leads").document(lead_id).update({"status": "failed", "error": "Vertex AI timeout"})
-                        continue
-                    except Exception as e:
-                        db.collection("leads").document(lead_id).update({"status": "failed", "error": str(e)})
-                        continue
-                    
-                    if evaluation.get("score", 0) >= 7:
-                        # V14: Polymorphic contact merge — LLM endpoints + DOM-scraped contacts
-                        contact_endpoints = list(evaluation.get("contact_endpoints", []))
-                        existing_uris = {e["uri"] for e in contact_endpoints}
-                        for em in (emails or [])[:3]:
-                            if em and em not in existing_uris:
-                                contact_endpoints.append({"platform": "email", "uri": em})
-                                existing_uris.add(em)
-                        for ph in (phones or [])[:2]:
-                            if ph and ph not in existing_uris:
-                                contact_endpoints.append({"platform": "other", "uri": ph})
-                                existing_uris.add(ph)
+                            try:
+                                httpx.post(
+                                    f"https://graph.facebook.com/v18.0/{wa_phone_id}/messages",
+                                    json=wa_payload,
+                                    headers={"Authorization": f"Bearer {wa_token}", "Content-Type": "application/json"},
+                                    timeout=5
+                                )
+                            except Exception as wa_e:
+                                print(f"[WA] Meta POST failed: {wa_e}")
 
-                        doc_ref.update({
-                            "score":                        evaluation.get("score"),
-                            "pain_point":                   evaluation.get("pain_point"),
-                            "dm":                           evaluation.get("dm"),
-                            "intent_signal":                evaluation.get("intent_signal", ""),
-                            "hiring_intent_found":          evaluation.get("hiring_intent_found", ""),
-                            "tech_stack_found":             evaluation.get("tech_stack_found", []),
-                            "icebreaker_angle":             evaluation.get("icebreaker_angle", ""),
-                            "contact_endpoints":            contact_endpoints,
-                            "decision_maker_name":          evaluation.get("decision_maker_name", "Unknown"),
-                            "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
-                            "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
-                            "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
-                            "sourcing_vector":              sourcing_vector,
-                            "confidence_tier":              url_to_tier.get(url, "High"),
-                            "status":                       "new"
-                        })
-                    
-                        # Meta WhatsApp Business API Trigger (V6)
-                        if evaluation.get("score", 0) >= 8:
-                            tenant_doc = db.collection("users").document(tenant_id).get().to_dict() or {}
-                            wa_token_encrypted = tenant_doc.get("wa_token")
-                            wa_phone_id = tenant_doc.get("wa_phone_id")
-                            admin_phone = tenant_doc.get("admin_phone")
-                        
-                            wa_token = None
-                            if wa_token_encrypted:
-                                try:
-                                    wa_token = cipher_suite.decrypt(wa_token_encrypted.encode()).decode()
-                                except:
-                                    wa_token = wa_token_encrypted # Fallback if not encrypted legacy
-                                
-                            if wa_token and wa_phone_id and admin_phone:
-                                wa_payload = {
-                                    "messaging_product": "whatsapp",
-                                    "to": admin_phone,
-                                    "type": "interactive",
-                                    "interactive": {
-                                        "type": "button",
-                                        "body": {
-                                            "text": f"🔥 Hot Lead Found!\nCompany: {url}\nScore: {evaluation.get('score')}/10\nWhy: {evaluation.get('pain_point')}\nTech Stack: {', '.join(evaluation.get('tech_stack_found', []))}\nHiring: {evaluation.get('hiring_intent_found', '')}\n\nDrafted DM: {evaluation.get('dm')}"
-                                        },
-                                        "action": {
-                                            "buttons": [
-                                                {"type": "reply", "reply": {"id": f"approve_{lead_id}", "title": "✅ Approve & Send"}},
-                                                {"type": "reply", "reply": {"id": f"ignore_{lead_id}", "title": "🚫 Ignore"}}
-                                            ]
-                                        }
-                                    }
-                                }
-                                try:
-                                    wa_headers = {"Authorization": f"Bearer {wa_token}", "Content-Type": "application/json"}
-                                    httpx.post(f"https://graph.facebook.com/v18.0/{wa_phone_id}/messages", json=wa_payload, headers=wa_headers, timeout=5)
-                                except Exception as wa_e:
-                                    print(f"WhatsApp Meta POST failed: {wa_e}")
-                    
-                        # Store purely for JSON endpoint tracking response formatting locally
-                        lead_doc = {
-                            "tenant_id": tenant_id,
-                            "campaign_id": campaign_id,
-                            "url": url,
-                            "score": evaluation.get("score"),
-                            "pain_point": evaluation.get("pain_point"),
-                            "dm": evaluation.get("dm"),
-                            "hiring_intent_found": evaluation.get("hiring_intent_found", ""),
-                            "tech_stack_found": evaluation.get("tech_stack_found", []),
-                            "icebreaker_angle": evaluation.get("icebreaker_angle", ""),
-                            "email": evaluation.get("email", ""),
-                            "phone": evaluation.get("phone", ""),
-                            "linkedin": evaluation.get("linkedin", ""),
-                            "status": "new"
-                        }
-                        all_results.append(lead_doc)
-                    else:
-                        # Delete the atomic document so we don't accidentally ingest phantom rows
-                        doc_ref.delete()
-            except Exception as loop_e:
-                print(f'Pipeline execution crashed: {loop_e}')
-                db.collection('leads').document(lead_id).update({'status': 'failed', 'error': 'Pipeline execution crashed'})
-                continue
-                    
-    return jsonify({"processed_leads": len(all_results)}), 200
+                    all_results.append({"url": url, "score": evaluation.get("score")})
+                else:
+                    doc_ref.delete()
+            else:
+                scrape_failed += 1
+
+        except Exception as loop_e:
+            print(f"[CONSUMER] Pipeline loop crashed for {url}: {loop_e}")
+            try:
+                db.collection('leads').document(lead_id).update(
+                    {'status': 'failed', 'error': 'Consumer pipeline crash'}
+                )
+            except:
+                pass
+            scrape_failed += 1
+            continue
+
+    print(f"[FUNNEL] Campaign: {campaign_id} | Scraper Success: {scrape_success} | Failed/Timeout: {scrape_failed}")
+    return jsonify({"processed_leads": len(all_results), "scrape_success": scrape_success, "scrape_failed": scrape_failed}), 200
 def extract_dense_payload(text, bio):
     import re
     paragraphs = [p.strip() for p in text.split('\n') if len(p.strip()) > 30]
