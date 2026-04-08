@@ -378,16 +378,23 @@ function createLeadCard(docId, lead) {
     let exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">🔒 Exclusive Lead</span>`;
     let competitorBadge = lead.competitor_match ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">🎯 Competitor Intercept: ${lead.competitor_match}</span>` : '';
 
+    // V16: origin_engine badge — safe fallback for legacy leads without this field
+    const originEngine  = lead.origin_engine || 'cartographer';
+    const engineBadge   = (originEngine === 'autonomous')
+        ? '<span style="font-size:0.75rem; background:#faf5ff; color:#7c3aed; padding:2px 8px; border-radius:4px; border:1px solid #ddd6fe; font-weight:600;">&#9889; Predictive Match</span>'
+        : '';
+
     card.innerHTML = `
         <div class="lead-header">
             <div>
-                <strong><a href="${lead.url || '#'}" target="_blank" style="color: var(--text-main); text-decoration: none;">${urlHostname} ↗</a></strong> • ${lead.source || 'Organic Search'} 
+                <strong><a href="${lead.url || '#'}" target="_blank" style="color: var(--text-main); text-decoration: none;">${urlHostname} &#8599;</a></strong> &bull; ${lead.source || 'Organic Search'} 
                 <span style="margin-left:8px; font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(lead.status || 'new').toUpperCase()}</span>
             </div>
             <div class="score">Score: ${lead.score || 0}/10</div>
         </div>
         <div class="pain-point">" ${lead.pain_point || 'Analyzing sentiment...'} "</div>
         <div class="premium-badges" style="margin-top: 8px; margin-bottom: 8px; font-weight: 500; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
+            ${engineBadge}
             ${exclusiveBadge}
             ${competitorBadge}
             ${hiringBadge}
@@ -395,16 +402,16 @@ function createLeadCard(docId, lead) {
         </div>
         <div class="dm-draft">${lead.dm || 'Drafting variation...'}</div>
         <div class="contact-info" style="margin-top: 8px; margin-bottom: 8px; font-size: 0.85rem; color: var(--text-main); font-weight: 500;">
-            ${lead.email ? `📧 <a href="mailto:${lead.email}" target="_blank" style="color:#2563eb; text-decoration:none;">${lead.email}</a> &nbsp;` : ''} 
-            ${lead.phone ? `📞 <a href="tel:${lead.phone}" style="color:#2563eb; text-decoration:none;">${lead.phone}</a>` : ''}
-            ${!lead.email && !lead.phone ? `<span style="color:var(--text-muted); font-style:italic;">No Contact Info Found</span>` : ''}
+            ${lead.email ? `<a href="mailto:${lead.email}" target="_blank" style="color:#2563eb; text-decoration:none;">&#128231; ${lead.email}</a> &nbsp;` : ''}
+            ${lead.phone ? `<a href="tel:${lead.phone}" style="color:#2563eb; text-decoration:none;">&#128222; ${lead.phone}</a>` : ''}
+            ${!lead.email && !lead.phone ? '<span style="color:var(--text-muted); font-style:italic;">No Contact Info Found</span>' : ''}
         </div>
         <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
-            <button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${(lead.dm || '').replace(/`/g, '\\`').replace(/'/g, "\\'")}\`)" title="Copy Message">📋 Copy Message</button>
-            <button id="crm-btn-${docId}" class="action-btn ${lead.is_in_crm ? 'in-crm' : ''}" onclick="${lead.is_in_crm ? '' : `pushToCRM('${docId}', \`${encodeURIComponent(JSON.stringify(lead)).replace(/'/g, "\\'")}\`)`}" style="color: ${lead.is_in_crm ? '#16a34a' : '#4f46e5'}; border-color: ${lead.is_in_crm ? '#86efac' : '#c7d2fe'}; background: ${lead.is_in_crm ? '#dcfce7' : '#e0e7ff'};" ${lead.is_in_crm ? 'disabled' : ''}>${lead.is_in_crm ? '✅ In CRM' : '☁️ Push to CRM'}</button>
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">🚫 Ignore</button>
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">🎯 Converted</button>
-            <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${encodeURIComponent(JSON.stringify(lead.interactions || []))}')" title="Audit Log">🕒 View Timeline Logs</button>
+            <button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${(lead.dm || '').replace(/`/g, '\\`').replace(/'/g, "\\'")}\`)" title="Copy Message">&#128203; Copy Message</button>
+            <button id="crm-btn-${docId}" class="action-btn ${lead.is_in_crm ? 'in-crm' : ''}" onclick="${lead.is_in_crm ? '' : `pushToCRM('${docId}', \`${encodeURIComponent(JSON.stringify(lead)).replace(/'/g, "\\'")}\`)`}" style="color: ${lead.is_in_crm ? '#16a34a' : '#4f46e5'}; border-color: ${lead.is_in_crm ? '#86efac' : '#c7d2fe'}; background: ${lead.is_in_crm ? '#dcfce7' : '#e0e7ff'};" ${lead.is_in_crm ? 'disabled' : ''}>${lead.is_in_crm ? '&#10003; In CRM' : '&#9729; Push to CRM'}</button>
+            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">&#128683; Ignore</button>
+            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">&#127919; Converted</button>
+            <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${encodeURIComponent(JSON.stringify(lead.interactions || []))}')" title="Audit Log">&#128336; View Timeline Logs</button>
         </div>
     `;
     return card;
@@ -651,7 +658,13 @@ function generateLeadInnerHtml(docId, lead) {
           ).join('')
         : '';
 
-    const exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">🔒 Exclusive Lead</span>`;
+    // V16: origin_engine badge — safe fallback for all legacy leads without this field
+    const originEngine = lead.origin_engine || 'cartographer';
+    const engineBadge  = (originEngine === 'autonomous')
+        ? '<span style="font-size:0.75rem; background:#faf5ff; color:#7c3aed; padding:2px 8px; border-radius:4px; border:1px solid #ddd6fe; font-weight:600;">&#9889; Predictive Match</span>'
+        : '';
+
+    const exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">&#128274; Exclusive Lead</span>`;
     const competitorBadge = lead.competitor_match
         ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">🎯 Competitor Intercept: ${lead.competitor_match}</span>`
         : '';
@@ -750,6 +763,7 @@ function generateLeadInnerHtml(docId, lead) {
         </div>
         ${intentSignalHtml}
         <div class="premium-badges" style="margin-top: 8px; margin-bottom: 8px; font-weight: 500; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
+            ${engineBadge}
             ${exclusiveBadge}
             ${competitorBadge}
             ${hiringBadge}

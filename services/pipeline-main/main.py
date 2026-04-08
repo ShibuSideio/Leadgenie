@@ -16,6 +16,8 @@ from google.api_core.exceptions import AlreadyExists, ResourceExhausted
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
+from pydantic import ValidationError
+from models import LeadPayload
 
 app = Flask(__name__)
 
@@ -90,6 +92,38 @@ def safe_truncate(text: str, max_bytes: int = 100000) -> str:
     if len(encoded) <= max_bytes:
         return text
     return encoded[:max_bytes].decode('utf-8', errors='ignore')
+
+
+def validate_and_update_lead(payload_dict: dict, doc_ref) -> bool:
+    """
+    Universal Data Contract gatekeeper.
+
+    Validates payload_dict against LeadPayload (Pydantic v2).
+    On success  → writes validated, clean dict to Firestore. Returns True.
+    On failure  → Dead Letter pattern: writes raw payload with
+                  status='schema_violation' for debugging. Returns False.
+
+    Both dispatch() and finalize() must pass their final dicts through here
+    instead of calling doc_ref.update() directly.
+    """
+    try:
+        validated = LeadPayload(**payload_dict)
+        doc_ref.update(validated.to_firestore_dict())
+        print(f"[CONTRACT] ✓ Validated lead {payload_dict.get('id', '?')} "
+              f"(engine={validated.origin_engine}, score={validated.score})")
+        return True
+    except ValidationError as ve:
+        print(f"[CONTRACT] ✗ Schema violation for {payload_dict.get('id', '?')}: {ve}")
+        # Dead Letter: preserve raw payload but quarantine it from the main feed
+        dead_letter = dict(payload_dict)
+        dead_letter["status"]            = "schema_violation"
+        dead_letter["schema_error"]      = str(ve)
+        dead_letter["schema_error_time"] = firestore.SERVER_TIMESTAMP
+        try:
+            doc_ref.update(dead_letter)
+        except Exception as dl_e:
+            print(f"[CONTRACT] Dead-letter write also failed: {dl_e}")
+        return False
 
 # ---------------------------------------------------------------------------
 # V14: SYNAPTIC ROUTER — Vector-to-Platform Dork Map
@@ -567,6 +601,10 @@ DETECTED TECH STACK:
             "primary_objection_hypothesis": {
                 "type": "STRING",
                 "description": "One sentence: why they might reject the pitch based on their site context."
+            },
+            "company_name": {
+                "type": "STRING",
+                "description": "The legal or trading name of the company/brand. Output 'Unknown' if not determinable from the text."
             }
         },
         "required": [
@@ -574,6 +612,7 @@ DETECTED TECH STACK:
             "hiring_intent_found", "tech_stack_found", "contact_endpoints",
             "decision_maker_name", "decision_maker_title",
             "company_size_tier", "primary_objection_hypothesis"
+            # company_name intentionally NOT in required — optional extraction
         ]
     }
 
@@ -594,7 +633,9 @@ DETECTED TECH STACK:
             "decision_maker_name":          data.get("decision_maker_name", "Unknown"),
             "decision_maker_title":         data.get("decision_maker_title", "Unknown"),
             "company_size_tier":            data.get("company_size_tier", "Unknown"),
-            "primary_objection_hypothesis": data.get("primary_objection_hypothesis", "Unknown")
+            "primary_objection_hypothesis": data.get("primary_objection_hypothesis", "Unknown"),
+            # Optional — None if Gemini couldn't determine it
+            "company_name":                 data.get("company_name") or None,
         }
     except Exception as e:
         raise ValueError(f"LLM Parsing Failure: {e}")
@@ -1035,12 +1076,17 @@ def dispatch():
                             contact_endpoints.append({"platform": "other", "uri": ph})
                             existing_uris.add(ph)
 
-                    doc_ref.update({
-                        "score":                        evaluation.get("score"),
-                        "pain_point":                   evaluation.get("pain_point"),
-                        "dm":                           evaluation.get("dm"),
+                    # ── Universal Data Contract write (dispatch path) ─────────
+                    lead_payload = {
+                        "id":                           lead_id,
+                        "source_url":                   url,
+                        "tenant_id":                    tenant_id,
+                        "origin_engine":                "cartographer",
+                        "score":                        evaluation.get("score", 0),
+                        "pain_point":                   evaluation.get("pain_point", ""),
+                        "dm":                           evaluation.get("dm", ""),
                         "intent_signal":                evaluation.get("intent_signal", ""),
-                        "hiring_intent_found":          evaluation.get("hiring_intent_found", ""),
+                        "hiring_intent_found":          evaluation.get("hiring_intent_found", "No"),
                         "tech_stack_found":             evaluation.get("tech_stack_found", []),
                         "icebreaker_angle":             evaluation.get("icebreaker_angle", ""),
                         "contact_endpoints":            contact_endpoints,
@@ -1048,10 +1094,13 @@ def dispatch():
                         "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
                         "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
                         "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
-                        "sourcing_vector":              sourcing_vector,
-                        "confidence_tier":              url_to_tier.get(url, "High"),
-                        "status":                       "new"
-                    })
+                        "company_name":                 evaluation.get("company_name"),   # Optional
+                        "dossier_text":                 None,                              # V16 placeholder
+                        "sourcing_vector":               sourcing_vector,
+                        "confidence_tier":               url_to_tier.get(url, "High"),
+                        "status":                        "new",
+                    }
+                    validate_and_update_lead(lead_payload, doc_ref)
 
                     scrape_success += 1
 
@@ -1234,12 +1283,17 @@ def finalize():
                     contact_endpoints.append({"platform": "other", "uri": ph})
                     existing_uris.add(ph)
 
-            doc_ref.update({
-                "score":                        evaluation.get("score"),
-                "pain_point":                   evaluation.get("pain_point"),
-                "dm":                           evaluation.get("dm"),
+            # ── Universal Data Contract write (finalize/scraper-heavy path) ──
+            lead_payload = {
+                "id":                           lead_id,
+                "source_url":                   url,
+                "tenant_id":                    tenant_id,
+                "origin_engine":                "cartographer",
+                "score":                        evaluation.get("score", 0),
+                "pain_point":                   evaluation.get("pain_point", ""),
+                "dm":                           evaluation.get("dm", ""),
                 "intent_signal":                evaluation.get("intent_signal", ""),
-                "hiring_intent_found":          evaluation.get("hiring_intent_found", ""),
+                "hiring_intent_found":          evaluation.get("hiring_intent_found", "No"),
                 "tech_stack_found":             evaluation.get("tech_stack_found", []),
                 "icebreaker_angle":             evaluation.get("icebreaker_angle", ""),
                 "contact_endpoints":            contact_endpoints,
@@ -1247,8 +1301,12 @@ def finalize():
                 "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
                 "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
                 "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
-                "status":                       "new"
-            })
+                "company_name":                 evaluation.get("company_name"),   # Optional
+                "dossier_text":                 None,                              # V16 placeholder
+                "sourcing_vector":               sourcing_vector,
+                "status":                        "new",
+            }
+            validate_and_update_lead(lead_payload, doc_ref)
             
             # Simplified WhatsApp Meta Call (V13)
             if evaluation.get("score", 0) >= 8:
