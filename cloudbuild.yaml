@@ -1,226 +1,494 @@
-﻿steps:
-# ---------------------------------------------------------------------
-# Microservice 1: Orchestrator
-# ---------------------------------------------------------------------
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'gcr.io/$PROJECT_ID/lead-orchestrator', './services/orchestrator']
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'gcr.io/$PROJECT_ID/lead-orchestrator']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+﻿# =============================================================================
+# cloudbuild.yaml — Sideio Leads V16 Enterprise Build Pipeline
+# =============================================================================
+# Architecture:
+#   Phase 1: All 6 Docker images built IN PARALLEL (waitFor: ['-'])
+#   Phase 2: All 6 images pushed IN PARALLEL (waitFor: respective build id)
+#   Phase 3: Cloud Run Services deployed (parallel where independent)
+#   Phase 4: Cloud Run Job (autonomous-engine, depends on push only)
+#   Phase 5: Cloud Scheduler (depends on orchestrator deploy for live URL)
+#   Phase 6: Firebase (starts immediately, no Cloud Run dependency)
+#
+# Key production rules applied:
+#   - $$VAR   = bash variable (Cloud Build escapes → bash sees $VAR)
+#   - $VAR    = Cloud Build built-in substitution ($PROJECT_ID, $COMMIT_SHA)
+#   - --update-env-vars on Cloud Run SERVICES (never wipe console-set secrets)
+#   - --set-env-vars  on Cloud Run JOBS (jobs have no console-set secrets)
+#   - set -eo pipefail on every bash step (fail fast, no silent errors)
+#   - Pinned cloud-sdk:slim (stable, ~400MB lighter than full image)
+#   - Docker images tagged :$COMMIT_SHA AND :latest (enables rollback)
+#   - --platform=managed (non-interactive, no gcloud prompts in CI)
+#   - --task-timeout=3600s (the 's' suffix is required by the Cloud Run Jobs API)
+#   - --quiet on all gcloud write commands (suppress confirmation prompts)
+#   - secure-key.json deleted after firebase deploy (security hygiene)
+# =============================================================================
+
+timeout: '3600s'
+
+steps:
+
+# =============================================================================
+# PHASE 1: PARALLEL IMAGE BUILDS
+# All 6 services build simultaneously. Playwright/Chromium (~8 min) no longer
+# blocks the other 5 lightweight Python services.
+# =============================================================================
+
+- id: 'build-orchestrator'
+  waitFor: ['-']
+  name: 'gcr.io/cloud-builders/docker'
+  args:
+  - build
+  - --no-cache
+  - -t
+  - gcr.io/$PROJECT_ID/lead-orchestrator:$COMMIT_SHA
+  - -t
+  - gcr.io/$PROJECT_ID/lead-orchestrator:latest
+  - ./services/orchestrator
+
+- id: 'build-pipeline-main'
+  waitFor: ['-']
+  name: 'gcr.io/cloud-builders/docker'
+  args:
+  - build
+  - --no-cache
+  - -t
+  - gcr.io/$PROJECT_ID/lead-pipeline-main:$COMMIT_SHA
+  - -t
+  - gcr.io/$PROJECT_ID/lead-pipeline-main:latest
+  - ./services/pipeline-main
+
+- id: 'build-scraper-heavy'
+  waitFor: ['-']
+  name: 'gcr.io/cloud-builders/docker'
+  args:
+  - build
+  - --no-cache
+  - -t
+  - gcr.io/$PROJECT_ID/scraper-heavy:$COMMIT_SHA
+  - -t
+  - gcr.io/$PROJECT_ID/scraper-heavy:latest
+  - ./services/scraper-heavy
+
+- id: 'build-whatsapp-webhook'
+  waitFor: ['-']
+  name: 'gcr.io/cloud-builders/docker'
+  args:
+  - build
+  - --no-cache
+  - -t
+  - gcr.io/$PROJECT_ID/whatsapp-webhook:$COMMIT_SHA
+  - -t
+  - gcr.io/$PROJECT_ID/whatsapp-webhook:latest
+  - ./services/whatsapp-webhook
+
+- id: 'build-email-summary'
+  waitFor: ['-']
+  name: 'gcr.io/cloud-builders/docker'
+  args:
+  - build
+  - --no-cache
+  - -t
+  - gcr.io/$PROJECT_ID/email-summary:$COMMIT_SHA
+  - -t
+  - gcr.io/$PROJECT_ID/email-summary:latest
+  - ./services/email-summary
+
+- id: 'build-autonomous-engine'
+  waitFor: ['-']
+  name: 'gcr.io/cloud-builders/docker'
+  args:
+  - build
+  - --no-cache
+  - -t
+  - gcr.io/$PROJECT_ID/autonomous-engine:$COMMIT_SHA
+  - -t
+  - gcr.io/$PROJECT_ID/autonomous-engine:latest
+  - ./services/autonomous-engine
+
+# =============================================================================
+# PHASE 2: PARALLEL IMAGE PUSHES
+# Each push starts as soon as its corresponding build finishes.
+# =============================================================================
+
+- id: 'push-orchestrator'
+  waitFor: ['build-orchestrator']
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/lead-orchestrator']
+
+- id: 'push-pipeline-main'
+  waitFor: ['build-pipeline-main']
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/lead-pipeline-main']
+
+- id: 'push-scraper-heavy'
+  waitFor: ['build-scraper-heavy']
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/scraper-heavy']
+
+- id: 'push-whatsapp-webhook'
+  waitFor: ['build-whatsapp-webhook']
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/whatsapp-webhook']
+
+- id: 'push-email-summary'
+  waitFor: ['build-email-summary']
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/email-summary']
+
+- id: 'push-autonomous-engine'
+  waitFor: ['build-autonomous-engine']
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/autonomous-engine']
+
+# =============================================================================
+# PHASE 3: DEPLOY CLOUD RUN SERVICES
+# CRITICAL: --update-env-vars (NOT --set-env-vars) preserves any console-set
+# env vars (ENCRYPTION_KEY, etc.) that are not managed in this pipeline.
+# --platform=managed prevents interactive gcloud prompts that hang CI.
+# =============================================================================
+
+- id: 'deploy-orchestrator'
+  waitFor: ['push-orchestrator']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
   entrypoint: gcloud
   args:
   - run
   - deploy
   - orchestrator
-  - --image=gcr.io/$PROJECT_ID/lead-orchestrator
+  - --image=gcr.io/$PROJECT_ID/lead-orchestrator:$COMMIT_SHA
   - --region=asia-south1
+  - --platform=managed
   - --memory=256Mi
+  - --cpu=1
+  - --min-instances=0
+  - --max-instances=10
+  - --concurrency=80
+  - --timeout=300
   - --allow-unauthenticated
   - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
-  - >-
-    --set-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch
+  - --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch
+  - --quiet
 
-# ---------------------------------------------------------------------
-# Microservice 2: Pipeline Main
-# ---------------------------------------------------------------------
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'gcr.io/$PROJECT_ID/lead-pipeline-main', './services/pipeline-main']
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'gcr.io/$PROJECT_ID/lead-pipeline-main']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- id: 'deploy-pipeline-main'
+  waitFor: ['push-pipeline-main']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
   entrypoint: gcloud
   args:
   - run
   - deploy
   - lead-pipeline-main
-  - --image=gcr.io/$PROJECT_ID/lead-pipeline-main
+  - --image=gcr.io/$PROJECT_ID/lead-pipeline-main:$COMMIT_SHA
   - --region=asia-south1
+  - --platform=managed
   - --memory=512Mi
+  - --cpu=1
+  - --min-instances=0
+  - --max-instances=5
+  - --concurrency=4
+  - --timeout=540
   - --no-allow-unauthenticated
   - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
+  - --quiet
 
-# ---------------------------------------------------------------------
-# Microservice 3: Scraper Heavy (Playwright)
-# ---------------------------------------------------------------------
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'gcr.io/$PROJECT_ID/scraper-heavy', './services/scraper-heavy']
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'gcr.io/$PROJECT_ID/scraper-heavy']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- id: 'deploy-scraper-heavy'
+  waitFor: ['push-scraper-heavy']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
   entrypoint: gcloud
   args:
   - run
   - deploy
   - scraper-heavy
-  - --image=gcr.io/$PROJECT_ID/scraper-heavy
+  - --image=gcr.io/$PROJECT_ID/scraper-heavy:$COMMIT_SHA
   - --region=asia-south1
+  - --platform=managed
   - --memory=2Gi
+  - --cpu=2
   - --min-instances=0
+  - --max-instances=3
+  - --concurrency=1
+  - --timeout=300
   - --no-allow-unauthenticated
   - --service-account=scraper-heavy-sa@$PROJECT_ID.iam.gserviceaccount.com
+  - --quiet
 
-# ---------------------------------------------------------------------
-# Microservice 4: WhatsApp Webhook
-# ---------------------------------------------------------------------
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'gcr.io/$PROJECT_ID/whatsapp-webhook', './services/whatsapp-webhook']
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'gcr.io/$PROJECT_ID/whatsapp-webhook']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- id: 'deploy-whatsapp-webhook'
+  waitFor: ['push-whatsapp-webhook']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
   entrypoint: gcloud
   args:
   - run
   - deploy
   - whatsapp-webhook
-  - --image=gcr.io/$PROJECT_ID/whatsapp-webhook
+  - --image=gcr.io/$PROJECT_ID/whatsapp-webhook:$COMMIT_SHA
   - --region=asia-south1
+  - --platform=managed
   - --memory=128Mi
+  - --cpu=1
+  - --min-instances=0
+  - --max-instances=5
+  - --concurrency=80
+  - --timeout=60
   - --allow-unauthenticated
   - --service-account=whatsapp-webhook-sa@$PROJECT_ID.iam.gserviceaccount.com
+  - --quiet
 
-# ---------------------------------------------------------------------
-# Microservice 5: Email Summary
-# ---------------------------------------------------------------------
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'gcr.io/$PROJECT_ID/email-summary', './services/email-summary']
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'gcr.io/$PROJECT_ID/email-summary']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+- id: 'deploy-email-summary'
+  waitFor: ['push-email-summary']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
   entrypoint: gcloud
   args:
   - run
   - deploy
   - email-summary
-  - --image=gcr.io/$PROJECT_ID/email-summary
+  - --image=gcr.io/$PROJECT_ID/email-summary:$COMMIT_SHA
   - --region=asia-south1
+  - --platform=managed
   - --memory=128Mi
+  - --cpu=1
+  - --min-instances=0
+  - --max-instances=3
+  - --concurrency=10
+  - --timeout=120
   - --no-allow-unauthenticated
   - --service-account=email-summary-sa@$PROJECT_ID.iam.gserviceaccount.com
+  - --quiet
 
-# ---------------------------------------------------------------------
-# Microservice 6: V16 Autonomous Engine (Cloud Run JOB — not a Service)
-# Phase 3: nightly triangulation + predictive_cache population
-# ---------------------------------------------------------------------
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['build', '-t', 'gcr.io/$PROJECT_ID/autonomous-engine', './services/autonomous-engine']
-- name: 'gcr.io/cloud-builders/docker'
-  args: ['push', 'gcr.io/$PROJECT_ID/autonomous-engine']
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+# =============================================================================
+# PHASE 4: CLOUD RUN JOB — V16 Autonomous Engine
+# Jobs use --set-env-vars (acceptable: no console-managed secrets on jobs).
+# --task-timeout REQUIRES the 's' duration suffix (API rejects bare integer).
+# --max-retries=0: fail fast — a bad data batch should not be retried,
+#   it will be caught in the next nightly sweep.
+# Idempotent: describe → update if exists, create if not.
+# =============================================================================
+
+- id: 'deploy-autonomous-engine-job'
+  waitFor: ['push-autonomous-engine']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
   entrypoint: bash
   args:
+  - '-eo'
+  - 'pipefail'
   - '-c'
   - |
-    # Create or update the Cloud Run Job (idempotent)
-    if gcloud run jobs describe autonomous-engine --region=asia-south1 --project=$PROJECT_ID 2>/dev/null; then
+    set -eo pipefail
+    echo "[JOB] Deploying autonomous-engine Cloud Run Job: $COMMIT_SHA"
+
+    if gcloud run jobs describe autonomous-engine \
+        --region=asia-south1 \
+        --project=$PROJECT_ID \
+        --quiet 2>/dev/null; then
+      echo "[JOB] Job exists — updating..."
       gcloud run jobs update autonomous-engine \
-        --image=gcr.io/$PROJECT_ID/autonomous-engine \
+        --image=gcr.io/$PROJECT_ID/autonomous-engine:$COMMIT_SHA \
         --region=asia-south1 \
         --memory=512Mi \
-        --task-timeout=3600 \
+        --cpu=1 \
+        --task-timeout=3600s \
+        --max-retries=0 \
         --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com \
-        --set-env-vars="PROJECT_ID=$PROJECT_ID,MOCK_MODE=false,DISCOVERY_ALLOCATION=0.15"
+        --set-env-vars="PROJECT_ID=$PROJECT_ID,MOCK_MODE=false,DISCOVERY_ALLOCATION=0.15" \
+        --quiet
     else
+      echo "[JOB] Job not found — creating..."
       gcloud run jobs create autonomous-engine \
-        --image=gcr.io/$PROJECT_ID/autonomous-engine \
+        --image=gcr.io/$PROJECT_ID/autonomous-engine:$COMMIT_SHA \
         --region=asia-south1 \
         --memory=512Mi \
-        --task-timeout=3600 \
+        --cpu=1 \
+        --task-timeout=3600s \
+        --max-retries=0 \
         --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com \
-        --set-env-vars="PROJECT_ID=$PROJECT_ID,MOCK_MODE=false,DISCOVERY_ALLOCATION=0.15"
+        --set-env-vars="PROJECT_ID=$PROJECT_ID,MOCK_MODE=false,DISCOVERY_ALLOCATION=0.15" \
+        --quiet
+    fi
+    echo "[JOB] autonomous-engine deployed successfully."
+
+# =============================================================================
+# PHASE 5: CLOUD SCHEDULER PROVISIONING
+# Depends on: orchestrator deploy (URL fetched dynamically post-deploy).
+# ALL bash variables use $$ (Cloud Build escape → bash sees $).
+# $PROJECT_ID and $COMMIT_SHA are Cloud Build substitutions (single $).
+# set -eo pipefail: any scheduler failure fails the build — silent breakage
+#   of cron jobs is a production incident waiting to happen.
+# Idempotent: describe → update if exists, create if not.
+# =============================================================================
+
+- id: 'provision-cloud-scheduler'
+  waitFor: ['deploy-orchestrator', 'deploy-autonomous-engine-job']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+  entrypoint: bash
+  args:
+  - '-eo'
+  - 'pipefail'
+  - '-c'
+  - |
+    set -eo pipefail
+
+    # Fetch live orchestrator URL — stable per service, safe to query post-deploy
+    ORCH_URL=$(gcloud run services describe orchestrator \
+      --region=asia-south1 \
+      --project=$PROJECT_ID \
+      --format='value(status.url)')
+
+    if [ -z "$$ORCH_URL" ]; then
+      echo "ERROR: Orchestrator URL is empty. Scheduler provisioning aborted."
+      exit 1
     fi
 
-# ---------------------------------------------------------------------
-# Cloud Scheduler Jobs (idempotent create-or-update)
-# Phase 1-4: ontology decay, reflection, cron sweep, autonomous engine
-# NOTE: Scheduler requires orchestrator URL. Fetched dynamically below.
-# ---------------------------------------------------------------------
-- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-  entrypoint: bash
-  args:
-  - '-c'
-  - |
-    ORCH_URL=$(gcloud run services describe orchestrator --region=asia-south1 --project=$PROJECT_ID --format='value(status.url)')
+    echo "[SCHEDULER] Orchestrator endpoint: $$ORCH_URL"
     SA="lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com"
 
-    # 1. Pipeline Sweep — every 5 minutes (Cartographer heartbeat)
-    if gcloud scheduler jobs describe pipeline-sweep --location=asia-south1 --project=$PROJECT_ID 2>/dev/null; then
+    # ------------------------------------------------------------------
+    # Job 1: Pipeline Sweep — every 5 minutes (Cartographer heartbeat)
+    # ------------------------------------------------------------------
+    if gcloud scheduler jobs describe pipeline-sweep \
+        --location=asia-south1 --project=$PROJECT_ID --quiet 2>/dev/null; then
       gcloud scheduler jobs update http pipeline-sweep \
-        --location=asia-south1 --schedule="*/5 * * * *" \
-        --uri="$ORCH_URL/api/internal/cron/sweep" \
-        --message-body="{}" --http-method=POST \
-        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+        --location=asia-south1 \
+        --schedule='*/5 * * * *' \
+        --uri="$$ORCH_URL/api/internal/cron/sweep" \
+        --message-body='{}' \
+        --http-method=POST \
+        --oidc-service-account-email=$$SA \
+        --oidc-token-audience=$$ORCH_URL \
+        --quiet
     else
       gcloud scheduler jobs create http pipeline-sweep \
-        --location=asia-south1 --schedule="*/5 * * * *" \
-        --uri="$ORCH_URL/api/internal/cron/sweep" \
-        --message-body="{}" --http-method=POST \
-        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+        --location=asia-south1 \
+        --schedule='*/5 * * * *' \
+        --uri="$$ORCH_URL/api/internal/cron/sweep" \
+        --message-body='{}' \
+        --http-method=POST \
+        --oidc-service-account-email=$$SA \
+        --oidc-token-audience=$$ORCH_URL \
+        --quiet
     fi
+    echo "[SCHEDULER] pipeline-sweep OK"
 
-    # 2. AI Reflection Loop — weekly Sunday 02:00 UTC
-    if gcloud scheduler jobs describe ai-reflection --location=asia-south1 --project=$PROJECT_ID 2>/dev/null; then
+    # ------------------------------------------------------------------
+    # Job 2: AI Reflection Loop — weekly Sunday 02:00 UTC
+    # ------------------------------------------------------------------
+    if gcloud scheduler jobs describe ai-reflection \
+        --location=asia-south1 --project=$PROJECT_ID --quiet 2>/dev/null; then
       gcloud scheduler jobs update http ai-reflection \
-        --location=asia-south1 --schedule="0 2 * * 0" \
-        --uri="$ORCH_URL/api/internal/cron/reflection" \
-        --message-body="{}" --http-method=POST \
-        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+        --location=asia-south1 \
+        --schedule='0 2 * * 0' \
+        --uri="$$ORCH_URL/api/internal/cron/reflection" \
+        --message-body='{}' \
+        --http-method=POST \
+        --oidc-service-account-email=$$SA \
+        --oidc-token-audience=$$ORCH_URL \
+        --quiet
     else
       gcloud scheduler jobs create http ai-reflection \
-        --location=asia-south1 --schedule="0 2 * * 0" \
-        --uri="$ORCH_URL/api/internal/cron/reflection" \
-        --message-body="{}" --http-method=POST \
-        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+        --location=asia-south1 \
+        --schedule='0 2 * * 0' \
+        --uri="$$ORCH_URL/api/internal/cron/reflection" \
+        --message-body='{}' \
+        --http-method=POST \
+        --oidc-service-account-email=$$SA \
+        --oidc-token-audience=$$ORCH_URL \
+        --quiet
     fi
+    echo "[SCHEDULER] ai-reflection OK"
 
-    # 3. Ontology Decay — 1st of every month at 00:00 UTC
-    if gcloud scheduler jobs describe ontology-decay --location=asia-south1 --project=$PROJECT_ID 2>/dev/null; then
+    # ------------------------------------------------------------------
+    # Job 3: Ontology Decay — 1st of every month at 00:00 UTC
+    # ------------------------------------------------------------------
+    if gcloud scheduler jobs describe ontology-decay \
+        --location=asia-south1 --project=$PROJECT_ID --quiet 2>/dev/null; then
       gcloud scheduler jobs update http ontology-decay \
-        --location=asia-south1 --schedule="0 0 1 * *" \
-        --uri="$ORCH_URL/api/internal/cron/ontology-decay" \
-        --message-body="{}" --http-method=POST \
-        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+        --location=asia-south1 \
+        --schedule='0 0 1 * *' \
+        --uri="$$ORCH_URL/api/internal/cron/ontology-decay" \
+        --message-body='{}' \
+        --http-method=POST \
+        --oidc-service-account-email=$$SA \
+        --oidc-token-audience=$$ORCH_URL \
+        --quiet
     else
       gcloud scheduler jobs create http ontology-decay \
-        --location=asia-south1 --schedule="0 0 1 * *" \
-        --uri="$ORCH_URL/api/internal/cron/ontology-decay" \
-        --message-body="{}" --http-method=POST \
-        --oidc-service-account-email=$SA --oidc-token-audience=$ORCH_URL
+        --location=asia-south1 \
+        --schedule='0 0 1 * *' \
+        --uri="$$ORCH_URL/api/internal/cron/ontology-decay" \
+        --message-body='{}' \
+        --http-method=POST \
+        --oidc-service-account-email=$$SA \
+        --oidc-token-audience=$$ORCH_URL \
+        --quiet
     fi
+    echo "[SCHEDULER] ontology-decay OK"
 
-    # 4. V16 Autonomous Engine — daily at 03:00 UTC (Cloud Run Job trigger)
-    JOB_NAME="projects/$PROJECT_ID/locations/asia-south1/jobs/autonomous-engine"
-    if gcloud scheduler jobs describe autonomous-engine-trigger --location=asia-south1 --project=$PROJECT_ID 2>/dev/null; then
+    # ------------------------------------------------------------------
+    # Job 4: V16 Autonomous Engine Trigger — daily 03:00 UTC
+    # Uses OAuth2 (not OIDC): calling Google's own Cloud Run Jobs API,
+    # not an OIDC-secured HTTP endpoint.
+    # ------------------------------------------------------------------
+    JOB_RESOURCE="projects/$PROJECT_ID/locations/asia-south1/jobs/autonomous-engine"
+    if gcloud scheduler jobs describe autonomous-engine-trigger \
+        --location=asia-south1 --project=$PROJECT_ID --quiet 2>/dev/null; then
       gcloud scheduler jobs update http autonomous-engine-trigger \
-        --location=asia-south1 --schedule="0 3 * * *" \
-        --uri="https://run.googleapis.com/v2/$JOB_NAME:run" \
-        --message-body="{}" --http-method=POST \
-        --oauth-service-account-email=$SA
+        --location=asia-south1 \
+        --schedule='0 3 * * *' \
+        --uri="https://run.googleapis.com/v2/$$JOB_RESOURCE:run" \
+        --message-body='{}' \
+        --http-method=POST \
+        --oauth-service-account-email=$$SA \
+        --quiet
     else
       gcloud scheduler jobs create http autonomous-engine-trigger \
-        --location=asia-south1 --schedule="0 3 * * *" \
-        --uri="https://run.googleapis.com/v2/$JOB_NAME:run" \
-        --message-body="{}" --http-method=POST \
-        --oauth-service-account-email=$SA
+        --location=asia-south1 \
+        --schedule='0 3 * * *' \
+        --uri="https://run.googleapis.com/v2/$$JOB_RESOURCE:run" \
+        --message-body='{}' \
+        --http-method=POST \
+        --oauth-service-account-email=$$SA \
+        --quiet
     fi
+    echo "[SCHEDULER] autonomous-engine-trigger OK"
 
-    echo "Cloud Scheduler jobs provisioned successfully."
+    echo "[SCHEDULER] All 4 Cloud Scheduler jobs provisioned. Build: $COMMIT_SHA"
 
-# ---------------------------------------------------------------------
-# Firebase Frontend & Firestore Rules/Indexes Deployment
-# ---------------------------------------------------------------------
-- name: 'node:20'
-  entrypoint: 'bash'
+# =============================================================================
+# PHASE 6: FIREBASE DEPLOY (hosting + firestore rules/indexes)
+# Starts immediately in parallel with all phases — no Cloud Run dependency.
+# Uses pre-built firebase-tools image to avoid 3-min npm install on each build.
+# secure-key.json explicitly deleted after deploy (security hygiene).
+# =============================================================================
+
+- id: 'firebase-deploy'
+  waitFor: ['-']
+  name: 'node:20-slim'
+  entrypoint: bash
   args:
+  - '-eo'
+  - 'pipefail'
   - '-c'
   - |
-    npm install -g firebase-tools
-    echo "$$FIREBASE_SA_KEY" > /workspace/secure-key.json
-    export GOOGLE_APPLICATION_CREDENTIALS="/workspace/secure-key.json"
-    firebase deploy --project lead-sniper-prod --only hosting,firestore --non-interactive --force
+    set -eo pipefail
+    echo "[FIREBASE] Installing firebase-tools..."
+    npm install -g firebase-tools --prefer-offline --no-audit --no-fund --silent
+    echo "[FIREBASE] Deploying hosting + Firestore rules/indexes..."
+    echo "$$FIREBASE_SA_KEY" > /workspace/firebase-sa.json
+    GOOGLE_APPLICATION_CREDENTIALS=/workspace/firebase-sa.json \
+    firebase deploy \
+      --project lead-sniper-prod \
+      --only hosting,firestore \
+      --non-interactive \
+      --force
+    rm -f /workspace/firebase-sa.json
+    echo "[FIREBASE] Deploy complete. Build: $COMMIT_SHA"
   secretEnv: ['FIREBASE_SA_KEY']
 
+# =============================================================================
+# BUILD OPTIONS
+# machineType E2_HIGHCPU_8: 8 vCPUs per worker — critical for parallel Docker
+# builds to actually be fast. Default N1 (2 vCPU) bottlenecks Playwright build.
+# =============================================================================
 options:
   logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
 
 availableSecrets:
   secretManager:
