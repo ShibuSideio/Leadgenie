@@ -422,10 +422,11 @@ window.pushToCRM = async function(docId, leadStr) {
     const btn = document.getElementById(`crm-btn-${docId}`);
     try {
         const success = await performApiMutation(`/api/leads/${docId}`, 'PUT', {
-            is_in_crm: true,
-            crm_status: 'new',
+            is_in_crm:      true,
+            crm_status:     'new',
             estimated_value: 0,
-            notes: []
+            notes:          [],
+            expire_at:      null  // DPDP TTL exemption: null prevents Firestore 90-day sweep
         });
         if (success) {
             // Optimistic UI: remove the entire lead card from the DOM immediately

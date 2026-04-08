@@ -1,6 +1,8 @@
 import os
 import json
 import urllib.request
+import urllib.parse
+from urllib.parse import urlparse
 import time
 import datetime
 import httpx
@@ -67,6 +69,36 @@ PIPELINE_URL = os.environ.get("PIPELINE_URL", "https://lead-pipeline-main-abc.a.
 
 FERNET_KEY = os.environ.get("ENCRYPTION_KEY", "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0=")
 cipher_suite = Fernet(FERNET_KEY.encode())
+
+
+# ---------------------------------------------------------------------------
+# ONTOLOGY MAP HELPERS (Phase 1)
+# Stateless pure functions — duplicated from pipeline-main (separate services).
+# ---------------------------------------------------------------------------
+_SOCIAL_ONTOLOGY_DOMAINS = {
+    "reddit.com", "facebook.com", "linkedin.com", "quora.com",
+    "kaggle.com", "instagram.com", "twitter.com", "x.com", "youtube.com"
+}
+
+def parse_base_path(url: str) -> str:
+    """
+    Dynamic base_path key for the ontology_map collection.
+    Social domains  → domain + 2 path segments (e.g., reddit.com/r/Entrepreneur).
+    B2B/news        → root domain only (e.g., techcrunch.com).
+    """
+    try:
+        parsed   = urlparse(url if url.startswith('http') else f'https://{url}')
+        hostname = parsed.hostname or ''
+        domain   = hostname.removeprefix('www.')
+        if not domain:
+            return 'unknown'
+        if any(domain.endswith(s) for s in _SOCIAL_ONTOLOGY_DOMAINS):
+            segments  = [s for s in parsed.path.split('/') if s]
+            key_parts = [domain] + segments[:2]
+            return '/'.join(key_parts)
+        return domain
+    except Exception:
+        return 'unknown'
 
 def get_service_account_email():
     url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
@@ -557,6 +589,42 @@ def trigger_daily_sweep(path):
                             except Exception as e:
                                 print(f"RLHF Backprop Native Error: {e}")
 
+                    # ── Phase 1: Ontology Map RLHF Hooks ───────────────────────────
+                    # Reward: Won / Negotiating  → +0.15 to baseline_weight
+                    # Penalty: Lost             → -0.05 to baseline_weight
+                    # Burn-in guard: only apply math if total_yield >= 50
+                    crm_status = data.get("crm_status")
+                    if crm_status in ["won", "negotiating", "lost"]:
+                        lead_dict     = doc_data.to_dict()
+                        source_url    = lead_dict.get("source_url", lead_dict.get("url", ""))
+                        base_path_key = parse_base_path(source_url)
+                        if base_path_key and base_path_key != 'unknown':
+                            try:
+                                ontology_ref  = db.collection('ontology_map').document(base_path_key)
+                                ontology_snap = ontology_ref.get()
+                                if ontology_snap.exists:
+                                    total_yield = ontology_snap.to_dict().get('total_yield', 0)
+                                    if total_yield >= 50:
+                                        # Burn-in guardrail cleared — apply real delta
+                                        if crm_status in ["won", "negotiating"]:
+                                            delta_weight = 0.15
+                                            print(f"[ONTOLOGY RLHF] Reward +{delta_weight} → {base_path_key}")
+                                        else:  # lost
+                                            delta_weight = -0.05
+                                            print(f"[ONTOLOGY RLHF] Penalty {delta_weight} → {base_path_key}")
+                                        ontology_ref.update({
+                                            'baseline_weight': firestore.Increment(delta_weight),
+                                            'last_seen':       firestore.SERVER_TIMESTAMP
+                                        })
+                                    else:
+                                        # Burn-in period: log interaction, keep weight at 1.0
+                                        print(f"[ONTOLOGY RLHF] Burn-in ({total_yield}/50 yields) — "
+                                              f"{crm_status} logged for {base_path_key}, weight unchanged.")
+                                else:
+                                    print(f"[ONTOLOGY RLHF] No ontology doc for {base_path_key} yet.")
+                            except Exception as re:
+                                print(f"[ONTOLOGY RLHF] Write failed for {base_path_key}: {re}")
+
                     # V14: Headless CRM Egress — stripped payload, no raw DOM
                     if status == "converted":
                         try:
@@ -904,5 +972,68 @@ Example output: {{"Classic B2B": 14, "Social/Forum Listening": 11, "Review Hijac
         db.collection("system_telemetry").document("vector_weights").set(new_weights)
         print(f"[REFLECTION] vector_weights updated: {new_weights}")
         return jsonify({"status": "reflection_complete", "sample_size": len(scrubbed), "new_weights": new_weights}), 200
+
+    # ──────────────────────────────────────────────────────────────────────────────────────
+    # Phase 1: ONTOLOGY DECAY CRON — Monthly Regression-to-the-Mean
+    # OIDC-protected. Triggered by Cloud Scheduler on a 1/month schedule.
+    # Math: new_weight = weight - (weight - 1.0) * 0.10
+    #   e.g.  1.5  →  1.5  - (0.5 * 0.10)  = 1.45
+    #          0.8  →  0.8  - (-0.2 * 0.10) = 0.82
+    # ──────────────────────────────────────────────────────────────────────────────────────
+    if request.path == "/api/internal/cron/ontology-decay" and request.method == "POST":
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing OIDC token"}), 401
+        token = auth_header.split("Bearer ")[1]
+        try:
+            from google.oauth2 import id_token
+            from google.auth.transport import requests as google_requests
+            id_token.verify_oauth2_token(token, google_requests.Request())
+        except Exception as e:
+            return jsonify({"error": "Invalid OIDC token", "details": str(e)}), 403
+
+        # Iterate every document in ontology_map and apply decay
+        updated_count  = 0
+        skipped_count  = 0
+        errored_count  = 0
+        decay_log      = []
+
+        try:
+            docs = db.collection('ontology_map').stream()
+            for doc in docs:
+                d      = doc.to_dict()
+                weight = d.get('baseline_weight', 1.0)
+                diff   = weight - 1.0
+
+                if abs(diff) < 0.001:  # already at or within float epsilon of 1.0
+                    skipped_count += 1
+                    continue
+
+                # Regression-to-mean: reduce the deviation from 1.0 by 10%
+                new_weight = round(weight - diff * 0.10, 6)
+
+                try:
+                    db.collection('ontology_map').document(doc.id).update({
+                        'baseline_weight': new_weight,
+                        'last_decayed':    firestore.SERVER_TIMESTAMP
+                    })
+                    decay_log.append({"path": doc.id, "old": weight, "new": new_weight})
+                    updated_count += 1
+                    print(f"[DECAY] {doc.id}: {weight:.4f} → {new_weight:.4f}")
+                except Exception as write_err:
+                    print(f"[DECAY] Write failed for {doc.id}: {write_err}")
+                    errored_count += 1
+
+        except Exception as scan_err:
+            return jsonify({"error": "Ontology scan failed", "details": str(scan_err)}), 500
+
+        print(f"[DECAY] Complete. updated={updated_count} skipped={skipped_count} errors={errored_count}")
+        return jsonify({
+            "status":        "decay_complete",
+            "updated":       updated_count,
+            "skipped":       skipped_count,
+            "errors":        errored_count,
+            "decay_applied": decay_log
+        }), 200
 
     return jsonify({"error": "Not Found"}), 404

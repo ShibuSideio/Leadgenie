@@ -94,6 +94,44 @@ def safe_truncate(text: str, max_bytes: int = 100000) -> str:
     return encoded[:max_bytes].decode('utf-8', errors='ignore')
 
 
+# Social domains that need deeper path-level precision in the ontology map.
+_SOCIAL_ONTOLOGY_DOMAINS = {
+    "reddit.com", "facebook.com", "linkedin.com", "quora.com",
+    "kaggle.com", "instagram.com", "twitter.com", "x.com", "youtube.com"
+}
+
+def parse_base_path(url: str) -> str:
+    """
+    Extracts the canonical base_path key for the ontology_map collection.
+
+    Rules (per Phase 1 architectural ruling):
+      • Social / Walled-Garden domains  →  domain + first 2 path segments
+          reddit.com/r/Entrepreneur/comments/xyz  →  reddit.com/r/Entrepreneur
+      • All other (B2B / news / directories) →  root domain only
+          www.techcrunch.com/2024/03/article     →  techcrunch.com
+
+    Strips www., query params, fragments, and trailing slashes.
+    Returns 'unknown' as a safe sentinel if parsing fails.
+    """
+    try:
+        parsed   = urlparse(url if url.startswith('http') else f'https://{url}')
+        hostname = parsed.hostname or ''
+        # Strip leading www.
+        domain   = hostname.removeprefix('www.')
+        if not domain:
+            return 'unknown'
+
+        if any(domain.endswith(s) for s in _SOCIAL_ONTOLOGY_DOMAINS):
+            # Social: domain + up to 2 clean path segments
+            segments = [s for s in parsed.path.split('/') if s]  # drop empties
+            key_parts = [domain] + segments[:2]
+            return '/'.join(key_parts)
+        else:
+            return domain
+    except Exception:
+        return 'unknown'
+
+
 def validate_and_update_lead(payload_dict: dict, doc_ref) -> bool:
     """
     Universal Data Contract gatekeeper.
@@ -103,6 +141,10 @@ def validate_and_update_lead(payload_dict: dict, doc_ref) -> bool:
     On failure  → Dead Letter pattern: writes raw payload with
                   status='schema_violation' for debugging. Returns False.
 
+    Also upserts the ontology_map on every successful write:
+      - Creates the document if the base_path is new (total_yield=0, weight=1.0)
+      - Increments total_yield by 1 on every valid lead
+
     Both dispatch() and finalize() must pass their final dicts through here
     instead of calling doc_ref.update() directly.
     """
@@ -111,6 +153,28 @@ def validate_and_update_lead(payload_dict: dict, doc_ref) -> bool:
         doc_ref.update(validated.to_firestore_dict())
         print(f"[CONTRACT] ✓ Validated lead {payload_dict.get('id', '?')} "
               f"(engine={validated.origin_engine}, score={validated.score})")
+
+        # ── Ontology Map upsert (Phase 1) ──────────────────────────────
+        # Executed ONLY after a successful Pydantic-validated write (Option A ruling).
+        # Avoids polluting the brain with failed/ghost leads.
+        source_url = payload_dict.get('source_url', '')
+        base_path  = parse_base_path(source_url)
+        if base_path and base_path != 'unknown':
+            try:
+                ontology_ref = db.collection('ontology_map').document(base_path)
+                ontology_ref.set(
+                    {
+                        'base_path':       base_path,
+                        'total_yield':     firestore.Increment(1),
+                        'baseline_weight': 1.0,      # only written on creation (merge=True)
+                        'last_seen':       firestore.SERVER_TIMESTAMP
+                    },
+                    merge=True   # increment total_yield; preserve existing baseline_weight
+                )
+                print(f"[ONTOLOGY] Upserted {base_path}")
+            except Exception as oe:
+                print(f"[ONTOLOGY] Upsert failed for {base_path}: {oe}")
+
         return True
     except ValidationError as ve:
         print(f"[CONTRACT] ✗ Schema violation for {payload_dict.get('id', '?')}: {ve}")
@@ -939,6 +1003,10 @@ def dispatch():
         doc_ref     = db.collection("leads").document(lead_id)
 
         try:
+            # ── DPDP TTL: expire_at = now + 90 days (Firestore native TTL watches this field) ──
+            # Leads NOT pushed to CRM will be auto-deleted after 90 days.
+            # pushToCRM() sets expire_at=null to permanently exempt CRM leads.
+            _expire_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=90)
             doc_ref.create({
                 "tenant_id":        tenant_id,
                 "matched_campaigns": [campaign_id],
@@ -946,7 +1014,8 @@ def dispatch():
                 "confidence_tier":  url_to_tier.get(url, "High"),
                 "sourcing_vector":  sourcing_vector,
                 "status":           "processing",
-                "createdAt":        firestore.SERVER_TIMESTAMP
+                "createdAt":        firestore.SERVER_TIMESTAMP,
+                "expire_at":        _expire_at,
             })
         except AlreadyExists:
             print(f"[UAR] Cross-campaign duplicate for {target_domain}. Updating matched_campaigns.")
