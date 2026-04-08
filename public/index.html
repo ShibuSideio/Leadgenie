@@ -28,12 +28,11 @@
         <nav class="glass-nav">
             <div class="logo">Sideio Smart Growth</div>
             <div class="nav-links">
-                <a href="#" id="tab-dashboard" class="active" onclick="switchTab('dashboard')">Dashboard</a>
-                <a href="#" id="tab-campaigns" onclick="switchTab('target')">Targeting</a>
-                <a href="#" id="tab-team" onclick="switchTab('team')">My Team</a>
-                <a href="#" id="tab-reports" onclick="switchTab('reports')">Custom Reports</a>
-                <a href="#view-l0-admin" id="tab-l0-admin" class="font-bold text-purple-600" onclick="switchTab('l0-admin')">L0 Admin</a>
-                <a href="#view-macro" id="tab-macro" class="hidden font-bold text-blue-600" onclick="switchTab('macro')">Global Trends</a>
+                <a href="#" id="tab-dashboard" class="active" onclick="switchTab('dashboard')">Home</a>
+                <a href="#" id="tab-campaigns" onclick="switchTab('target')">My Searches</a>
+                <a href="#view-crm-test" id="tab-crm" onclick="switchTab('crm-test')">Pipeline CRM</a>
+                <a href="#" id="tab-reports" onclick="switchTab('reports')">Reports</a>
+                <a href="#view-l0-admin" id="tab-l0-admin" class="hidden font-bold text-purple-600" onclick="switchTab('l0-admin')">Admin</a>
                 <button id="logout-btn" class="secondary-btn">Logout</button>
             </div>
         </nav>
@@ -87,20 +86,44 @@
 
             <!-- Main Content Area -->
             <section id="view-dashboard" class="glass-panel main-feed">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <h2>Your Latest Hot Leads</h2>
-                    <select id="campaign-filter" style="padding: 6px; border-radius: 6px; border: 1px solid var(--glass-border); background: #fff;" onchange="filterLeadsByCampaign(this.value)">
-                        <option value="all">All Campaigns</option>
+                <!-- Greeting + KPI Bar -->
+                <div id="dashboard-greeting" class="greeting-bar">
+                    <div class="greeting-text">
+                        <span id="greeting-message">Welcome back.</span>
+                        <span id="greeting-sub" style="color:var(--text-muted); font-size:0.9rem; margin-left:8px;"></span>
+                    </div>
+                    <button class="find-clients-hero-btn" onclick="openNewCampaignModal()">+ Find New Clients</button>
+                </div>
+                <div class="kpi-tiles" id="kpi-tiles">
+                    <div class="kpi-tile kpi-hot">
+                        <div class="kpi-icon">🔥</div>
+                        <div class="kpi-value" id="kpi-new-count">—</div>
+                        <div class="kpi-label">New Leads</div>
+                    </div>
+                    <div class="kpi-tile kpi-active">
+                        <div class="kpi-icon">💬</div>
+                        <div class="kpi-value" id="kpi-contacted-count">—</div>
+                        <div class="kpi-label">Contacted</div>
+                    </div>
+                    <div class="kpi-tile kpi-won">
+                        <div class="kpi-icon">🏆</div>
+                        <div class="kpi-value" id="kpi-won-count">—</div>
+                        <div class="kpi-label">Converted</div>
+                    </div>
+                </div>
+                <!-- Campaign filter -->
+                <div style="display:flex; justify-content:space-between; align-items:center; margin: 16px 0 8px;">
+                    <h3 style="font-size:1rem; color:var(--text-muted); font-weight:500;">Today's Leads</h3>
+                    <select id="campaign-filter" style="padding: 6px 10px; border-radius: 8px; border: 1px solid var(--glass-border); background: #fff; font-size:0.85rem;" onchange="filterLeadsByCampaign(this.value)">
+                        <option value="all">All Searches</option>
                     </select>
                 </div>
                 <div id="active-campaign-feed"></div>
                 <div id="leads-list" class="leads-list">
-                    <!-- Leads will be injected here via JS -->
-                    <div class="lead-card pulse">Loading intelligence...</div>
+                    <div class="lead-card pulse">Loading your pipeline...</div>
                 </div>
-                
                 <div style="text-align: center; margin-top: 16px;">
-                    <button class="secondary-btn" onclick="loadMoreLeads()" style="padding: 10px 24px;">Load Historical Leads</button>
+                    <button class="secondary-btn" onclick="loadMoreLeads()" style="padding: 10px 24px;">Load Older Leads</button>
                 </div>
             </section>
 
@@ -284,40 +307,116 @@
         </div>
     </div>
 
-    <div id="new-campaign-modal" class="hidden" style="position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:999; display:flex; justify-content:center; align-items:center;">
-        <div class="glass-panel" style="width: 400px; max-width: 90%;">
-            <h2>Find New Clients</h2>
-            <br>
-            <input type="text" id="camp-name" placeholder="What do you want to call this search?" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
-            <input type="text" id="camp-bio" placeholder="Describe your product offering..." class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
-            <input type="text" id="camp-keys" placeholder="Target Keywords (e.g. CEO, funding, hiring)" class="full-width" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
-            
-            <label style="font-size: 0.8rem; color: var(--text-muted); padding-top: 8px;">Target Location</label>
-            <div style="display:flex; gap: 8px; margin-bottom: 12px;">
-                <select id="camp-gl" onchange="handleCountryChange('camp-gl','camp-location')" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; background: white;">
-                    <option value="">Global</option>
-                    <option value="us">United States</option>
-                    <option value="uk">United Kingdom</option>
-                    <option value="ca">Canada</option>
-                    <option value="au">Australia</option>
-                    <option value="in">India</option>
-                </select>
-                <input type="text" id="camp-location" placeholder="City, State/Region" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+    <!-- ═══════════════════════════════════════════════════════════
+         NEW: CONVERSATIONAL "FIND NEW CLIENTS" MODAL — 2-STEP FLOW
+         Step 1: Single-sentence intent input
+         Step 2: Smart confirmation card with guided validation
+    ════════════════════════════════════════════════════════════════ -->
+    <div id="new-campaign-modal" class="hidden fc-overlay">
+        <div class="fc-modal glass-panel">
+
+            <!-- ── STEP 1: Intent Input ───────────────────────────── -->
+            <div id="fc-step-1">
+                <button class="fc-close-btn" onclick="closeNewCampaignModal()">✕</button>
+                <div class="fc-logo-mark">✦</div>
+                <h2 class="fc-headline">Who are your next clients?</h2>
+                <p class="fc-sub">Describe them in plain English. We handle the rest.</p>
+
+                <div class="fc-input-wrap">
+                    <span class="fc-input-icon">🔍</span>
+                    <textarea id="fc-intent" class="fc-intent-input"
+                        placeholder="e.g. Small e-commerce businesses in the UK that are growing fast and need better marketing"
+                        rows="3"
+                        oninput="fcUpdateCharHint(this)"
+                        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();fcStep1Next();}"
+                    ></textarea>
+                </div>
+                <div class="fc-char-hint" id="fc-char-hint">Press Enter or click below</div>
+
+                <!-- Quick-start templates -->
+                <div class="fc-templates">
+                    <p class="fc-templates-label">Quick start ↓</p>
+                    <div class="fc-chips">
+                        <button class="fc-chip" onclick="fcFillTemplate(this)">🏪 Local service businesses that need more customers</button>
+                        <button class="fc-chip" onclick="fcFillTemplate(this)">💻 SaaS startups actively hiring sales engineers</button>
+                        <button class="fc-chip" onclick="fcFillTemplate(this)">📦 E-commerce stores running paid ads</button>
+                        <button class="fc-chip" onclick="fcFillTemplate(this)">🏥 Healthcare clinics expanding into new areas</button>
+                    </div>
+                </div>
+
+                <button class="fc-next-btn" id="fc-next-btn" onclick="fcStep1Next()">
+                    Find My Clients →
+                </button>
             </div>
-            
-            <label style="font-size: 0.8rem; color: var(--text-muted); padding-top: 8px;">Priority Target Websites (Max 10)</label>
-            <textarea id="camp-target-urls" placeholder="Paste up to 10 specific URLs you want to pitch (one per line). Our AI will process these first, and automatically hunt down additional leads to fill your pipeline." class="full-width" rows="4" style="margin-bottom: 12px; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; resize: vertical;"></textarea>
-            
-            <label style="display:flex; align-items:center; gap:8px; margin-bottom: 24px; font-size: 0.9rem;">
-                <input type="checkbox" id="competitor-monitor-cb" checked> Automatically track my competitors
-            </label>
-            
-            <div style="display:flex; gap: 12px;">
-                <button class="primary-btn full-width" onclick="saveCampaignAction()">Start Searching</button>
-                <button class="secondary-btn full-width" onclick="document.getElementById('new-campaign-modal').classList.add('hidden')">Close</button>
+
+            <!-- ── STEP 2: Smart Confirmation Card ───────────────── -->
+            <div id="fc-step-2" class="hidden">
+                <button class="fc-back-btn" onclick="fcGoBack()">← Back</button>
+                <button class="fc-close-btn" onclick="closeNewCampaignModal()">✕</button>
+
+                <div class="fc-understood-badge">✓ Here's what I found</div>
+                <p class="fc-sub" style="margin-bottom:20px;">Confirm the details below — I'll personalise every lead to this.</p>
+
+                <!-- Block A: Who they want to reach -->
+                <div class="fc-confirm-block" id="fc-block-who">
+                    <div class="fc-block-icon">🎯</div>
+                    <div class="fc-block-content">
+                        <div class="fc-block-label">You want to reach</div>
+                        <div class="fc-block-value" id="fc-confirm-who">—</div>
+                        <input class="fc-block-edit hidden" id="fc-edit-who" placeholder="Describe your ideal client..." />
+                    </div>
+                    <button class="fc-block-edit-btn" onclick="fcToggleEdit('who')">Edit</button>
+                </div>
+
+                <!-- Block B: What they sell -->
+                <div class="fc-confirm-block" id="fc-block-what">
+                    <div class="fc-block-icon">💼</div>
+                    <div class="fc-block-content">
+                        <div class="fc-block-label">What you offer them</div>
+                        <div class="fc-block-value" id="fc-confirm-what" style="color:var(--text-muted); font-style:italic;">Tell me what you sell…</div>
+                        <textarea class="fc-block-edit" id="fc-edit-what" placeholder="e.g. We build custom websites for service businesses. We help them get more enquiries online." rows="2"></textarea>
+                        <div class="fc-required-note" id="fc-what-required">⚡ This helps us write a personalised pitch for every lead. Please add a sentence or two.</div>
+                    </div>
+                    <button class="fc-block-edit-btn" id="fc-what-btn" onclick="fcToggleEdit('what')">Add ↓</button>
+                </div>
+
+                <!-- Block C: Location -->
+                <div class="fc-confirm-block" id="fc-block-where" style="border-color: transparent;">
+                    <div class="fc-block-icon">📍</div>
+                    <div class="fc-block-content">
+                        <div class="fc-block-label">Where should I look?</div>
+                        <div id="fc-location-chips" class="fc-location-chips">
+                            <button class="fc-loc-chip" data-gl="" data-loc="Worldwide" onclick="fcSelectLocation(this)">🌍 Worldwide</button>
+                            <button class="fc-loc-chip" data-gl="in" data-loc="India" onclick="fcSelectLocation(this)">🇮🇳 India</button>
+                            <button class="fc-loc-chip" data-gl="us" data-loc="United States" onclick="fcSelectLocation(this)">🇺🇸 USA</button>
+                            <button class="fc-loc-chip" data-gl="uk" data-loc="United Kingdom" onclick="fcSelectLocation(this)">🇬🇧 UK</button>
+                            <button class="fc-loc-chip" data-gl="ca" data-loc="Canada" onclick="fcSelectLocation(this)">🇨🇦 Canada</button>
+                            <button class="fc-loc-chip" data-gl="au" data-loc="Australia" onclick="fcSelectLocation(this)">🇦🇺 Australia</button>
+                        </div>
+                        <input class="fc-block-edit" id="fc-edit-where-city" placeholder="City or region (optional)" style="margin-top:8px;" />
+                        <div class="fc-required-note" id="fc-where-required">📍 Please pick a location so I know where to focus.</div>
+                        <!-- hidden fields used by saveCampaignAction -->
+                        <input type="hidden" id="camp-gl" />
+                        <input type="hidden" id="camp-location" />
+                    </div>
+                </div>
+
+                <!-- Hidden internal fields (populated by JS) -->
+                <input type="hidden" id="camp-name" />
+                <input type="hidden" id="camp-bio" />
+                <input type="hidden" id="camp-keys" />
+                <input type="hidden" id="camp-target-urls" />
+
+                <!-- Validation notice -->
+                <div class="fc-validation-bar hidden" id="fc-validation-bar"></div>
+
+                <button class="fc-next-btn" id="fc-launch-btn" onclick="fcLaunch()">
+                    🚀 Find My Clients
+                </button>
+                <p class="fc-disclaimer">Leads are matched to your description. Quality over quantity, always.</p>
             </div>
+
         </div>
-    </div>
     </div>
 
     <div id="edit-campaign-modal" class="hidden" style="position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:999; display:flex; justify-content:center; align-items:center;">
@@ -401,6 +500,6 @@
             });
         }
     </script>
-    <script src="app.js?v=22"></script>
+    <script src="app.js?v=23"></script>
 </body>
 </html>

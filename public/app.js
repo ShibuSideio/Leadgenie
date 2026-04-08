@@ -1,4 +1,4 @@
-// Firebase configuration (Placeholder)
+﻿// Firebase configuration (Placeholder)
 const firebaseConfig = {
     apiKey: "AIzaSyCxqimZJ7kspuJJ8qXF34zguLkNXi6MWd4",
     authDomain: "lead-sniper-prod.firebaseapp.com",
@@ -69,7 +69,7 @@ async function loadDashboard() {
         loadLeads()
     ]);
 
-    // V15.1 HOTFIX: crmAutoOpen resolved here — inside the real loadDashboard,
+    // V15.1 HOTFIX: crmAutoOpen resolved here â€” inside the real loadDashboard,
     // NOT via a recursive override. loadMe() must have run first so
     // window.currentUserData (and .role) is populated before switchTab checks it.
     if (window.crmAutoOpen) {
@@ -132,7 +132,7 @@ async function loadMe() {
             const alertBanner = document.getElementById('wallet-alert-banner');
             const newCampBtn = document.querySelector('button[onclick="openNewCampaignModal()"]');
             if (credits <= 0) {
-                if (alertBanner) { alertBanner.innerText = "🛑 Wallet Empty: You have 0 credits. Upgrade your account to continue sweeping."; alertBanner.classList.remove('hidden'); }
+                if (alertBanner) { alertBanner.innerText = "ðŸ›‘ Wallet Empty: You have 0 credits. Upgrade your account to continue sweeping."; alertBanner.classList.remove('hidden'); }
                 if (newCampBtn) { newCampBtn.innerText = "Upgrade Plan (0 Credits)"; newCampBtn.disabled = true; newCampBtn.style.background = "#94a3b8"; }
             } else if (credits < 50) {
                 if (alertBanner) alertBanner.classList.remove('hidden');
@@ -151,6 +151,11 @@ async function loadMe() {
                 hookInput.value = data.crm_webhook_url;
             }
             window.currentUserData = data;
+
+            // V17: Greeting with first name
+            const dName = auth.currentUser?.displayName || '';
+            const firstName = dName.split(' ')[0] || '';
+            fcUpdateGreeting(firstName);
             
         }
     } catch(e) { console.error('Failed to load wallet', e); }
@@ -200,7 +205,7 @@ async function loadCampaigns() {
             const statusBadge = `<span style="font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(camp.status || 'unknown').toUpperCase()}</span>`;
             
             const hasLocation = camp.gl && camp.location;
-            const locationWarn = hasLocation ? '' : '<br><span style="color: #ea580c; font-size: 0.75rem; display:block; margin-top:4px;">⚠️ Location Missing: Edit Campaign to set Targeting</span>';
+            const locationWarn = hasLocation ? '' : '<br><span style="color: #ea580c; font-size: 0.75rem; display:block; margin-top:4px;">âš ï¸ Location Missing: Edit Campaign to set Targeting</span>';
             
             tableHTML += `
                 <tr style="border-bottom: 1px solid var(--glass-border);">
@@ -316,28 +321,29 @@ async function loadLeads() {
                 if (elIgn) elIgn.innerText = cIgnored;
                 
                 initAnalyticsChart(cNew, cContact, cConvert);
+                fcUpdateKPIs(rawLeadsCache);
                 renderLeads();
             }, (error) => {
                 console.error('[Firestore] onSnapshot Error:', error);
                 if (error.code === 'failed-precondition') {
                     // Missing composite index for (tenant_id, is_in_crm).
-                    // DO NOT retry — show actionable toast and stop.
+                    // DO NOT retry â€” show actionable toast and stop.
                     const msg = 'Firestore index missing for CRM feed filter. Check GCP Console to create the composite index for (tenant_id, is_in_crm).';
                     console.error('[Firestore] Missing index:', msg);
-                    showToast('Feed index missing — see console for index link.', 'error');
+                    showToast('Feed index missing â€” see console for index link.', 'error');
                     leadsList.innerHTML = `<div class="lead-card" style="color:#f59e0b; border-color:#f59e0b; padding:16px;">
-                        ⚠️ Firestore composite index required.<br>
+                        âš ï¸ Firestore composite index required.<br>
                         <small>Open the browser console for the GCP link to auto-create it (takes ~1 min).</small>
                     </div>`;
-                    return; // Hard stop — no retry, no recursion.
+                    return; // Hard stop â€” no retry, no recursion.
                 }
                 if (error.code === 'permission-denied') {
-                    console.warn('[Firestore] Permission denied — check firestore.rules or approval_status.');
+                    console.warn('[Firestore] Permission denied â€” check firestore.rules or approval_status.');
                     return;
                 }
                 // All other errors: log + display, no retry.
                 console.error('[Firestore] Unhandled snapshot error:', error.code, error.message);
-                showToast('Live feed error — refresh to reconnect.', 'error');
+                showToast('Live feed error â€” refresh to reconnect.', 'error');
             });
         
     } catch (error) {
@@ -359,7 +365,7 @@ function createLeadCard(docId, lead) {
     let hiringIntent = lead.hiring_intent_found || '';
     let hiringBadge = '';
     if (hiringIntent === 'Yes') {
-        hiringBadge = `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; border:1px solid #a7f3d0">🟢 Hiring</span>`;
+        hiringBadge = `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; border:1px solid #a7f3d0">ðŸŸ¢ Hiring</span>`;
     }
     
     const techDict = {
@@ -374,11 +380,11 @@ function createLeadCard(docId, lead) {
         'react': 'Modern Web App'
     };
     
-    let techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0) ? lead.tech_stack_found.map(tech => `<span style="font-size:0.75rem; background:transparent; color:#6b7280; padding:2px 6px; border-radius:4px; border:1px solid #e5e7eb">⚡ ${techDict[tech.toLowerCase()] || tech}</span>`).join('') : '';
-    let exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">🔒 Exclusive Lead</span>`;
-    let competitorBadge = lead.competitor_match ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">🎯 Competitor Intercept: ${lead.competitor_match}</span>` : '';
+    let techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0) ? lead.tech_stack_found.map(tech => `<span style="font-size:0.75rem; background:transparent; color:#6b7280; padding:2px 6px; border-radius:4px; border:1px solid #e5e7eb">âš¡ ${techDict[tech.toLowerCase()] || tech}</span>`).join('') : '';
+    let exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">ðŸ”’ Exclusive Lead</span>`;
+    let competitorBadge = lead.competitor_match ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">ðŸŽ¯ Competitor Intercept: ${lead.competitor_match}</span>` : '';
 
-    // V16: origin_engine badge — safe fallback for legacy leads without this field
+    // V16: origin_engine badge â€” safe fallback for legacy leads without this field
     const originEngine  = lead.origin_engine || 'cartographer';
     const engineBadge   = (originEngine === 'autonomous')
         ? '<span style="font-size:0.75rem; background:#faf5ff; color:#7c3aed; padding:2px 8px; border-radius:4px; border:1px solid #ddd6fe; font-weight:600;">&#9889; Predictive Match</span>'
@@ -418,7 +424,7 @@ function createLeadCard(docId, lead) {
 }
 
 window.pushToCRM = async function(docId, leadStr) {
-    // V15: Native CRM push — sets is_in_crm:true + initialises crm_status:new
+    // V15: Native CRM push â€” sets is_in_crm:true + initialises crm_status:new
     const btn = document.getElementById(`crm-btn-${docId}`);
     try {
         const success = await performApiMutation(`/api/leads/${docId}`, 'PUT', {
@@ -438,7 +444,7 @@ window.pushToCRM = async function(docId, leadStr) {
             // Prune from rawLeadsCache so re-renders stay clean
             rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
 
-            showToast('Lead filed in CRM — navigate to #crm-test to manage it.', 'success');
+            showToast('Lead filed in CRM â€” navigate to #crm-test to manage it.', 'success');
 
             // Optional legacy webhook fire
             const userUrl = window.currentUserData?.crm_webhook_url;
@@ -451,7 +457,7 @@ window.pushToCRM = async function(docId, leadStr) {
         }
     } catch(e) {
         console.error('CRM Push failure', e);
-        showToast('CRM push failed — try again.', 'error');
+        showToast('CRM push failed â€” try again.', 'error');
     }
 };
 
@@ -524,7 +530,7 @@ window.smartContactAction = function(docId, dm, uri, platform) {
         cardEl.remove();
     }
 
-    // 3. Open the URI — Phase 2: Relative Path Defence
+    // 3. Open the URI â€” Phase 2: Relative Path Defence
     if (uri) {
         const isEmail = platform === 'email' || (uri.includes('@') && !uri.startsWith('http'));
         const isPhone = platform === 'other' && /^[\d\s+()\-]{6,}$/.test(uri);
@@ -534,7 +540,7 @@ window.smartContactAction = function(docId, dm, uri, platform) {
         } else if (isPhone) {
             href = `tel:${uri}`;
         } else if (/^(https?:\/\/|mailto:|tel:)/i.test(uri)) {
-            // URI already has a valid protocol — use as-is
+            // URI already has a valid protocol â€” use as-is
             href = uri;
         } else {
             // Relative path / naked domain guard: prepend https://
@@ -543,7 +549,7 @@ window.smartContactAction = function(docId, dm, uri, platform) {
         window.open(href, '_blank', 'noopener,noreferrer');
     }
 
-    showToast('Message copied — opening contact...', 'success');
+    showToast('Message copied â€” opening contact...', 'success');
     updateLeadStatus(docId, 'contacted');
 };
 
@@ -587,24 +593,24 @@ window.changeLeadPage = function(delta) {
 };
 
 // ---------------------------------------------------------------------------
-// ENTERPRISE DOSSIER RENDERER — V14 POLYMORPHIC SCHEMA
+// ENTERPRISE DOSSIER RENDERER â€” V14 POLYMORPHIC SCHEMA
 // ---------------------------------------------------------------------------
 
 // Platform metadata: icon, label, CTA text for each endpoint type
 const PLATFORM_META = {
-    whatsapp:  { icon: '💬', label: 'WhatsApp',   cta: 'Message on WhatsApp',  priority: 1 },
-    instagram: { icon: '📸', label: 'Instagram',  cta: 'DM on Instagram',      priority: 2 },
-    linkedin:  { icon: '💼', label: 'LinkedIn',   cta: 'Connect on LinkedIn',  priority: 2 },
-    facebook:  { icon: '📘', label: 'Facebook',   cta: 'Message on Facebook',  priority: 3 },
-    email:     { icon: '📧', label: 'Email',      cta: 'Send Email',           priority: 4 },
-    gmb:       { icon: '📍', label: 'GMB',        cta: 'Open Maps Profile',    priority: 4 },
-    reddit:    { icon: '🔴', label: 'Reddit',     cta: 'Open Reddit Profile',  priority: 5 },
-    other:     { icon: '🔗', label: 'Contact',    cta: 'Open Contact',         priority: 6 }
+    whatsapp:  { icon: 'ðŸ’¬', label: 'WhatsApp',   cta: 'Message on WhatsApp',  priority: 1 },
+    instagram: { icon: 'ðŸ“¸', label: 'Instagram',  cta: 'DM on Instagram',      priority: 2 },
+    linkedin:  { icon: 'ðŸ’¼', label: 'LinkedIn',   cta: 'Connect on LinkedIn',  priority: 2 },
+    facebook:  { icon: 'ðŸ“˜', label: 'Facebook',   cta: 'Message on Facebook',  priority: 3 },
+    email:     { icon: 'ðŸ“§', label: 'Email',      cta: 'Send Email',           priority: 4 },
+    gmb:       { icon: 'ðŸ“', label: 'GMB',        cta: 'Open Maps Profile',    priority: 4 },
+    reddit:    { icon: 'ðŸ”´', label: 'Reddit',     cta: 'Open Reddit Profile',  priority: 5 },
+    other:     { icon: 'ðŸ”—', label: 'Contact',    cta: 'Open Contact',         priority: 6 }
 };
 
 /**
  * Resolves the primary endpoint from a contact_endpoints array
- * using the hierarchy: WhatsApp → Instagram/LinkedIn → Email → Reddit/Forums → Other
+ * using the hierarchy: WhatsApp â†’ Instagram/LinkedIn â†’ Email â†’ Reddit/Forums â†’ Other
  */
 function getContactHierarchy(endpoints) {
     if (!endpoints || endpoints.length === 0) return null;
@@ -616,34 +622,34 @@ function getContactHierarchy(endpoints) {
 }
 
 function generateLeadInnerHtml(docId, lead) {
-    // ── Enterprise Dossier fields ─────────────────────────────────────────────
+    // â”€â”€ Enterprise Dossier fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const targetName       = (!lead.decision_maker_name        || lead.decision_maker_name        === 'N/A') ? 'Data unavailable on scanned domain'                       : lead.decision_maker_name;
     const companySize      = (!lead.company_size_tier          || lead.company_size_tier          === 'N/A') ? 'Requires secondary analysis'                               : lead.company_size_tier;
     const primaryObjection = (!lead.primary_objection_hypothesis || lead.primary_objection_hypothesis === 'N/A') ? 'Insufficient data to generate confident hypothesis'  : lead.primary_objection_hypothesis;
     const icebreakerAngle  = lead.icebreaker_angle || '';
 
-    // ── URL ───────────────────────────────────────────────────────────────────
+    // â”€â”€ URL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let urlHostname = 'Unknown URL';
     try { if (lead.url) urlHostname = new URL(lead.url).hostname; } catch(e) {}
 
     const statusColor = lead.status === 'completed' ? 'var(--success)'
         : (lead.status === 'ignored' ? '#ef4444' : 'var(--text-muted)');
 
-    // ── V14: Intent Signal (replaces plain pain_point at top of card) ─────────
+    // â”€â”€ V14: Intent Signal (replaces plain pain_point at top of card) â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const intentSignal = lead.intent_signal || lead.pain_point || '';
     const intentSignalHtml = intentSignal
         ? `<div class="intent-signal">${intentSignal}</div>`
         : '';
 
-    // ── Confidence Tier badge ────────────────────────────────────────────────
+    // â”€â”€ Confidence Tier badge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const tierClass  = lead.confidence_tier === 'Medium' ? 'tier-medium' : 'tier-high';
     const tierBadge  = lead.confidence_tier
-        ? `<span class="tier-badge ${tierClass}">${lead.confidence_tier === 'High' ? '✓' : '~'} ${lead.confidence_tier}</span>`
+        ? `<span class="tier-badge ${tierClass}">${lead.confidence_tier === 'High' ? 'âœ“' : '~'} ${lead.confidence_tier}</span>`
         : '';
 
-    // ── Badges ────────────────────────────────────────────────────────────────
+    // â”€â”€ Badges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const hiringBadge = (lead.hiring_intent_found === 'Yes')
-        ? `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; border:1px solid #a7f3d0">🟢 Hiring</span>`
+        ? `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; border:1px solid #a7f3d0">ðŸŸ¢ Hiring</span>`
         : '';
 
     const techDict = {
@@ -655,11 +661,11 @@ function generateLeadInnerHtml(docId, lead) {
     };
     const techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0)
         ? lead.tech_stack_found.map(t =>
-            `<span style="font-size:0.75rem; background:transparent; color:#6b7280; padding:2px 6px; border-radius:4px; border:1px solid #e5e7eb">⚡ ${techDict[t.toLowerCase()] || t}</span>`
+            `<span style="font-size:0.75rem; background:transparent; color:#6b7280; padding:2px 6px; border-radius:4px; border:1px solid #e5e7eb">âš¡ ${techDict[t.toLowerCase()] || t}</span>`
           ).join('')
         : '';
 
-    // V16: origin_engine badge — safe fallback for all legacy leads without this field
+    // V16: origin_engine badge â€” safe fallback for all legacy leads without this field
     const originEngine = lead.origin_engine || 'cartographer';
     const engineBadge  = (originEngine === 'autonomous')
         ? '<span style="font-size:0.75rem; background:#faf5ff; color:#7c3aed; padding:2px 8px; border-radius:4px; border:1px solid #ddd6fe; font-weight:600;">&#9889; Predictive Match</span>'
@@ -667,16 +673,16 @@ function generateLeadInnerHtml(docId, lead) {
 
     const exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">&#128274; Exclusive Lead</span>`;
     const competitorBadge = lead.competitor_match
-        ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">🎯 Competitor Intercept: ${lead.competitor_match}</span>`
+        ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">ðŸŽ¯ Competitor Intercept: ${lead.competitor_match}</span>`
         : '';
     const targetNameBadge = (lead.decision_maker_name)
-        ? `<span style="font-size:0.75rem; background:#eff6ff; color:#1d4ed8; padding:2px 6px; border-radius:4px; border:1px solid #bfdbfe">👤 ${targetName}</span>`
+        ? `<span style="font-size:0.75rem; background:#eff6ff; color:#1d4ed8; padding:2px 6px; border-radius:4px; border:1px solid #bfdbfe">ðŸ‘¤ ${targetName}</span>`
         : '';
     const companySizeBadge = (lead.company_size_tier)
-        ? `<span style="font-size:0.75rem; background:#fefce8; color:#854d0e; padding:2px 6px; border-radius:4px; border:1px solid #fef08a">🏢 ${companySize}</span>`
+        ? `<span style="font-size:0.75rem; background:#fefce8; color:#854d0e; padding:2px 6px; border-radius:4px; border:1px solid #fef08a">ðŸ¢ ${companySize}</span>`
         : '';
 
-    // ── V14: Polymorphic Contact Endpoints ───────────────────────────────────
+    // â”€â”€ V14: Polymorphic Contact Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const endpoints     = Array.isArray(lead.contact_endpoints) ? lead.contact_endpoints.filter(e => e && e.uri) : [];
     const primary       = getContactHierarchy(endpoints);
     const altEndpoints  = primary ? endpoints.filter(e => e !== primary) : endpoints;
@@ -694,7 +700,7 @@ function generateLeadInnerHtml(docId, lead) {
             title="${meta.cta}">${meta.icon} ${meta.cta}</button>`;
     } else {
         // No endpoints: fallback to legacy copy behaviour
-        primaryCtaHtml = `<button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${safeDm}\`)" title="Copy Message">📋 Copy Message</button>`;
+        primaryCtaHtml = `<button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${safeDm}\`)" title="Copy Message">ðŸ“‹ Copy Message</button>`;
     }
 
     // Alt-contacts dropdown (only if there are secondary endpoints)
@@ -712,7 +718,7 @@ function generateLeadInnerHtml(docId, lead) {
             } else if (isEmail) {
                 displayLabel = `Email: ${ep.uri}`;
             } else {
-                const shortUri = ep.uri.length > 26 ? ep.uri.substring(0, 24) + '…' : ep.uri;
+                const shortUri = ep.uri.length > 26 ? ep.uri.substring(0, 24) + 'â€¦' : ep.uri;
                 displayLabel = `${m.label}: ${shortUri}`;
             }
             return `<button class="alt-contact-item"
@@ -731,19 +737,19 @@ function generateLeadInnerHtml(docId, lead) {
         </div>`;
     }
 
-    // ── Icebreaker / Objection rows ───────────────────────────────────────────
+    // â”€â”€ Icebreaker / Objection rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const icebreakerRow = icebreakerAngle
         ? `<div style="margin-top:8px; font-size:0.85rem; color:#4f46e5; font-style:italic; padding:6px 10px; background:rgba(79,70,229,0.05); border-left:3px solid #6366f1; border-radius:0 4px 4px 0;">
-               💡 Icebreaker: ${icebreakerAngle}
+               ðŸ’¡ Icebreaker: ${icebreakerAngle}
            </div>`
         : '';
     const objectionRow = (lead.primary_objection_hypothesis)
         ? `<div style="margin-top:6px; font-size:0.82rem; color:#b45309; padding:4px 10px; background:#fffbeb; border-left:3px solid #f59e0b; border-radius:0 4px 4px 0;">
-               ⚠️ Likely Objection: ${primaryObjection}
+               âš ï¸ Likely Objection: ${primaryObjection}
            </div>`
         : '';
 
-    // ── Safe serialisation for timeline ──────────────────────────────────────
+    // â”€â”€ Safe serialisation for timeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const safeEvents = encodeURIComponent(JSON.stringify(lead.interactions || []));
     const safeLeadEnc = encodeURIComponent(JSON.stringify({
         id: lead.id,
@@ -756,7 +762,7 @@ function generateLeadInnerHtml(docId, lead) {
     return `
         <div class="lead-header">
             <div>
-                <strong><a href="${lead.url || '#'}" target="_blank" style="color: var(--text-main); text-decoration: none;">${urlHostname} ↗</a></strong> • ${lead.source || 'Organic Search'}
+                <strong><a href="${lead.url || '#'}" target="_blank" style="color: var(--text-main); text-decoration: none;">${urlHostname} â†—</a></strong> â€¢ ${lead.source || 'Organic Search'}
                 <span style="margin-left:8px; font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(lead.status || 'new').toUpperCase()}</span>
                 ${tierBadge}
             </div>
@@ -778,10 +784,10 @@ function generateLeadInnerHtml(docId, lead) {
         <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
             ${primaryCtaHtml}
             ${altDropdownHtml}
-            <button class="action-btn" onclick="pushToCRM('${docId}', '${safeLeadEnc}')" style="color: #4f46e5; border-color: #c7d2fe; background: #e0e7ff;">☁️ Push to CRM</button>
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">🚫 Ignore</button>
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">🎯 Converted</button>
-            <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${safeEvents}')" title="Audit Log">🕒 Timeline</button>
+            <button class="action-btn" onclick="pushToCRM('${docId}', '${safeLeadEnc}')" style="color: #4f46e5; border-color: #c7d2fe; background: #e0e7ff;">â˜ï¸ Push to CRM</button>
+            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">ðŸš« Ignore</button>
+            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">ðŸŽ¯ Converted</button>
+            <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${safeEvents}')" title="Audit Log">ðŸ•’ Timeline</button>
         </div>
     `;
 }
@@ -793,26 +799,22 @@ let virtualObserver = new IntersectionObserver((entries) => {
                 const leadId = entry.target.getAttribute('data-lead-id');
                 const lead = rawLeadsCache.find(l => (l.id || l.doc_id) === leadId);
                 if (lead) {
-                    entry.target.innerHTML = generateLeadInnerHtml(leadId, lead);
-                    entry.target.setAttribute('data-rendered', 'true');
-                    entry.target.style.height = 'auto';
+                    // V17: Use new folded card renderer
+                    const newCard = window.createLeadCardV2(leadId, lead);
+                    entry.target.replaceWith(newCard);
+                    virtualObserver.unobserve(entry.target);
+                    virtualObserver.observe(newCard);
+                    newCard.setAttribute('data-rendered', 'true');
                 }
-            }
-        } else {
-            if(entry.target.hasAttribute('data-rendered')) {
-                const rect = entry.target.getBoundingClientRect();
-                entry.target.style.height = `${Math.max(150, rect.height)}px`;
-                entry.target.innerHTML = '';
-                entry.target.removeAttribute('data-rendered');
             }
         }
     });
-}, { rootMargin: "800px" });
+}, { rootMargin: "600px" });
 
 function renderLeads() {
     const filteredLeads = rawLeadsCache.filter(lead => {
         if (!['new', 'contacted', 'converted'].includes(lead.status || 'new')) return false;
-        // V14.2: Fix campaign filter — leads now use matched_campaigns[] array, not campaign_id scalar
+        // V14.2: Fix campaign filter â€” leads now use matched_campaigns[] array, not campaign_id scalar
         if (currentCampaignFilter !== 'all') {
             const matched = Array.isArray(lead.matched_campaigns)
                 ? lead.matched_campaigns.includes(currentCampaignFilter)
@@ -825,7 +827,7 @@ function renderLeads() {
     if (filteredLeads.length === 0) {
         leadsList.innerHTML = `
             <div class="lead-card" style="text-align: center; padding: 40px; border: none; background: transparent; box-shadow: none;">
-                <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">⏳</div>
+                <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">â³</div>
                 <h3 style="color: var(--text-main); margin-bottom: 8px;">Hunting for leads...</h3>
                 <p style="color: var(--text-muted); font-size: 0.95rem; line-height: 1.5;">
                     We are actively scanning the web for targets matching your criteria. Check back in a few minutes.
@@ -885,7 +887,7 @@ window.viewLeadTimeline = function(eventsJson) {
     } catch(e) { console.error('Timeline Schema Sync Error', e); }
 };
 
-// ── Location State Sync ────────────────────────────────────────────────────
+// â”€â”€ Location State Sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Called by onchange on both country dropdowns.
 // Clears the city/region text input and sets a country-native placeholder
 // so the user always gets a clean, contextual hint after switching country.
@@ -1112,18 +1114,15 @@ window.saveCampaignAction = async function() {
                     const r = await routerResp.json();
                     const v16  = r.autonomous_promoted  || 0;
                     const v14  = r.cartographer_queued  || 0;
-                    routerMsg = `Engine dispatched: ⚡ ${v16} Predictive + 🔍 ${v14} Cartographer leads`;
+                    routerMsg = `Engine dispatched: âš¡ ${v16} Predictive + ðŸ” ${v14} Cartographer leads`;
                 }
             } catch (routerErr) {
                 console.warn('[ROUTER] Router call failed, Cartographer sweep will pick up:', routerErr);
             }
         }
 
-        document.getElementById('new-campaign-modal').classList.add('hidden');
+        closeNewCampaignModal();  // V17: resets conversational flow state
         showToast(routerMsg, 'success');
-        nameInput.value = ''; bioInput.value = ''; keysInput.value = '';
-        if (glInput) glInput.value = '';
-        if (locationInput) locationInput.value = '';
         if (targetUrlsInput) targetUrlsInput.value = '';
         loadDashboard();
     } catch(err) {
@@ -1157,7 +1156,7 @@ window.switchTab = function(tabName) {
         if(document.getElementById('tab-macro')) document.getElementById('tab-macro').classList.add('active');
         fetchMacroTrends();
     } else if(tabName === 'crm-test') {
-        // V15: L0 super_admin only — no nav link exposed to regular users
+        // V15: L0 super_admin only â€” no nav link exposed to regular users
         const isAdmin = window.currentUserData?.role === 'super_admin';
         if (!isAdmin) {
             showToast('CRM module is restricted to L0 administrators.', 'error');
@@ -1441,7 +1440,7 @@ window.loadMoreLeads = function() {
 };
 
 // ============================================================================
-// V15: NATIVE CRM SANDBOX ENGINE — /crm-test
+// V15: NATIVE CRM SANDBOX ENGINE â€” /crm-test
 // ============================================================================
 
 const CRM_STATUSES = ['new', 'contacted', 'replied', 'negotiating', 'won', 'lost'];
@@ -1451,7 +1450,7 @@ let crmLeadsCache = [];
 let crmActiveLead = null;   // lead object currently open in side panel
 let crmDraggedId  = null;   // id of card being dragged
 
-// ── loadCrmBoard ─────────────────────────────────────────────────────────────
+// â”€â”€ loadCrmBoard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 window.loadCrmBoard = async function() {
     const user = firebase.auth().currentUser;
     if (!user) return;
@@ -1478,7 +1477,7 @@ window.loadCrmBoard = async function() {
     }
 };
 
-// ── renderKanban ─────────────────────────────────────────────────────────────
+// â”€â”€ renderKanban â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function renderKanban() {
     const now = Date.now();
     // Group by crm_status (fallback to 'new')
@@ -1512,7 +1511,7 @@ function renderKanban() {
     });
 
     // Health widget
-    const fmt = v => `₹${Number(v || 0).toLocaleString('en-IN')}`;
+    const fmt = v => `â‚¹${Number(v || 0).toLocaleString('en-IN')}`;
     const negotiating = grouped['negotiating'].reduce((a, l) => a + (l.estimated_value || 0), 0);
     const won         = grouped['won'].reduce((a, l) => a + (l.estimated_value || 0), 0);
     const el1 = document.getElementById('crm-negotiating-sum'); if (el1) el1.textContent = fmt(negotiating);
@@ -1521,7 +1520,7 @@ function renderKanban() {
     const el4 = document.getElementById('crm-total-count');     if (el4) el4.textContent = crmLeadsCache.length;
 }
 
-// ── buildKanbanCard ──────────────────────────────────────────────────────────
+// â”€â”€ buildKanbanCard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function buildKanbanCard(lead, now) {
     const card   = document.createElement('div');
     const id     = lead.id || lead.doc_id || '';
@@ -1540,11 +1539,11 @@ function buildKanbanCard(lead, now) {
 
     const domain   = (() => { try { return new URL(lead.url || 'https://unknown').hostname.replace('www.', ''); } catch(_) { return lead.url || 'Unknown'; } })();
     const signal   = lead.intent_signal || lead.pain_point || '';
-    const value    = lead.estimated_value ? `💰 ₹${Number(lead.estimated_value).toLocaleString('en-IN')}` : '';
+    const value    = lead.estimated_value ? `ðŸ’° â‚¹${Number(lead.estimated_value).toLocaleString('en-IN')}` : '';
 
     card.innerHTML = `
         <div class="card-domain">${domain}${fueBadge}</div>
-        <div class="card-score">Score: ${lead.score || 'N/A'}/10 · ${(lead.confidence_tier || 'High')}</div>
+        <div class="card-score">Score: ${lead.score || 'N/A'}/10 Â· ${(lead.confidence_tier || 'High')}</div>
         ${signal ? `<div class="card-signal">${signal}</div>` : ''}
         ${value ? `<div class="card-value">${value}</div>` : ''}
     `;
@@ -1559,7 +1558,7 @@ function buildKanbanCard(lead, now) {
     return card;
 }
 
-// ── handleKanbanDrop ─────────────────────────────────────────────────────────
+// â”€â”€ handleKanbanDrop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function handleKanbanDrop(e, col) {
     e.preventDefault();
     col.classList.remove('drag-over');
@@ -1587,7 +1586,7 @@ async function handleKanbanDrop(e, col) {
     crmDraggedId = null;
 }
 
-// ── openCrmPanel / closeCrmPanel ─────────────────────────────────────────────
+// â”€â”€ openCrmPanel / closeCrmPanel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 window.openCrmPanel = function(lead) {
     crmActiveLead = lead;
     const panel = document.getElementById('crm-side-panel');
@@ -1620,8 +1619,8 @@ window.openCrmPanel = function(lead) {
     const endpoints = lead.contact_endpoints || [];
     const primary   = endpoints[0] || null;
     const primaryLabel = primary
-        ? `${PLATFORM_META[primary.platform]?.icon || '🔗'} ${PLATFORM_META[primary.platform]?.label || 'Contact'}`
-        : '📋 Copy DM';
+        ? `${PLATFORM_META[primary.platform]?.icon || 'ðŸ”—'} ${PLATFORM_META[primary.platform]?.label || 'Contact'}`
+        : 'ðŸ“‹ Copy DM';
 
     body.innerHTML = `
         <!-- Intent Signal -->
@@ -1640,11 +1639,11 @@ window.openCrmPanel = function(lead) {
         <div class="crm-panel-section" style="background:#f8fafc; padding:12px; border-radius:10px; border:1px solid var(--glass-border);">
             <div class="crm-panel-label" style="margin-bottom:8px;">Smart Action Settings</div>
             ${meetingUrl ? `<div class="crm-toggle-row">
-                <span class="crm-toggle-label">📅 Include Meeting Link</span>
+                <span class="crm-toggle-label">ðŸ“… Include Meeting Link</span>
                 <label class="crm-toggle"><input type="checkbox" id="toggle-meeting" onchange="refreshCrmDmPreview('${id}')"><span class="crm-toggle-slider"></span></label>
             </div>` : ''}
             ${assetUrl ? `<div class="crm-toggle-row">
-                <span class="crm-toggle-label">🔗 Include Asset Link</span>
+                <span class="crm-toggle-label">ðŸ”— Include Asset Link</span>
                 <label class="crm-toggle"><input type="checkbox" id="toggle-asset" onchange="refreshCrmDmPreview('${id}')"><span class="crm-toggle-slider"></span></label>
             </div>` : ''}
             <button class="crm-smart-action-btn" onclick="crmSmartAction('${id}', '${primary ? encodeURIComponent(primary.uri) : ''}', '${primary ? primary.platform : ''}')">
@@ -1654,7 +1653,7 @@ window.openCrmPanel = function(lead) {
 
         <!-- Estimated Value -->
         <div class="crm-panel-section">
-            <div class="crm-panel-label">Estimated Deal Value (₹)</div>
+            <div class="crm-panel-label">Estimated Deal Value (â‚¹)</div>
             <input type="number" id="crm-est-value" class="crm-input" value="${lead.estimated_value || 0}" placeholder="e.g. 50000" min="0">
             <button class="crm-save-btn" onclick="saveCrmValue('${id}')">Save Value</button>
         </div>
@@ -1684,7 +1683,7 @@ window.closeCrmPanel = function() {
     crmActiveLead = null;
 };
 
-// ── refreshCrmDmPreview ───────────────────────────────────────────────────────
+// â”€â”€ refreshCrmDmPreview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 window.refreshCrmDmPreview = function(id) {
     if (!crmActiveLead) return;
     const meetEl  = document.getElementById('toggle-meeting');
@@ -1693,16 +1692,16 @@ window.refreshCrmDmPreview = function(id) {
     if (!preview) return;
     let dm = crmActiveLead.dm || '';
     if (meetEl && meetEl.checked && window.currentUserData?.meeting_url) {
-        dm += `\n\n📅 Book a quick call: ${window.currentUserData.meeting_url}`;
+        dm += `\n\nðŸ“… Book a quick call: ${window.currentUserData.meeting_url}`;
     }
     if (assetEl && assetEl.checked) {
         const assetUrl = window.currentUserData?.asset_url || crmActiveLead.attached_asset_url || '';
-        if (assetUrl) dm += `\n\n🔗 Here's our resource: ${assetUrl}`;
+        if (assetUrl) dm += `\n\nðŸ”— Here's our resource: ${assetUrl}`;
     }
     preview.textContent = dm;
 };
 
-// ── crmSmartAction ────────────────────────────────────────────────────────────
+// â”€â”€ crmSmartAction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 window.crmSmartAction = function(id, uriEnc, platform) {
     if (!crmActiveLead) return;
     const meetEl  = document.getElementById('toggle-meeting');
@@ -1710,11 +1709,11 @@ window.crmSmartAction = function(id, uriEnc, platform) {
     let dm = crmActiveLead.dm || '';
 
     if (meetEl && meetEl.checked && window.currentUserData?.meeting_url) {
-        dm += `\n\n📅 Book a quick call: ${window.currentUserData.meeting_url}`;
+        dm += `\n\nðŸ“… Book a quick call: ${window.currentUserData.meeting_url}`;
     }
     if (assetEl && assetEl.checked) {
         const assetUrl = window.currentUserData?.asset_url || crmActiveLead.attached_asset_url || '';
-        if (assetUrl) dm += `\n\n🔗 Here's our resource: ${assetUrl}`;
+        if (assetUrl) dm += `\n\nðŸ”— Here's our resource: ${assetUrl}`;
     }
 
     navigator.clipboard.writeText(dm).catch(() => {});
@@ -1735,7 +1734,7 @@ window.crmSmartAction = function(id, uriEnc, platform) {
     updateLeadStatus(id, 'contacted');
 };
 
-// ── saveCrmValue ──────────────────────────────────────────────────────────────
+// â”€â”€ saveCrmValue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 window.saveCrmValue = async function(id) {
     const val = parseInt(document.getElementById('crm-est-value')?.value || '0', 10);
     try {
@@ -1749,7 +1748,7 @@ window.saveCrmValue = async function(id) {
     } catch(e) { showToast('Failed to save value', 'error'); }
 };
 
-// ── saveCrmFollowup ───────────────────────────────────────────────────────────
+// â”€â”€ saveCrmFollowup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 window.saveCrmFollowup = async function(id) {
     const dateStr = document.getElementById('crm-followup')?.value;
     if (!dateStr) return showToast('Pick a date first', 'error');
@@ -1765,7 +1764,7 @@ window.saveCrmFollowup = async function(id) {
     } catch(e) { showToast('Failed to save date', 'error'); }
 };
 
-// ── saveCrmNote ───────────────────────────────────────────────────────────────
+// â”€â”€ saveCrmNote â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 window.saveCrmNote = async function(id) {
     const input = document.getElementById('crm-note-input');
     const text  = input?.value?.trim();
@@ -1798,3 +1797,487 @@ window.saveCrmNote = async function(id) {
 // hoisting: the 'original' reference captured the hoisted new declaration,
 // making _origLoadDashboard === the new loadDashboard (self-reference).
 // The crmAutoOpen check is now inlined directly in loadDashboard() above.
+
+// =============================================================================
+// V17: CONVERSATIONAL "FIND NEW CLIENTS" ENGINE
+// =============================================================================
+
+// --- State ---
+window._fcState = {
+    gl: '',       // country code
+    location: '', // city/region text
+    whoConfirmed: '',
+    whatConfirmed: '',
+};
+
+// --- Utility: parse intent sentence for key signals ---
+function fcParseIntent(sentence) {
+    const s = sentence.toLowerCase();
+    const result = { who: sentence.trim(), where: '', gl: '' };
+
+    // Location extraction â€” order matters (longer matches first)
+    const locationMap = [
+        { re: /\b(united\s*states|usa|u\.s\.a|u\.s)\b/i,  gl: 'us', label: 'United States' },
+        { re: /\b(united\s*kingdom|uk|u\.k|britain|england|london)\b/i, gl: 'uk', label: 'United Kingdom' },
+        { re: /\b(canada|toronto|vancouver|montreal)\b/i,  gl: 'ca', label: 'Canada' },
+        { re: /\b(australia|sydney|melbourne)\b/i,         gl: 'au', label: 'Australia' },
+        { re: /\b(india|mumbai|delhi|bangalore|bengaluru|hyderabad|pune|chennai|kolkata|kerala|kochi|jaipur)\b/i, gl: 'in', label: 'India' },
+    ];
+
+    for (const loc of locationMap) {
+        if (loc.re.test(sentence)) {
+            result.where = loc.label;
+            result.gl    = loc.gl;
+            break;
+        }
+    }
+
+    // Attempt to strip the location phrase from the "who" summary
+    if (result.where) {
+        result.who = sentence
+            .replace(/\s+in\s+(the\s+)?(united states|usa|united kingdom|uk|canada|australia|india|[a-z\s,]+)/gi, '')
+            .replace(/\s+from\s+(the\s+)?(united states|usa|united kingdom|uk|canada|australia|india)/gi, '')
+            .trim() || sentence.trim();
+    }
+
+    return result;
+}
+
+// --- Auto-generate a readable campaign name from the parsed intent ---
+function fcBuildCampaignName(who, where) {
+    const now = new Date();
+    const month = now.toLocaleString('en', { month: 'short' });
+    const year  = now.getFullYear();
+    // Take first 35 chars of who
+    const base = who.length > 35 ? who.substring(0, 35).trim() + 'â€¦' : who;
+    return where ? `${base} Â· ${where} Â· ${month} ${year}` : `${base} Â· ${month} ${year}`;
+}
+
+// --- Relative time helper ---
+function fcTimeAgo(ts) {
+    if (!ts) return '';
+    const then = typeof ts.toDate === 'function' ? ts.toDate() : new Date(ts);
+    const diffMs = Date.now() - then.getTime();
+    const m = Math.floor(diffMs / 60000);
+    const h = Math.floor(m / 60);
+    const d = Math.floor(h / 24);
+    if (m < 2)  return 'just now';
+    if (m < 60) return `${m}m ago`;
+    if (h < 24) return `${h}h ago`;
+    if (d < 7)  return `${d}d ago`;
+    return then.toLocaleDateString('en', { day: 'numeric', month: 'short' });
+}
+
+// Step 1: character hint update
+window.fcUpdateCharHint = function(el) {
+    const n = el.value.trim().length;
+    const hint = document.getElementById('fc-char-hint');
+    if (!hint) return;
+    if (n === 0)       hint.textContent = 'Press Enter or click below';
+    else if (n < 20)   hint.textContent = 'A bit more detail helps get better results â†“';
+    else if (n < 60)   hint.textContent = 'Good. Add a location for sharper targeting â†’';
+    else               hint.textContent = 'âœ“ Ready â€” click to proceed';
+};
+
+// Fill template chip
+window.fcFillTemplate = function(btn) {
+    const ta = document.getElementById('fc-intent');
+    if (!ta) return;
+    // Strip emoji prefix from chip text
+    ta.value = btn.textContent.replace(/^[^\w]+/, '').trim();
+    ta.focus();
+    fcUpdateCharHint(ta);
+};
+
+// Step 1 â†’ Step 2
+window.fcStep1Next = function() {
+    const ta = document.getElementById('fc-intent');
+    if (!ta) return;
+    const sentence = ta.value.trim();
+    if (sentence.length < 5) {
+        ta.style.borderColor = '#ef4444';
+        ta.placeholder = 'Please describe who you want to reachâ€¦';
+        ta.focus();
+        setTimeout(() => { ta.style.borderColor = ''; }, 2000);
+        return;
+    }
+
+    const parsed = fcParseIntent(sentence);
+    window._fcState.gl       = parsed.gl;
+    window._fcState.location = parsed.where;
+    window._fcState.whoConfirmed = parsed.who;
+
+    // Populate step 2
+    const whoEl = document.getElementById('fc-confirm-who');
+    if (whoEl) whoEl.textContent = parsed.who;
+    const editWho = document.getElementById('fc-edit-who');
+    if (editWho) editWho.value = parsed.who;
+
+    // Auto-select location if parsed
+    if (parsed.gl) {
+        document.querySelectorAll('.fc-loc-chip').forEach(c => {
+            c.classList.toggle('selected', c.dataset.gl === parsed.gl);
+        });
+        const blockWhere = document.getElementById('fc-block-where');
+        if (blockWhere) blockWhere.style.borderColor = '';
+        document.getElementById('fc-where-required')?.classList.remove('show');
+    } else {
+        // No location detected â€” highlight location block
+        const blockWhere = document.getElementById('fc-block-where');
+        if (blockWhere) blockWhere.style.borderColor = '#f59e0b';
+        document.getElementById('fc-where-required')?.classList.add('show');
+    }
+
+    // Open "what" edit if bio not in sentence
+    const editWhat = document.getElementById('fc-edit-what');
+    if (editWhat) {
+        editWhat.classList.remove('hidden');
+        editWhat.style.display = '';
+    }
+    document.getElementById('fc-what-btn')?.setAttribute('data-open', '1');
+
+    // Transition
+    document.getElementById('fc-step-1').classList.add('hidden');
+    document.getElementById('fc-step-2').classList.remove('hidden');
+};
+
+// Back button
+window.fcGoBack = function() {
+    document.getElementById('fc-step-2').classList.add('hidden');
+    document.getElementById('fc-step-1').classList.remove('hidden');
+};
+
+// Toggle inline edit
+window.fcToggleEdit = function(field) {
+    if (field === 'who') {
+        const val  = document.getElementById('fc-confirm-who');
+        const inp  = document.getElementById('fc-edit-who');
+        if (!val || !inp) return;
+        const isOpen = !inp.classList.contains('hidden');
+        if (isOpen) {
+            // Save
+            const newVal = inp.value.trim() || val.textContent;
+            val.textContent = newVal;
+            window._fcState.whoConfirmed = newVal;
+            inp.classList.add('hidden');
+        } else {
+            inp.classList.remove('hidden');
+            inp.focus();
+        }
+    } else if (field === 'what') {
+        const inp = document.getElementById('fc-edit-what');
+        const btn = document.getElementById('fc-what-btn');
+        if (!inp) return;
+        const isOpen = inp.style.display !== 'none' && !inp.classList.contains('hidden');
+        if (isOpen) {
+            // Save
+            const v = inp.value.trim();
+            window._fcState.whatConfirmed = v;
+            const valEl = document.getElementById('fc-confirm-what');
+            if (valEl && v) { valEl.textContent = v; valEl.style.fontStyle = 'normal'; valEl.style.color = 'var(--text-main)'; }
+            if (btn) btn.textContent = 'Edit';
+            document.getElementById('fc-what-required')?.classList.remove('show');
+        } else {
+            inp.style.display = '';
+            inp.classList.remove('hidden');
+            inp.focus();
+            if (btn) btn.textContent = 'Save âœ“';
+        }
+    }
+};
+
+// Location chip selection
+window.fcSelectLocation = function(btn) {
+    document.querySelectorAll('.fc-loc-chip').forEach(c => c.classList.remove('selected'));
+    btn.classList.add('selected');
+    window._fcState.gl       = btn.dataset.gl || '';
+    window._fcState.location = btn.dataset.loc || '';
+    document.getElementById('fc-where-required')?.classList.remove('show');
+    const blockWhere = document.getElementById('fc-block-where');
+    if (blockWhere) blockWhere.style.borderColor = 'transparent';
+};
+
+// Launch (validation + submit)
+window.fcLaunch = function() {
+    const bar  = document.getElementById('fc-validation-bar');
+    const errs = [];
+
+    // Validate WHO
+    const who = document.getElementById('fc-edit-who')?.value.trim()
+             || document.getElementById('fc-confirm-who')?.textContent.trim()
+             || window._fcState.whoConfirmed;
+    if (!who || who === 'â€”') errs.push('Tell me who you want to reach.');
+
+    // Validate WHAT (required for bio)
+    const what = document.getElementById('fc-edit-what')?.value.trim()
+              || window._fcState.whatConfirmed;
+    if (!what || what.length < 15) {
+        errs.push("Add a short description of what you sell â€” this personalises every pitch.");
+        document.getElementById('fc-what-required')?.classList.add('show');
+    }
+
+    // Validate WHERE
+    if (!window._fcState.gl && !window._fcState.location) {
+        errs.push("Pick a location â€” even 'Worldwide' is fine.");
+        document.getElementById('fc-where-required')?.classList.add('show');
+        const blockWhere = document.getElementById('fc-block-where');
+        if (blockWhere) blockWhere.style.borderColor = '#f87171';
+    }
+
+    if (errs.length > 0) {
+        if (bar) { bar.textContent = 'âš¡ ' + errs[0]; bar.classList.remove('hidden'); }
+        return;
+    }
+    if (bar) bar.classList.add('hidden');
+
+    // Populate hidden fields for saveCampaignAction
+    const cityInput = document.getElementById('fc-edit-where-city');
+    const city = cityInput?.value.trim() || '';
+    const locationText = city ? `${city}, ${window._fcState.location}` : window._fcState.location;
+
+    document.getElementById('camp-gl').value       = window._fcState.gl;
+    document.getElementById('camp-location').value  = locationText;
+    document.getElementById('camp-name').value      = fcBuildCampaignName(who, window._fcState.location);
+    document.getElementById('camp-bio').value       = what;
+    // Use who-description as keywords (AI will extract from bio anyway)
+    document.getElementById('camp-keys').value      = who.substring(0, 120);
+    document.getElementById('camp-target-urls').value = '';
+
+    saveCampaignAction();
+};
+
+// Close modal
+window.closeNewCampaignModal = function() {
+    document.getElementById('new-campaign-modal').classList.add('hidden');
+    // Reset step
+    document.getElementById('fc-step-1').classList.remove('hidden');
+    document.getElementById('fc-step-2').classList.add('hidden');
+    const ta = document.getElementById('fc-intent');
+    if (ta) ta.value = '';
+    window._fcState = { gl:'', location:'', whoConfirmed:'', whatConfirmed:'' };
+};
+
+// Override openNewCampaignModal to use new modal instead
+window.openNewCampaignModal = async function() {
+    const remaining = (window.activeWallet?.allocated_credits || 0) - (window.activeWallet?.consumed_credits || 0);
+    if (remaining <= 0) {
+        showToast('Credits exhausted. Contact admin to reload.', 'error');
+        return;
+    }
+    document.getElementById('new-campaign-modal').classList.remove('hidden');
+    document.getElementById('fc-intent')?.focus();
+
+    // Auto-detect location and pre-select chip
+    try {
+        const resp = await fetch('https://ipapi.co/json/', { cache: 'force-cache' });
+        const json = await resp.json();
+        if (json.country_code) {
+            const glCode = json.country_code.toLowerCase();
+            window._fcState.gl = glCode;
+            // Pre-select country chip on step 2
+            document.querySelectorAll('.fc-loc-chip').forEach(c => {
+                if (c.dataset.gl === glCode) {
+                    c.classList.add('selected');
+                    window._fcState.location = c.dataset.loc;
+                }
+            });
+        }
+        if (json.city) {
+            const cityInput = document.getElementById('fc-edit-where-city');
+            if (cityInput) cityInput.value = json.city;
+        }
+    } catch(e) { /* silent â€” location is not required */ }
+};
+
+// =============================================================================
+// V17: DASHBOARD GREETING + KPI TILES
+// =============================================================================
+
+function fcUpdateGreeting(firstName) {
+    const el = document.getElementById('greeting-message');
+    if (!el) return;
+    const hr = new Date().getHours();
+    const g  = hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening';
+    el.textContent = firstName ? `${g}, ${firstName}.` : `${g}.`;
+}
+
+function fcUpdateKPIs(leadsArray) {
+    const counts = { new: 0, contacted: 0, converted: 0 };
+    leadsArray.forEach(l => {
+        if (l.status === 'new' || l.status === 'processing') counts.new++;
+        else if (l.status === 'contacted' || l.status === 'replied') counts.contacted++;
+        else if (l.status === 'converted') counts.converted++;
+    });
+    const setEl = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v || '0'; };
+    setEl('kpi-new-count',       counts.new);
+    setEl('kpi-contacted-count', counts.contacted);
+    setEl('kpi-won-count',       counts.converted);
+}
+
+// =============================================================================
+// V17: NEW LEAD CARD RENDERER (createLeadCardV2)
+// Called from the existing snapshot handler â€” replaces createLeadCard
+// =============================================================================
+
+function getScoreEmoji(score) {
+    if (score >= 9) return 'ðŸ”¥';
+    if (score >= 7) return 'âš¡';
+    if (score >= 5) return 'ðŸ‘';
+    return 'ðŸ“‹';
+}
+
+window.createLeadCardV2 = function(docId, lead) {
+    const card = document.createElement('div');
+    card.className = 'lead-card-v2';
+    card.id = docId;
+
+    // Company name (prefer company_name, fallback to hostname)
+    let displayName = lead.company_name || '';
+    let hostname = '';
+    try { hostname = lead.url ? new URL(lead.url).hostname.replace('www.','') : (lead.source_url ? new URL(lead.source_url).hostname.replace('www.','') : ''); } catch(e){}
+    if (!displayName) displayName = hostname || 'Unknown Company';
+
+    const score     = lead.score || 0;
+    const heatPct   = Math.round((score / 10) * 100);
+    const emoji     = getScoreEmoji(score);
+    const signal    = lead.intent_signal || lead.pain_point || '';
+    const dm        = lead.dm || '';
+    const icebreaker = dm; // Icebreaker IS the opening message
+
+    // Badges â€” only show if value exists
+    const badges = [];
+    if (lead.origin_engine === 'autonomous') badges.push({ text: 'âš¡ Predictive', bg: '#faf5ff', color: '#7c3aed', border: '#ddd6fe' });
+    badges.push({ text: 'ðŸ”’ Exclusive', bg: '#f3e8ff', color: '#6b21a8', border: '#e9d5ff' });
+    if (lead.hiring_intent_found === 'Yes') badges.push({ text: 'ðŸŸ¢ Hiring', bg: '#ecfdf5', color: '#059669', border: '#a7f3d0' });
+    if (lead.competitor_match) badges.push({ text: `ðŸŽ¯ ${lead.competitor_match}`, bg: '#fee2e2', color: '#b91c1c', border: '#fecaca' });
+
+    const badgesHTML = badges.map(b =>
+        `<span class="lc-badge" style="background:${b.bg};color:${b.color};border-color:${b.border}">${b.text}</span>`
+    ).join('');
+
+    // Time ago
+    const timeAgo = fcTimeAgo(lead.createdAt || lead.promotedAt);
+
+    // Source label â€” human-readable
+    const sourceLabel = (lead.sourcing_vector || lead.source || '').includes('Autonomous')
+        ? 'AI Match' : (lead.source || 'Web Signal');
+
+    // Contact URI for primary CTA
+    const primaryUri  = (lead.contact_endpoints || [])[0]?.value || lead.email || lead.url || lead.source_url || '#';
+    const primaryPlat = (lead.contact_endpoints || [])[0]?.platform || 'email';
+
+    const expandId    = `lc-expand-${docId}`;
+    const moreId      = `lc-more-${docId}`;
+    const overflowId  = `lc-of-${docId}`;
+
+    card.innerHTML = `
+        <div class="lc-header">
+            <div class="lc-left">
+                <div class="lc-company-name">
+                    <a href="${lead.url || lead.source_url || '#'}" target="_blank" rel="noopener noreferrer" title="Open company website">${displayName} &#8599;</a>
+                </div>
+                <div class="lc-meta">
+                    <span>${sourceLabel}</span>
+                    ${timeAgo ? `<span class="lc-found-ago">Â· ${timeAgo}</span>` : ''}
+                </div>
+            </div>
+            <div class="lc-score-wrap">
+                <div class="lc-score-emoji">${emoji}</div>
+                <div class="lc-heat-bar"><div class="lc-heat-fill" style="width:${heatPct}%"></div></div>
+                <div class="lc-score-label">${score}/10</div>
+            </div>
+        </div>
+
+        ${signal ? `<div class="lc-signal">${signal}</div>` : ''}
+
+        <div class="lc-badges">${badgesHTML}</div>
+
+        <button class="lc-expand-btn" onclick="lcToggleExpand('${docId}')">
+            <span id="lc-expand-icon-${docId}">â†“</span> See opening message &amp; full intelligence
+        </button>
+
+        <div class="lc-expanded" id="${expandId}">
+
+            ${icebreaker ? `
+            <div class="lc-section">
+                <div class="lc-section-label">Your Opening Message</div>
+                <div class="lc-icebreaker">${icebreaker}</div>
+            </div>` : ''}
+
+            ${lead.pain_point && lead.pain_point !== signal ? `
+            <div class="lc-section">
+                <div class="lc-section-label">Why This Lead</div>
+                <div class="lc-why">${lead.pain_point}</div>
+            </div>` : ''}
+
+            ${lead.objection ? `
+            <div class="lc-section">
+                <div class="lc-section-label">Likely Objection</div>
+                <div class="lc-objection">âš ï¸ ${lead.objection}</div>
+            </div>` : ''}
+
+            ${lead.email || lead.phone ? `
+            <div class="lc-section" style="font-size:0.85rem; color:var(--text-main);">
+                <div class="lc-section-label">Contact Info</div>
+                ${lead.email ? `<a href="mailto:${lead.email}" style="color:#2563eb;text-decoration:none;">âœ‰ ${lead.email}</a>&nbsp;` : ''}
+                ${lead.phone ? `<a href="tel:${lead.phone}" style="color:#2563eb;text-decoration:none;">ðŸ“ž ${lead.phone}</a>` : ''}
+            </div>` : ''}
+
+        </div>
+
+        <div class="lc-actions-primary">
+            <button class="lc-contact-btn" onclick="smartContactAction('${docId}', \`${dm.replace(/`/g,'\\`').replace(/\\/g,'\\\\')}\`, '${primaryUri}', '${primaryPlat}')">
+                âœ‰ Contact This Lead
+            </button>
+            <button class="lc-crm-btn ${lead.is_in_crm ? 'in-crm' : ''}"
+                id="crm-btn-${docId}"
+                onclick="${lead.is_in_crm ? '' : `pushToCRM('${docId}', \`${encodeURIComponent(JSON.stringify(lead)).replace(/\\/g,'\\\\')}\`)`}"
+                ${lead.is_in_crm ? 'disabled' : ''}
+                title="Send to pipeline CRM">
+                ${lead.is_in_crm ? 'âœ“ In CRM' : 'â†’ CRM'}
+            </button>
+            <div style="position:relative;">
+                <button class="lc-more-btn" id="${moreId}" onclick="lcToggleMore('${docId}')" title="More options">Â·Â·Â·</button>
+                <div class="lc-overflow-menu" id="${overflowId}">
+                    <button class="lc-overflow-item" onclick="updateLeadStatus('${docId}','converted');lcCloseMore('${docId}')">ðŸŽ¯ Mark Converted</button>
+                    <button class="lc-overflow-item" onclick="viewLeadTimeline('${encodeURIComponent(JSON.stringify(lead.interactions||[]))}');lcCloseMore('${docId}')">ðŸ• View Timeline</button>
+                    <button class="lc-overflow-item danger" onclick="updateLeadStatus('${docId}','ignored');lcCloseMore('${docId}')">âœ• Skip This Lead</button>
+                </div>
+            </div>
+        </div>
+    `;
+    return card;
+};
+
+// Toggle expand/collapse
+window.lcToggleExpand = function(docId) {
+    const panel = document.getElementById(`lc-expand-${docId}`);
+    const icon  = document.getElementById(`lc-expand-icon-${docId}`);
+    if (!panel) return;
+    const isOpen = panel.classList.contains('open');
+    panel.classList.toggle('open', !isOpen);
+    if (icon) icon.textContent = isOpen ? 'â†“' : 'â†‘';
+};
+
+// Overflow menu toggle
+window.lcToggleMore = function(docId) {
+    const menu = document.getElementById(`lc-of-${docId}`);
+    if (!menu) return;
+    const isOpen = menu.classList.contains('open');
+    // Close all others first
+    document.querySelectorAll('.lc-overflow-menu.open').forEach(m => m.classList.remove('open'));
+    if (!isOpen) {
+        menu.classList.add('open');
+        // Auto-close on outside click
+        setTimeout(() => {
+            const handler = (e) => {
+                if (!menu.contains(e.target)) { menu.classList.remove('open'); document.removeEventListener('click', handler); }
+            };
+            document.addEventListener('click', handler);
+        }, 0);
+    }
+};
+window.lcCloseMore = function(docId) {
+    document.getElementById(`lc-of-${docId}`)?.classList.remove('open');
+};
+
