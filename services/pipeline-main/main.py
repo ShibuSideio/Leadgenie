@@ -650,8 +650,14 @@ def produce():
     snippet_db  = {}       # url → {"title": ..., "snippet": ...} for hand-off
 
     for kw in smart_keywords:
-        search_query = f"{kw} AND {location}" if location and location != "all" else kw
-        raw_results  = search_serper(search_query, location=location or None, gl=gl or None)
+        # ── Query Builder Guard: clean location string, no orphaned AND operators ──
+        # Strips whitespace, ignores 'all', prevents contradictory geo injection.
+        clean_location = location.strip() if location else ""
+        if clean_location and clean_location.lower() != "all":
+            search_query = f"{kw} AND {clean_location}"
+        else:
+            search_query = kw
+        raw_results  = search_serper(search_query, location=clean_location or None, gl=gl or None)
         filtered     = filter_serper_noise(raw_results)
         for r in filtered:
             link = r.get("link")

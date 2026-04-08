@@ -294,7 +294,7 @@
             
             <label style="font-size: 0.8rem; color: var(--text-muted); padding-top: 8px;">Target Location</label>
             <div style="display:flex; gap: 8px; margin-bottom: 12px;">
-                <select id="camp-gl" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; background: white;">
+                <select id="camp-gl" onchange="handleCountryChange('camp-gl','camp-location')" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; background: white;">
                     <option value="">Global</option>
                     <option value="us">United States</option>
                     <option value="uk">United Kingdom</option>
@@ -302,7 +302,7 @@
                     <option value="au">Australia</option>
                     <option value="in">India</option>
                 </select>
-                <input type="text" id="camp-location" placeholder="State/Region, City" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+                <input type="text" id="camp-location" placeholder="City, State/Region" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             </div>
             
             <label style="font-size: 0.8rem; color: var(--text-muted); padding-top: 8px;">Priority Target Websites (Max 10)</label>
@@ -334,7 +334,7 @@
             
             <label style="font-size: 0.8rem; color: var(--text-muted);">Geographic Targeting</label>
             <div style="display:flex; gap: 8px; margin-bottom: 12px;">
-                <select id="edit-camp-gl" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; background: white;">
+                <select id="edit-camp-gl" onchange="handleCountryChange('edit-camp-gl','edit-camp-location')" style="flex:1; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px; background: white;">
                     <option value="">Global</option>
                     <option value="us">United States</option>
                     <option value="uk">United Kingdom</option>
@@ -342,7 +342,7 @@
                     <option value="au">Australia</option>
                     <option value="in">India</option>
                 </select>
-                <input type="text" id="edit-camp-location" placeholder="City, State" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
+                <input type="text" id="edit-camp-location" placeholder="City, State/Region" style="flex:2; padding: 10px; border: 1px solid var(--glass-border); border-radius: 6px;">
             </div>
 
             <label style="font-size: 0.8rem; color: var(--text-muted);">Priority Target Websites (Max 10)</label>
@@ -401,6 +401,6 @@
             });
         }
     </script>
-    <script src="app.js?v=18"></script>
+    <script src="app.js?v=19"></script>
 </body>
 </html>

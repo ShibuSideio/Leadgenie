@@ -870,6 +870,27 @@ window.viewLeadTimeline = function(eventsJson) {
     } catch(e) { console.error('Timeline Schema Sync Error', e); }
 };
 
+// ── Location State Sync ────────────────────────────────────────────────────
+// Called by onchange on both country dropdowns.
+// Clears the city/region text input and sets a country-native placeholder
+// so the user always gets a clean, contextual hint after switching country.
+const COUNTRY_PLACEHOLDER_MAP = {
+    'us': 'e.g. San Francisco, California',
+    'uk': 'e.g. Manchester, England',
+    'ca': 'e.g. Toronto, Ontario',
+    'au': 'e.g. Melbourne, Victoria',
+    'in': 'e.g. Kochi, Kerala',
+    '':   'City, State/Region'   // Global fallback
+};
+
+window.handleCountryChange = function(selectId, inputId) {
+    const gl    = document.getElementById(selectId)?.value || '';
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    input.value       = '';                                         // clear stale city
+    input.placeholder = COUNTRY_PLACEHOLDER_MAP[gl] || 'City, State/Region';
+};
+
 window.openEditModal = function(id, name, bio, keywords, gl, location, targetUrls) {
     document.getElementById('edit-camp-id').value = id;
     document.getElementById('edit-camp-name').value = name;
@@ -935,18 +956,27 @@ window.openNewCampaignModal = async function() {
         showToast('Beta quota exhausted. Contact admin to reload.', 'error');
         return;
     }
-    
+
     document.getElementById('new-campaign-modal').classList.remove('hidden');
-    const glInput = document.getElementById('camp-gl');
+    const glInput  = document.getElementById('camp-gl');
     const locInput = document.getElementById('camp-location');
-    
+
+    // Sync placeholder to any already-selected country on modal open
+    if (glInput && glInput.value) {
+        handleCountryChange('camp-gl', 'camp-location');
+    }
+
     // Auto-detect Geo if unpopulated
     if (glInput && !glInput.value) {
         try {
             const resp = await fetch('https://ipapi.co/json/');
             const json = await resp.json();
-            if (json.country) glInput.value = json.country_code ? json.country_code.toLowerCase() : '';
-            if (json.city) locInput.value = `${json.city}, ${json.region}`;
+            if (json.country_code) {
+                glInput.value = json.country_code.toLowerCase();
+                // Sync placeholder AFTER setting country code, THEN fill city
+                handleCountryChange('camp-gl', 'camp-location');
+            }
+            if (json.city && locInput) locInput.value = `${json.city}, ${json.region}`;
         } catch(e) {
             console.warn("Soft Geolocation Exception:", e);
         }
