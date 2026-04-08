@@ -312,8 +312,17 @@ def trigger_daily_sweep(path):
                 docs = db.collection("campaigns").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream()
                 
             elif request.path == "/api/leads":
-                # Apply explicit server-side sorting logic if indexing allows, otherwise stream natively.
-                docs = db.collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream()
+                # V15: Server-side CRM filter — honour ?crm= param to avoid full-collection downloads
+                # ?crm=true  → CRM board (is_in_crm == True)
+                # ?crm=false → Main dashboard feed (is_in_crm == False)
+                # (no param) → All leads, for backward compat with any legacy consumers
+                crm_param = request.args.get("crm")  # None | "true" | "false"
+                q = db.collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id)
+                if crm_param == "true":
+                    q = q.where(field_path="is_in_crm", op_string="==", value=True)
+                elif crm_param == "false":
+                    q = q.where(field_path="is_in_crm", op_string="==", value=False)
+                docs = q.limit(200).stream()
 
             results = [sanitize_document(doc) for doc in docs]
             return jsonify({"status": "success", "data": results}), 200
