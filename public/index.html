@@ -208,7 +208,80 @@
                     </table>
                 </div>
             </section>
+
+            <!-- V15: CRM Sandbox — hidden, accessible at #crm-test only -->
+            <section id="view-crm-test" class="glass-panel main-feed hidden" style="padding: 20px; overflow: hidden;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-shrink:0;">
+                    <div>
+                        <h2 style="margin:0;">Pipeline CRM</h2>
+                        <p style="margin:4px 0 0; font-size:0.82rem; color:var(--text-muted);">Leads you've explicitly pushed are shown here. Drag cards to update their stage.</p>
+                    </div>
+                    <button class="secondary-btn" onclick="loadCrmBoard()" style="font-size:0.8rem;">↻ Refresh</button>
+                </div>
+
+                <!-- Pipeline Health Widget -->
+                <div class="crm-health-bar" id="crm-health-bar">
+                    <div class="crm-health-stat">
+                        <div class="label">Negotiating</div>
+                        <div class="value" id="crm-negotiating-sum">₹0</div>
+                    </div>
+                    <div class="crm-health-divider"></div>
+                    <div class="crm-health-stat">
+                        <div class="label">Won</div>
+                        <div class="value" id="crm-won-sum">₹0</div>
+                    </div>
+                    <div class="crm-health-divider"></div>
+                    <div class="crm-health-stat">
+                        <div class="label">Pipeline Total</div>
+                        <div class="value" id="crm-pipeline-total">₹0</div>
+                    </div>
+                    <div class="crm-health-divider"></div>
+                    <div class="crm-health-stat">
+                        <div class="label">In CRM</div>
+                        <div class="value" id="crm-total-count">0</div>
+                    </div>
+                </div>
+
+                <!-- Kanban Board -->
+                <div class="kanban-board" id="kanban-board">
+                    <div class="kanban-col col-new" data-status="new" id="col-new">
+                        <div class="kanban-col-header">New Lead <span class="col-count" id="cnt-new">0</span></div>
+                        <div class="kanban-col-body" id="body-new"></div>
+                    </div>
+                    <div class="kanban-col col-contacted" data-status="contacted" id="col-contacted">
+                        <div class="kanban-col-header">Contacted <span class="col-count" id="cnt-contacted">0</span></div>
+                        <div class="kanban-col-body" id="body-contacted"></div>
+                    </div>
+                    <div class="kanban-col col-replied" data-status="replied" id="col-replied">
+                        <div class="kanban-col-header">Replied <span class="col-count" id="cnt-replied">0</span></div>
+                        <div class="kanban-col-body" id="body-replied"></div>
+                    </div>
+                    <div class="kanban-col col-negotiating" data-status="negotiating" id="col-negotiating">
+                        <div class="kanban-col-header">Negotiating <span class="col-count" id="cnt-negotiating">0</span></div>
+                        <div class="kanban-col-body" id="body-negotiating"></div>
+                    </div>
+                    <div class="kanban-col col-won" data-status="won" id="col-won">
+                        <div class="kanban-col-header">Won 🏆 <span class="col-count" id="cnt-won">0</span></div>
+                        <div class="kanban-col-body" id="body-won"></div>
+                    </div>
+                    <div class="kanban-col col-lost" data-status="lost" id="col-lost">
+                        <div class="kanban-col-header">Lost <span class="col-count" id="cnt-lost">0</span></div>
+                        <div class="kanban-col-body" id="body-lost"></div>
+                    </div>
+                </div>
+            </section>
         </main>
+    </div>
+
+    <!-- V15: CRM Micro-Dossier Side Panel -->
+    <div id="crm-side-panel" class="crm-side-panel">
+        <div class="crm-panel-header">
+            <h3 id="crm-panel-title">Lead Dossier</h3>
+            <button class="crm-panel-close" onclick="closeCrmPanel()">✕</button>
+        </div>
+        <div class="crm-panel-body" id="crm-panel-body">
+            <!-- Dynamically injected by openCrmPanel() -->
+        </div>
     </div>
 
     <div id="new-campaign-modal" class="hidden" style="position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:999; display:flex; justify-content:center; align-items:center;">
@@ -328,6 +401,6 @@
             });
         }
     </script>
-    <script src="app.js?v=16"></script>
+    <script src="app.js?v=17"></script>
 </body>
 </html>

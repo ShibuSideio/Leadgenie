@@ -376,7 +376,7 @@ function createLeadCard(docId, lead) {
         </div>
         <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
             <button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${(lead.dm || '').replace(/`/g, '\\`').replace(/'/g, "\\'")}\`)" title="Copy Message">📋 Copy Message</button>
-            <button class="action-btn" onclick="pushToCRM('${docId}', \`${encodeURIComponent(JSON.stringify(lead)).replace(/'/g, "\\'")}\`)" style="color: #4f46e5; border-color: #c7d2fe; background: #e0e7ff;">☁️ Push to CRM</button>
+            <button id="crm-btn-${docId}" class="action-btn ${lead.is_in_crm ? 'in-crm' : ''}" onclick="${lead.is_in_crm ? '' : `pushToCRM('${docId}', \`${encodeURIComponent(JSON.stringify(lead)).replace(/'/g, "\\'")}\`)`}" style="color: ${lead.is_in_crm ? '#16a34a' : '#4f46e5'}; border-color: ${lead.is_in_crm ? '#86efac' : '#c7d2fe'}; background: ${lead.is_in_crm ? '#dcfce7' : '#e0e7ff'};" ${lead.is_in_crm ? 'disabled' : ''}>${lead.is_in_crm ? '✅ In CRM' : '☁️ Push to CRM'}</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">🚫 Ignore</button>
             <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">🎯 Converted</button>
             <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${encodeURIComponent(JSON.stringify(lead.interactions || []))}')" title="Audit Log">🕒 View Timeline Logs</button>
@@ -386,20 +386,39 @@ function createLeadCard(docId, lead) {
 }
 
 window.pushToCRM = async function(docId, leadStr) {
-    const userUrl = window.currentUserData?.crm_webhook_url;
-    if (!userUrl) { showToast("No CRM Hook Configured in Settings", "error"); return; }
+    // V15: Native CRM push — sets is_in_crm:true + initialises crm_status:new
+    const btn = document.getElementById(`crm-btn-${docId}`);
     try {
-        const lead = JSON.parse(decodeURIComponent(leadStr));
-        await fetch(userUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            mode: 'no-cors',
-            body: JSON.stringify({ event: 'lead_pushed', lead: lead })
+        const success = await performApiMutation(`/api/leads/${docId}`, 'PUT', {
+            is_in_crm: true,
+            crm_status: 'new',
+            estimated_value: 0,
+            notes: []
         });
-        showToast("Signal fired to CRM Integration", "success");
-    } catch (e) {
-        console.error("CRM Push failure", e);
-        showToast("Hook connection failed", "error");
+        if (success) {
+            // Optimistic UI: disable + restyle button
+            if (btn) {
+                btn.textContent = '✅ In CRM';
+                btn.classList.add('in-crm');
+                btn.disabled = true;
+                btn.onclick = null;
+            }
+            // Update cache so re-renders don't re-enable it
+            const lead = rawLeadsCache.find(l => (l.id || l.doc_id) === docId);
+            if (lead) lead.is_in_crm = true;
+            showToast('Lead pushed to CRM pipeline — open /crm-test to manage it.', 'success');
+            // Optional webhook fire (legacy integration)
+            const userUrl = window.currentUserData?.crm_webhook_url;
+            if (userUrl) {
+                try {
+                    const lead = JSON.parse(decodeURIComponent(leadStr));
+                    fetch(userUrl, { method:'POST', headers:{'Content-Type':'application/json'}, mode:'no-cors', body: JSON.stringify({event:'lead_pushed', lead}) });
+                } catch(_) {}
+            }
+        }
+    } catch(e) {
+        console.error('CRM Push failure', e);
+        showToast('CRM push failed — try again.', 'error');
     }
 };
 
@@ -1016,7 +1035,7 @@ window.saveCampaignAction = async function() {
 window.switchTab = function(tabName) {
     document.querySelectorAll('.main-feed').forEach(el => el.classList.add('hidden'));
     document.querySelectorAll('.nav-links a').forEach(el => el.classList.remove('active'));
-    
+
     if(tabName === 'dashboard') {
         document.getElementById('view-dashboard').classList.remove('hidden');
         document.getElementById('tab-dashboard').classList.add('active');
@@ -1037,8 +1056,26 @@ window.switchTab = function(tabName) {
         if(document.getElementById('view-macro')) document.getElementById('view-macro').classList.remove('hidden');
         if(document.getElementById('tab-macro')) document.getElementById('tab-macro').classList.add('active');
         fetchMacroTrends();
+    } else if(tabName === 'crm-test') {
+        // V15: Hidden CRM sandbox route — no nav link shown
+        const crmView = document.getElementById('view-crm-test');
+        if (crmView) {
+            crmView.classList.remove('hidden');
+            loadCrmBoard();
+        }
     }
 };
+
+// V15: Hash-based hidden route for /crm-test
+window.addEventListener('hashchange', () => {
+    if (window.location.hash === '#crm-test' && firebase.auth().currentUser) {
+        switchTab('crm-test');
+    }
+});
+if (window.location.hash === '#crm-test') {
+    // Deferred until auth is ready (onAuthStateChanged will call loadDashboard first)
+    window.crmAutoOpen = true;
+}
 
 window.lastL0FetchTime = 0;
 window.l0TelemetryCache = { macro: {}, tenants: [], sortKey: 'leads', sortDesc: true };
@@ -1292,3 +1329,367 @@ window.sendEmailReport = function() {
 window.loadMoreLeads = function() {
     showToast('Historical offset cursors must be mapped in Orchestrator Endpoint v2.', 'info');
 };
+
+// ============================================================================
+// V15: NATIVE CRM SANDBOX ENGINE — /crm-test
+// ============================================================================
+
+const CRM_STATUSES = ['new', 'contacted', 'replied', 'negotiating', 'won', 'lost'];
+
+// State: keyed by lead id
+let crmLeadsCache = [];
+let crmActiveLead = null;   // lead object currently open in side panel
+let crmDraggedId  = null;   // id of card being dragged
+
+// ── loadCrmBoard ─────────────────────────────────────────────────────────────
+window.loadCrmBoard = async function() {
+    const user = firebase.auth().currentUser;
+    if (!user) return;
+
+    // Show loading state in all columns
+    CRM_STATUSES.forEach(s => {
+        const body = document.getElementById(`body-${s}`);
+        if (body) body.innerHTML = '<div style="padding:8px; color:var(--text-muted); font-size:0.8rem;">Loading...</div>';
+    });
+
+    try {
+        const token = await user.getIdToken();
+        const res   = await fetch(`${API_BASE}/api/leads?crm=true&rt=${Date.now()}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (res.status === 401 || res.status === 403) return handleAuthRejection();
+        const payload = await res.json();
+        // Filter strictly: is_in_crm === true only
+        crmLeadsCache = (payload.data || []).filter(l => l.is_in_crm === true);
+        renderKanban();
+    } catch(e) {
+        console.error('[CRM] Load failed', e);
+        showToast('Failed to load CRM data', 'error');
+    }
+};
+
+// ── renderKanban ─────────────────────────────────────────────────────────────
+function renderKanban() {
+    const now = Date.now();
+    // Group by crm_status (fallback to 'new')
+    const grouped = {};
+    CRM_STATUSES.forEach(s => grouped[s] = []);
+    crmLeadsCache.forEach(lead => {
+        const st = CRM_STATUSES.includes(lead.crm_status) ? lead.crm_status : 'new';
+        grouped[st].push(lead);
+    });
+
+    // Render each column
+    CRM_STATUSES.forEach(status => {
+        const body    = document.getElementById(`body-${status}`);
+        const counter = document.getElementById(`cnt-${status}`);
+        const leads   = grouped[status];
+        if (!body) return;
+        if (counter) counter.textContent = leads.length;
+
+        body.innerHTML = '';
+        leads.forEach(lead => {
+            const card     = buildKanbanCard(lead, now);
+            body.appendChild(card);
+        });
+    });
+
+    // Attach drop targets
+    document.querySelectorAll('.kanban-col').forEach(col => {
+        col.addEventListener('dragover',  e => { e.preventDefault(); col.classList.add('drag-over'); });
+        col.addEventListener('dragleave', ()  => col.classList.remove('drag-over'));
+        col.addEventListener('drop',      e  => handleKanbanDrop(e, col));
+    });
+
+    // Health widget
+    const fmt = v => `₹${Number(v || 0).toLocaleString('en-IN')}`;
+    const negotiating = grouped['negotiating'].reduce((a, l) => a + (l.estimated_value || 0), 0);
+    const won         = grouped['won'].reduce((a, l) => a + (l.estimated_value || 0), 0);
+    const el1 = document.getElementById('crm-negotiating-sum'); if (el1) el1.textContent = fmt(negotiating);
+    const el2 = document.getElementById('crm-won-sum');         if (el2) el2.textContent = fmt(won);
+    const el3 = document.getElementById('crm-pipeline-total');  if (el3) el3.textContent = fmt(negotiating + won);
+    const el4 = document.getElementById('crm-total-count');     if (el4) el4.textContent = crmLeadsCache.length;
+}
+
+// ── buildKanbanCard ──────────────────────────────────────────────────────────
+function buildKanbanCard(lead, now) {
+    const card   = document.createElement('div');
+    const id     = lead.id || lead.doc_id || '';
+    card.className   = 'crm-card';
+    card.draggable   = true;
+    card.dataset.id  = id;
+
+    // Follow-up date badge
+    let fueBadge = '';
+    if (lead.follow_up_date) {
+        const fueTs = lead.follow_up_date._seconds
+            ? lead.follow_up_date._seconds * 1000
+            : new Date(lead.follow_up_date).getTime();
+        if (fueTs < now) fueBadge = '<span class="due-badge">Due</span>';
+    }
+
+    const domain   = (() => { try { return new URL(lead.url || 'https://unknown').hostname.replace('www.', ''); } catch(_) { return lead.url || 'Unknown'; } })();
+    const signal   = lead.intent_signal || lead.pain_point || '';
+    const value    = lead.estimated_value ? `💰 ₹${Number(lead.estimated_value).toLocaleString('en-IN')}` : '';
+
+    card.innerHTML = `
+        <div class="card-domain">${domain}${fueBadge}</div>
+        <div class="card-score">Score: ${lead.score || 'N/A'}/10 · ${(lead.confidence_tier || 'High')}</div>
+        ${signal ? `<div class="card-signal">${signal}</div>` : ''}
+        ${value ? `<div class="card-value">${value}</div>` : ''}
+    `;
+
+    card.addEventListener('dragstart', e => {
+        crmDraggedId = id;
+        card.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+    });
+    card.addEventListener('dragend', () => card.classList.remove('dragging'));
+    card.addEventListener('click',   () => openCrmPanel(lead));
+    return card;
+}
+
+// ── handleKanbanDrop ─────────────────────────────────────────────────────────
+async function handleKanbanDrop(e, col) {
+    e.preventDefault();
+    col.classList.remove('drag-over');
+    const newStatus = col.dataset.status;
+    if (!crmDraggedId || !newStatus) return;
+
+    // Optimistic UI
+    const lead = crmLeadsCache.find(l => (l.id || l.doc_id) === crmDraggedId);
+    if (!lead) return;
+    const oldStatus  = lead.crm_status || 'new';
+    if (oldStatus === newStatus) return;
+    lead.crm_status  = newStatus;
+    renderKanban();
+
+    // Persist
+    try {
+        await performApiMutation(`/api/leads/${crmDraggedId}`, 'PUT', { crm_status: newStatus });
+        showToast(`Moved to "${newStatus}"`, 'success');
+    } catch(err) {
+        // Rollback
+        lead.crm_status = oldStatus;
+        renderKanban();
+        showToast('Status update failed', 'error');
+    }
+    crmDraggedId = null;
+}
+
+// ── openCrmPanel / closeCrmPanel ─────────────────────────────────────────────
+window.openCrmPanel = function(lead) {
+    crmActiveLead = lead;
+    const panel = document.getElementById('crm-side-panel');
+    const body  = document.getElementById('crm-panel-body');
+    const title = document.getElementById('crm-panel-title');
+    if (!panel || !body) return;
+
+    const id      = lead.id || lead.doc_id || '';
+    const domain  = (() => { try { return new URL(lead.url || 'https://x').hostname.replace('www.',''); } catch(_) { return lead.url || id; } })();
+    if (title) title.textContent = domain;
+
+    const fueVal  = lead.follow_up_date
+        ? (() => { try { const ts = lead.follow_up_date._seconds ? lead.follow_up_date._seconds*1000 : new Date(lead.follow_up_date).getTime(); return new Date(ts).toISOString().slice(0,10); } catch(_) { return ''; } })()
+        : '';
+
+    const notes   = Array.isArray(lead.notes) ? lead.notes : [];
+    const notesFeed = notes.length === 0
+        ? '<div style="color:var(--text-muted); font-size:0.8rem; font-style:italic;">No notes yet.</div>'
+        : notes.slice().reverse().map(n => `
+            <div class="crm-note-item">
+                <div class="note-ts">${new Date(n.timestamp?._seconds ? n.timestamp._seconds*1000 : n.timestamp).toLocaleString()}</div>
+                <div class="note-text">${n.text}</div>
+            </div>`).join('');
+
+    // Pull meeting/asset from user data
+    const meetingUrl = window.currentUserData?.meeting_url || '';
+    const assetUrl   = window.currentUserData?.asset_url || lead.attached_asset_url || '';
+
+    // Primary endpoint for Smart Action
+    const endpoints = lead.contact_endpoints || [];
+    const primary   = endpoints[0] || null;
+    const primaryLabel = primary
+        ? `${PLATFORM_META[primary.platform]?.icon || '🔗'} ${PLATFORM_META[primary.platform]?.label || 'Contact'}`
+        : '📋 Copy DM';
+
+    body.innerHTML = `
+        <!-- Intent Signal -->
+        <div class="crm-panel-section">
+            <div class="crm-panel-label">Intent Signal</div>
+            <div class="crm-panel-intent">${lead.intent_signal || lead.pain_point || 'No signal captured.'}</div>
+        </div>
+
+        <!-- AI-Drafted DM -->
+        <div class="crm-panel-section">
+            <div class="crm-panel-label">AI-Drafted Message</div>
+            <div class="crm-panel-dm" id="crm-dm-preview">${lead.dm || 'No draft available.'}</div>
+        </div>
+
+        <!-- Smart Action Toggles -->
+        <div class="crm-panel-section" style="background:#f8fafc; padding:12px; border-radius:10px; border:1px solid var(--glass-border);">
+            <div class="crm-panel-label" style="margin-bottom:8px;">Smart Action Settings</div>
+            ${meetingUrl ? `<div class="crm-toggle-row">
+                <span class="crm-toggle-label">📅 Include Meeting Link</span>
+                <label class="crm-toggle"><input type="checkbox" id="toggle-meeting" onchange="refreshCrmDmPreview('${id}')"><span class="crm-toggle-slider"></span></label>
+            </div>` : ''}
+            ${assetUrl ? `<div class="crm-toggle-row">
+                <span class="crm-toggle-label">🔗 Include Asset Link</span>
+                <label class="crm-toggle"><input type="checkbox" id="toggle-asset" onchange="refreshCrmDmPreview('${id}')"><span class="crm-toggle-slider"></span></label>
+            </div>` : ''}
+            <button class="crm-smart-action-btn" onclick="crmSmartAction('${id}', '${primary ? encodeURIComponent(primary.uri) : ''}', '${primary ? primary.platform : ''}')">
+                ${primaryLabel}
+            </button>
+        </div>
+
+        <!-- Estimated Value -->
+        <div class="crm-panel-section">
+            <div class="crm-panel-label">Estimated Deal Value (₹)</div>
+            <input type="number" id="crm-est-value" class="crm-input" value="${lead.estimated_value || 0}" placeholder="e.g. 50000" min="0">
+            <button class="crm-save-btn" onclick="saveCrmValue('${id}')">Save Value</button>
+        </div>
+
+        <!-- Follow-Up Date -->
+        <div class="crm-panel-section">
+            <div class="crm-panel-label">Follow-Up Date</div>
+            <input type="date" id="crm-followup" class="crm-input" value="${fueVal}">
+            <button class="crm-save-btn" onclick="saveCrmFollowup('${id}')">Set Reminder</button>
+        </div>
+
+        <!-- Notes -->
+        <div class="crm-panel-section">
+            <div class="crm-panel-label">Notes</div>
+            <div class="crm-notes-feed" id="crm-notes-feed">${notesFeed}</div>
+            <textarea id="crm-note-input" class="crm-input" rows="3" placeholder="Add a note..." style="margin-top:8px; resize:vertical;"></textarea>
+            <button class="crm-save-btn" onclick="saveCrmNote('${id}')">Add Note</button>
+        </div>
+    `;
+
+    panel.classList.add('open');
+};
+
+window.closeCrmPanel = function() {
+    const panel = document.getElementById('crm-side-panel');
+    if (panel) panel.classList.remove('open');
+    crmActiveLead = null;
+};
+
+// ── refreshCrmDmPreview ───────────────────────────────────────────────────────
+window.refreshCrmDmPreview = function(id) {
+    if (!crmActiveLead) return;
+    const meetEl  = document.getElementById('toggle-meeting');
+    const assetEl = document.getElementById('toggle-asset');
+    const preview = document.getElementById('crm-dm-preview');
+    if (!preview) return;
+    let dm = crmActiveLead.dm || '';
+    if (meetEl && meetEl.checked && window.currentUserData?.meeting_url) {
+        dm += `\n\n📅 Book a quick call: ${window.currentUserData.meeting_url}`;
+    }
+    if (assetEl && assetEl.checked) {
+        const assetUrl = window.currentUserData?.asset_url || crmActiveLead.attached_asset_url || '';
+        if (assetUrl) dm += `\n\n🔗 Here's our resource: ${assetUrl}`;
+    }
+    preview.textContent = dm;
+};
+
+// ── crmSmartAction ────────────────────────────────────────────────────────────
+window.crmSmartAction = function(id, uriEnc, platform) {
+    if (!crmActiveLead) return;
+    const meetEl  = document.getElementById('toggle-meeting');
+    const assetEl = document.getElementById('toggle-asset');
+    let dm = crmActiveLead.dm || '';
+
+    if (meetEl && meetEl.checked && window.currentUserData?.meeting_url) {
+        dm += `\n\n📅 Book a quick call: ${window.currentUserData.meeting_url}`;
+    }
+    if (assetEl && assetEl.checked) {
+        const assetUrl = window.currentUserData?.asset_url || crmActiveLead.attached_asset_url || '';
+        if (assetUrl) dm += `\n\n🔗 Here's our resource: ${assetUrl}`;
+    }
+
+    navigator.clipboard.writeText(dm).catch(() => {});
+
+    if (uriEnc) {
+        const uri = decodeURIComponent(uriEnc);
+        const isEmail = platform === 'email' || (uri.includes('@') && !uri.startsWith('http'));
+        const isPhone = platform === 'other' && /^[\d\s+()\\-]{6,}$/.test(uri);
+        let href;
+        if (isEmail)      href = `mailto:${uri}`;
+        else if (isPhone) href = `tel:${uri}`;
+        else if (/^(https?:\/\/|mailto:|tel:)/i.test(uri)) href = uri;
+        else              href = `https://${uri}`;
+        window.open(href, '_blank', 'noopener,noreferrer');
+    }
+
+    showToast('DM copied with appended links!', 'success');
+    updateLeadStatus(id, 'contacted');
+};
+
+// ── saveCrmValue ──────────────────────────────────────────────────────────────
+window.saveCrmValue = async function(id) {
+    const val = parseInt(document.getElementById('crm-est-value')?.value || '0', 10);
+    try {
+        const ok = await performApiMutation(`/api/leads/${id}`, 'PUT', { estimated_value: val });
+        if (ok) {
+            const lead = crmLeadsCache.find(l => (l.id || l.doc_id) === id);
+            if (lead) lead.estimated_value = val;
+            renderKanban();
+            showToast('Deal value saved!', 'success');
+        }
+    } catch(e) { showToast('Failed to save value', 'error'); }
+};
+
+// ── saveCrmFollowup ───────────────────────────────────────────────────────────
+window.saveCrmFollowup = async function(id) {
+    const dateStr = document.getElementById('crm-followup')?.value;
+    if (!dateStr) return showToast('Pick a date first', 'error');
+    const ts = new Date(dateStr).toISOString();
+    try {
+        const ok = await performApiMutation(`/api/leads/${id}`, 'PUT', { follow_up_date: ts });
+        if (ok) {
+            const lead = crmLeadsCache.find(l => (l.id || l.doc_id) === id);
+            if (lead) lead.follow_up_date = ts;
+            renderKanban();
+            showToast('Reminder set!', 'success');
+        }
+    } catch(e) { showToast('Failed to save date', 'error'); }
+};
+
+// ── saveCrmNote ───────────────────────────────────────────────────────────────
+window.saveCrmNote = async function(id) {
+    const input = document.getElementById('crm-note-input');
+    const text  = input?.value?.trim();
+    if (!text) return showToast('Note cannot be empty', 'error');
+
+    const note  = { timestamp: new Date().toISOString(), text };
+    const lead  = crmLeadsCache.find(l => (l.id || l.doc_id) === id);
+    const notes = Array.isArray(lead?.notes) ? [...lead.notes, note] : [note];
+
+    try {
+        const ok = await performApiMutation(`/api/leads/${id}`, 'PUT', { notes });
+        if (ok) {
+            if (lead) lead.notes = notes;
+            if (input) input.value = '';
+            // Re-render notes feed
+            const feed = document.getElementById('crm-notes-feed');
+            if (feed) {
+                feed.innerHTML = notes.slice().reverse().map(n => `
+                    <div class="crm-note-item">
+                        <div class="note-ts">${new Date(n.timestamp?._seconds ? n.timestamp._seconds*1000 : n.timestamp).toLocaleString()}</div>
+                        <div class="note-text">${n.text}</div>
+                    </div>`).join('');
+            }
+            showToast('Note saved!', 'success');
+        }
+    } catch(e) { showToast('Failed to save note', 'error'); }
+};
+
+// ── Auto-open CRM if hash was set before auth resolved ───────────────────────
+const _origLoadDashboard = loadDashboard;
+async function loadDashboard() {
+    await _origLoadDashboard();
+    if (window.crmAutoOpen) {
+        window.crmAutoOpen = false;
+        switchTab('crm-test');
+    }
+}
