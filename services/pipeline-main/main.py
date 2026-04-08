@@ -301,14 +301,42 @@ def extract_root_domain(url):
     except:
         return ""
 
-def deep_context_serper_dork(domain, tenant_id):
+def deep_context_serper_dork(domain, tenant_id, sourcing_vector="Classic B2B"):
+    """
+    V14.4 HOTFIX: Enrichment Gatekeeper.
+    Skips ALL Serper calls for:
+      1. Social/UGC domains (reddit, facebook, instagram, youtube, etc.)
+      2. B2C sourcing vectors (no company LinkedIn / Naukri job listings exist)
+    """
     if not domain: return "", False
-    
+
+    # ── GATEKEEPER: Social Domain Blacklist ───────────────────────────────────
+    ENRICHMENT_SOCIAL_BLACKLIST = [
+        "reddit.com", "facebook.com", "instagram.com", "youtube.com",
+        "linkedin.com", "quora.com", "twitter.com", "x.com", "medium.com"
+    ]
+    cleaned_domain = domain.lower().replace("www.", "")
+    for blocked in ENRICHMENT_SOCIAL_BLACKLIST:
+        if blocked in cleaned_domain:
+            print(f"[ENRICHMENT] Bypassing company enrichment for B2C/Social domain: {domain}")
+            return "", False
+
+    # ── GATEKEEPER: B2C Persona Bypass ───────────────────────────────────────
+    # B2C vectors do not have company LinkedIn pages or Naukri job listings.
+    # Running enrichment searches against them burns credits with zero signal.
+    B2C_VECTORS = [
+        "Reddit B2C", "Quora B2C", "Google Maps B2C",
+        "TripAdvisor B2C", "YouTube B2C", "Facebook Groups B2C"
+    ]
+    if sourcing_vector in B2C_VECTORS:
+        print(f"[ENRICHMENT] Bypassing company enrichment for B2C/Social domain: {domain} (vector={sourcing_vector})")
+        return "", False
+
     api_key = get_secret(SERPER_API_KEY_NAME).strip()
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
-    
+
     context_data = []
-    
+
     def fetch_serper(url, payload):
         try:
              db.collection("usage_metrics").document(tenant_id).set({"serper_searches": firestore.Increment(1)}, merge=True)
@@ -332,16 +360,16 @@ def deep_context_serper_dork(domain, tenant_id):
     # Vector C: Hiring Intent
     hiring_query = f"site:naukri.com/job-listings OR site:instahyre.com/job OR site:linkedin.com/jobs OR site:indeed.com/cmp \"{domain}\""
     hiring_data = fetch_serper("https://google.serper.dev/search", {"q": hiring_query, "num": 3})
-    
+
     hiring_signatures = ["we are hiring", "job description", "apply today", "openings", "careers", "looking for", "lakh", "lpa", "fresher"]
     native_hiring_intent_found = False
-    
+
     for job in hiring_data.get("organic", []):
          snippet_lower = job.get('snippet', '').lower()
          context_data.append(f"[HIRING] {snippet_lower}")
          if any(sig in snippet_lower for sig in hiring_signatures):
              native_hiring_intent_found = True
-         
+
     return " | ".join(context_data)[:3000], native_hiring_intent_found
 
 
@@ -883,7 +911,7 @@ def dispatch():
                 db.collection("users").document(tenant_id).collection("wallet_shards") \
                     .document(str(shard_id)).set({"consumed_credits": firestore.Increment(1)}, merge=True)
 
-                context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
+                context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id, sourcing_vector)
 
                 # RLHF Fit Score
                 fit_score = 0
@@ -1075,7 +1103,7 @@ def finalize():
         db.collection("usage_metrics").document(tenant_id).collection("shards").document(str(shard_id)).set({"gemini_calls": firestore.Increment(1)}, merge=True)
         db.collection("users").document(tenant_id).collection("wallet_shards").document(str(shard_id)).set({"consumed_credits": firestore.Increment(1)}, merge=True)
         
-        context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id)
+        context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id, sourcing_vector)
         
         try:
             docs = db.collection("leads").where("tenant_id", "==", tenant_id).where("status", "==", "converted").order_by("updatedAt", direction=firestore.Query.DESCENDING).limit(3).stream()
