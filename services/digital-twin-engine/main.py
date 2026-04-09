@@ -45,13 +45,12 @@ from firebase_admin import auth as firebase_auth, credentials
 app = Flask(__name__)
 
 # Apply strict CORS for production + local dev
-CORS(app, resources={
-    r"/*": {
-        "origins": ["https://lead-sniper-prod.web.app", "http://localhost:5000"],
-        "methods": ["POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"]
-    }
-})
+CORS(app, 
+    origins=["https://lead-sniper-prod.web.app", "http://localhost:5000"],
+    methods=["*"],
+    allow_headers=["*"],
+    supports_credentials=True
+)
 
 # =============================================================================
 # BOOT INITIALISATION
