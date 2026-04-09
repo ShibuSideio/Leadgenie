@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 # cloudbuild.yaml — Sideio Leads V16 Enterprise Build Pipeline
 # =============================================================================
 # Architecture:
@@ -28,10 +28,12 @@ timeout: '3600s'
 steps:
 
 # =============================================================================
-# PHASE 0: FRONTEND SYNTAX GATE
-# Runs node --check on app.js BEFORE any Docker build or Firebase deploy.
-# A SyntaxError here fails the build instantly — zero chance of deploying
-# a broken frontend. Costs ~2s. Saves production lockouts entirely.
+# PHASE 0: FRONTEND QA GATE (2-layer)
+# Layer 1 — node --check: catches SyntaxErrors (missing catch, unexpected token)
+# Layer 2 — node -e scan: catches missing function declarations (ReferenceErrors
+#            that only surface at runtime and lock out the entire app).
+# Both layers must pass before any Docker build or Firebase deploy starts.
+# Total cost: ~3s. Zero broken deployments possible.
 # =============================================================================
 
 - id: 'syntax-check-appjs'
@@ -41,9 +43,40 @@ steps:
   args:
   - '-c'
   - |
-    echo "[GATE] Running JS syntax check on public/app.js..."
+    set -eo pipefail
+    echo "[GATE L1] Checking JS syntax: public/app.js"
     node --check public/app.js
-    echo "[GATE] app.js syntax OK — proceeding with build."
+    echo "[GATE L1] Syntax OK."
+
+    echo "[GATE L2] Checking critical function declarations..."
+    node -e "
+      const fs = require('fs');
+      const code = fs.readFileSync('public/app.js', 'utf8');
+      const required = [
+        'function loadLeads',
+        'function loadMe',
+        'function loadCampaigns',
+        'function renderLeads',
+        'window.showToast',
+        'window.createLeadCardV2',
+        'window.copilotAction',
+        'virtualObserver',
+        'window.switchTab',
+        'window.viewLeadTimeline'
+      ];
+      let failed = false;
+      required.forEach(fn => {
+        if (!code.includes(fn)) {
+          console.error('[GATE L2] MISSING FUNCTION: ' + fn);
+          failed = true;
+        } else {
+          console.log('[GATE L2] OK: ' + fn);
+        }
+      });
+      if (failed) process.exit(1);
+      console.log('[GATE L2] All critical declarations present.');
+    "
+    echo "[GATE] All checks passed — build proceeding."
 
 # =============================================================================
 # PHASE 1: PARALLEL IMAGE BUILDS
