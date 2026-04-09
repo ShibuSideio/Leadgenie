@@ -578,14 +578,10 @@ def scrape_url(url):
         print(f"Fallback to heavy scraper for {url} due to {str(e)}")
         raise ValueError("DEFERRED")
 
-def final_score_and_dm(text, bio, context_payload, tech_stack, historical_dms=None, source_url=None):
+def final_score_and_dm(text, active_campaigns, context_payload, tech_stack, historical_dms=None, source_url=None):
     """
-    V14.1: Persona Value-Chain Matrix + Polymorphic URI hardening.
-    - Infers B2B/B2C persona from bio and aligns DM tone accordingly.
-    - Forces social profile link extraction from forum DOMs.
-    - Strict contact_endpoints schema with enum-locked platform field.
+    V18 Multi-Campaign Swarm: Evaluates lead against ALL active campaigns.
     """
-    # Detect social/forum origin for the URI hardening rule
     social_domains = ["reddit.com", "quora.com", "facebook.com", "linkedin.com", "instagram.com"]
     is_social_source = source_url and any(d in source_url.lower() for d in social_domains)
     social_platform = "other"
@@ -599,7 +595,6 @@ def final_score_and_dm(text, bio, context_payload, tech_stack, historical_dms=No
     social_uri_rule = ""
     if is_social_source:
         social_uri_rule = f"""
-
 SOCIAL PROFILE URI RULE (MANDATORY — this source is from a social/forum platform):
 The source URL '{source_url}' originates from a social network or forum.
 You MUST extract the URL of the original poster's user profile from the DOM text.
@@ -607,50 +602,44 @@ Map this profile link to the contact_endpoints array using the correct platform 
 Do NOT return an empty contact_endpoints array if a user profile link is present in the text.
 Look for patterns like '/u/', '/user/', '/profile/', '@username', or any author attribution link."""
 
-    prompt = f"""You are an Elite Extraction Engine with dynamic persona intelligence.
+    import json
+    campaigns_str = json.dumps([{
+        "campaign_id": c.get("id", c.get("name")),
+        "bio": c.get("bio", ""),
+        "keywords": c.get("keywords", "")
+    } for c in active_campaigns], indent=2)
 
-# STEP 1 — PERSONA CLASSIFICATION
-Before scoring, classify the user based on their bio: '{bio}'.
-- B2B Vendor: sells tools, software, or services TO other businesses.
-- B2C Service Provider: sells coaching, advice, or services DIRECTLY to individual consumers or students.
+    prompt = f"""You are an Elite Extraction Engine evaluating a lead against multiple campaigns using the "Spear & Shield" strategy.
 
-# STEP 2 — PERSONA-LOCKED SCORING & EXTRACTION
-Score this lead 1-10 based on how well it matches the bio above.
+# STEP 1 — CROSS-POLLINATION EVALUATION MATRIX
+Read the text DOM and evaluate it against EACH of these active campaigns:
+{campaigns_str}
 
-IF B2B Vendor:
-- The ideal target is a business decision-maker experiencing the user's stated pain point.
-- A generic homepage, ad, or content without a human contact MUST score 0.
-- Outreach (dm field) MUST use professional B2B tone: direct, outcome-driven, no fluff.
+Score the lead (1-10) for EACH campaign based on how well the target fits the campaign's bio and keywords.
+Only return campaigns where the user is genuinely a good fit (score >= 4).
 
-IF B2C Service Provider:
-- The ideal target is an INDIVIDUAL (not a company) who has explicitly expressed the need in their own words.
-- Corporate pages, university sites, agencies, or competitor pages MUST score 0.
-- Outreach (dm field) MUST be warm, personal, direct-to-consumer. DO NOT write enterprise software pitches or B2B jargon.
-- Example: A career counselor should send a personal offer of help, NOT an ROI pitch.
+# STEP 2 — "SPEAR & SHIELD" COPILOT DRAFT
+1. Identify the campaign with the HIGHEST match score. Use this as the primary pain point to open the message ("Spear").
+2. If other campaigns also matched (score >= 4), weave them fluidly into the second sentence as supporting value to show deep understanding ("Shield").
+3. NEVER pitch a bundle; pitch a primary solution with secondary benefits.
+4. Tone: Provide a warm, personal, direct message. No fluff, no generic greetings.
 
 # STEP 3 — EXTRACTION RULES
 For hiring_intent_found: Return ONLY 'Yes' or 'No'. No explanation.
 
 For contact_endpoints: Extract ALL reachable contact surfaces explicitly present in the text.
 Each endpoint must have a 'platform' from the strict enum and a 'uri'.
-
-URI PROTOCOL RULE (MANDATORY): Every URI MUST include its full protocol prefix. Never return a naked domain:
-- Web profile URLs: must start with https:// (e.g. https://reddit.com/user/johndoe, https://linkedin.com/in/jane)
-- Email addresses: return ONLY the email string (e.g. hello@company.com), the frontend will prefix mailto:
-- Phone numbers: return ONLY the digits/number string, the frontend will prefix tel:
-- If a URI would be a naked domain (e.g. 'reddit.com' with no path), DO NOT include it.
-
-REDDIT TARGETING RULE (MANDATORY — only applies when source is Reddit):
-You MUST extract the href of the original poster's author attribution link (e.g. https://reddit.com/user/[username]).
-If the poster's profile URL cannot be found in the DOM, do NOT invent one. Instead, omit this endpoint entirely.
-A generic 'https://reddit.com' URI with no username path is useless and MUST NOT be returned.
-
-PHONE DEDUPLICATION RULE: If the DOM contains more than 3 telephone numbers, return ONLY the first 2 in contact_endpoints. Excess numbers create UI clutter.
-
-Do NOT invent contacts. Only extract what is explicitly present in the DOM.
+URI PROTOCOL RULE (MANDATORY): Every URI MUST include its full protocol prefix:
+- Web profile URLs: must start with https://
+- Email addresses: return ONLY the email string
+- Phone numbers: return ONLY the digits/number string
+- If a URI would be a naked domain, DO NOT include it.
+REDDIT TARGETING RULE: Extract the href of the original poster's attribution link.
+PHONE DEDUPLICATION: Max 2 numbers.
+Do NOT invent contacts. Only extract what is explicitly present.
 {social_uri_rule}
 
-For intent_signal: Write one precise sentence explaining the specific signal in this content that proves they need the user's solution.
+For intent_signal: Write one precise sentence explaining the specific signal proving they need the solution.
 
 CONTEXTUAL DORKING DATA:
 {context_payload}
@@ -658,22 +647,29 @@ CONTEXTUAL DORKING DATA:
 DETECTED TECH STACK:
 {', '.join(tech_stack) if tech_stack else 'None extracted'}
 """
-
     if historical_dms:
         prompt += f"\nPast successful converted messages (match tone and length strictly): {historical_dms}\n"
+    prompt += f"\nUsing all context, output your evaluation and drafting.\n\nText DOM:\n{text}"
 
-    prompt += f"\nUsing all context, write a hyper-personalized outreach message aligned to the persona above, targeting the identified pain point.\n\nText DOM:\n{text}"
+    sys_inst = "You are an Elite Extraction Engine with dynamic persona intelligence. Never hallucinate contacts."
 
-    sys_inst = "You are an Elite Extraction Engine. Extract factual data with precision and draft concise, high-converting outreach. Adapt your tone strictly to the user's persona (B2B/B2C). Never hallucinate contacts. Never use fluff or generic greetings."
-
-    # V14: Strict polymorphic contact schema — enum-locked platform field
     schema = {
         "type": "OBJECT",
         "properties": {
-            "score": {"type": "INTEGER"},
+            "matched_campaigns": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "campaign_id": {"type": "STRING"},
+                        "raw_score": {"type": "INTEGER"}
+                    },
+                    "required": ["campaign_id", "raw_score"]
+                }
+            },
             "dm": {
                 "type": "STRING",
-                "description": "Drafted outreach message. Output exact string 'N/A' if insufficient data."
+                "description": "Drafted Spear & Shield outreach message. Output exact string 'N/A' if insufficient data."
             },
             "pain_point": {
                 "type": "STRING",
@@ -736,11 +732,10 @@ DETECTED TECH STACK:
             }
         },
         "required": [
-            "score", "dm", "pain_point", "icebreaker_angle", "intent_signal",
+            "matched_campaigns", "dm", "pain_point", "icebreaker_angle", "intent_signal",
             "hiring_intent_found", "tech_stack_found", "contact_endpoints",
             "decision_maker_name", "decision_maker_title",
             "company_size_tier", "primary_objection_hypothesis"
-            # company_name intentionally NOT in required — optional extraction
         ]
     }
 
@@ -749,8 +744,33 @@ DETECTED TECH STACK:
         if not isinstance(data, dict):
             raise ValueError("Parsed JSON is not a dictionary.")
 
+        matched_campaigns = data.get("matched_campaigns", [])
+        if not matched_campaigns:
+            final_score = 0
+            matched_ids = []
+            trend_mapped = False
+            highest_campaign = "Unknown"
+        else:
+            # Sort descending by raw_score
+            matched_campaigns.sort(key=lambda x: x.get("raw_score", 0), reverse=True)
+            base_score = float(matched_campaigns[0].get("raw_score", 0))
+            highest_campaign = matched_campaigns[0].get("campaign_id", "Unknown")
+            matched_ids = [str(c.get("campaign_id")) for c in matched_campaigns]
+
+            multiplier = 1.0
+            if len(matched_campaigns) == 2:
+                multiplier = 1.3
+            elif len(matched_campaigns) >= 3:
+                multiplier = 1.6
+
+            final_score = int(min(base_score * multiplier, 10.0))
+            trend_mapped = len(matched_campaigns) >= 3
+
         return {
-            "score":                        data.get("score", 0),
+            "score":                        final_score,
+            "matched_campaign_ids":         matched_ids,
+            "trend_mapped":                 trend_mapped,
+            "highest_campaign_id":          highest_campaign,
             "pain_point":                   data.get("pain_point", "Unknown"),
             "hiring_intent_found":          data.get("hiring_intent_found", "No"),
             "tech_stack_found":             data.get("tech_stack_found", []),
@@ -762,7 +782,6 @@ DETECTED TECH STACK:
             "decision_maker_title":         data.get("decision_maker_title", "Unknown"),
             "company_size_tier":            data.get("company_size_tier", "Unknown"),
             "primary_objection_hypothesis": data.get("primary_objection_hypothesis", "Unknown"),
-            # Optional — None if Gemini couldn't determine it
             "company_name":                 data.get("company_name") or None,
         }
     except Exception as e:
@@ -1701,6 +1720,17 @@ def dispatch():
     sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
     location     = campaign.get("location", "").strip()
 
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    # V18 Multi-Campaign Swarm: Pre-fetch ALL active campaigns for tenant ecosystem
+    active_campaigns_docs = db.collection("campaigns").where(filter=FieldFilter("tenant_id", "==", tenant_id)).where(filter=FieldFilter("status", "==", "active")).stream()
+    active_campaigns = []
+    for doc in active_campaigns_docs:
+        d = doc.to_dict()
+        d["id"] = doc.id
+        active_campaigns.append(d)
+    if not active_campaigns:
+        active_campaigns = [campaign]
+
     # ── V18: PrismPipeline — instantiate once per dispatch() call ────────────
     # Reads target_personas from the campaign doc (populated by Digital Twin).
     # Falls back gracefully to GeneralDomain mode if personas are absent.
@@ -1969,7 +1999,7 @@ def dispatch():
                     continue
 
                 try:
-                    evaluation = final_score_and_dm(text, bio, context_payload, tech_stack, source_url=url)
+                    evaluation = final_score_and_dm(text, active_campaigns, context_payload, tech_stack, source_url=url)
                 except TimeoutError:
                     db.collection("leads").document(lead_id).update({"status": "failed", "error": "Vertex AI timeout"})
                     scrape_failed += 1
@@ -2011,6 +2041,9 @@ def dispatch():
                         "tenant_id":                    tenant_id,
                         "origin_engine":                "cartographer",
                         "score":                        evaluation.get("score", 0),
+                        "matched_campaign_ids":         evaluation.get("matched_campaign_ids", []),
+                        "trend_mapped":                 evaluation.get("trend_mapped", False),
+                        "highest_campaign_id":          evaluation.get("highest_campaign_id", "Unknown"),
                         "pain_point":                   evaluation.get("pain_point", ""),
                         "dm":                           evaluation.get("dm", ""),
                         "intent_signal":                evaluation.get("intent_signal", ""),
@@ -2126,6 +2159,17 @@ def finalize():
     campaign_id = data.get("campaign_id")
     bio = data.get("bio", "")
     url = data.get("url", "")
+
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    # V18 Multi-Campaign Swarm: Pre-fetch ALL active campaigns for tenant ecosystem
+    active_campaigns_docs = db.collection("campaigns").where(filter=FieldFilter("tenant_id", "==", tenant_id)).where(filter=FieldFilter("status", "==", "active")).stream()
+    active_campaigns = []
+    for doc in active_campaigns_docs:
+        d = doc.to_dict()
+        d["id"] = doc.id
+        active_campaigns.append(d)
+    if not active_campaigns:
+        active_campaigns = [{"id": campaign_id, "bio": bio}]
     target_domain = data.get("target_domain", "")
     preferences_weights = data.get("preferences_weights", {})
     tech_stack = ["Fallback Scraper Used"]
@@ -2186,7 +2230,7 @@ def finalize():
             docs = db.collection("leads").where("tenant_id", "==", tenant_id).where("status", "==", "converted").order_by("updatedAt", direction=firestore.Query.DESCENDING).limit(3).stream()
             historical_dms = [doc.to_dict().get("dm") for doc in docs if doc.to_dict().get("dm")]
             
-            evaluation = final_score_and_dm(dense_text, bio, context_payload, tech_stack, historical_dms, source_url=url)
+            evaluation = final_score_and_dm(dense_text, active_campaigns, context_payload, tech_stack, historical_dms, source_url=url)
         except TimeoutError:
             doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
             return jsonify({"status": "timeout"}), 200
@@ -2221,6 +2265,9 @@ def finalize():
                 "tenant_id":                    tenant_id,
                 "origin_engine":                "cartographer",
                 "score":                        evaluation.get("score", 0),
+                "matched_campaign_ids":         evaluation.get("matched_campaign_ids", []),
+                "trend_mapped":                 evaluation.get("trend_mapped", False),
+                "highest_campaign_id":          evaluation.get("highest_campaign_id", "Unknown"),
                 "pain_point":                   evaluation.get("pain_point", ""),
                 "dm":                           evaluation.get("dm", ""),
                 "intent_signal":                evaluation.get("intent_signal", ""),

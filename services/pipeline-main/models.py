@@ -47,6 +47,11 @@ class LeadPayload(BaseModel):
     sourcing_vector: str = ""
     confidence_tier: str = "High"
     status: str = "new"
+    
+    # ── V18 Multi-Campaign fields ────────────────────────────────────────────
+    matched_campaign_ids: List[str] = []
+    trend_mapped: bool = False
+    highest_campaign_id: str = "Unknown"
 
     # ── Optional extraction fields ───────────────────────────────────────────
     company_name: Optional[str] = None       # V14 attempts; V16 populates natively

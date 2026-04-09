@@ -736,10 +736,32 @@ def trigger_daily_sweep(path):
             # Remove any forged tenant injections
             data.pop('tenant_id', None)
             
-            if request.path == "/api/campaigns" and request.method == "POST":
+            if request.path == "/api/tenant_profiles" and request.method == "POST":
                 is_valid, status_code, err_msg = check_quota(tenant_id)
                 if not is_valid:
                     return jsonify({"error": err_msg}), status_code
+
+                data['tenant_id'] = tenant_id
+                data['createdAt'] = firestore.SERVER_TIMESTAMP
+                data['updatedAt'] = firestore.SERVER_TIMESTAMP
+                
+                # Master Twin is one-time root level document
+                db.collection("tenant_profiles").document(tenant_id).set(data, merge=True)
+                return jsonify({"status": "success", "id": tenant_id}), 201
+
+            elif request.path == "/api/campaigns" and request.method == "POST":
+                is_valid, status_code, err_msg = check_quota(tenant_id)
+                if not is_valid:
+                    return jsonify({"error": err_msg}), status_code
+
+                # Hard limit 4 active product/service campaigns per tenant
+                active_campaigns_count = len(list(db.collection("campaigns")
+                    .where(filter=FieldFilter("tenant_id", "==", tenant_id))
+                    .where(filter=FieldFilter("status", "==", "active"))
+                    .stream()))
+                
+                if active_campaigns_count >= 4:
+                    return jsonify({"error": "Maximum of 4 active product/service campaigns allowed per tenant."}), 403
 
                 data['tenant_id'] = tenant_id
                 data['createdAt'] = firestore.SERVER_TIMESTAMP

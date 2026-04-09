@@ -1571,6 +1571,11 @@ window.createLeadCardV2 = function(docId, lead) {
     badges.push({t:'Exclusive',bg:'#f3e8ff',c:'#6b21a8',b:'#e9d5ff'});
     if (lead.hiring_intent_found === 'Yes') badges.push({t:'Hiring',bg:'#ecfdf5',c:'#059669',b:'#a7f3d0'});
     if (lead.competitor_match) badges.push({t:lead.competitor_match,bg:'#fee2e2',c:'#b91c1c',b:'#fecaca'});
+    
+    if (lead.trend_mapped) badges.push({t:'Trend Mapped',bg:'#fff1f2',c:'#be123c',b:'#fecdd3'});
+    else if (lead.matched_campaign_ids && lead.matched_campaign_ids.length > 1) {
+        badges.push({t:'Cross-Pollinated',bg:'#eff6ff',c:'#1d4ed8',b:'#bfdbfe'});
+    }
     var bHTML = badges.map(function(x) {
         return '<span class="lc-badge" style="background:'+x.bg+';color:'+x.c+';border-color:'+x.b+'">'+x.t+'</span>';
     }).join('');
@@ -2024,15 +2029,34 @@ window.dtPrefillAndLaunch = function() {
     const keys = who.substring(0, 120);
 
     closeDTModal();
-
-    saveCampaignAction({
+    window.saveTenantProfileAction({
         name: campName,
         bio: bio,
         keywords: keys,
-        gl: gl,
-        location: '',
-        target_urls: []
+        gl: gl
     });
+};
+
+window.saveTenantProfileAction = async function(payload) {
+    showToast('Setting up Master Twin Profile...', 'info');
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken();
+
+        const createResp = await fetch(`${API_BASE}/api/tenant_profiles`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!createResp.ok) throw new Error('Master profile creation failed');
+        
+        loadDashboard();
+        showToast('Master Twin active! You can now add child campaigns.', 'success');
+    } catch(err) {
+        console.error('[saveTenantProfileAction]', err);
+        showToast('Failed to save Master Twin. Check API permissions.', 'error');
+    }
 };
 
 // Natural Language Fallback Launch
