@@ -4,6 +4,9 @@ import json
 import httpx
 import hashlib
 import datetime
+import hashlib
+import threading
+import uuid
 import concurrent.futures
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
@@ -20,6 +23,55 @@ from pydantic import ValidationError
 from models import LeadPayload
 
 app = Flask(__name__)
+
+
+# =============================================================================
+# V18: ASYNC GCS RAW FIREHOSE DUMP
+# Dumps pre-filter raw social/web payloads into sideio-raw-firehose-lake.
+# Runs in a daemon thread — never blocks the ingestion pipeline.
+# Object path: raw/{tenant_id}/{YYYYMMDD}/{uuid}.json
+# =============================================================================
+
+GCS_FIREHOSE_BUCKET = os.environ.get("GCS_FIREHOSE_BUCKET", "sideio-raw-firehose-lake")
+
+def _dump_raw_to_gcs(raw_payload: dict, tenant_id: str):
+    """
+    Asynchronously dumps a raw (pre-filter) lead payload to the GCS firehose lake.
+    Must be fully self-contained — runs in a daemon thread.
+    """
+    try:
+        from google.cloud import storage as gcs_lib
+        import uuid, datetime, json
+
+        gcs = gcs_lib.Client()
+        bucket = gcs.bucket(GCS_FIREHOSE_BUCKET)
+
+        date_str  = datetime.datetime.utcnow().strftime("%Y%m%d")
+        object_id = str(uuid.uuid4())
+        blob_name = f"raw/{tenant_id}/{date_str}/{object_id}.json"
+
+        # Enrich with dump metadata
+        dump_payload = {
+            "_dump_id":       object_id,
+            "_dumped_at":     datetime.datetime.utcnow().isoformat() + "Z",
+            "_tenant_id":     tenant_id,
+            **raw_payload
+        }
+
+        blob = bucket.blob(blob_name)
+        blob.upload_from_string(
+            json.dumps(dump_payload, default=str),
+            content_type="application/json"
+        )
+        print(f"[GCS FIREHOSE] Dumped raw payload → gs://{GCS_FIREHOSE_BUCKET}/{blob_name}")
+    except Exception as e:
+        print(f"[GCS FIREHOSE] Non-blocking dump failed: {e}")
+
+
+def _async_gcs_dump(raw_payload: dict, tenant_id: str):
+    """Fire-and-forget wrapper — spawns a daemon thread for GCS dump."""
+    t = threading.Thread(target=_dump_raw_to_gcs, args=(raw_payload, tenant_id), daemon=True)
+    t.start()
 
 @app.route("/health", methods=["GET"])
 def health_check():
@@ -775,6 +827,15 @@ def produce():
         else:
             search_query = kw
         raw_results  = search_serper(search_query, location=clean_location or None, gl=gl or None)
+        # V18: Async GCS Firehose Dump — pre-filter raw Swarm noise → sideio-raw-firehose-lake
+        _async_gcs_dump({
+            "query":          search_query,
+            "campaign_id":    campaign_id,
+            "sourcing_vector": sourcing_vector,
+            "keyword":        kw,
+            "result_count":   len(raw_results) if raw_results else 0,
+            "raw_results":    raw_results or [],
+        }, tenant_id)
         filtered     = filter_serper_noise(raw_results)
         for r in filtered:
             link = r.get("link")
@@ -872,6 +933,749 @@ def produce():
     }), 200
 
 
+# =============================================================================
+# THE PRISM ENGINE — Hybrid Architecture (V18)
+# =============================================================================
+#
+# Architecture Overview:
+#   ┌──────────────────────────────────────────────────────────────┐
+#   │  OperatingModeRouter                                         │
+#   │  Reads campaign.target_personas (from Digital Twin)          │
+#   │  → Classifies each URL as:                                   │
+#   │      WalledGarden  — social/forum/walled domains             │
+#   │      GeneralDomain — open B2B web                            │
+#   │      B2B2C         — consumer-intent → distributor search    │
+#   └──────────┬───────────────────┬─────────────────┬────────────┘
+#              │                   │                 │
+#    WalledGardenHook    GeneralDomainHook    B2B2CIntermediaryFinder
+#    (3× parallel Serper  (httpx scrape        (find local distributors
+#     triangulation)       + WAF fallback       for consumer intents)
+#                          to snippet-path)
+#
+# All hooks return:
+#   { "text": str, "tech_stack": list, "emails": list, "phones": list,
+#     "mode": str, "fallback_used": bool }
+#
+# Error boundaries:
+#   • Each hook catches its own exceptions and returns a structured
+#     result dict, never raising into the calling dispatch() loop.
+#   • WAF detection in GeneralDomainHook → immediate fallback to
+#     WalledGardenHook snippet-path for that URL only.
+# =============================================================================
+
+# --------------------------------------------------------------------------
+# WALLED GARDEN DOMAIN REGISTRY
+# Determines which domains are routed to WalledGardenHook by default.
+# Both the OperatingModeRouter AND the existing SOCIAL_DOMAINS_PRODUCER
+# use this list — kept as a single source of truth.
+# --------------------------------------------------------------------------
+WALLED_GARDEN_DOMAINS: set[str] = {
+    "reddit.com", "facebook.com", "linkedin.com", "instagram.com",
+    "x.com", "twitter.com", "quora.com", "youtube.com", "team-bhp.com",
+    "tiktok.com", "pinterest.com", "snapchat.com", "threads.net",
+}
+
+# WAF fingerprints shared between GeneralDomainHook and the existing scrape_url()
+_WAF_FINGERPRINTS = [
+    "just a moment", "attention required!", "cloudflare ray id",
+    "access denied", "403 forbidden", "please verify you are human",
+    "enable javascript and cookies to continue",
+    "checking if the site connection is secure",
+]
+
+
+def _is_waf_blocked(html_or_text: str) -> bool:
+    """Returns True if the response looks like a WAF/bot-challenge page."""
+    lowered = html_or_text.lower()
+    return any(fp in lowered for fp in _WAF_FINGERPRINTS)
+
+
+# --------------------------------------------------------------------------
+# LAYER 0 — OPERATING MODE ROUTER
+# --------------------------------------------------------------------------
+
+class OperatingModeRouter:
+    """
+    Classifies a candidate URL into one of three processing modes:
+      • 'WalledGarden'  — social/UGC domains; snippet-based analysis
+      • 'GeneralDomain' — open web domains; httpx DOM scrape
+      • 'B2B2C'         — consumer-intent URLs requiring intermediary search
+
+    Classification logic (priority order):
+      1. If the URL's root domain matches WALLED_GARDEN_DOMAINS → WalledGarden
+      2. If any Digital Twin target_persona description contains B2B2C signals
+         AND the URL contains consumer-intent keywords → B2B2C
+      3. Else → GeneralDomain
+
+    B2B2C signal detection is lightweight (keyword-level) to stay under 8s budget.
+    """
+
+    # Consumer-intent keywords that trigger B2B2C mode when present in the URL path
+    _B2B2C_URL_SIGNALS   = {"review", "compare", "best", "near-me", "near+me",
+                             "recommendation", "alternative", "vs", "find"}
+
+    # Persona description keywords that indicate this campaign has B2B2C targets
+    _B2B2C_PERSONA_FLAGS = {
+        "consumer", "individual", "student", "patient", "retail",
+        "end user", "end-user", "buyer", "shopper", "household",
+        "b2b2c", "distributor", "reseller", "channel partner",
+    }
+
+    def __init__(self, target_personas: list[dict]):
+        """
+        :param target_personas: List of persona dicts from campaign.target_personas
+                                (populated by the Digital Twin engine).
+                                Each has keys: name, description, location_hint.
+        """
+        self._personas     = target_personas or []
+        self._has_b2b2c    = self._detect_b2b2c_campaign()
+
+    def _detect_b2b2c_campaign(self) -> bool:
+        """
+        Returns True if ANY persona description contains a B2B2C signal keyword.
+        We OR across all personas so a mixed B2B/B2B2C campaign is still flagged.
+        """
+        for persona in self._personas:
+            desc = (persona.get("description", "") + " " + persona.get("name", "")).lower()
+            if any(flag in desc for flag in self._B2B2C_PERSONA_FLAGS):
+                return True
+        return False
+
+    def route(self, url: str) -> str:
+        """
+        Returns one of: 'WalledGarden', 'GeneralDomain', 'B2B2C'
+        """
+        root_domain = extract_root_domain(url)
+
+        # Priority 1: walled garden domain check
+        if any(root_domain.endswith(wg) for wg in WALLED_GARDEN_DOMAINS):
+            return "WalledGarden"
+
+        # Priority 2: B2B2C — only if campaign has B2B2C persona AND URL signals consumer intent
+        if self._has_b2b2c:
+            url_lower = url.lower()
+            if any(sig in url_lower for sig in self._B2B2C_URL_SIGNALS):
+                return "B2B2C"
+
+        return "GeneralDomain"
+
+    def summarise_personas(self) -> str:
+        """Returns a compact text summary of target personas for Gemini prompts."""
+        if not self._personas:
+            return "No target personas defined."
+        lines = []
+        for i, p in enumerate(self._personas[:3], 1):
+            lines.append(
+                f"{i}. {p.get('name', 'Unknown')} — {p.get('description', '')} "
+                f"[{p.get('location_hint', 'Global')}]"
+            )
+        return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# LAYER 1A — WALLED GARDEN HOOK
+# Triangulation: 3 parallel Serper queries → concatenated snippets.
+# Applies thin-payload truncation penalty on the output text.
+# Reads/writes scraped_cache for deduplication.
+# --------------------------------------------------------------------------
+
+class WalledGardenHook:
+    """
+    Processes walled-garden / social URLs via Serper snippet triangulation.
+
+    3-step pipeline:
+      A. Execute 3 parallel Serper queries:
+           i.   site:{domain} "{url_path_keywords}"
+           ii.  "{domain_name}" intent signals
+           iii. "{url_slug}" community discussion
+      B. Concatenate all organic + KG snippets as the text payload.
+      C. Apply Truncation Penalty: if total text < 500 chars, prefix a
+         shadow-learner marker so the scoring threshold drops to 6.
+
+    scraped_cache contract:
+      • Always reads first — avoids duplicate Serper spend.
+      • Always writes on fresh fetch — supplies Producer hand-off context.
+    """
+
+    def __init__(self, db_client, serper_key: str):
+        self._db         = db_client
+        self._serper_key = serper_key
+
+    def _build_queries(self, url: str, root_domain: str, persona_summary: str) -> list[str]:
+        """
+        3-query triangulation tailored to the URL structure.
+
+        Query rationale:
+          Q1 site-scoped: finds the specific page/post as indexed by Google.
+          Q2 brand + intent: finds third-party discussion about this entity.
+          Q3 persona-aware: finds pages where the target persona discusses this.
+        """
+        parsed   = urlparse(url)
+        # Extract meaningful path words (drop slashes, numbers, and single chars)
+        path_slug = " ".join(
+            w for w in parsed.path.replace("-", " ").replace("_", " ").split("/")
+            if len(w) > 2 and not w.isdigit()
+        )[:80]
+
+        q1 = f'site:{root_domain} {path_slug}'.strip()
+        q2 = f'"{root_domain}" {path_slug[:50]}'.strip()
+        # Q3: persona-driven — extract first meaningful noun phrase from summary
+        persona_hint = (persona_summary.split("—")[0].split("\n")[0][:60]).strip()
+        q3 = f'"{root_domain}" {persona_hint}'.strip() if persona_hint else q2
+
+        return [q1, q2, q3]
+
+    def _run_serper(self, query: str) -> dict:
+        headers = {"X-API-KEY": self._serper_key, "Content-Type": "application/json"}
+        try:
+            resp = httpx.post(
+                "https://google.serper.dev/search",
+                headers=headers,
+                json={"q": query, "num": 10},
+                timeout=6.0,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            print(f"[WALLED-GARDEN] Serper query failed: {e}")
+        return {}
+
+    def _extract_snippets(self, serper_result: dict) -> str:
+        parts: list[str] = []
+        kg = serper_result.get("knowledgeGraph", {})
+        if kg.get("description"):
+            parts.append(f"[KG] {kg['description']}")
+        for r in serper_result.get("organic", [])[:8]:
+            snippet = r.get("snippet", "").strip()
+            title   = r.get("title",   "").strip()
+            if snippet:
+                parts.append(snippet)
+            elif title:
+                parts.append(title)
+        return " ".join(parts)
+
+    def fetch(self, url: str, root_domain: str, persona_summary: str, tenant_id: str) -> dict:
+        """
+        Returns:
+          { text, tech_stack, emails, phones, mode, fallback_used }
+        """
+        cache_key = url.replace("/", "_")
+        cache_ref = self._db.collection("scraped_cache").document(cache_key)
+
+        # ── Cache read — avoid duplicate Serper spend ──────────────────────
+        try:
+            cached = cache_ref.get()
+            if cached.exists:
+                c = cached.to_dict()
+                if c.get("text"):
+                    print(f"[WALLED-GARDEN] Cache HIT for {url} ({len(c['text'])} chars)")
+                    return {
+                        "text":         c["text"],
+                        "tech_stack":   c.get("tech_stack", ["Social Platform Snippet"]),
+                        "emails":       c.get("emails", []),
+                        "phones":       c.get("phones", []),
+                        "mode":         "WalledGarden",
+                        "fallback_used": False,
+                    }
+        except Exception as ce:
+            print(f"[WALLED-GARDEN] Cache read error for {url}: {ce}")
+
+        # ── 3-way parallel Serper triangulation ───────────────────────────
+        queries = self._build_queries(url, root_domain, persona_summary)
+        all_texts: list[str] = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {pool.submit(self._run_serper, q): q for q in queries}
+            for future in concurrent.futures.as_completed(futures, timeout=7.0):
+                try:
+                    result = future.result()
+                    extracted = self._extract_snippets(result)
+                    if extracted:
+                        all_texts.append(extracted)
+                except Exception as fe:
+                    print(f"[WALLED-GARDEN] Triangulation future failed: {fe}")
+
+        combined_text = " ".join(all_texts).strip()
+
+        # ── Truncation Penalty — shadow learner marker ────────────────────
+        # If text is thin (< 500 chars), tag it so dispatch() drops the accept
+        # threshold from 7 to 6. This is the "Shadow Learner route" signal.
+        is_thin = len(combined_text) < 500
+        if is_thin:
+            combined_text = f"[SHADOW_LEARNER_THIN_PAYLOAD] {combined_text}"
+            print(f"[WALLED-GARDEN] Thin payload ({len(combined_text)} chars) — shadow learner tagged")
+
+        # ── Cache write — hand-off for future Consumer runs ───────────────
+        if combined_text:
+            try:
+                cache_ref.set({
+                    "url":        url,
+                    "text":       safe_truncate(combined_text),
+                    "source":     "walled_garden_triangulation",
+                    "tech_stack": ["Social Platform Snippet"],
+                    "emails":     [],
+                    "phones":     [],
+                }, merge=True)
+            except Exception as cw:
+                print(f"[WALLED-GARDEN] Cache write failed for {url}: {cw}")
+
+        # ── Serper spend telemetry ─────────────────────────────────────────
+        try:
+            shard_id = random.randint(0, 9)
+            self._db.collection("usage_metrics").document(tenant_id).set(
+                {"serper_searches": firestore.Increment(len(queries))}, merge=True
+            )
+        except Exception:
+            pass
+
+        return {
+            "text":         combined_text,
+            "tech_stack":   ["Social Platform Snippet"],
+            "emails":       [],
+            "phones":       [],
+            "mode":         "WalledGarden",
+            "fallback_used": False,
+        }
+
+
+# --------------------------------------------------------------------------
+# LAYER 1B — GENERAL DOMAIN HOOK
+# httpx DOM scrape with WAF detection → fallback to WalledGarden snippet-path.
+# Reads/writes scraped_cache.
+# Runs Digital Twin persona embedding match scoring on extracted text.
+# --------------------------------------------------------------------------
+
+# Tech stack X-ray signatures (shared with existing scrape_url())
+_TECH_SIGNATURES: dict[str, str] = {
+    "wordpress":      "wp-content",
+    "shopify":        "cdn.shopify.com",
+    "stripe":         "js.stripe.com",
+    "react":          "react-root",
+    "hubspot":        "js.hs-scripts.com",
+    "salesforce":     "force.com",
+    "google analytics": "google-analytics.com",
+    "segment":        "cdn.segment.com",
+    "intercom":       "widget.intercom.io",
+    "crisp":          "crisp.chat",
+    "zendesk":        "zopim.com",
+    "drift":          "drift.com/drift-frame",
+}
+
+
+def _extract_tech_stack(html_blob: str) -> list[str]:
+    lowered = html_blob.lower()
+    return [name for name, sig in _TECH_SIGNATURES.items() if sig in lowered]
+
+
+def _persona_match_score(text: str, persona_summary: str) -> int:
+    """
+    Lightweight keyword-overlap score between scraped text and persona descriptions.
+    Returns 0-10. Used as a tiebreaker / early-drop signal.
+
+    Implementation: token intersection. Avoids an extra Gemini call on this path.
+    A full embedding cosine-similarity approach is deferred to a future sprint
+    (would require storing persona embeddings in Firestore).
+    """
+    import re
+    persona_tokens = set(re.findall(r"\b\w{4,}\b", persona_summary.lower()))
+    text_tokens    = set(re.findall(r"\b\w{4,}\b", text.lower()[:8000]))
+    if not persona_tokens:
+        return 5  # neutral
+    overlap = len(persona_tokens & text_tokens)
+    return min(10, int((overlap / max(len(persona_tokens), 1)) * 20))
+
+
+class GeneralDomainHook:
+    """
+    Processes open-web B2B domains via httpx DOM scrape.
+
+    Processing flow:
+      1. Cache check (avoid re-scrape of recently seen domains).
+      2. httpx.get(url, timeout=10) — standard User-Agent.
+      3. WAF detection on response body → if blocked, delegate to
+         WalledGardenHook (snippet path) for this URL only.
+      4. BeautifulSoup text extraction + Tech-Stack X-Ray.
+      5. Digital Twin persona match scoring (lightweight token overlap).
+      6. Cache write to scraped_cache.
+
+    Error boundaries:
+      • Any non-WAF network/parse error → returns empty text (calling
+        dispatch() will mark the lead as failed_scrape).
+      • WAF detection → returns WalledGarden fallback result with
+        fallback_used=True so the caller logs the fallback event.
+    """
+
+    def __init__(self, db_client, serper_key: str):
+        self._db         = db_client
+        self._serper_key = serper_key
+        self._wg_hook    = WalledGardenHook(db_client, serper_key)
+
+    def fetch(
+        self,
+        url: str,
+        root_domain: str,
+        persona_summary: str,
+        tenant_id: str,
+    ) -> dict:
+        """
+        Returns:
+          { text, tech_stack, emails, phones, mode, fallback_used,
+            persona_match_score }
+        """
+        cache_key = url.replace("/", "_")
+        cache_ref = self._db.collection("scraped_cache").document(cache_key)
+
+        # ── Cache read ──────────────────────────────────────────────────────
+        try:
+            cached = cache_ref.get()
+            if cached.exists:
+                c = cached.to_dict()
+                if c.get("text") and c.get("source") != "serper_snippet":
+                    print(f"[GENERAL-DOMAIN] Cache HIT for {url}")
+                    return {
+                        "text":               c["text"],
+                        "tech_stack":         c.get("tech_stack", []),
+                        "emails":             c.get("emails", []),
+                        "phones":             c.get("phones", []),
+                        "mode":               "GeneralDomain",
+                        "fallback_used":      False,
+                        "persona_match_score": _persona_match_score(c["text"], persona_summary),
+                    }
+        except Exception as ce:
+            print(f"[GENERAL-DOMAIN] Cache read error for {url}: {ce}")
+
+        # ── httpx DOM scrape ────────────────────────────────────────────────
+        text       = ""
+        tech_stack : list[str] = []
+        emails     : list[str] = []
+        phones     : list[str] = []
+        fallback   = False
+
+        try:
+            resp = httpx.get(
+                url,
+                timeout=httpx.Timeout(connect=4.0, read=10.0, write=10.0, pool=1.0),
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; SideioBot/1.0; +https://sideio.com)"},
+            )
+
+            raw_html = resp.text
+
+            # ── WAF detection → immediate fallback ────────────────────────
+            if _is_waf_blocked(raw_html) or resp.status_code in (403, 429, 503):
+                print(f"[GENERAL-DOMAIN] WAF/block detected for {url} (HTTP {resp.status_code}). "
+                      f"Falling back to WalledGarden snippet path.")
+                wg_result = self._wg_hook.fetch(url, root_domain, persona_summary, tenant_id)
+                wg_result["fallback_used"] = True
+                wg_result["mode"]          = "GeneralDomain→WalledGardenFallback"
+                wg_result["persona_match_score"] = _persona_match_score(
+                    wg_result.get("text", ""), persona_summary
+                )
+                return wg_result
+
+            # ── BeautifulSoup extraction ───────────────────────────────────
+            soup = BeautifulSoup(raw_html, "html.parser")
+
+            # Tech-Stack X-Ray (zero-cost, regex on raw HTML)
+            tech_stack = _extract_tech_stack(raw_html.lower())
+
+            # Email and phone harvesting from <a> tags
+            emails = list({
+                a["href"].replace("mailto:", "").split("?")[0].strip()
+                for a in soup.find_all("a", href=True)
+                if a["href"].startswith("mailto:")
+            })[:5]
+            phones = list({
+                a["href"].replace("tel:", "").strip()
+                for a in soup.find_all("a", href=True)
+                if a["href"].startswith("tel:")
+            })[:3]
+
+            # Text extraction — prioritise semantic HTML5 sections
+            # (header, main, article, section) over raw body dump
+            semantic_zones = soup.find_all(["main", "article", "section", "header"])
+            if semantic_zones:
+                text = " ".join(
+                    zone.get_text(separator=" ", strip=True)
+                    for zone in semantic_zones
+                )
+            else:
+                text = soup.get_text(separator=" ", strip=True)
+
+            if len(text) < 150:
+                # JS-heavy / thin page — treat as walled-garden fallback
+                print(f"[GENERAL-DOMAIN] Too little text ({len(text)} chars) for {url}. "
+                      f"Falling back to WalledGarden snippet path.")
+                wg_result = self._wg_hook.fetch(url, root_domain, persona_summary, tenant_id)
+                wg_result["fallback_used"]       = True
+                wg_result["mode"]                = "GeneralDomain→WalledGardenFallback"
+                wg_result["persona_match_score"] = _persona_match_score(
+                    wg_result.get("text", ""), persona_summary
+                )
+                return wg_result
+
+        except httpx.TimeoutException:
+            print(f"[GENERAL-DOMAIN] httpx timeout for {url}. Falling back to snippet path.")
+            wg_result = self._wg_hook.fetch(url, root_domain, persona_summary, tenant_id)
+            wg_result["fallback_used"]       = True
+            wg_result["mode"]                = "GeneralDomain→WalledGardenFallback(Timeout)"
+            wg_result["persona_match_score"] = _persona_match_score(
+                wg_result.get("text", ""), persona_summary
+            )
+            return wg_result
+        except Exception as e:
+            print(f"[GENERAL-DOMAIN] Unexpected scrape error for {url}: {e}")
+            return {
+                "text": "", "tech_stack": [], "emails": [], "phones": [],
+                "mode": "GeneralDomain", "fallback_used": False,
+                "persona_match_score": 0,
+            }
+
+        # ── Cache write ─────────────────────────────────────────────────────
+        try:
+            cache_ref.set({
+                "url":        url,
+                "text":       safe_truncate(text),
+                "source":     "general_domain_httpx",
+                "tech_stack": tech_stack,
+                "emails":     emails,
+                "phones":     phones,
+            }, merge=True)
+        except Exception as cw:
+            print(f"[GENERAL-DOMAIN] Cache write failed for {url}: {cw}")
+
+        pms = _persona_match_score(text, persona_summary)
+        print(f"[GENERAL-DOMAIN] Scraped {url}: {len(text)} chars | "
+              f"tech={tech_stack} | persona_match={pms}")
+
+        return {
+            "text":               safe_truncate(text),
+            "tech_stack":         tech_stack,
+            "emails":             emails,
+            "phones":             phones,
+            "mode":               "GeneralDomain",
+            "fallback_used":      False,
+            "persona_match_score": pms,
+        }
+
+
+# --------------------------------------------------------------------------
+# LAYER 1C — B2B2C INTERMEDIARY FINDER
+# Takes a consumer-intent URL + geographic hint from Digital Twin personas.
+# Searches for local distributors/resellers in that geographic area.
+# --------------------------------------------------------------------------
+
+class B2B2CIntermediaryFinder:
+    """
+    B2B2C Bridge: finds local distributor/reseller/channel partners
+    who carry the product/service relevant to the consumer-intent URL.
+
+    Pipeline:
+      1. Extract the consumer intent phrase from the URL path + page context.
+      2. Derive target geography from the campaign's Digital Twin persona
+         location_hints (preferring the most specific region).
+      3. Execute 2 Serper queries:
+           a. distributor/reseller search for the product category in that geo.
+           b. local stockist/channel partner search.
+      4. Return normalised intermediary candidates as text for final_score_and_dm().
+
+    The output text is formatted to prime the Gemini scoring prompt:
+    "These are B2B2C intermediaries (distributors/resellers) who serve [consumer
+    profile] in [region]. Score and draft an outreach for the vendor..."
+    """
+
+    def __init__(self, db_client, serper_key: str):
+        self._db         = db_client
+        self._serper_key = serper_key
+
+    def _serper_search(self, query: str, gl: str | None = None) -> list[dict]:
+        headers = {"X-API-KEY": self._serper_key, "Content-Type": "application/json"}
+        payload: dict = {"q": query, "num": 10}
+        if gl:
+            payload["gl"] = gl
+        try:
+            resp = httpx.post(
+                "https://google.serper.dev/search",
+                headers=headers,
+                json=payload,
+                timeout=6.0,
+            )
+            if resp.status_code == 200:
+                return resp.json().get("organic", [])
+        except Exception as e:
+            print(f"[B2B2C] Serper search failed: {e}")
+        return []
+
+    def _derive_geo(self, personas: list[dict]) -> tuple[str, str]:
+        """
+        Returns (location_string, gl_code) from the campaign's persona hints.
+        Prefers the most specific (non-'Global') hint across all personas.
+        """
+        _GL_MAP = {
+            "india": ("India", "in"), "usa": ("USA", "us"),
+            "united states": ("USA", "us"), "uk": ("UK", "gb"),
+            "united kingdom": ("UK", "gb"), "canada": ("Canada", "ca"),
+            "australia": ("Australia", "au"), "germany": ("Germany", "de"),
+            "singapore": ("Singapore", "sg"), "uae": ("UAE", "ae"),
+            "dubai": ("UAE", "ae"), "global": ("", ""),
+        }
+        for persona in personas:
+            hint = persona.get("location_hint", "Global").lower()
+            if hint and hint != "global":
+                for kw, vals in _GL_MAP.items():
+                    if kw in hint:
+                        return vals
+        return "", ""
+
+    def find_intermediaries(
+        self,
+        consumer_url: str,
+        root_domain:  str,
+        personas:     list[dict],
+        persona_summary: str,
+        tenant_id:    str,
+    ) -> dict:
+        """
+        Returns the standard hook result dict with mode='B2B2C'.
+        """
+        location_str, gl = self._derive_geo(personas)
+
+        # Derive product/service category from URL path + persona summary
+        parsed    = urlparse(consumer_url)
+        url_words = " ".join(
+            w for w in parsed.path.replace("-", " ").replace("_", " ").split("/")
+            if len(w) > 2
+        )[:60]
+        # Use the first persona name as category signal
+        persona_category = (personas[0].get("name", "") if personas else "")[:50]
+        product_category = (url_words or persona_category or root_domain)[:80]
+
+        # Build geo-scoped distributor queries
+        geo_suffix = f" {location_str}" if location_str else ""
+        queries = [
+            f'"{product_category}" distributor reseller{geo_suffix} -site:alibaba.com',
+            f'"{product_category}" channel partner stockist{geo_suffix} B2B',
+        ]
+
+        print(f"[B2B2C] Finding intermediaries: category='{product_category}', "
+              f"geo='{location_str}', gl='{gl}'")
+
+        all_snippets: list[str] = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(self._serper_search, q, gl or None) for q in queries]
+            for future in concurrent.futures.as_completed(futures, timeout=7.0):
+                try:
+                    results = future.result()
+                    for r in results[:6]:
+                        link    = r.get("link", "")
+                        snippet = r.get("snippet", "")
+                        title   = r.get("title", "")
+                        if snippet:
+                            all_snippets.append(f"[INTERMEDIARY] {title} — {link}\n{snippet}")
+                except Exception as fe:
+                    print(f"[B2B2C] Intermediary future error: {fe}")
+
+        combined_text = "\n\n".join(all_snippets) if all_snippets else ""
+
+        # Prime the Gemini scoring context
+        context_header = (
+            f"[B2B2C BRIDGE MODE]\n"
+            f"Consumer Intent Source: {consumer_url}\n"
+            f"Product/Service Category: {product_category}\n"
+            f"Target Geography: {location_str or 'Global'}\n"
+            f"Campaign Persona: {persona_summary[:200]}\n\n"
+            f"The following are local distributors, resellers, or channel partners "
+            f"who can reach the consumer segment described above. "
+            f"Score each as a B2B lead for the vendor (NOT the consumer):\n\n"
+            f"{combined_text}"
+        )
+
+        # Serper spend telemetry
+        try:
+            self._db.collection("usage_metrics").document(tenant_id).set(
+                {"serper_searches": firestore.Increment(len(queries))}, merge=True
+            )
+        except Exception:
+            pass
+
+        return {
+            "text":               safe_truncate(context_header),
+            "tech_stack":         ["B2B2C Intermediary Search"],
+            "emails":             [],
+            "phones":             [],
+            "mode":               "B2B2C",
+            "fallback_used":      False,
+            "persona_match_score": 5,   # neutral — Gemini scores the intermediaries
+        }
+
+
+# --------------------------------------------------------------------------
+# THE PRISM PIPELINE — Orchestrator
+# Entry point: PrismPipeline(campaign_doc, db, serper_key)
+#              .process_url(url, tenant_id) → hook_result dict
+# --------------------------------------------------------------------------
+
+class PrismPipeline:
+    """
+    Composes OperatingModeRouter + the three hooks into a single
+    callable that dispatch() uses per URL.
+
+    Usage in dispatch():
+        prism = PrismPipeline(campaign, db, serper_key)
+        hook_result = prism.process_url(url, tenant_id)
+        text       = hook_result["text"]
+        tech_stack = hook_result["tech_stack"]
+        ...
+
+    All decisions (mode, fallback) are logged at the INFO level
+    so Cloud Logging dashboards can surface per-mode funnel metrics.
+    """
+
+    def __init__(self, campaign_doc: dict, db_client, serper_key: str):
+        target_personas = campaign_doc.get("target_personas", [])
+        self._router    = OperatingModeRouter(target_personas)
+        self._personas  = target_personas
+        self._wg_hook   = WalledGardenHook(db_client, serper_key)
+        self._gd_hook   = GeneralDomainHook(db_client, serper_key)
+        self._b2c_hook  = B2B2CIntermediaryFinder(db_client, serper_key)
+        self._persona_summary = self._router.summarise_personas()
+
+    def process_url(self, url: str, tenant_id: str) -> dict:
+        """
+        Routes the URL through the correct hook and returns a unified result.
+        Never raises — all exceptions are caught and returned as empty text.
+        """
+        root_domain = extract_root_domain(url)
+        mode        = self._router.route(url)
+
+        print(f"[PRISM] URL: {url} | Domain: {root_domain} | Mode: {mode}")
+
+        try:
+            if mode == "WalledGarden":
+                return self._wg_hook.fetch(url, root_domain, self._persona_summary, tenant_id)
+
+            elif mode == "B2B2C":
+                return self._b2c_hook.find_intermediaries(
+                    url, root_domain, self._personas, self._persona_summary, tenant_id
+                )
+
+            else:  # GeneralDomain
+                return self._gd_hook.fetch(url, root_domain, self._persona_summary, tenant_id)
+
+        except Exception as e:
+            print(f"[PRISM] Unhandled exception for {url} (mode={mode}): {e}")
+            return {
+                "text": "", "tech_stack": [], "emails": [], "phones": [],
+                "mode": mode, "fallback_used": False,
+                "persona_match_score": 0,
+            }
+
+
+# =============================================================================
+# END OF PRISM ENGINE
+# =============================================================================
+
+
 @app.route("/dispatch", methods=["POST"])
 def dispatch():
     """
@@ -896,6 +1700,18 @@ def dispatch():
     bio          = campaign.get("bio", "")
     sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
     location     = campaign.get("location", "").strip()
+
+    # ── V18: PrismPipeline — instantiate once per dispatch() call ────────────
+    # Reads target_personas from the campaign doc (populated by Digital Twin).
+    # Falls back gracefully to GeneralDomain mode if personas are absent.
+    try:
+        _serper_key_for_prism = get_secret(SERPER_API_KEY_NAME).strip()
+        prism = PrismPipeline(campaign, db, _serper_key_for_prism)
+        print(f"[PRISM] Instantiated for campaign {campaign_id} | "
+              f"personas={len(campaign.get('target_personas', []))}")
+    except Exception as prism_init_err:
+        print(f"[PRISM] Init failed: {prism_init_err}. Prism disabled for this batch.")
+        prism = None
 
     # ── Destructive Queue Pop (Batch of 10) — Race Condition Safe ────────────
     # We immediately write the queue MINUS the batch before processing begins.
@@ -1035,36 +1851,61 @@ def dispatch():
             continue
 
         try:
-            # Cache check
-            cache_ref  = db.collection("scraped_cache").document(url.replace('/', '_'))
-            cache_doc  = cache_ref.get()
-            text, tech_stack, emails, phones = "", [], [], []
+            # ── PRISM ENGINE: route → scrape → return unified result ─────────
+            # PrismPipeline handles cache reads/writes, WAF fallback, B2B2C
+            # mode switching, and scraped_cache persistence internally.
+            # If prism was not initialised (init error), fall back to the
+            # legacy scrape_url() path to maintain zero-downtime guarantee.
 
-            if cache_doc.exists:
-                c_data     = cache_doc.to_dict()
-                text       = c_data.get("text", "")
-                tech_stack = c_data.get("tech_stack", [])
-                emails     = c_data.get("emails", [])
-                phones     = c_data.get("phones", [])
-            elif is_social:
-                # ── P2: Social short-circuit — read from hydrated snippet_map ──
-                # snippet_map was loaded from scraped_cache (Producer hand-off) at
-                # the top of dispatch(). It contains real Serper title+snippet text.
-                raw_snippet = snippet_map.get(url, "")
-                if raw_snippet:
-                    text       = raw_snippet
-                    tech_stack = ["Social Platform Bypass"]
-                    print(f"[SOCIAL SHORT-CIRCUIT] Real snippet ({len(text)} chars) for {url}")
-                else:
-                    # ── P3: No snippet available — ghost state prevention ──────
-                    # Do NOT leave doc in 'processing'. Mark dropped and skip.
-                    print(f"[SOCIAL SHORT-CIRCUIT] No snippet available for {url} — marking dropped.")
-                    doc_ref.update({"status": "dropped_no_context", "error": "No Serper snippet in cache"})
-                    scrape_failed += 1
+            text, tech_stack, emails, phones = "", [], [], []
+            prism_mode    = "legacy"
+            fallback_used = False
+
+            if prism is not None:
+                hook_result   = prism.process_url(url, tenant_id)
+                text          = hook_result.get("text", "")
+                tech_stack    = hook_result.get("tech_stack", [])
+                emails        = hook_result.get("emails", [])
+                phones        = hook_result.get("phones", [])
+                prism_mode    = hook_result.get("mode", "GeneralDomain")
+                fallback_used = hook_result.get("fallback_used", False)
+
+                # Shadow Learner: WalledGarden thin payloads are pre-tagged
+                # by WalledGardenHook with [SHADOW_LEARNER_THIN_PAYLOAD].
+                # This marker is read by the threshold logic below.
+
+                if fallback_used:
+                    print(f"[PRISM] Fallback used for {url}: {prism_mode}")
+
+                # Last-resort: if Prism returned empty text (e.g. JS SPA that
+                # httpx cannot render), defer to scraper-heavy exactly as before.
+                if not text:
+                    print(f"[PRISM] Empty text from {prism_mode} for {url}. "
+                          f"Queueing async task to scraper-heavy.")
+                    from google.cloud import tasks_v2 as _tv2
+                    _tc     = _tv2.CloudTasksClient()
+                    _parent = _tc.queue_path(PROJECT_ID, LOCATION, QUEUE)
+                    _task   = {
+                        "http_request": {
+                            "http_method": _tv2.HttpMethod.POST,
+                            "url": SCRAPER_HEAVY_URL,
+                            "headers": {"Content-Type": "application/json"},
+                            "body": json.dumps({
+                                "url": url, "lead_id": lead_id, "tenant_id": tenant_id,
+                                "campaign_id": campaign_id, "bio": bio,
+                                "target_domain": target_domain,
+                                "preferences_weights": preferences_weights
+                            }).encode()
+                        }
+                    }
+                    _tc.create_task(parent=_parent, task=_task)
                     continue
+
             else:
+                # Prism init failed — legacy scrape_url() path
                 try:
                     text, tech_stack, emails, phones = scrape_url(url)
+                    prism_mode = "legacy_scrape_url"
                     scrape_success += 1
                 except ValueError as e:
                     if str(e) == "DEFERRED":
@@ -1087,15 +1928,16 @@ def dispatch():
                         }
                         _tc.create_task(parent=_parent, task=_task)
                         continue
-                    # ── P3: Non-DEFERRED scrape failure — mark failed, do not ghost ──
                     print(f"[SCRAPE FAIL] {url}: {e}")
                     doc_ref.update({"status": "failed_scrape", "error": str(e)})
                     scrape_failed += 1
-                    continue  # ← was: text="", now we skip entirely
+                    continue
 
-                if text:
-                    cache_ref.set({"url": url, "text": safe_truncate(text),
-                                   "tech_stack": tech_stack, "emails": emails, "phones": phones})
+            # Stamp prism_mode on the stub (for analytics in Cloud Logging)
+            try:
+                doc_ref.update({"prism_mode": prism_mode, "fallback_used": fallback_used})
+            except Exception:
+                pass
 
             if text:
                 bot_keywords = ["Cloudflare Ray ID", "Please verify you are human",
@@ -1141,9 +1983,14 @@ def dispatch():
                 # Snippet-sourced leads (< 500 chars) lack DOM depth.
                 # Gemini cannot confidently score them >= 7 even with clear intent.
                 # Lower to >= 6 for thin payloads so snippet leads are not mass-dropped.
-                is_thin_payload = len(text.strip()) < 500
+                # V18: WalledGardenHook tags thin payloads with [SHADOW_LEARNER_THIN_PAYLOAD]
+                # prefix — also treated as thin regardless of char count.
+                _is_shadow_thin  = text.strip().startswith("[SHADOW_LEARNER_THIN_PAYLOAD]")
+                is_thin_payload  = _is_shadow_thin or len(text.strip()) < 500
                 accept_threshold = 6 if is_thin_payload else 7
-                print(f"[THRESHOLD] Payload: {len(text)} chars → threshold: {accept_threshold} (thin={is_thin_payload})")
+                print(f"[THRESHOLD] Payload: {len(text)} chars → threshold: {accept_threshold} "
+                      f"(thin={is_thin_payload}, shadow={_is_shadow_thin}, mode={prism_mode})")
+
 
                 if evaluation.get("score", 0) >= accept_threshold:
                     contact_endpoints = list(evaluation.get("contact_endpoints", []))
@@ -1157,7 +2004,7 @@ def dispatch():
                             contact_endpoints.append({"platform": "other", "uri": ph})
                             existing_uris.add(ph)
 
-                    # ── Universal Data Contract write (dispatch path) ─────────
+                    # ── Universal Data Contract write (dispatch / Prism path) ──
                     lead_payload = {
                         "id":                           lead_id,
                         "source_url":                   url,
@@ -1179,6 +2026,9 @@ def dispatch():
                         "dossier_text":                 None,                              # V16 placeholder
                         "sourcing_vector":               sourcing_vector,
                         "confidence_tier":               url_to_tier.get(url, "High"),
+                        # V18: Prism Engine provenance fields (funnel analytics)
+                        "prism_mode":                   prism_mode,
+                        "prism_fallback":                fallback_used,
                         "status":                        "new",
                     }
                     validate_and_update_lead(lead_payload, doc_ref)

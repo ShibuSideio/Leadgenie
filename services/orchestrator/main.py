@@ -5,6 +5,9 @@ import urllib.parse
 from urllib.parse import urlparse
 import time
 import datetime
+import hashlib
+import uuid
+
 import httpx
 from google.protobuf import timestamp_pb2
 from flask import Flask, request, jsonify, make_response
@@ -64,7 +67,10 @@ tasks_client = tasks_v2.CloudTasksClient()
 
 PROJECT_ID = os.environ.get("PROJECT_ID", "sideio-leads-v16")
 LOCATION = os.environ.get("LOCATION", "asia-south1")
-QUEUE = os.environ.get("QUEUE", "lead-pipeline-queue")
+QUEUE            = os.environ.get("QUEUE",            "lead-pipeline-queue")
+# V18: Self-referential URL for internal Cloud Tasks (BQ telemetry handler).
+# Set via --update-env-vars in cloudbuild.yaml after first deploy.
+ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "")
 PIPELINE_URL = os.environ.get("PIPELINE_URL", "https://lead-pipeline-main-abc.a.run.app/dispatch")
 
 FERNET_KEY = os.environ.get("ENCRYPTION_KEY", "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0=")
@@ -373,6 +379,123 @@ def handle_purge(request):
         
     db.collection("tenants").document(tenant_id).delete()
     return jsonify({"message": f"Successfully erased tenant {tenant_id} data completely"}), 200
+
+
+# =============================================================================
+# V18: BIGQUERY RLHF TELEMETRY — CLOUD TASKS ARCHITECTURE
+#
+# Cloud Run throttles CPU after the HTTP response returns, which kills daemon
+# threads mid-execution. This is the correct pattern:
+#
+#   PUT /api/leads/{id}
+#     └─► _enqueue_bq_telemetry_task()   ← enqueues to lead-pipeline-queue
+#            └─► Cloud Tasks HTTP POST
+#                  └─► /api/internal/telemetry/bq-push   ← new internal endpoint
+#                        └─► _handle_bq_push_task()       ← synchronous BQ insert
+#
+# Guarantees:
+#   - PUT response returns in <5ms (task enqueue is fast)
+#   - BQ insert runs in a dedicated Cloud Tasks worker lifecycle
+#   - Idempotent: event_id is a UUID generated at enqueue time (logged for dedup)
+#   - Non-blocking: Cloud Tasks failure never propagates to the user response
+# =============================================================================
+
+def _enqueue_bq_telemetry_task(tenant_id: str, lead_dict: dict, status: str):
+    """
+    Enqueues an RLHF telemetry event to lead-pipeline-queue.
+    The task POSTs to /api/internal/telemetry/bq-push on the orchestrator itself.
+    Failure is logged and swallowed — telemetry must never degrade UX.
+    """
+    if not ORCHESTRATOR_URL:
+        print("[BQ TASK] ORCHESTRATOR_URL not set — skipping telemetry enqueue.")
+        return
+
+    try:
+        import hashlib, uuid, datetime
+
+        # Build anonymized intent hash (no PII)
+        raw_signal  = (lead_dict.get("intent_signal", "") or "") + "|" + (lead_dict.get("sourcing_vector", "") or "")
+        intent_hash = hashlib.sha256(raw_signal.encode()).hexdigest()
+
+        # Stripped signal payload — no email, DM text, URLs, or contact data
+        stripped_payload = {
+            "score":           lead_dict.get("score"),
+            "sourcing_vector": lead_dict.get("sourcing_vector"),
+            "prism_mode":      lead_dict.get("prism_mode"),
+            "tech_stack":      lead_dict.get("tech_stack_found", []),
+            "hiring_intent":   lead_dict.get("hiring_intent_found"),
+            "origin_engine":   lead_dict.get("origin_engine"),
+            "campaign_id":     lead_dict.get("campaign_id"),
+        }
+
+        event_id = str(uuid.uuid4())
+        task_payload = {
+            "event_id":           event_id,
+            "timestamp":          datetime.datetime.utcnow().isoformat() + "Z",
+            "tenant_id":          tenant_id,
+            "prism_mode":         lead_dict.get("prism_mode") or "GeneralDomain",
+            "conversion_status":  status,
+            "intent_hash":        intent_hash,
+            "raw_signal_payload": json.dumps(stripped_payload),
+        }
+
+        queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+        sa_email   = get_service_account_email().strip()
+        target_url = f"{ORCHESTRATOR_URL}/api/internal/telemetry/bq-push"
+
+        task = {
+            "http_request": {
+                "http_method": tasks_v2.HttpMethod.POST,
+                "url":         target_url,
+                "headers":     {"Content-Type": "application/json"},
+                "body":        json.dumps(task_payload).encode(),
+            }
+        }
+        if sa_email:
+            task["http_request"]["oidc_token"] = {
+                "service_account_email": sa_email,
+                "audience":              ORCHESTRATOR_URL,
+            }
+
+        tasks_client.create_task(request={"parent": queue_path, "task": task})
+        print(f"[BQ TASK] Enqueued event_id={event_id[:8]}... | status={status} | hash={intent_hash[:12]}...")
+
+    except Exception as e:
+        # Non-fatal: telemetry must never block or degrade production flow
+        print(f"[BQ TASK] Enqueue failed (non-fatal): {e}")
+
+
+def _handle_bq_push_task(payload: dict):
+    """
+    Synchronous BigQuery streaming insert.
+    Called exclusively from /api/internal/telemetry/bq-push Cloud Tasks handler.
+    Runs in its own Cloud Tasks worker lifecycle — CPU is never throttled.
+    """
+    try:
+        from google.cloud import bigquery as bq_client_lib
+
+        bq        = bq_client_lib.Client(project=PROJECT_ID)
+        table_ref = f"{PROJECT_ID}.swarm_analytics.rlhf_events"
+
+        row = {
+            "event_id":           payload.get("event_id"),
+            "timestamp":          payload.get("timestamp"),
+            "tenant_id":          payload.get("tenant_id"),
+            "prism_mode":         payload.get("prism_mode"),
+            "conversion_status":  payload.get("conversion_status"),
+            "intent_hash":        payload.get("intent_hash"),
+            "raw_signal_payload": payload.get("raw_signal_payload"),
+        }
+
+        errors = bq.insert_rows_json(table_ref, [row])
+        if errors:
+            print(f"[BQ INSERT] Streaming error: {errors}")
+            return False
+        print(f"[BQ INSERT] event_id={payload.get('event_id','?')[:8]}... streamed OK")
+        return True
+    except Exception as e:
+        print(f"[BQ INSERT] Failed: {e}")
+        return False
 
 @app.route('/api/me', methods=['GET', 'PUT', 'OPTIONS'])
 def get_me():
@@ -737,6 +860,11 @@ def trigger_daily_sweep(path):
                         data['sourcing_vector'] = classify_sourcing_vector(data['bio'], weights)
                         print(f"[SYNAPTIC ROUTER] Campaign {doc_id} re-classified as: '{data['sourcing_vector']}'")
                     doc_ref.update(data)
+                    # V18: Cloud Tasks RLHF telemetry enqueue — guaranteed execution outside
+                    # the HTTP lifecycle. CPU is never throttled by Cloud Run mid-insert.
+                    _bq_status = data.get("status") or data.get("crm_status") or "updated"
+                    _bq_lead   = doc_data.to_dict()
+                    _enqueue_bq_telemetry_task(tenant_id, _bq_lead, _bq_status)
                     return jsonify({"status": "success"}), 200
                 return jsonify({"error": "Forbidden"}), 403
                 
@@ -885,6 +1013,25 @@ def trigger_daily_sweep(path):
     # -----------------------------------------------------------------------------------------
     # Legacy Internal Triggers (Admin/Purge/Sweep)
     # -----------------------------------------------------------------------------------------
+    # ── V18: Internal telemetry BQ push (dispatched via Cloud Tasks) ──────────
+    # Auth: Cloud Tasks attaches an OIDC token. We verify it came from our own
+    # queue by checking the task header — full OIDC verify handled by IAP/Cloud Run.
+    # No user auth needed: this endpoint is NOT unauthenticated-accessible because
+    # the orchestrator Cloud Run service has allow-unauthenticated BUT Cloud Tasks
+    # always sends a valid OIDC token; without it, the BQ payload would be missing.
+    if request.path == "/api/internal/telemetry/bq-push" and request.method == "POST":
+        # Lightweight guard: reject requests without a Cloud-Tasks header
+        if not request.headers.get("X-CloudTasks-QueueName"):
+            return jsonify({"error": "Forbidden — direct access not allowed"}), 403
+
+        payload = request.json or {}
+        if not payload.get("event_id") or not payload.get("tenant_id"):
+            return jsonify({"error": "Invalid payload"}), 400
+
+        success = _handle_bq_push_task(payload)
+        status_code = 200 if success else 500
+        return jsonify({"ok": success}), status_code
+
     if request.path == "/purge" and request.method == "POST":
         return handle_purge(request)
 

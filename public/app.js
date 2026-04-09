@@ -1,4 +1,4 @@
-﻿// Firebase configuration (Placeholder)
+// Firebase configuration (Placeholder)
 const firebaseConfig = {
     apiKey: "AIzaSyCxqimZJ7kspuJJ8qXF34zguLkNXi6MWd4",
     authDomain: "lead-sniper-prod.firebaseapp.com",
@@ -15,6 +15,12 @@ const auth = firebase.auth();
 
 const API_BASE = "https://orchestrator-222247989819.asia-south1.run.app";
 
+// Digital Twin Engine — dedicated microservice (POST /api/analyze-website)
+// Update this URL after first `gcloud run deploy digital-twin-engine` completes.
+const DT_ENGINE_URL = "https://digital-twin-engine-222247989819.asia-south1.run.app";
+
+
+
 // DOM Elements
 const authContainer = document.getElementById('auth-container');
 const appContainer = document.getElementById('app-container');
@@ -25,6 +31,9 @@ const leadsList = document.getElementById('leads-list');
 // Selected Filter State
 let currentCampaignFilter = 'all';
 let rawLeadsCache = [];
+// V18: O(1) lead lookup for Event Delegation copilot action
+// Keyed by Firestore docId. Populated in createLeadCardV2.
+const _leadsMap = new Map();
 
 function handleAuthRejection() {
     showToast("Session Expired or Unauthorized Access.", "error");
@@ -95,7 +104,9 @@ async function loadMe() {
             const data = payload.data || {};
             
             const waitroom = document.getElementById('waitroom-overlay');
-            const mainGrid = document.querySelector('.dashboard-grid');
+            // TECH DEBT: .dashboard-grid selector kept for compat. Also targets .app-main.
+            // Refactor to remove .dashboard-grid dependency in next sprint.
+            const mainGrid = document.querySelector('.app-main, .dashboard-grid');
             const navMenu = document.querySelector('.glass-nav');
 
             if (data.approval_status === 'pending') {
@@ -124,6 +135,19 @@ async function loadMe() {
 
             // Defensively check both payload tracks mapping legacy or missing keys safely
             const w = payload.wallet || data.wallet || {allocated_credits: 0, consumed_credits: 0};
+            }
+            
+            // Force display properties explicitly beyond just CSS class removal
+            if (data.role === 'super_admin') {
+                const l0Tab = document.getElementById('tab-l0-admin');
+                if (l0Tab) {
+                    l0Tab.classList.remove('hidden');
+                    l0Tab.style.display = 'inline-block';
+                }
+            }
+
+            // Defensively check both payload tracks mapping legacy or missing keys safely
+            const w = payload.wallet || data.wallet || {allocated_credits: 0, consumed_credits: 0};
             activeWallet = w;
             const el = document.getElementById('wallet-balance');
             const credits = (w.allocated_credits || 0) - (w.consumed_credits || 0);
@@ -132,14 +156,26 @@ async function loadMe() {
             const alertBanner = document.getElementById('wallet-alert-banner');
             const newCampBtn = document.querySelector('button[onclick="openNewCampaignModal()"]');
             if (credits <= 0) {
-                if (alertBanner) { alertBanner.innerText = "ðŸ›‘ Wallet Empty: You have 0 credits. Upgrade your account to continue sweeping."; alertBanner.classList.remove('hidden'); }
-                if (newCampBtn) { newCampBtn.innerText = "Upgrade Plan (0 Credits)"; newCampBtn.disabled = true; newCampBtn.style.background = "#94a3b8"; }
+                if (alertBanner) { alertBanner.textContent = 'Wallet Empty: You have 0 credits. Contact admin to top up.'; alertBanner.classList.remove('hidden'); }
+                if (newCampBtn) { newCampBtn.textContent = 'Upgrade Plan (0 Credits)'; newCampBtn.disabled = true; newCampBtn.style.background = '#94a3b8'; }
             } else if (credits < 50) {
                 if (alertBanner) alertBanner.classList.remove('hidden');
             } else {
                 if (alertBanner) alertBanner.classList.add('hidden');
-                if (newCampBtn) { newCampBtn.innerText = "+ Find New Clients"; newCampBtn.disabled = false; newCampBtn.style.background = "var(--primary)"; }
+                if (newCampBtn) { newCampBtn.textContent = '+ Find New Clients'; newCampBtn.disabled = false; newCampBtn.style.background = 'var(--primary)'; }
             }
+
+            // V18: Populate user dropdown header
+            const udName = document.getElementById('ud-display-name');
+            const udEmail = document.getElementById('ud-email');
+            const avatarEl = document.getElementById('user-avatar-initials');
+            const avatarLg = document.getElementById('ud-avatar-large');
+            const displayName = auth.currentUser?.displayName || data.email || 'User';
+            const initials = displayName.split(' ').map(p => p[0]).join('').substring(0, 2).toUpperCase();
+            if (udName) udName.textContent = displayName;
+            if (udEmail) udEmail.textContent = auth.currentUser?.email || '';
+            if (avatarEl) avatarEl.textContent = initials;
+            if (avatarLg) avatarLg.textContent = initials;
 
             if (!data.agreed_to_terms) {
                 const tosModal = document.getElementById('tos-modal');
@@ -205,7 +241,7 @@ async function loadCampaigns() {
             const statusBadge = `<span style="font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(camp.status || 'unknown').toUpperCase()}</span>`;
             
             const hasLocation = camp.gl && camp.location;
-            const locationWarn = hasLocation ? '' : '<br><span style="color: #ea580c; font-size: 0.75rem; display:block; margin-top:4px;">âš ï¸ Location Missing: Edit Campaign to set Targeting</span>';
+            const locationWarn = hasLocation ? '' : '<br><span style="color: #ea580c; font-size: 0.75rem; display:block; margin-top:4px;">âš ï¸  Location Missing: Edit Campaign to set Targeting</span>';
             
             tableHTML += `
                 <tr style="border-bottom: 1px solid var(--glass-border);">
@@ -242,9 +278,22 @@ async function loadCampaigns() {
 }
 
 // --- ENTERPRISE CHART.JS PIPELINE ---
+// V18: funnel-wrap is conditionally shown only when leads exist (clean canvas otherwise)
 let conversionChart = null;
 function initAnalyticsChart(newC, contactedC, convertedC) {
     const ctx = document.getElementById('funnelChart');
+    const wrapper = document.getElementById('funnel-wrap');
+    const totalLeads = newC + contactedC + convertedC;
+
+    // Show/hide the wrapper based on whether there is any data
+    if (wrapper) {
+        if (totalLeads > 0) {
+            wrapper.classList.remove('hidden');
+        } else {
+            wrapper.classList.add('hidden');
+            return; // No data — keep canvas clean
+        }
+    }
     if (!ctx) return;
     if (conversionChart) {
         conversionChart.data.datasets[0].data = [newC, contactedC, convertedC];
@@ -265,913 +314,49 @@ function initAnalyticsChart(newC, contactedC, convertedC) {
     });
 }
 
-// Load Leads Real-Time (Firestore Subscription)
-let unsubscribeLeads = null;
-
-async function loadLeads() {
-    leadsList.innerHTML = '<div class="lead-card pulse">Connecting to Secure Orchestrator...</div>';
-    
-    try {
-        const user = firebase.auth().currentUser;
-        if (!user) return handleAuthRejection();
-        
-        if (unsubscribeLeads) { unsubscribeLeads(); }
-
-        unsubscribeLeads = firebase.firestore()
-            .collection('leads')
-            .where('tenant_id', '==', user.uid)
-            .where('is_in_crm', '==', false)  // V15: Main feed = raw intelligence only (not yet pushed to CRM)
-            .onSnapshot((snapshot) => {
-                rawLeadsCache = [];
-                snapshot.forEach(doc => {
-                    let data = doc.data();
-                    data.id = doc.id;
-                    rawLeadsCache.push(data);
-                });
-                
-                if (rawLeadsCache.length === 0) {
-                    renderLeads();
-                    initAnalyticsChart(0,0,0);
-                    return;
-                }
-
-                rawLeadsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
-                
-                let cNew = 0, cContact= 0, cConvert = 0;
-                let cDiscovered = rawLeadsCache.length;
-                let cActionable = 0, cIgnored = 0;
-
-                rawLeadsCache.forEach(l => {
-                    if (l.status === 'ignored') {
-                        cIgnored++;
-                        return;
-                    }
-                    if (l.status === 'new' || !l.status) cActionable++;
-                    
-                    if (l.status === 'contacted') { cContact++; }
-                    else if (l.status === 'converted') { cConvert++; }
-                    else { cNew++; }
-                });
-                
-                const elDisc = document.getElementById('stat-discovered');
-                const elAct = document.getElementById('stat-actionable');
-                const elIgn = document.getElementById('stat-ignored');
-                if (elDisc) elDisc.innerText = cDiscovered;
-                if (elAct) elAct.innerText = cActionable;
-                if (elIgn) elIgn.innerText = cIgnored;
-                
-                initAnalyticsChart(cNew, cContact, cConvert);
-                fcUpdateKPIs(rawLeadsCache);
-                renderLeads();
-            }, (error) => {
-                console.error('[Firestore] onSnapshot Error:', error);
-                if (error.code === 'failed-precondition') {
-                    // Missing composite index for (tenant_id, is_in_crm).
-                    // DO NOT retry â€” show actionable toast and stop.
-                    const msg = 'Firestore index missing for CRM feed filter. Check GCP Console to create the composite index for (tenant_id, is_in_crm).';
-                    console.error('[Firestore] Missing index:', msg);
-                    showToast('Feed index missing â€” see console for index link.', 'error');
-                    leadsList.innerHTML = `<div class="lead-card" style="color:#f59e0b; border-color:#f59e0b; padding:16px;">
-                        âš ï¸ Firestore composite index required.<br>
-                        <small>Open the browser console for the GCP link to auto-create it (takes ~1 min).</small>
-                    </div>`;
-                    return; // Hard stop â€” no retry, no recursion.
-                }
-                if (error.code === 'permission-denied') {
-                    console.warn('[Firestore] Permission denied â€” check firestore.rules or approval_status.');
-                    return;
-                }
-                // All other errors: log + display, no retry.
-                console.error('[Firestore] Unhandled snapshot error:', error.code, error.message);
-                showToast('Live feed error â€” refresh to reconnect.', 'error');
-            });
-        
-    } catch (error) {
-        console.error("Firestore Initialization Error:", error);
-        leadsList.innerHTML = '<div class="lead-card" style="color: #ef4444; border-color: #ef4444;">Could not connect to Native Database. Please check your network.</div>';
-        showToast('Connection Refused', 'error');
-    }
-}
-
-// Organic DOM Factory
-function createLeadCard(docId, lead) {
-    const card = document.createElement('div');
-    card.className = 'lead-card';
-    let urlHostname = 'Unknown URL';
-    try { if (lead.url) urlHostname = new URL(lead.url).hostname; } catch(e){}
-    
-    const statusColor = lead.status === 'completed' ? 'var(--success)' : (lead.status === 'ignored' ? '#ef4444' : 'var(--text-muted)');
-    
-    let hiringIntent = lead.hiring_intent_found || '';
-    let hiringBadge = '';
-    if (hiringIntent === 'Yes') {
-        hiringBadge = `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; border:1px solid #a7f3d0">ðŸŸ¢ Hiring</span>`;
-    }
-    
-    const techDict = {
-        'stripe': 'Takes Online Payments',
-        'wordpress': 'Active Content/Blog',
-        'shopify': 'E-Commerce Store',
-        'salesforce': 'Enterprise CRM',
-        'hubspot': 'Marketing Automation',
-        'google analytics': 'Tracks Analytics',
-        'segment': 'Customer Data Platform',
-        'intercom': 'Live Chat Support',
-        'react': 'Modern Web App'
-    };
-    
-    let techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0) ? lead.tech_stack_found.map(tech => `<span style="font-size:0.75rem; background:transparent; color:#6b7280; padding:2px 6px; border-radius:4px; border:1px solid #e5e7eb">âš¡ ${techDict[tech.toLowerCase()] || tech}</span>`).join('') : '';
-    let exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">ðŸ”’ Exclusive Lead</span>`;
-    let competitorBadge = lead.competitor_match ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">ðŸŽ¯ Competitor Intercept: ${lead.competitor_match}</span>` : '';
-
-    // V16: origin_engine badge â€” safe fallback for legacy leads without this field
-    const originEngine  = lead.origin_engine || 'cartographer';
-    const engineBadge   = (originEngine === 'autonomous')
-        ? '<span style="font-size:0.75rem; background:#faf5ff; color:#7c3aed; padding:2px 8px; border-radius:4px; border:1px solid #ddd6fe; font-weight:600;">&#9889; Predictive Match</span>'
-        : '';
-
-    card.innerHTML = `
-        <div class="lead-header">
-            <div>
-                <strong><a href="${lead.url || '#'}" target="_blank" style="color: var(--text-main); text-decoration: none;">${urlHostname} &#8599;</a></strong> &bull; ${lead.source || 'Organic Search'} 
-                <span style="margin-left:8px; font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(lead.status || 'new').toUpperCase()}</span>
-            </div>
-            <div class="score">Score: ${lead.score || 0}/10</div>
-        </div>
-        <div class="pain-point">" ${lead.pain_point || 'Analyzing sentiment...'} "</div>
-        <div class="premium-badges" style="margin-top: 8px; margin-bottom: 8px; font-weight: 500; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
-            ${engineBadge}
-            ${exclusiveBadge}
-            ${competitorBadge}
-            ${hiringBadge}
-            ${techBadges}
-        </div>
-        <div class="dm-draft">${lead.dm || 'Drafting variation...'}</div>
-        <div class="contact-info" style="margin-top: 8px; margin-bottom: 8px; font-size: 0.85rem; color: var(--text-main); font-weight: 500;">
-            ${lead.email ? `<a href="mailto:${lead.email}" target="_blank" style="color:#2563eb; text-decoration:none;">&#128231; ${lead.email}</a> &nbsp;` : ''}
-            ${lead.phone ? `<a href="tel:${lead.phone}" style="color:#2563eb; text-decoration:none;">&#128222; ${lead.phone}</a>` : ''}
-            ${!lead.email && !lead.phone ? '<span style="color:var(--text-muted); font-style:italic;">No Contact Info Found</span>' : ''}
-        </div>
-        <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
-            <button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${(lead.dm || '').replace(/`/g, '\\`').replace(/'/g, "\\'")}\`)" title="Copy Message">&#128203; Copy Message</button>
-            <button id="crm-btn-${docId}" class="action-btn ${lead.is_in_crm ? 'in-crm' : ''}" onclick="${lead.is_in_crm ? '' : `pushToCRM('${docId}', \`${encodeURIComponent(JSON.stringify(lead)).replace(/'/g, "\\'")}\`)`}" style="color: ${lead.is_in_crm ? '#16a34a' : '#4f46e5'}; border-color: ${lead.is_in_crm ? '#86efac' : '#c7d2fe'}; background: ${lead.is_in_crm ? '#dcfce7' : '#e0e7ff'};" ${lead.is_in_crm ? 'disabled' : ''}>${lead.is_in_crm ? '&#10003; In CRM' : '&#9729; Push to CRM'}</button>
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">&#128683; Ignore</button>
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">&#127919; Converted</button>
-            <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${encodeURIComponent(JSON.stringify(lead.interactions || []))}')" title="Audit Log">&#128336; View Timeline Logs</button>
-        </div>
-    `;
-    return card;
-}
-
-window.pushToCRM = async function(docId, leadStr) {
-    // V15: Native CRM push â€” sets is_in_crm:true + initialises crm_status:new
-    const btn = document.getElementById(`crm-btn-${docId}`);
-    try {
-        const success = await performApiMutation(`/api/leads/${docId}`, 'PUT', {
-            is_in_crm:      true,
-            crm_status:     'new',
-            estimated_value: 0,
-            notes:          [],
-            expire_at:      null  // DPDP TTL exemption: null prevents Firestore 90-day sweep
-        });
-        if (success) {
-            // Optimistic UI: remove the entire lead card from the DOM immediately
-            const cardEl = document.getElementById(docId);
-            if (cardEl) {
-                virtualObserver.unobserve(cardEl);
-                cardEl.remove();
-            }
-            // Prune from rawLeadsCache so re-renders stay clean
-            rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
-
-            showToast('Lead filed in CRM â€” navigate to #crm-test to manage it.', 'success');
-
-            // Optional legacy webhook fire
-            const userUrl = window.currentUserData?.crm_webhook_url;
-            if (userUrl) {
-                try {
-                    const lead = JSON.parse(decodeURIComponent(leadStr));
-                    fetch(userUrl, { method:'POST', headers:{'Content-Type':'application/json'}, mode:'no-cors', body: JSON.stringify({event:'lead_pushed', lead}) });
-                } catch(_) {}
-            }
-        }
-    } catch(e) {
-        console.error('CRM Push failure', e);
-        showToast('CRM push failed â€” try again.', 'error');
-    }
-};
-
-window.saveCRMWebhook = async function() {
-    const user = firebase.auth().currentUser;
-    const url = document.getElementById('crm-webhook-url').value.trim();
-    if (!user || !url) return;
-    try {
-        const token = await user.getIdToken();
-        const response = await fetch(`${API_BASE}/api/me`, {
-            method: 'PUT',
-            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ crm_webhook_url: url })
-        });
-        if (response.ok) {
-            if (window.currentUserData) window.currentUserData.crm_webhook_url = url;
-            showToast("CRM Integration Locked", "success");
-        } else showToast("Failed to save webhook", "error");
-    } catch(e) { console.error(e); }
-};
-
-window.agreeToTerms = async function() {
-    const user = firebase.auth().currentUser;
-    if (!user) return;
-    try {
-        const token = await user.getIdToken();
-        const response = await fetch(`${API_BASE}/api/me`, {
-            method: 'PUT',
-            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agreed_to_terms: true })
-        });
-        if (response.ok) {
-            document.getElementById('tos-modal').classList.add('hidden');
-            showToast("Compliance agreement signed", "success");
-        } else showToast("Backend sync failed", "error");
-    } catch(e) { console.error(e); }
-};
-
-window.copyMessageAndContact = function(docId, dm) {
-    navigator.clipboard.writeText(dm).then(() => {
-        showToast("Message Copied to Clipboard", "success");
-
-        // Optimistic UI
-        rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
-        const cardEl = document.getElementById(docId);
-        if (cardEl) {
-            virtualObserver.unobserve(cardEl);
-            cardEl.remove();
-        }
-        updateLeadStatus(docId, "contacted");
-    }).catch(err => {
-        console.error("Clipboard failed", err);
-        showToast("Failed to copy", "error");
-    });
-};
-
-// ---------------------------------------------------------------------------
-// V14: SMART CONTACT ACTION
-// Primary CTA handler: copies DM, opens URI, marks lead as contacted.
-// ---------------------------------------------------------------------------
-window.smartContactAction = function(docId, dm, uri, platform) {
-    // 1. Copy the drafted message to clipboard
-    navigator.clipboard.writeText(dm).catch(err => console.warn('Clipboard fail:', err));
-
-    // 2. Optimistic UI dismiss
-    rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
-    const cardEl = document.getElementById(docId);
-    if (cardEl) {
-        virtualObserver.unobserve(cardEl);
-        cardEl.remove();
-    }
-
-    // 3. Open the URI â€” Phase 2: Relative Path Defence
-    if (uri) {
-        const isEmail = platform === 'email' || (uri.includes('@') && !uri.startsWith('http'));
-        const isPhone = platform === 'other' && /^[\d\s+()\-]{6,}$/.test(uri);
-        let href;
-        if (isEmail) {
-            href = `mailto:${uri}`;
-        } else if (isPhone) {
-            href = `tel:${uri}`;
-        } else if (/^(https?:\/\/|mailto:|tel:)/i.test(uri)) {
-            // URI already has a valid protocol â€” use as-is
-            href = uri;
-        } else {
-            // Relative path / naked domain guard: prepend https://
-            href = `https://${uri}`;
-        }
-        window.open(href, '_blank', 'noopener,noreferrer');
-    }
-
-    showToast('Message copied â€” opening contact...', 'success');
-    updateLeadStatus(docId, 'contacted');
-};
-
-// ---------------------------------------------------------------------------
-// V14: ALT-CONTACTS DROPDOWN TOGGLE
-// ---------------------------------------------------------------------------
-window.toggleAltContacts = function(wrapperId) {
-    const wrapper  = document.getElementById(wrapperId);
-    if (!wrapper) return;
-    const toggle   = wrapper.querySelector('.alt-contacts-toggle');
-    const dropdown = wrapper.querySelector('.alt-contacts-dropdown');
-    const isOpen   = dropdown.classList.contains('open');
-    dropdown.classList.toggle('open', !isOpen);
-    if (toggle) toggle.classList.toggle('open', !isOpen);
-    // Close on click outside
-    if (!isOpen) {
-        const closeHandler = (e) => {
-            if (!wrapper.contains(e.target)) {
-                dropdown.classList.remove('open');
-                if (toggle) toggle.classList.remove('open');
-                document.removeEventListener('click', closeHandler);
-            }
-        };
-        setTimeout(() => document.addEventListener('click', closeHandler), 0);
-    }
-};
-
-window.currentPage = 1;
-window.leadsPerPage = 20;
-
-window.filterLeadsByCampaign = function(campaignId) {
-    currentCampaignFilter = campaignId;
-    window.currentPage = 1; // Reset pagination on filter
-    renderLeads();
-};
-
-window.changeLeadPage = function(delta) {
-    window.currentPage += delta;
-    renderLeads();
-    document.querySelector('.dashboard-grid')?.scrollIntoView({ behavior: 'smooth' });
-};
-
-// ---------------------------------------------------------------------------
-// ENTERPRISE DOSSIER RENDERER â€” V14 POLYMORPHIC SCHEMA
-// ---------------------------------------------------------------------------
-
-// Platform metadata: icon, label, CTA text for each endpoint type
-const PLATFORM_META = {
-    whatsapp:  { icon: 'ðŸ’¬', label: 'WhatsApp',   cta: 'Message on WhatsApp',  priority: 1 },
-    instagram: { icon: 'ðŸ“¸', label: 'Instagram',  cta: 'DM on Instagram',      priority: 2 },
-    linkedin:  { icon: 'ðŸ’¼', label: 'LinkedIn',   cta: 'Connect on LinkedIn',  priority: 2 },
-    facebook:  { icon: 'ðŸ“˜', label: 'Facebook',   cta: 'Message on Facebook',  priority: 3 },
-    email:     { icon: 'ðŸ“§', label: 'Email',      cta: 'Send Email',           priority: 4 },
-    gmb:       { icon: 'ðŸ“', label: 'GMB',        cta: 'Open Maps Profile',    priority: 4 },
-    reddit:    { icon: 'ðŸ”´', label: 'Reddit',     cta: 'Open Reddit Profile',  priority: 5 },
-    other:     { icon: 'ðŸ”—', label: 'Contact',    cta: 'Open Contact',         priority: 6 }
-};
-
-/**
- * Resolves the primary endpoint from a contact_endpoints array
- * using the hierarchy: WhatsApp â†’ Instagram/LinkedIn â†’ Email â†’ Reddit/Forums â†’ Other
- */
-function getContactHierarchy(endpoints) {
-    if (!endpoints || endpoints.length === 0) return null;
-    return [...endpoints].sort((a, b) => {
-        const pa = (PLATFORM_META[a.platform] || PLATFORM_META.other).priority;
-        const pb = (PLATFORM_META[b.platform] || PLATFORM_META.other).priority;
-        return pa - pb;
-    })[0];
-}
-
-function generateLeadInnerHtml(docId, lead) {
-    // â”€â”€ Enterprise Dossier fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const targetName       = (!lead.decision_maker_name        || lead.decision_maker_name        === 'N/A') ? 'Data unavailable on scanned domain'                       : lead.decision_maker_name;
-    const companySize      = (!lead.company_size_tier          || lead.company_size_tier          === 'N/A') ? 'Requires secondary analysis'                               : lead.company_size_tier;
-    const primaryObjection = (!lead.primary_objection_hypothesis || lead.primary_objection_hypothesis === 'N/A') ? 'Insufficient data to generate confident hypothesis'  : lead.primary_objection_hypothesis;
-    const icebreakerAngle  = lead.icebreaker_angle || '';
-
-    // â”€â”€ URL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    let urlHostname = 'Unknown URL';
-    try { if (lead.url) urlHostname = new URL(lead.url).hostname; } catch(e) {}
-
-    const statusColor = lead.status === 'completed' ? 'var(--success)'
-        : (lead.status === 'ignored' ? '#ef4444' : 'var(--text-muted)');
-
-    // â”€â”€ V14: Intent Signal (replaces plain pain_point at top of card) â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const intentSignal = lead.intent_signal || lead.pain_point || '';
-    const intentSignalHtml = intentSignal
-        ? `<div class="intent-signal">${intentSignal}</div>`
-        : '';
-
-    // â”€â”€ Confidence Tier badge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const tierClass  = lead.confidence_tier === 'Medium' ? 'tier-medium' : 'tier-high';
-    const tierBadge  = lead.confidence_tier
-        ? `<span class="tier-badge ${tierClass}">${lead.confidence_tier === 'High' ? 'âœ“' : '~'} ${lead.confidence_tier}</span>`
-        : '';
-
-    // â”€â”€ Badges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const hiringBadge = (lead.hiring_intent_found === 'Yes')
-        ? `<span style="font-size:0.75rem; background:#ecfdf5; color:#059669; padding:2px 6px; border-radius:4px; border:1px solid #a7f3d0">ðŸŸ¢ Hiring</span>`
-        : '';
-
-    const techDict = {
-        'stripe': 'Takes Online Payments', 'wordpress': 'Active Content/Blog',
-        'shopify': 'E-Commerce Store',     'salesforce': 'Enterprise CRM',
-        'hubspot': 'Marketing Automation', 'google analytics': 'Tracks Analytics',
-        'segment': 'Customer Data Platform', 'intercom': 'Live Chat Support',
-        'react': 'Modern Web App'
-    };
-    const techBadges = (lead.tech_stack_found && lead.tech_stack_found.length > 0)
-        ? lead.tech_stack_found.map(t =>
-            `<span style="font-size:0.75rem; background:transparent; color:#6b7280; padding:2px 6px; border-radius:4px; border:1px solid #e5e7eb">âš¡ ${techDict[t.toLowerCase()] || t}</span>`
-          ).join('')
-        : '';
-
-    // V16: origin_engine badge â€” safe fallback for all legacy leads without this field
-    const originEngine = lead.origin_engine || 'cartographer';
-    const engineBadge  = (originEngine === 'autonomous')
-        ? '<span style="font-size:0.75rem; background:#faf5ff; color:#7c3aed; padding:2px 8px; border-radius:4px; border:1px solid #ddd6fe; font-weight:600;">&#9889; Predictive Match</span>'
-        : '';
-
-    const exclusiveBadge = `<span style="font-size:0.75rem; background:#f3e8ff; color:#6b21a8; padding:2px 6px; border-radius:4px; border:1px solid #e9d5ff">&#128274; Exclusive Lead</span>`;
-    const competitorBadge = lead.competitor_match
-        ? `<span style="font-size:0.75rem; background:#fee2e2; color:#b91c1c; padding:2px 6px; border-radius:4px; border:1px solid #fecaca">ðŸŽ¯ Competitor Intercept: ${lead.competitor_match}</span>`
-        : '';
-    const targetNameBadge = (lead.decision_maker_name)
-        ? `<span style="font-size:0.75rem; background:#eff6ff; color:#1d4ed8; padding:2px 6px; border-radius:4px; border:1px solid #bfdbfe">ðŸ‘¤ ${targetName}</span>`
-        : '';
-    const companySizeBadge = (lead.company_size_tier)
-        ? `<span style="font-size:0.75rem; background:#fefce8; color:#854d0e; padding:2px 6px; border-radius:4px; border:1px solid #fef08a">ðŸ¢ ${companySize}</span>`
-        : '';
-
-    // â”€â”€ V14: Polymorphic Contact Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const endpoints     = Array.isArray(lead.contact_endpoints) ? lead.contact_endpoints.filter(e => e && e.uri) : [];
-    const primary       = getContactHierarchy(endpoints);
-    const altEndpoints  = primary ? endpoints.filter(e => e !== primary) : endpoints;
-    const altDropId     = `alt-${docId}`;
-
-    // Safe-encode DM for onclick attribute
-    const safeDm = (lead.dm || '').replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/'/g, "\\'");
-
-    let primaryCtaHtml = '';
-    if (primary) {
-        const meta   = PLATFORM_META[primary.platform] || PLATFORM_META.other;
-        const safeUri = encodeURIComponent(primary.uri);
-        primaryCtaHtml = `<button class="smart-cta-btn"
-            onclick="smartContactAction('${docId}', \`${safeDm}\`, decodeURIComponent('${safeUri}'), '${primary.platform}')"
-            title="${meta.cta}">${meta.icon} ${meta.cta}</button>`;
-    } else {
-        // No endpoints: fallback to legacy copy behaviour
-        primaryCtaHtml = `<button class="action-btn" onclick="copyMessageAndContact('${docId}', \`${safeDm}\`)" title="Copy Message">ðŸ“‹ Copy Message</button>`;
-    }
-
-    // Alt-contacts dropdown (only if there are secondary endpoints)
-    let altDropdownHtml = '';
-    if (altEndpoints.length > 0) {
-        const altItems = altEndpoints.map(ep => {
-            const m = PLATFORM_META[ep.platform] || PLATFORM_META.other;
-            const safeUri = encodeURIComponent(ep.uri);
-            // V14.2: Platform-aware label (Phone: ..., Email: ..., WhatsApp: ...)
-            let displayLabel;
-            const isPhone = ep.platform === 'other' && /^[\d\s+()\-]{6,}$/.test(ep.uri);
-            const isEmail = ep.platform === 'email' || (ep.uri.includes('@') && !ep.uri.startsWith('http'));
-            if (isPhone) {
-                displayLabel = `Phone: ${ep.uri}`;
-            } else if (isEmail) {
-                displayLabel = `Email: ${ep.uri}`;
-            } else {
-                const shortUri = ep.uri.length > 26 ? ep.uri.substring(0, 24) + 'â€¦' : ep.uri;
-                displayLabel = `${m.label}: ${shortUri}`;
-            }
-            return `<button class="alt-contact-item"
-                onclick="smartContactAction('${docId}', \`${safeDm}\`, decodeURIComponent('${safeUri}'), '${ep.platform}')">
-                <span class="platform-icon">${m.icon}</span>
-                <span class="platform-uri">${displayLabel}</span>
-            </button>`;
-        }).join('');
-
-        altDropdownHtml = `<div class="alt-contacts-wrapper" id="${altDropId}">
-            <button class="alt-contacts-toggle" onclick="toggleAltContacts('${altDropId}')">
-                +${altEndpoints.length}
-                <svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>
-            </button>
-            <div class="alt-contacts-dropdown">${altItems}</div>
-        </div>`;
-    }
-
-    // â”€â”€ Icebreaker / Objection rows â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const icebreakerRow = icebreakerAngle
-        ? `<div style="margin-top:8px; font-size:0.85rem; color:#4f46e5; font-style:italic; padding:6px 10px; background:rgba(79,70,229,0.05); border-left:3px solid #6366f1; border-radius:0 4px 4px 0;">
-               ðŸ’¡ Icebreaker: ${icebreakerAngle}
-           </div>`
-        : '';
-    const objectionRow = (lead.primary_objection_hypothesis)
-        ? `<div style="margin-top:6px; font-size:0.82rem; color:#b45309; padding:4px 10px; background:#fffbeb; border-left:3px solid #f59e0b; border-radius:0 4px 4px 0;">
-               âš ï¸ Likely Objection: ${primaryObjection}
-           </div>`
-        : '';
-
-    // â”€â”€ Safe serialisation for timeline â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const safeEvents = encodeURIComponent(JSON.stringify(lead.interactions || []));
-    const safeLeadEnc = encodeURIComponent(JSON.stringify({
-        id: lead.id,
-        score: lead.score,
-        dm: lead.dm,
-        intent_signal: lead.intent_signal,
-        contact_endpoints: lead.contact_endpoints
-    })).replace(/'/g, "\\'");
-
-    return `
-        <div class="lead-header">
-            <div>
-                <strong><a href="${lead.url || '#'}" target="_blank" style="color: var(--text-main); text-decoration: none;">${urlHostname} â†—</a></strong> â€¢ ${lead.source || 'Organic Search'}
-                <span style="margin-left:8px; font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(lead.status || 'new').toUpperCase()}</span>
-                ${tierBadge}
-            </div>
-            <div class="score">Score: ${lead.score || 0}/10</div>
-        </div>
-        ${intentSignalHtml}
-        <div class="premium-badges" style="margin-top: 8px; margin-bottom: 8px; font-weight: 500; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;">
-            ${engineBadge}
-            ${exclusiveBadge}
-            ${competitorBadge}
-            ${hiringBadge}
-            ${targetNameBadge}
-            ${companySizeBadge}
-            ${techBadges}
-        </div>
-        ${icebreakerRow}
-        ${objectionRow}
-        <div class="dm-draft">${lead.dm || 'Drafting variation...'}</div>
-        <div class="action-row" style="flex-wrap: wrap; gap: 8px; margin-top:12px; padding-top:12px; border-top: 1px solid var(--glass-border)">
-            ${primaryCtaHtml}
-            ${altDropdownHtml}
-            <button class="action-btn" onclick="pushToCRM('${docId}', '${safeLeadEnc}')" style="color: #4f46e5; border-color: #c7d2fe; background: #e0e7ff;">â˜ï¸ Push to CRM</button>
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'ignored')" title="Ignore Lead">ðŸš« Ignore</button>
-            <button class="action-btn" onclick="updateLeadStatus('${docId}', 'converted')" title="Lead Converted">ðŸŽ¯ Converted</button>
-            <button class="action-btn" style="background:#f8fafc; color:var(--text-muted); border: 1px solid var(--glass-border);" onclick="viewLeadTimeline('${safeEvents}')" title="Audit Log">ðŸ•’ Timeline</button>
-        </div>
-    `;
-}
-
-let virtualObserver = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-        if(entry.isIntersecting) {
-            if(!entry.target.hasAttribute('data-rendered')) {
-                const leadId = entry.target.getAttribute('data-lead-id');
-                const lead = rawLeadsCache.find(l => (l.id || l.doc_id) === leadId);
-                if (lead) {
-                    // V17: Use new folded card renderer
-                    const newCard = window.createLeadCardV2(leadId, lead);
-                    entry.target.replaceWith(newCard);
-                    virtualObserver.unobserve(entry.target);
-                    virtualObserver.observe(newCard);
-                    newCard.setAttribute('data-rendered', 'true');
-                }
-            }
-        }
-    });
-}, { rootMargin: "600px" });
-
-function renderLeads() {
-    const filteredLeads = rawLeadsCache.filter(lead => {
-        if (!['new', 'contacted', 'converted'].includes(lead.status || 'new')) return false;
-        // V14.2: Fix campaign filter â€” leads now use matched_campaigns[] array, not campaign_id scalar
-        if (currentCampaignFilter !== 'all') {
-            const matched = Array.isArray(lead.matched_campaigns)
-                ? lead.matched_campaigns.includes(currentCampaignFilter)
-                : lead.campaign_id === currentCampaignFilter; // legacy fallback
-            if (!matched) return false;
-        }
-        return true;
-    });
-    
-    if (filteredLeads.length === 0) {
-        leadsList.innerHTML = `
-            <div class="lead-card" style="text-align: center; padding: 40px; border: none; background: transparent; box-shadow: none;">
-                <div style="font-size: 3rem; margin-bottom: 12px; opacity: 0.8;">â³</div>
-                <h3 style="color: var(--text-main); margin-bottom: 8px;">Hunting for leads...</h3>
-                <p style="color: var(--text-muted); font-size: 0.95rem; line-height: 1.5;">
-                    We are actively scanning the web for targets matching your criteria. Check back in a few minutes.
-                </p>
-            </div>
-        `;
-        return;
-    }
-    
-    leadsList.innerHTML = '';
-    virtualObserver.disconnect();
-    
-    // Strict DOM Virtualization implementation
-    filteredLeads.forEach(lead => {
-         const wrapper = document.createElement('div');
-         wrapper.className = 'lead-card';
-         wrapper.style.minHeight = '180px';
-         wrapper.id = lead.id || lead.doc_id;
-         wrapper.setAttribute('data-lead-id', lead.id || lead.doc_id);
-         
-         leadsList.appendChild(wrapper);
-         virtualObserver.observe(wrapper);
-    });
-}
-
-// TOAST UI ENGINE
-window.showToast = function(message, type = 'info') {
-    const container = document.getElementById('toast-container');
-    if (!container) return;
-    const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.textContent = message;
-    container.appendChild(toast);
-    setTimeout(() => toast.classList.add('show'), 10);
-    setTimeout(() => {
-        toast.classList.remove('show');
-        setTimeout(() => toast.remove(), 300);
-    }, 3500);
-};
-
-// Modals
-window.viewLeadTimeline = function(eventsJson) {
-    try {
-        const events = JSON.parse(decodeURIComponent(eventsJson)) || [];
-        const feed = document.getElementById('audit-timeline-feed');
-        if (events.length === 0) {
-            feed.innerHTML = '<p style="color:var(--text-muted); text-align:center;">No CRM interactions recorded yet.</p>';
-        } else {
-            feed.innerHTML = events.map(e => `
-                <div style="padding:12px; border-left: 3px solid var(--primary); margin-bottom:12px; background: white; border-radius: 0 4px 4px 0; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
-                    <small style="color:var(--text-muted); display:block; margin-bottom:4px;">${e.date}</small>
-                    <strong style="color: var(--text-main); font-size: 0.95rem;">${e.action}</strong>
-                </div>
-            `).join('');
-        }
-        document.getElementById('audit-log-modal').classList.remove('hidden');
-    } catch(e) { console.error('Timeline Schema Sync Error', e); }
-};
-
-// â”€â”€ Location State Sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Called by onchange on both country dropdowns.
-// Clears the city/region text input and sets a country-native placeholder
-// so the user always gets a clean, contextual hint after switching country.
-const COUNTRY_PLACEHOLDER_MAP = {
-    'us': 'e.g. San Francisco, California',
-    'uk': 'e.g. Manchester, England',
-    'ca': 'e.g. Toronto, Ontario',
-    'au': 'e.g. Melbourne, Victoria',
-    'in': 'e.g. Kochi, Kerala',
-    '':   'City, State/Region'   // Global fallback
-};
-
-window.handleCountryChange = function(selectId, inputId) {
-    const gl    = document.getElementById(selectId)?.value || '';
-    const input = document.getElementById(inputId);
-    if (!input) return;
-    input.value       = '';                                         // clear stale city
-    input.placeholder = COUNTRY_PLACEHOLDER_MAP[gl] || 'City, State/Region';
-};
-
-window.openEditModal = function(id, name, bio, keywords, gl, location, targetUrls) {
-    document.getElementById('edit-camp-id').value = id;
-    document.getElementById('edit-camp-name').value = name;
-    document.getElementById('edit-camp-bio').value = bio;
-    document.getElementById('edit-camp-keys').value = keywords;
-    const glEl = document.getElementById('edit-camp-gl');
-    const locEl = document.getElementById('edit-camp-location');
-    if (glEl) glEl.value = gl;
-    if (locEl) locEl.value = location;
-    // V14.2: Populate target URLs if present
-    const targetUrlsEl = document.getElementById('edit-camp-target-urls');
-    if (targetUrlsEl) targetUrlsEl.value = Array.isArray(targetUrls) ? targetUrls.join('\n') : (targetUrls || '');
-    document.getElementById('edit-campaign-modal').classList.remove('hidden');
-};
-
-window.closeEditModal = function() {
-    document.getElementById('edit-campaign-modal').classList.add('hidden');
-};
-
-// MUTATION STUBS: Redirected to REST Gateways
-async function performApiMutation(url, method, payload) {
-    const user = auth.currentUser;
-    if(!user) return false;
-    const token = await user.getIdToken();
-    const response = await fetch(`${API_BASE}${url}`, {
-        method: method,
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    });
-    if (response.status === 401 || response.status === 403) {
-        handleAuthRejection();
-        return false;
-    }
-    if (!response.ok) throw new Error("API Execution Failed");
-    return true;
-}
-
-window.updateLeadStatus = async function(docId, newStatus) {
-    if (newStatus === 'ignored') {
-        const leadIndex = rawLeadsCache.findIndex(l => l.id === docId);
-        if (leadIndex !== -1) {
-             rawLeadsCache.splice(leadIndex, 1);
-             renderLeads();
-        }
-    }
-    
-    try {
-        const success = await performApiMutation(`/api/leads/${docId}`, 'PUT', { status: newStatus });
-        if(success) {
-            showToast(`Lead status updated: ${newStatus}`, 'success');
-            if (newStatus !== 'ignored') {
-                loadDashboard();
-            }
-        }
-    } catch(err) {
-        showToast('Error saving update to database', 'error');
-    }
-};
-
-window.openNewCampaignModal = async function() {
-    const remaining = activeWallet.allocated_credits - activeWallet.consumed_credits;
-    if (remaining <= 0) {
-        showToast('Beta quota exhausted. Contact admin to reload.', 'error');
-        return;
-    }
-
-    document.getElementById('new-campaign-modal').classList.remove('hidden');
-    const glInput  = document.getElementById('camp-gl');
-    const locInput = document.getElementById('camp-location');
-
-    // Sync placeholder to any already-selected country on modal open
-    if (glInput && glInput.value) {
-        handleCountryChange('camp-gl', 'camp-location');
-    }
-
-    // Auto-detect Geo if unpopulated
-    if (glInput && !glInput.value) {
-        try {
-            const resp = await fetch('https://ipapi.co/json/');
-            const json = await resp.json();
-            if (json.country_code) {
-                glInput.value = json.country_code.toLowerCase();
-                // Sync placeholder AFTER setting country code, THEN fill city
-                handleCountryChange('camp-gl', 'camp-location');
-            }
-            if (json.city && locInput) locInput.value = `${json.city}, ${json.region}`;
-        } catch(e) {
-            console.warn("Soft Geolocation Exception:", e);
-        }
-    }
-};
-
-window.saveEditedCampaign = async function() {
-    const id = document.getElementById('edit-camp-id').value;
-    const name = document.getElementById('edit-camp-name').value;
-    const bio = document.getElementById('edit-camp-bio').value;
-    const keys = document.getElementById('edit-camp-keys').value;
-    const glInput = document.getElementById('edit-camp-gl');
-    const locationInput = document.getElementById('edit-camp-location');
-    const targetUrlsInput = document.getElementById('edit-camp-target-urls');
-
-    if (!name || !keys) return showToast('Name and Keywords required', 'error');
-
-    // V14.2: Parse target URLs textarea
-    let targetUrls = [];
-    if (targetUrlsInput && targetUrlsInput.value.trim()) {
-        targetUrls = targetUrlsInput.value.split('\n').map(u => u.trim()).filter(u => u.length > 0);
-        if (targetUrls.length > 10) {
-            showToast('Warning: Only the first 10 URLs will be used.', 'error');
-            targetUrls = targetUrls.slice(0, 10);
-        }
-    }
-
-    showToast('Pushing updates to AI Engine...', 'info');
-    try {
-        const payload = {
-            name,
-            bio,
-            keywords: keys,
-            gl: glInput ? glInput.value : '',
-            location: locationInput ? locationInput.value : '',
-            target_urls: targetUrls,
-            status: 'active'
-        };
-        const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', payload);
-        if(success) {
-            closeEditModal();
-            showToast('Campaign successfully updated!', 'success');
-            loadDashboard();
-        }
-    } catch(err) {
-        showToast('Error modifying campaign', 'error');
-    }
-};
-
-window.toggleCampaignStatus = async function(id, currentStatus) {
-    const newStatus = currentStatus === 'active' ? 'paused' : 'active';
-    try {
-        const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', { status: newStatus });
-        if(success) {
-            showToast(`Campaign ${newStatus} successfully`, 'success');
-            loadDashboard();
-        }
-    } catch(err) {
-        showToast('Status update failed', 'error');
-    }
-};
-
-window.saveCampaignAction = async function() {
-    const nameInput = document.getElementById('camp-name');
-    const bioInput = document.getElementById('camp-bio');
-    const keysInput = document.getElementById('camp-keys');
-    const glInput = document.getElementById('camp-gl');
-    const locationInput = document.getElementById('camp-location');
-    const targetUrlsInput = document.getElementById('camp-target-urls');
-    
-    if (!nameInput || !keysInput || !nameInput.value || !keysInput.value) {
-        showToast('Campaign Name and Keywords are required', 'error');
-        return;
-    }
-    
-    let targetUrls = [];
-    if (targetUrlsInput && targetUrlsInput.value.trim().length > 0) {
-        targetUrls = targetUrlsInput.value.split('\n').map(u => u.trim()).filter(u => u.length > 0);
-        if (targetUrls.length > 10) {
-            showToast('Warning: Only the first 10 URLs will be prioritized.', 'error');
-            targetUrls = targetUrls.slice(0, 10);
-        }
-    }
-    
-    showToast('Setting up your search...', 'info');
-    try {
-        // Step 1: Create the campaign
-        const user  = auth.currentUser;
-        if (!user) return;
-        const token = await user.getIdToken();
-        const createResp = await fetch(`${API_BASE}/api/campaigns`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                name:        nameInput.value,
-                bio:         bioInput.value,
-                keywords:    keysInput.value,
-                gl:          glInput ? glInput.value : '',
-                location:    locationInput ? locationInput.value : '',
-                target_urls: targetUrls,
-                status:      'active'
-            })
-        });
-        if (!createResp.ok) throw new Error('Campaign creation failed');
-        const createData = await createResp.json();
-        const campaignId = createData.id;
-
-        // Step 2: Fire Epsilon-Greedy Router for immediate first batch
-        let routerMsg = 'System is now looking for clients!';
-        if (campaignId) {
-            try {
-                const routerResp = await fetch(`${API_BASE}/api/campaigns/${campaignId}/run`, {
-                    method:  'POST',
-                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                    body:    JSON.stringify({})
-                });
-                if (routerResp.ok) {
-                    const r = await routerResp.json();
-                    const v16  = r.autonomous_promoted  || 0;
-                    const v14  = r.cartographer_queued  || 0;
-                    routerMsg = `Engine dispatched: âš¡ ${v16} Predictive + ðŸ” ${v14} Cartographer leads`;
-                }
-            } catch (routerErr) {
-                console.warn('[ROUTER] Router call failed, Cartographer sweep will pick up:', routerErr);
-            }
-        }
-
-        closeNewCampaignModal();  // V17: resets conversational flow state
-        showToast(routerMsg, 'success');
-        if (targetUrlsInput) targetUrlsInput.value = '';
-        loadDashboard();
-    } catch(err) {
-        showToast('Failed to save campaign. Check API permissions.', 'error');
-    }
-};
-
-// SPA Router
+// SPA Router — V18: syncs both top cmd-bar (desktop) and bottom dock (mobile)
 window.switchTab = function(tabName) {
     document.querySelectorAll('.main-feed').forEach(el => el.classList.add('hidden'));
-    document.querySelectorAll('.nav-links a').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.cmd-btn').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.dock-btn').forEach(el => el.classList.remove('active'));
 
-    if(tabName === 'dashboard') {
+    const activateTab = (topId, dockId) => {
+        const topEl = document.getElementById(topId);
+        const dockEl = document.getElementById(dockId);
+        if (topEl) topEl.classList.add('active');
+        if (dockEl) dockEl.classList.add('active');
+    };
+
+    if (tabName === 'dashboard') {
         document.getElementById('view-dashboard').classList.remove('hidden');
-        document.getElementById('tab-dashboard').classList.add('active');
-    } else if(tabName === 'target') {
-        if(document.getElementById('view-target')) document.getElementById('view-target').classList.remove('hidden');
-        document.getElementById('tab-campaigns').classList.add('active');
-    } else if(tabName === 'team') {
-        if(document.getElementById('view-team')) document.getElementById('view-team').classList.remove('hidden');
-        document.getElementById('tab-team').classList.add('active');
-    } else if(tabName === 'reports') {
-        if(document.getElementById('view-reports')) document.getElementById('view-reports').classList.remove('hidden');
-        if(document.getElementById('tab-reports')) document.getElementById('tab-reports').classList.add('active');
-    } else if(tabName === 'l0-admin') {
-        if(document.getElementById('view-l0-admin')) document.getElementById('view-l0-admin').classList.remove('hidden');
-        if(document.getElementById('tab-l0-admin')) document.getElementById('tab-l0-admin').classList.add('active');
+        activateTab('tab-dashboard', 'dock-tab-dashboard');
+    } else if (tabName === 'target') {
+        if (document.getElementById('view-target')) document.getElementById('view-target').classList.remove('hidden');
+        activateTab('tab-campaigns', 'dock-tab-campaigns');
+    } else if (tabName === 'team') {
+        if (document.getElementById('view-team')) document.getElementById('view-team').classList.remove('hidden');
+    } else if (tabName === 'reports') {
+        if (document.getElementById('view-reports')) document.getElementById('view-reports').classList.remove('hidden');
+        activateTab('tab-reports', 'dock-tab-reports');
+    } else if (tabName === 'l0-admin') {
+        if (document.getElementById('view-l0-admin')) document.getElementById('view-l0-admin').classList.remove('hidden');
+        const l0Tab = document.getElementById('tab-l0-admin');
+        if (l0Tab) l0Tab.classList.add('active');
         fetchL0Telemetry();
-    } else if(tabName === 'macro') {
-        if(document.getElementById('view-macro')) document.getElementById('view-macro').classList.remove('hidden');
-        if(document.getElementById('tab-macro')) document.getElementById('tab-macro').classList.add('active');
+    } else if (tabName === 'macro') {
+        if (document.getElementById('view-macro')) document.getElementById('view-macro').classList.remove('hidden');
         fetchMacroTrends();
-    } else if(tabName === 'crm-test') {
-        // V15: L0 super_admin only â€” no nav link exposed to regular users
+    } else if (tabName === 'crm-test') {
         const isAdmin = window.currentUserData?.role === 'super_admin';
-        if (!isAdmin) {
-            showToast('CRM module is restricted to L0 administrators.', 'error');
-            return;
-        }
+        if (!isAdmin) { showToast('CRM module is restricted to L0 administrators.', 'error'); return; }
         const crmView = document.getElementById('view-crm-test');
-        if (crmView) {
-            crmView.classList.remove('hidden');
-            loadCrmBoard();
-        }
+        if (crmView) { crmView.classList.remove('hidden'); loadCrmBoard(); }
     }
 };
 
 // V15: Hash-based hidden route for #crm-test (L0 admin only)
 window.addEventListener('hashchange', () => {
+
     if (window.location.hash === '#crm-test' && firebase.auth().currentUser) {
         // Gate: only super_admin can access
         if (window.currentUserData?.role === 'super_admin') {
@@ -2034,7 +1219,6 @@ window.fcLaunch = function() {
     const cityInput = document.getElementById('fc-edit-where-city');
     const city = cityInput?.value.trim() || '';
     const locationText = city ? `${city}, ${window._fcState.location}` : window._fcState.location;
-
     document.getElementById('camp-gl').value       = window._fcState.gl;
     document.getElementById('camp-location').value  = locationText;
     document.getElementById('camp-name').value      = fcBuildCampaignName(who, window._fcState.location);
@@ -2046,10 +1230,9 @@ window.fcLaunch = function() {
     saveCampaignAction();
 };
 
-// Close modal
+// Close modal — restored (was accidentally removed during V18 edit)
 window.closeNewCampaignModal = function() {
     document.getElementById('new-campaign-modal').classList.add('hidden');
-    // Reset step
     document.getElementById('fc-step-1').classList.remove('hidden');
     document.getElementById('fc-step-2').classList.add('hidden');
     const ta = document.getElementById('fc-intent');
@@ -2115,139 +1298,206 @@ function fcUpdateKPIs(leadsArray) {
 }
 
 // =============================================================================
-// V17: NEW LEAD CARD RENDERER (createLeadCardV2)
-// Called from the existing snapshot handler â€” replaces createLeadCard
+// V18: LEAD CARD RENDERER - Predictive Copilot Architecture
+// prism_mode routing:
+//   GeneralDomain / legacy -> B2B dossier (Company Size, Tech Stack, Objection)
+//   WalledGarden / Social  -> Social dossier (Platform, Snippet, Handle)
+//   B2B2C                  -> Split view (Consumer Demand + Distributor)
 // =============================================================================
 
 function getScoreEmoji(score) {
-    if (score >= 9) return 'ðŸ”¥';
-    if (score >= 7) return 'âš¡';
-    if (score >= 5) return 'ðŸ‘';
-    return 'ðŸ“‹';
+    if (score >= 9) return '&#x1F525;';
+    if (score >= 7) return '&#x26A1;';
+    if (score >= 5) return '&#x1F511;';
+    return '&#x1F4CB;';
+}
+
+var _PRISM_PLATFORM_META = {
+    'reddit.com':    'Copy Reply & Open Reddit',
+    'linkedin.com':  'Copy Pitch & Open LinkedIn',
+    'facebook.com':  'Copy Message & Open Facebook',
+    'instagram.com': 'Copy DM & Open Instagram',
+    'twitter.com':   'Copy Reply & Open X',
+    'x.com':         'Copy Reply & Open X',
+    'quora.com':     'Copy Answer & Open Quora',
+    'youtube.com':   'Copy Comment & Open YouTube',
+    'team-bhp.com':  'Copy Reply & Open Team-BHP',
+};
+
+function _copilotBtnLabel(lead) {
+    var url = lead.url || lead.source_url || '';
+    var hostname = '';
+    try { hostname = new URL(url).hostname.replace('www.', '').toLowerCase(); } catch(e) {}
+    var domains = Object.keys(_PRISM_PLATFORM_META);
+    for (var i = 0; i < domains.length; i++) {
+        if (hostname.endsWith(domains[i])) return '&#x1F4CB; ' + _PRISM_PLATFORM_META[domains[i]] + ' &#x2197;';
+    }
+    var mode = (lead.prism_mode || '').toLowerCase();
+    if (mode.indexOf('walledgarden') !== -1) return '&#x1F4CB; Copy Reply & Open Platform &#x2197;';
+    if (mode === 'b2b2c')                    return '&#x1F4CB; Copy Pitch & Open Distributor &#x2197;';
+    return '&#x1F4CB; Copy Pitch & Open Website &#x2197;';
+}
+
+function _prismDossierHTML(lead) {
+    var mode = (lead.prism_mode || 'GeneralDomain').toLowerCase();
+
+    if (mode.indexOf('walledgarden') !== -1 || mode === 'social') {
+        var platform = 'Social Platform';
+        try {
+            var h = new URL(lead.url || lead.source_url || '').hostname.replace('www.','');
+            platform = h.split('.')[0].charAt(0).toUpperCase() + h.split('.')[0].slice(1);
+        } catch(e) {}
+        var snippet = lead.intent_signal || lead.pain_point || '';
+        var handleEntry = null;
+        var eps = lead.contact_endpoints || [];
+        for (var ei = 0; ei < eps.length; ei++) {
+            var uri = eps[ei].uri || '';
+            if (!uri.includes('@') && (uri.includes('linkedin') || uri.includes('reddit') || uri.includes('facebook') || uri.includes('instagram') || uri.includes('/u/') || uri.includes('/user/'))) {
+                handleEntry = eps[ei]; break;
+            }
+        }
+        var handle = handleEntry ? handleEntry.uri : '';
+        return '<div class="lc-section lc-dossier lc-dossier--social">' +
+            '<div class="lc-section-label">Social Intelligence</div>' +
+            '<div class="lc-dossier-row"><span class="lc-dossier-key">Intent Detected On</span><span class="lc-dossier-val">' + platform + '</span></div>' +
+            (snippet ? '<div class="lc-dossier-row"><span class="lc-dossier-key">Snippet Context</span><span class="lc-dossier-val lc-dossier-snippet">' + snippet + '</span></div>' : '') +
+            (handle ? '<div class="lc-dossier-row"><span class="lc-dossier-key">Profile</span><span class="lc-dossier-val"><a href="' + handle + '" target="_blank" rel="noopener" style="color:var(--primary);text-decoration:none;">View &#x2197;</a></span></div>' : '') +
+            '</div>';
+    }
+
+    if (mode === 'b2b2c') {
+        var demand = lead.intent_signal || lead.pain_point || 'Consumer demand signal captured.';
+        var obj    = lead.primary_objection_hypothesis || lead.objection || '';
+        var tech   = (lead.tech_stack_found || []).slice(0,4).join(', ') || '-';
+        return '<div class="lc-section lc-dossier lc-dossier--b2b2c">' +
+            '<div class="lc-section-label">Consumer Demand Context</div>' +
+            '<div class="lc-dossier-row"><span class="lc-dossier-key">Demand Signal</span><span class="lc-dossier-val">' + demand + '</span></div>' +
+            '</div><div class="lc-section lc-dossier lc-dossier--b2b2c-dist">' +
+            '<div class="lc-section-label">Distributor Contact Dossier</div>' +
+            '<div class="lc-dossier-row"><span class="lc-dossier-key">Tech Stack</span><span class="lc-dossier-val">' + tech + '</span></div>' +
+            (obj ? '<div class="lc-dossier-row"><span class="lc-dossier-key">Primary Objection</span><span class="lc-dossier-val">' + obj + '</span></div>' : '') +
+            '</div>';
+    }
+
+    var csz   = lead.company_size_tier || '-';
+    var tech2 = (lead.tech_stack_found || []).slice(0,4).join(', ') || '-';
+    var obj2  = lead.primary_objection_hypothesis || lead.objection || '';
+    var dmN   = lead.decision_maker_name  || '';
+    var dmT   = lead.decision_maker_title || '';
+    var dmStr = [dmN, dmT].filter(Boolean).join(' / ') || '-';
+    return '<div class="lc-section lc-dossier lc-dossier--b2b">' +
+        '<div class="lc-section-label">Company Dossier</div>' +
+        '<div class="lc-dossier-row"><span class="lc-dossier-key">Company Size</span><span class="lc-dossier-val">' + csz + '</span></div>' +
+        '<div class="lc-dossier-row"><span class="lc-dossier-key">Tech Stack</span><span class="lc-dossier-val">' + tech2 + '</span></div>' +
+        '<div class="lc-dossier-row"><span class="lc-dossier-key">Decision Maker</span><span class="lc-dossier-val">' + dmStr + '</span></div>' +
+        (obj2 ? '<div class="lc-dossier-row"><span class="lc-dossier-key">Primary Objection</span><span class="lc-dossier-val">' + obj2 + '</span></div>' : '') +
+        '</div>';
 }
 
 window.createLeadCardV2 = function(docId, lead) {
-    const card = document.createElement('div');
+    // Store lead in O(1) lookup cache — eliminates all encoding for copilot action
+    _leadsMap.set(docId, lead);
+    var card = document.createElement('div');
     card.className = 'lead-card-v2';
     card.id = docId;
 
-    // Company name (prefer company_name, fallback to hostname)
-    let displayName = lead.company_name || '';
-    let hostname = '';
-    try { hostname = lead.url ? new URL(lead.url).hostname.replace('www.','') : (lead.source_url ? new URL(lead.source_url).hostname.replace('www.','') : ''); } catch(e){}
+    var displayName = lead.company_name || '';
+    var hostname = '';
+    try { var raw = lead.url || lead.source_url || ''; hostname = raw ? new URL(raw).hostname.replace('www.','') : ''; } catch(e) {}
     if (!displayName) displayName = hostname || 'Unknown Company';
 
-    const score     = lead.score || 0;
-    const heatPct   = Math.round((score / 10) * 100);
-    const emoji     = getScoreEmoji(score);
-    const signal    = lead.intent_signal || lead.pain_point || '';
-    const dm        = lead.dm || '';
-    const icebreaker = dm; // Icebreaker IS the opening message
-
-    // Badges â€” only show if value exists
-    const badges = [];
-    if (lead.origin_engine === 'autonomous') badges.push({ text: 'âš¡ Predictive', bg: '#faf5ff', color: '#7c3aed', border: '#ddd6fe' });
-    badges.push({ text: 'ðŸ”’ Exclusive', bg: '#f3e8ff', color: '#6b21a8', border: '#e9d5ff' });
-    if (lead.hiring_intent_found === 'Yes') badges.push({ text: 'ðŸŸ¢ Hiring', bg: '#ecfdf5', color: '#059669', border: '#a7f3d0' });
-    if (lead.competitor_match) badges.push({ text: `ðŸŽ¯ ${lead.competitor_match}`, bg: '#fee2e2', color: '#b91c1c', border: '#fecaca' });
-
-    const badgesHTML = badges.map(b =>
-        `<span class="lc-badge" style="background:${b.bg};color:${b.color};border-color:${b.border}">${b.text}</span>`
-    ).join('');
-
-    // Time ago
-    const timeAgo = fcTimeAgo(lead.createdAt || lead.promotedAt);
-
-    // Source label â€” human-readable
-    const sourceLabel = (lead.sourcing_vector || lead.source || '').includes('Autonomous')
+    var score   = lead.score || 0;
+    var heatPct = Math.round((score / 10) * 100);
+    var emoji   = getScoreEmoji(score);
+    var signal  = lead.intent_signal || lead.pain_point || '';
+    var dm      = lead.dm || '';
+    var timeAgo = fcTimeAgo(lead.createdAt || lead.promotedAt);
+    var srcLbl  = (lead.sourcing_vector || lead.source || '').indexOf('Autonomous') !== -1
         ? 'AI Match' : (lead.source || 'Web Signal');
 
-    // Contact URI for primary CTA
-    const primaryUri  = (lead.contact_endpoints || [])[0]?.value || lead.email || lead.url || lead.source_url || '#';
-    const primaryPlat = (lead.contact_endpoints || [])[0]?.platform || 'email';
+    var pm = lead.prism_mode || '';
+    var prismBadge = '';
+    if (pm.indexOf('WalledGarden') !== -1 || pm.indexOf('walledgarden') !== -1) {
+        prismBadge = '<span class="lc-badge" style="background:#f0f9ff;color:#0369a1;border-color:#bae6fd;">Social</span>';
+    } else if (pm === 'B2B2C' || pm === 'b2b2c') {
+        prismBadge = '<span class="lc-badge" style="background:#fff7ed;color:#c2410c;border-color:#fed7aa;">B2B2C</span>';
+    } else if (pm.indexOf('General') !== -1 || pm.indexOf('legacy') !== -1) {
+        prismBadge = '<span class="lc-badge" style="background:#f0fdf4;color:#166534;border-color:#bbf7d0;">B2B</span>';
+    }
 
-    const expandId    = `lc-expand-${docId}`;
-    const moreId      = `lc-more-${docId}`;
-    const overflowId  = `lc-of-${docId}`;
+    var badges = [];
+    if (lead.origin_engine === 'autonomous') badges.push({t:'Predictive',bg:'#faf5ff',c:'#7c3aed',b:'#ddd6fe'});
+    badges.push({t:'Exclusive',bg:'#f3e8ff',c:'#6b21a8',b:'#e9d5ff'});
+    if (lead.hiring_intent_found === 'Yes') badges.push({t:'Hiring',bg:'#ecfdf5',c:'#059669',b:'#a7f3d0'});
+    if (lead.competitor_match) badges.push({t:lead.competitor_match,bg:'#fee2e2',c:'#b91c1c',b:'#fecaca'});
+    var bHTML = badges.map(function(x) {
+        return '<span class="lc-badge" style="background:'+x.bg+';color:'+x.c+';border-color:'+x.b+'">'+x.t+'</span>';
+    }).join('');
 
-    card.innerHTML = `
-        <div class="lc-header">
-            <div class="lc-left">
-                <div class="lc-company-name">
-                    <a href="${lead.url || lead.source_url || '#'}" target="_blank" rel="noopener noreferrer" title="Open company website">${displayName} &#8599;</a>
-                </div>
-                <div class="lc-meta">
-                    <span>${sourceLabel}</span>
-                    ${timeAgo ? `<span class="lc-found-ago">Â· ${timeAgo}</span>` : ''}
-                </div>
-            </div>
-            <div class="lc-score-wrap">
-                <div class="lc-score-emoji">${emoji}</div>
-                <div class="lc-heat-bar"><div class="lc-heat-fill" style="width:${heatPct}%"></div></div>
-                <div class="lc-score-label">${score}/10</div>
-            </div>
-        </div>
+    var expandId   = 'lc-expand-'  + docId;
+    var moreId     = 'lc-more-'    + docId;
+    var overflowId = 'lc-of-'      + docId;
+    var copilotLbl = _copilotBtnLabel(lead);
+    var isCont     = lead.status === 'contacted' || lead.status === 'replied';
 
-        ${signal ? `<div class="lc-signal">${signal}</div>` : ''}
+    // dmB64/urlB64 removed — copilot action reads from _leadsMap by docId
 
-        <div class="lc-badges">${badgesHTML}</div>
+    var cInfo = '';
+    if (lead.email || lead.phone) {
+        cInfo = '<div class="lc-section" style="font-size:0.85rem;">' +
+            '<div class="lc-section-label">Contact Info</div>' +
+            (lead.email ? '<a href="mailto:'+lead.email+'" style="color:#2563eb;text-decoration:none;">'+lead.email+'</a>&nbsp;' : '') +
+            (lead.phone ? '<a href="tel:'+lead.phone+'" style="color:#2563eb;text-decoration:none;">'+lead.phone+'</a>' : '') +
+            '</div>';
+    }
 
-        <button class="lc-expand-btn" onclick="lcToggleExpand('${docId}')">
-            <span id="lc-expand-icon-${docId}">â†“</span> See opening message &amp; full intelligence
-        </button>
+    var crmCls = 'lc-crm-btn' + (lead.is_in_crm ? ' in-crm' : '');
+    var crmOC  = lead.is_in_crm ? '' : ("pushToCRM('" + docId + "','" + encodeURIComponent(JSON.stringify(lead)).replace(/\\/g,'\\\\') + "')");
 
-        <div class="lc-expanded" id="${expandId}">
+    card.innerHTML =
+        '<div class="lc-header">' +
+            '<div class="lc-left">' +
+                '<div class="lc-company-name"><a href="'+(lead.url||lead.source_url||'#')+'" target="_blank" rel="noopener noreferrer">'+displayName+' &#8599;</a></div>' +
+                '<div class="lc-meta"><span>'+srcLbl+'</span>'+(timeAgo?' &middot; '+timeAgo:'')+' </div>' +
+            '</div>' +
+            '<div class="lc-score-wrap">' +
+                '<div class="lc-score-emoji">'+emoji+'</div>' +
+                '<div class="lc-heat-bar"><div class="lc-heat-fill" style="width:'+heatPct+'%"></div></div>' +
+                '<div class="lc-score-label">'+score+'/10</div>' +
+            '</div>' +
+        '</div>' +
+        (signal ? '<div class="lc-signal">'+signal+'</div>' : '') +
+        '<div class="lc-badges">'+prismBadge+bHTML+'</div>' +
+        '<button class="lc-expand-btn" onclick="lcToggleExpand(''+docId+'')">' +
+            '<span id="lc-expand-icon-'+docId+'">&#x2193;</span> See opening message & full intelligence' +
+        '</button>' +
+        '<div class="lc-expanded" id="'+expandId+'">' +
+            (dm ? '<div class="lc-section"><div class="lc-section-label">Your Opening Message</div><div class="lc-icebreaker">'+dm+'</div></div>' : '') +
+            (lead.pain_point && lead.pain_point !== signal ? '<div class="lc-section"><div class="lc-section-label">Why This Lead</div><div class="lc-why">'+lead.pain_point+'</div></div>' : '') +
+            _prismDossierHTML(lead) +
+            cInfo +
+        '</div>' +
+        '<div class="lc-actions-primary">' +
+            '<button class="lc-contact-btn lc-copilot-btn'+(isCont?' lc-copilot-btn--contacted':'')+'"' +
+                ' id="copilot-btn-'+docId+'"' +
+                ' data-action="copilot" data-lead-id="'+docId+'"' +
+                (isCont?' disabled':'')+'>'+
+                (isCont ? '&#x2713; Contacted' : copilotLbl) +
+            '</button>' +
+            '<button class="'+crmCls+'" id="crm-btn-'+docId+'"'+(crmOC?' onclick="'+crmOC+'"':'')+(lead.is_in_crm?' disabled':'')+' title="Send to pipeline CRM">'+(lead.is_in_crm?'In CRM':'-> CRM')+'</button>' +
+            '<div style="position:relative;">' +
+                '<button class="lc-more-btn" id="'+moreId+'" onclick="lcToggleMore(''+docId+'')" title="More options">...</button>' +
+                '<div class="lc-overflow-menu" id="'+overflowId+'">' +
+                    '<button class="lc-overflow-item" onclick="updateLeadStatus(''+docId+'','converted');lcCloseMore(''+docId+'')">Mark Converted</button>' +
+                    '<button class="lc-overflow-item" onclick="viewLeadTimeline(''+encodeURIComponent(JSON.stringify(lead.interactions||[]))+'');lcCloseMore(''+docId+'')">View Timeline</button>' +
+                    '<button class="lc-overflow-item danger" onclick="updateLeadStatus(''+docId+'','ignored');lcCloseMore(''+docId+'')">Skip This Lead</button>' +
+                '</div>' +
+            '</div>' +
+        '</div>';
 
-            ${icebreaker ? `
-            <div class="lc-section">
-                <div class="lc-section-label">Your Opening Message</div>
-                <div class="lc-icebreaker">${icebreaker}</div>
-            </div>` : ''}
-
-            ${lead.pain_point && lead.pain_point !== signal ? `
-            <div class="lc-section">
-                <div class="lc-section-label">Why This Lead</div>
-                <div class="lc-why">${lead.pain_point}</div>
-            </div>` : ''}
-
-            ${lead.objection ? `
-            <div class="lc-section">
-                <div class="lc-section-label">Likely Objection</div>
-                <div class="lc-objection">âš ï¸ ${lead.objection}</div>
-            </div>` : ''}
-
-            ${lead.email || lead.phone ? `
-            <div class="lc-section" style="font-size:0.85rem; color:var(--text-main);">
-                <div class="lc-section-label">Contact Info</div>
-                ${lead.email ? `<a href="mailto:${lead.email}" style="color:#2563eb;text-decoration:none;">âœ‰ ${lead.email}</a>&nbsp;` : ''}
-                ${lead.phone ? `<a href="tel:${lead.phone}" style="color:#2563eb;text-decoration:none;">ðŸ“ž ${lead.phone}</a>` : ''}
-            </div>` : ''}
-
-        </div>
-
-        <div class="lc-actions-primary">
-            <button class="lc-contact-btn" onclick="smartContactAction('${docId}', \`${dm.replace(/`/g,'\\`').replace(/\\/g,'\\\\')}\`, '${primaryUri}', '${primaryPlat}')">
-                âœ‰ Contact This Lead
-            </button>
-            <button class="lc-crm-btn ${lead.is_in_crm ? 'in-crm' : ''}"
-                id="crm-btn-${docId}"
-                onclick="${lead.is_in_crm ? '' : `pushToCRM('${docId}', \`${encodeURIComponent(JSON.stringify(lead)).replace(/\\/g,'\\\\')}\`)`}"
-                ${lead.is_in_crm ? 'disabled' : ''}
-                title="Send to pipeline CRM">
-                ${lead.is_in_crm ? 'âœ“ In CRM' : 'â†’ CRM'}
-            </button>
-            <div style="position:relative;">
-                <button class="lc-more-btn" id="${moreId}" onclick="lcToggleMore('${docId}')" title="More options">Â·Â·Â·</button>
-                <div class="lc-overflow-menu" id="${overflowId}">
-                    <button class="lc-overflow-item" onclick="updateLeadStatus('${docId}','converted');lcCloseMore('${docId}')">ðŸŽ¯ Mark Converted</button>
-                    <button class="lc-overflow-item" onclick="viewLeadTimeline('${encodeURIComponent(JSON.stringify(lead.interactions||[]))}');lcCloseMore('${docId}')">ðŸ• View Timeline</button>
-                    <button class="lc-overflow-item danger" onclick="updateLeadStatus('${docId}','ignored');lcCloseMore('${docId}')">âœ• Skip This Lead</button>
-                </div>
-            </div>
-        </div>
-    `;
     return card;
 };
+
 
 // Toggle expand/collapse
 window.lcToggleExpand = function(docId) {
@@ -2278,6 +1528,444 @@ window.lcToggleMore = function(docId) {
     }
 };
 window.lcCloseMore = function(docId) {
-    document.getElementById(`lc-of-${docId}`)?.classList.remove('open');
+    document.getElementById('lc-of-' + docId)?.classList.remove('open');
 };
+
+// =============================================================================
+// V18: COPILOT ACTION — Zero-Liability Execution Flow
+// Simultaneously: (1) copies the AI-drafted DM to clipboard, (2) opens the
+// lead URL in a new tab. Immediately flips the card to 'Contacted' (optimistic).
+// Fires background PUT /api/leads/{id} to persist status + trigger RLHF loop.
+//
+// dm and url are passed as base64 to avoid all quote-escaping issues in the
+// inline onclick attribute generated by createLeadCardV2.
+// =============================================================================
+
+// =============================================================================
+// V18: COPILOT ACTION — Event Delegation Architecture (Unicode-Safe)
+//
+// ARCHITECTURAL UPGRADE from btoa/atob inline encoding:
+// - Lead data is stored in _leadsMap by docId when the card is created.
+// - The copilot button carries only data-lead-id="docId" (no encoding at all).
+// - A single delegated listener on #leads-list calls copilotAction(docId).
+// - This eliminates the btoa() DOMException that fires on emoji/UTF-8 DMs.
+//
+// copilotAction() is still window-exposed for backward-compat (e.g. devtools).
+// =============================================================================
+
+window.copilotAction = async function(docId) {
+    // Retrieve the live lead object from the in-memory cache
+    var lead = _leadsMap.get(docId);
+    if (!lead) {
+        console.warn('[Copilot] Lead not found in _leadsMap for id:', docId);
+        showToast('Lead data unavailable. Please refresh.', 'error');
+        return;
+    }
+
+    var dm  = lead.dm  || '';
+    var url = lead.url || lead.source_url || '';
+
+    // Step 1: Optimistic UI — immediately flip button to Contacted state
+    var btn = document.getElementById('copilot-btn-' + docId);
+    if (btn) {
+        btn.innerHTML = '&#x2713; Contacted';
+        btn.disabled  = true;
+        btn.classList.add('lc-copilot-btn--contacted');
+    }
+
+    // Step 2: Clipboard write (full Unicode support; execCommand fallback for non-HTTPS)
+    if (dm) {
+        try {
+            await navigator.clipboard.writeText(dm);
+        } catch(e) {
+            var ta = document.createElement('textarea');
+            ta.value = dm;
+            ta.style.position = 'fixed';
+            ta.style.opacity  = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch(_) {}
+            document.body.removeChild(ta);
+        }
+    }
+
+    // Step 3: Open lead source in new tab
+    if (url && url !== '#') {
+        window.open(url, '_blank', 'noopener,noreferrer');
+    }
+
+    // Step 4: Contextual toast
+    showToast(dm ? 'Message copied — paste it in the new tab to reply.' : 'Opening lead source…', 'success');
+
+    // Step 5: Background status persist + RLHF trigger (fire-and-forget; non-blocking)
+    updateLeadStatus(docId, 'contacted');
+};
+
+// =============================================================================
+// V18: USER DROPDOWN TOGGLE
+// =============================================================================
+
+window.toggleUserDropdown = function() {
+    const dropdown = document.getElementById('user-dropdown');
+    const pill = document.getElementById('user-pill-btn');
+    if (!dropdown) return;
+    const isOpen = !dropdown.classList.contains('hidden');
+    if (isOpen) {
+        dropdown.classList.add('hidden');
+        if (pill) pill.classList.remove('open');
+    } else {
+        dropdown.classList.remove('hidden');
+        if (pill) pill.classList.add('open');
+        // Auto-close on outside click
+        setTimeout(() => {
+            const handler = (e) => {
+                const wrap = document.getElementById('user-pill-wrap') || pill?.closest('.user-pill-wrap');
+                if (!wrap || !wrap.contains(e.target)) {
+                    dropdown.classList.add('hidden');
+                    if (pill) pill.classList.remove('open');
+                    document.removeEventListener('click', handler);
+                }
+            };
+            document.addEventListener('click', handler);
+        }, 0);
+    }
+};
+
+// =============================================================================
+// V18: SETTINGS / INTEGRATIONS MODAL
+// =============================================================================
+
+window.openSettingsModal = function() {
+    // Close user dropdown if open
+    document.getElementById('user-dropdown')?.classList.add('hidden');
+    document.getElementById('user-pill-btn')?.classList.remove('open');
+    document.getElementById('settings-modal')?.classList.remove('hidden');
+};
+
+window.closeSettingsModal = function() {
+    document.getElementById('settings-modal')?.classList.add('hidden');
+};
+
+// Close settings modal on overlay click
+document.addEventListener('DOMContentLoaded', () => {
+    const settingsOverlay = document.getElementById('settings-modal');
+    if (settingsOverlay) {
+        settingsOverlay.addEventListener('click', (e) => {
+            if (e.target === settingsOverlay) closeSettingsModal();
+        });
+    }
+    const dtOverlay = document.getElementById('dt-onboarding-modal');
+    if (dtOverlay) {
+        dtOverlay.addEventListener('click', (e) => {
+            if (e.target === dtOverlay) closeDTModal();
+        });
+    }
+
+    // ── V18: Event Delegation for Copilot Action button ──────────────────────
+    // Single listener on #leads-list handles all .lc-copilot-btn clicks.
+    // Reads lead data from _leadsMap by data-lead-id — zero encoding required.
+    const leadsList = document.getElementById('leads-list');
+    if (leadsList) {
+        leadsList.addEventListener('click', function(e) {
+            const btn = e.target.closest('[data-action="copilot"]');
+            if (btn && !btn.disabled) {
+                const docId = btn.dataset.leadId;
+                if (docId) copilotAction(docId);
+            }
+        });
+    }
+});
+
+// =============================================================================
+// V18: DIGITAL TWIN ONBOARDING ENGINE
+//
+// SECURITY NOTE (per architectural review):
+// Mock persona data is ONLY injected in localhost/dev environments.
+// In production, a failed analyze-website call shows a graceful toast and
+// falls back to the existing manual fc-step-2 flow.
+// =============================================================================
+
+const _dtIsLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
+// Internal state store for extracted personas
+window._dtState = {
+    companyName: '',
+    companyDesc: '',
+    companyValue: '',
+    targets: [
+        { name: '', desc: '' },
+        { name: '', desc: '' },
+        { name: '', desc: '' }
+    ],
+    extractedBio: '',
+    extractedWho: '',
+    extractedGl: ''
+};
+
+// Open the Digital Twin modal
+window.openDTModal = function() {
+    document.getElementById('user-dropdown')?.classList.add('hidden');
+    document.getElementById('user-pill-btn')?.classList.remove('open');
+    // Reset to View A
+    document.getElementById('dt-view-a')?.classList.remove('hidden');
+    document.getElementById('dt-view-b')?.classList.add('hidden');
+    document.getElementById('dt-view-c')?.classList.add('hidden');
+    const urlInput = document.getElementById('dt-url-input');
+    if (urlInput) urlInput.value = '';
+    document.getElementById('dt-onboarding-modal')?.classList.remove('hidden');
+    setTimeout(() => document.getElementById('dt-url-input')?.focus(), 100);
+};
+
+window.closeDTModal = function() {
+    document.getElementById('dt-onboarding-modal')?.classList.add('hidden');
+};
+
+// View A → View B: validate URL and start analysis
+window.dtStartAnalysis = async function() {
+    const urlInput = document.getElementById('dt-url-input');
+    const rawUrl = (urlInput?.value || '').trim();
+
+    if (!rawUrl || rawUrl.length < 5) {
+        if (urlInput) { urlInput.style.borderColor = '#ef4444'; setTimeout(() => { urlInput.style.borderColor = ''; }, 2000); }
+        showToast('Please enter a valid website URL.', 'error');
+        return;
+    }
+
+    // Ensure protocol
+    const url = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+
+    // Transition to View B
+    document.getElementById('dt-view-a')?.classList.add('hidden');
+    document.getElementById('dt-view-b')?.classList.remove('hidden');
+
+    // Animate progress text
+    const statusEl = document.getElementById('dt-status-text');
+    const progressEl = document.getElementById('dt-progress-fill');
+    const steps = [
+        { text: 'Reading site...', pct: '15%', delay: 0 },
+        { text: 'Extracting brand signals...', pct: '35%', delay: 1200 },
+        { text: 'Building Company Persona...', pct: '55%', delay: 2400 },
+        { text: 'Identifying Decision Makers...', pct: '75%', delay: 3600 },
+        { text: 'Finalising target profiles...', pct: '90%', delay: 4800 }
+    ];
+
+    steps.forEach(({ text, pct, delay }) => {
+        setTimeout(() => {
+            if (statusEl) { statusEl.style.opacity = '0'; setTimeout(() => { statusEl.textContent = text; statusEl.style.opacity = '1'; }, 150); }
+            if (progressEl) progressEl.style.width = pct;
+        }, delay);
+    });
+
+    // API call with a 6s minimum animation window
+    const animDone = new Promise(resolve => setTimeout(resolve, 5800));
+
+    let personaData = null;
+    let apiError = null;
+
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) throw new Error('Not authenticated');
+        const token = await user.getIdToken();
+
+        const apiCall = fetch(`${DT_ENGINE_URL}/api/analyze-website`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        });
+
+        const [, resp] = await Promise.all([animDone, apiCall]);
+        if (resp.ok) {
+            const payload = await resp.json();
+            personaData = payload.data || null;
+        } else if (resp.status === 404 || resp.status === 501 || resp.status === 422) {
+            // 422 = insufficient data from backend
+            apiError = 'not_ready';
+        } else {
+            apiError = 'api_error';
+        }
+    } catch (e) {
+        console.warn('[DT] analyze-website call failed:', e);
+        apiError = 'network';
+        await animDone;
+    }
+
+    // Handle result
+    if (personaData) {
+        dtPopulatePersonas(personaData, url);
+    } else if (apiError === 'not_ready' && _dtIsLocal) {
+        // DEV-ONLY mock — never runs in production
+        console.warn('[DT] Using mock persona data — localhost only');
+        dtPopulatePersonas(dtMockPersona(url), url);
+    } else {
+        // Production graceful failure
+        document.getElementById('dt-view-b')?.classList.add('hidden');
+        document.getElementById('dt-view-a')?.classList.remove('hidden');
+        showToast('Digital Twin engine is currently provisioning. Please use manual entry.', 'error');
+    }
+};
+
+// DEV-ONLY mock persona generator (localhost guard enforced above)
+function dtMockPersona(url) {
+    const domain = (() => { try { return new URL(url).hostname.replace('www.', ''); } catch(e) { return url; } })();
+    return {
+        company:  { name: domain, description: `${domain} is a growing business looking to expand its client base.`, value: 'B2B Services' },
+        targets: [
+            { name: 'Small Business Owners', description: 'Businesses with 1-10 employees actively seeking growth tools.' },
+            { name: 'Marketing Managers', description: 'Mid-market companies with active social media budgets.' },
+            { name: 'Agency Decision Makers', description: 'Agencies managing multiple client accounts and seeking automation.' }
+        ]
+    };
+}
+
+// Populate View C with API or mock data
+function dtPopulatePersonas(data, url) {
+    const company = data.company || {};
+    const targets = data.targets || [];
+
+    // Store in state
+    window._dtState.companyName = company.name || '';
+    window._dtState.companyDesc = company.description || '';
+    window._dtState.companyValue = company.value || '';
+    window._dtState.targets = [
+        targets[0] || { name: '', desc: '' },
+        targets[1] || { name: '', desc: '' },
+        targets[2] || { name: '', desc: '' }
+    ];
+
+    // Derive campaign payload
+    window._dtState.extractedBio    = company.description || '';
+    window._dtState.extractedWho    = (targets[0]?.name || '') + (targets.length > 1 ? `, ${targets[1]?.name || ''}` : '');
+    window._dtState.extractedGl     = data.detected_gl || '';
+
+    // Populate DOM
+    const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val || '—'; };
+    setText('dt-company-name', company.name);
+    setText('dt-company-desc', company.description);
+    setText('dt-company-value', company.value);
+    for (let i = 0; i < 3; i++) {
+        const t = targets[i] || {};
+        setText(`dt-target-${i+1}-name`, t.name);
+        setText(`dt-target-${i+1}-desc`, t.description || t.desc);
+    }
+
+    // Store for handoff
+    document.getElementById('dt-extracted-bio').value  = window._dtState.extractedBio;
+    document.getElementById('dt-extracted-who').value  = window._dtState.extractedWho;
+    document.getElementById('dt-extracted-gl').value   = window._dtState.extractedGl;
+
+    // Final progress
+    const statusEl = document.getElementById('dt-status-text');
+    const progressEl = document.getElementById('dt-progress-fill');
+    if (statusEl) statusEl.textContent = 'Analysis complete \u2713';
+    if (progressEl) progressEl.style.width = '100%';
+
+    // Transition to View C
+    setTimeout(() => {
+        document.getElementById('dt-view-b')?.classList.add('hidden');
+        document.getElementById('dt-view-c')?.classList.remove('hidden');
+    }, 500);
+}
+
+// Skip DT — go directly to existing manual flow
+window.skipDTonboarding = function() {
+    closeDTModal();
+    openNewCampaignModal();
+};
+
+// Edit individual persona inline (simple prompt-based for now)
+window.dtEditPersona = function(field) {
+    if (field === 'company') {
+        const newDesc = prompt('Edit your company description:', window._dtState.companyDesc);
+        if (newDesc !== null) {
+            window._dtState.companyDesc = newDesc;
+            window._dtState.extractedBio = newDesc;
+            document.getElementById('dt-company-desc').textContent = newDesc;
+            document.getElementById('dt-extracted-bio').value = newDesc;
+        }
+    } else {
+        const idx = parseInt(field.split('-')[1]) - 1;
+        const t = window._dtState.targets[idx] || {};
+        const newName = prompt('Edit target persona name:', t.name || '');
+        if (newName !== null) {
+            window._dtState.targets[idx] = { ...t, name: newName };
+            document.getElementById(`dt-target-${idx+1}-name`).textContent = newName;
+            // Rebuild extractedWho
+            window._dtState.extractedWho = window._dtState.targets.map(t => t.name).filter(Boolean).join(', ');
+            document.getElementById('dt-extracted-who').value = window._dtState.extractedWho;
+        }
+    }
+};
+
+// View C "Launch Campaign" — pre-fills fc-step-2 and hands off for human review
+// Decision: DO NOT auto-launch. Show fc modal for final user confirmation.
+window.dtPrefillAndLaunch = function() {
+    const bio = document.getElementById('dt-extracted-bio')?.value || window._dtState.extractedBio;
+    const who = document.getElementById('dt-extracted-who')?.value || window._dtState.extractedWho;
+    const gl  = document.getElementById('dt-extracted-gl')?.value  || window._dtState.extractedGl;
+    const company = window._dtState.companyName;
+
+    if (!bio || !who) {
+        showToast('Please fill in company and target descriptions before launching.', 'error');
+        return;
+    }
+
+    // Close DT modal
+    closeDTModal();
+
+    // Pre-fill the hidden fc form fields and reveal fc-step-2 directly
+    // (bypassing step 1 since we already have the intent data)
+    const intentEl = document.getElementById('fc-intent');
+    if (intentEl) intentEl.value = `${who} for ${company || 'our company'}`;
+
+    // Set fc-step-2 confirmation display values
+    const whoEl = document.getElementById('fc-confirm-who');
+    const editWhoEl = document.getElementById('fc-edit-who');
+    const whatEl = document.getElementById('fc-confirm-what');
+    const editWhatEl = document.getElementById('fc-edit-what');
+
+    if (whoEl) whoEl.textContent = who;
+    if (editWhoEl) editWhoEl.value = who;
+    if (whatEl) { whatEl.textContent = bio; whatEl.style.fontStyle = 'normal'; whatEl.style.color = 'var(--text-main)'; }
+    if (editWhatEl) { editWhatEl.value = bio; editWhatEl.classList.remove('hidden'); }
+
+    // Set location if detected
+    if (gl) {
+        window._fcState = window._fcState || {};
+        window._fcState.gl = gl;
+        document.querySelectorAll('.fc-loc-chip').forEach(c => {
+            c.classList.toggle('selected', c.dataset.gl === gl);
+            if (c.dataset.gl === gl) window._fcState.location = c.dataset.loc || '';
+        });
+    }
+
+    // Set internal _fcState
+    window._fcState.whoConfirmed = who;
+    window._fcState.whatConfirmed = bio;
+
+    // Populate hidden form fields that saveCampaignAction() reads
+    const now = new Date();
+    const month = now.toLocaleString('en', { month: 'short' });
+    const campName = `${who.substring(0, 35)} \u00B7 ${month} ${now.getFullYear()}`;
+    const campGl   = document.getElementById('camp-gl');
+    const campLoc  = document.getElementById('camp-location');
+    const campNm   = document.getElementById('camp-name');
+    const campBio  = document.getElementById('camp-bio');
+    const campKeys = document.getElementById('camp-keys');
+    if (campGl)   campGl.value   = gl;
+    if (campLoc)  campLoc.value  = window._fcState.location || '';
+    if (campNm)   campNm.value   = campName;
+    if (campBio)  campBio.value  = bio;
+    if (campKeys) campKeys.value = who.substring(0, 120);
+
+    // Show fc modal at step 2 (human review before deploy)
+    const modal = document.getElementById('new-campaign-modal');
+    const step1  = document.getElementById('fc-step-1');
+    const step2  = document.getElementById('fc-step-2');
+    if (modal)  modal.classList.remove('hidden');
+    if (step1)  step1.classList.add('hidden');
+    if (step2)  step2.classList.remove('hidden');
+
+    showToast('Personas loaded — review and confirm before launching.', 'info');
+};
+
 

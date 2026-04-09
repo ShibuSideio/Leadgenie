@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 # cloudbuild.yaml — Sideio Leads V16 Enterprise Build Pipeline
 # =============================================================================
 # Architecture:
@@ -105,6 +105,32 @@ steps:
   - gcr.io/$PROJECT_ID/autonomous-engine:latest
   - ./services/autonomous-engine
 
+- id: 'build-digital-twin-engine'
+  waitFor: ['-']
+  name: 'gcr.io/cloud-builders/docker'
+  args:
+  - build
+  - --no-cache
+  - -t
+  - gcr.io/$PROJECT_ID/digital-twin-engine:$COMMIT_SHA
+  - -t
+  - gcr.io/$PROJECT_ID/digital-twin-engine:latest
+  - ./services/digital-twin-engine
+
+# V18: Shadow Learner Aggregator — Cloud Run Job (12h BQ aggregation cycle)
+- id: 'build-shadow-learner'
+  waitFor: ['-']
+  name: 'gcr.io/cloud-builders/docker'
+  args:
+  - build
+  - --no-cache
+  - -t
+  - gcr.io/$PROJECT_ID/shadow-learner-aggregator:$COMMIT_SHA
+  - -t
+  - gcr.io/$PROJECT_ID/shadow-learner-aggregator:latest
+  - ./services/shadow-learner-aggregator
+
+
 # =============================================================================
 # PHASE 2: PARALLEL IMAGE PUSHES
 # Each push starts as soon as its corresponding build finishes.
@@ -140,8 +166,20 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/autonomous-engine']
 
+- id: 'push-digital-twin-engine'
+  waitFor: ['build-digital-twin-engine']
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/digital-twin-engine']
+
+# V18: Shadow Learner push
+- id: 'push-shadow-learner'
+  waitFor: ['build-shadow-learner']
+  name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/shadow-learner-aggregator']
+
 # =============================================================================
 # PHASE 3: DEPLOY CLOUD RUN SERVICES
+
 # CRITICAL: --update-env-vars (NOT --set-env-vars) preserves any console-set
 # env vars (ENCRYPTION_KEY, etc.) that are not managed in this pipeline.
 # --platform=managed prevents interactive gcloud prompts that hang CI.
@@ -166,7 +204,10 @@ steps:
   - --timeout=300
   - --allow-unauthenticated
   - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
-  - --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch
+  # V18: ORCHESTRATOR_URL is a Cloud Build substitution variable (_ORCHESTRATOR_URL).
+  # Set this once in the Cloud Build trigger config (GCP Console → Cloud Build → Triggers).
+  # Value: the live orchestrator Cloud Run URL, e.g. https://orchestrator-xxx.asia-south1.run.app
+  - --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL
   - --quiet
 
 - id: 'deploy-pipeline-main'
@@ -188,6 +229,7 @@ steps:
   - --timeout=540
   - --no-allow-unauthenticated
   - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
+  - --update-env-vars=PROJECT_ID=$PROJECT_ID,GCS_FIREHOSE_BUCKET=sideio-raw-firehose-lake
   - --quiet
 
 - id: 'deploy-scraper-heavy'
@@ -254,6 +296,35 @@ steps:
   - --quiet
 
 # =============================================================================
+# PHASE 3b: DEPLOY — Digital Twin Engine
+# 512Mi RAM, --no-allow-unauthenticated (Firebase ID token required).
+# Low concurrency (4) — each request runs a parallel Serper + Gemini call;
+# memory is the binding constraint, not CPU.
+# =============================================================================
+
+- id: 'deploy-digital-twin-engine'
+  waitFor: ['push-digital-twin-engine']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+  entrypoint: gcloud
+  args:
+  - run
+  - deploy
+  - digital-twin-engine
+  - --image=gcr.io/$PROJECT_ID/digital-twin-engine:$COMMIT_SHA
+  - --region=asia-south1
+  - --platform=managed
+  - --memory=512Mi
+  - --cpu=1
+  - --min-instances=0
+  - --max-instances=5
+  - --concurrency=4
+  - --timeout=30
+  - --no-allow-unauthenticated
+  - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
+  - --update-env-vars=PROJECT_ID=$PROJECT_ID,LOCATION=asia-south1
+  - --quiet
+
+# =============================================================================
 # PHASE 4: CLOUD RUN JOB — V16 Autonomous Engine
 # Jobs use --set-env-vars (acceptable: no console-managed secrets on jobs).
 # --task-timeout REQUIRES the 's' duration suffix (API rejects bare integer).
@@ -304,8 +375,55 @@ steps:
     fi
     echo "[JOB] autonomous-engine deployed successfully."
 
+# V18: Shadow Learner Aggregator — Cloud Run Job deploy
+# Depends only on its push. Runs in parallel with other Phase 4 deploys.
+# Uses shadow-learner-sa (BQ dataEditor + Firestore datastore.user).
+# WINDOW_HOURS=12 matches the Cloud Scheduler 12h trigger cadence.
+- id: 'deploy-shadow-learner-job'
+  waitFor: ['push-shadow-learner']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+  entrypoint: bash
+  args:
+  - '-eo'
+  - 'pipefail'
+  - '-c'
+  - |
+    set -eo pipefail
+    echo "[JOB] Deploying shadow-learner-aggregator Cloud Run Job: $COMMIT_SHA"
+
+    if gcloud run jobs describe shadow-learner-aggregator \
+        --region=asia-south1 \
+        --project=$PROJECT_ID \
+        --quiet 2>/dev/null; then
+      echo "[JOB] Job exists — updating..."
+      gcloud run jobs update shadow-learner-aggregator \
+        --image=gcr.io/$PROJECT_ID/shadow-learner-aggregator:$COMMIT_SHA \
+        --region=asia-south1 \
+        --memory=512Mi \
+        --cpu=1 \
+        --task-timeout=3600s \
+        --max-retries=1 \
+        --service-account=shadow-learner-sa@$PROJECT_ID.iam.gserviceaccount.com \
+        --set-env-vars="PROJECT_ID=$PROJECT_ID,BQ_DATASET=swarm_analytics,BQ_TABLE=rlhf_events,WINDOW_HOURS=12" \
+        --quiet
+    else
+      echo "[JOB] Job not found — creating..."
+      gcloud run jobs create shadow-learner-aggregator \
+        --image=gcr.io/$PROJECT_ID/shadow-learner-aggregator:$COMMIT_SHA \
+        --region=asia-south1 \
+        --memory=512Mi \
+        --cpu=1 \
+        --task-timeout=3600s \
+        --max-retries=1 \
+        --service-account=shadow-learner-sa@$PROJECT_ID.iam.gserviceaccount.com \
+        --set-env-vars="PROJECT_ID=$PROJECT_ID,BQ_DATASET=swarm_analytics,BQ_TABLE=rlhf_events,WINDOW_HOURS=12" \
+        --quiet
+    fi
+    echo "[JOB] shadow-learner-aggregator deployed successfully."
+
 # =============================================================================
 # PHASE 5: CLOUD SCHEDULER PROVISIONING
+
 # Depends on: orchestrator deploy (URL fetched dynamically post-deploy).
 # ALL bash variables use $$ (Cloud Build escape → bash sees $).
 # $PROJECT_ID and $COMMIT_SHA are Cloud Build substitutions (single $).
