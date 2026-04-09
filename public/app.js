@@ -123,20 +123,7 @@ async function loadMe() {
                 if (navMenu) navMenu.style.display = '';
                 if (waitroom) waitroom.style.display = 'none';
             }
-            
-            // Force display properties explicitly beyond just CSS class removal
-            if (data.role === 'super_admin') {
-                const l0Tab = document.getElementById('tab-l0-admin');
-                if (l0Tab) {
-                    l0Tab.classList.remove('hidden');
-                    l0Tab.style.display = 'inline-block';
-                }
-            }
 
-            // Defensively check both payload tracks mapping legacy or missing keys safely
-            const w = payload.wallet || data.wallet || {allocated_credits: 0, consumed_credits: 0};
-            }
-            
             // Force display properties explicitly beyond just CSS class removal
             if (data.role === 'super_admin') {
                 const l0Tab = document.getElementById('tab-l0-admin');
@@ -192,9 +179,10 @@ async function loadMe() {
             const dName = auth.currentUser?.displayName || '';
             const firstName = dName.split(' ')[0] || '';
             fcUpdateGreeting(firstName);
-            
         }
-    } catch(e) { console.error('Failed to load wallet', e); }
+    } catch (error) {
+        console.error('Execution failed:', error);
+    }
 }
 
 // Dynamic Campaign Hydration via REST API
