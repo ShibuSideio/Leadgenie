@@ -1,4 +1,4 @@
-// Firebase configuration (Placeholder)
+﻿// Firebase configuration (Placeholder)
 const firebaseConfig = {
     apiKey: "AIzaSyCxqimZJ7kspuJJ8qXF34zguLkNXi6MWd4",
     authDomain: "lead-sniper-prod.firebaseapp.com",
@@ -445,6 +445,190 @@ window.viewLeadTimeline = function(eventsJson) {
         }
         document.getElementById('audit-log-modal')?.classList.remove('hidden');
     } catch(e) { console.error('Timeline error', e); }
+};
+
+
+// =============================================================================
+// CORE API MUTATION HELPER — used by pushToCRM, updateLeadStatus, etc.
+// =============================================================================
+
+async function performApiMutation(url, method, payload) {
+    const user = auth.currentUser;
+    if (!user) return false;
+    const token = await user.getIdToken();
+    const response = await fetch(`${API_BASE}${url}`, {
+        method: method,
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    if (response.status === 401 || response.status === 403) { handleAuthRejection(); return false; }
+    if (!response.ok) throw new Error('API Execution Failed');
+    return true;
+}
+
+// =============================================================================
+// CRM PUSH — moves lead from main feed into the CRM pipeline
+// =============================================================================
+
+window.pushToCRM = async function(docId, leadStr) {
+    try {
+        const success = await performApiMutation(`/api/leads/${docId}`, 'PUT', {
+            is_in_crm:       true,
+            crm_status:      'new',
+            estimated_value: 0,
+            notes:           [],
+            expire_at:       null
+        });
+        if (success) {
+            const cardEl = document.getElementById(docId);
+            if (cardEl) { virtualObserver.unobserve(cardEl); cardEl.remove(); }
+            rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
+            showToast('Lead filed in CRM — navigate to CRM tab to manage it.', 'success');
+            const userUrl = window.currentUserData?.crm_webhook_url;
+            if (userUrl) {
+                try {
+                    const lead = JSON.parse(decodeURIComponent(leadStr));
+                    fetch(userUrl, { method:'POST', headers:{'Content-Type':'application/json'}, mode:'no-cors', body: JSON.stringify({event:'lead_pushed', lead}) });
+                } catch(_) {}
+            }
+        }
+    } catch(e) {
+        console.error('CRM Push failure', e);
+        showToast('CRM push failed — try again.', 'error');
+    }
+};
+
+// =============================================================================
+// LEAD STATUS UPDATE — contacted / converted / ignored
+// =============================================================================
+
+window.updateLeadStatus = async function(docId, newStatus) {
+    if (newStatus === 'ignored') {
+        const idx = rawLeadsCache.findIndex(l => l.id === docId);
+        if (idx !== -1) { rawLeadsCache.splice(idx, 1); renderLeads(); }
+    }
+    try {
+        const success = await performApiMutation(`/api/leads/${docId}`, 'PUT', { status: newStatus });
+        if (success) {
+            showToast(`Lead status updated: ${newStatus}`, 'success');
+            if (newStatus !== 'ignored') loadDashboard();
+        }
+    } catch(err) {
+        showToast('Error saving update to database', 'error');
+    }
+};
+
+// =============================================================================
+// CAMPAIGN ACTIONS — toggle pause/resume, update details
+// =============================================================================
+
+window.toggleCampaignStatus = async function(id, currentStatus) {
+    const newStatus = currentStatus === 'active' ? 'paused' : 'active';
+    try {
+        const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', { status: newStatus });
+        if (success) { showToast(`Campaign ${newStatus} successfully`, 'success'); loadDashboard(); }
+    } catch(err) {
+        showToast('Status update failed', 'error');
+    }
+};
+
+window.updateCampaignAction = async function(id) {
+    const nameInput = document.getElementById(`edit-camp-name-${id}`);
+    const bioInput  = document.getElementById(`edit-camp-bio-${id}`);
+    const keysInput = document.getElementById(`edit-camp-keys-${id}`);
+    const urlsInput = document.getElementById(`edit-camp-urls-${id}`);
+    if (!nameInput || !keysInput) return;
+    let targetUrls = [];
+    if (urlsInput && urlsInput.value.trim()) {
+        targetUrls = urlsInput.value.split('\n').map(u => u.trim()).filter(Boolean).slice(0, 10);
+    }
+    try {
+        const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', {
+            name: nameInput.value, bio: bioInput?.value || '', keywords: keysInput.value, target_urls: targetUrls
+        });
+        if (success) { showToast('Campaign successfully updated!', 'success'); loadDashboard(); }
+    } catch(err) {
+        showToast('Error modifying campaign', 'error');
+    }
+};
+
+// =============================================================================
+// SAVE CAMPAIGN ACTION — called from fc modal Step 2 "Launch" button
+// =============================================================================
+
+window.saveCampaignAction = async function() {
+    const nameInput      = document.getElementById('camp-name');
+    const bioInput       = document.getElementById('camp-bio');
+    const keysInput      = document.getElementById('camp-keys');
+    const glInput        = document.getElementById('camp-gl');
+    const locationInput  = document.getElementById('camp-location');
+    const targetUrlsInput = document.getElementById('camp-target-urls');
+
+    if (!nameInput || !keysInput || !nameInput.value || !keysInput.value) {
+        showToast('Campaign Name and Keywords are required', 'error');
+        return;
+    }
+
+    let targetUrls = [];
+    if (targetUrlsInput && targetUrlsInput.value.trim()) {
+        targetUrls = targetUrlsInput.value.split('\n').map(u => u.trim()).filter(Boolean);
+        if (targetUrls.length > 10) {
+            showToast('Warning: Only the first 10 URLs will be prioritized.', 'error');
+            targetUrls = targetUrls.slice(0, 10);
+        }
+    }
+
+    showToast('Setting up your search...', 'info');
+    try {
+        const user = auth.currentUser;
+        if (!user) return;
+        const token = await user.getIdToken();
+
+        const createResp = await fetch(`${API_BASE}/api/campaigns`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name:        nameInput.value,
+                bio:         bioInput?.value || '',
+                keywords:    keysInput.value,
+                gl:          glInput?.value || '',
+                location:    locationInput?.value || '',
+                target_urls: targetUrls,
+                status:      'active'
+            })
+        });
+        if (!createResp.ok) throw new Error('Campaign creation failed');
+        const createData = await createResp.json();
+        const campaignId = createData.id;
+
+        // Fire Epsilon-Greedy Router for immediate first batch
+        let routerMsg = 'System is now looking for clients!';
+        if (campaignId) {
+            try {
+                const routerResp = await fetch(`${API_BASE}/api/campaigns/${campaignId}/run`, {
+                    method:  'POST',
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body:    JSON.stringify({})
+                });
+                if (routerResp.ok) {
+                    const r    = await routerResp.json();
+                    const v16  = r.autonomous_promoted || 0;
+                    const v14  = r.cartographer_queued || 0;
+                    routerMsg  = `Engine dispatched: ${v16} Predictive + ${v14} Cartographer leads queued`;
+                }
+            } catch (routerErr) {
+                console.warn('[ROUTER] Router call failed — Cartographer sweep will pick up:', routerErr);
+            }
+        }
+
+        closeNewCampaignModal();
+        showToast(routerMsg, 'success');
+        if (targetUrlsInput) targetUrlsInput.value = '';
+        loadDashboard();
+    } catch(err) {
+        console.error('[saveCampaignAction]', err);
+        showToast('Failed to save campaign. Check API permissions.', 'error');
+    }
 };
 
 // SPA Router — V18: syncs both top cmd-bar (desktop) and bottom dock (mobile)
