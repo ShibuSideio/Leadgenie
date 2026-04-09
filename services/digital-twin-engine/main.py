@@ -31,6 +31,7 @@ from http import HTTPStatus
 
 import httpx
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from google.cloud import secretmanager
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
@@ -42,6 +43,15 @@ import firebase_admin
 from firebase_admin import auth as firebase_auth, credentials
 
 app = Flask(__name__)
+
+# Apply strict CORS for production + local dev
+CORS(app, resources={
+    r"/*": {
+        "origins": ["https://lead-sniper-prod.web.app", "http://localhost:5000"],
+        "methods": ["POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 
 # =============================================================================
 # BOOT INITIALISATION
