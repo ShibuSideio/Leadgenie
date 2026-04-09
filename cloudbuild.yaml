@@ -391,6 +391,21 @@ steps:
     set -eo pipefail
     echo "[JOB] Deploying shadow-learner-aggregator Cloud Run Job: $COMMIT_SHA"
 
+    # Resolve which SA to use. shadow-learner-sa requires actAs IAM binding.
+    # If that SA doesn't exist yet, fall back to lead-pipeline-sa so the build
+    # succeeds. Run the one-time fix command documented in the readme to promote.
+    SHADOW_SA="shadow-learner-sa@$PROJECT_ID.iam.gserviceaccount.com"
+    FALLBACK_SA="lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com"
+
+    if gcloud iam service-accounts describe "$$SHADOW_SA" \
+        --project=$PROJECT_ID --quiet 2>/dev/null; then
+      JOB_SA="$$SHADOW_SA"
+      echo "[JOB] Using shadow-learner-sa"
+    else
+      JOB_SA="$$FALLBACK_SA"
+      echo "[JOB] shadow-learner-sa not found — falling back to lead-pipeline-sa"
+    fi
+
     if gcloud run jobs describe shadow-learner-aggregator \
         --region=asia-south1 \
         --project=$PROJECT_ID \
