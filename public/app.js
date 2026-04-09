@@ -560,31 +560,45 @@ window.updateCampaignAction = async function(id) {
 // SAVE CAMPAIGN ACTION — called from fc modal Step 2 "Launch" button
 // =============================================================================
 
-window.saveCampaignAction = async function() {
-    const nameInput      = document.getElementById('camp-name');
-    const bioInput       = document.getElementById('camp-bio');
-    const keysInput      = document.getElementById('camp-keys');
-    const glInput        = document.getElementById('camp-gl');
-    const locationInput  = document.getElementById('camp-location');
-    const targetUrlsInput = document.getElementById('camp-target-urls');
+window.saveCampaignAction = async function(payload) {
+    let cpName = '', cpBio = '', cpKeys = '', cpGl = '', cpLoc = '', targetUrls = [];
 
-    if (!nameInput || !keysInput || !nameInput.value || !keysInput.value) {
+    if (payload) {
+        cpName = payload.name || '';
+        cpBio = payload.bio || '';
+        cpKeys = payload.keywords || '';
+        cpGl = payload.gl || '';
+        cpLoc = payload.location || '';
+        targetUrls = payload.target_urls || [];
+    } else {
+        const nameInput      = document.getElementById('camp-name');
+        const bioInput       = document.getElementById('camp-bio');
+        const keysInput      = document.getElementById('camp-keys');
+        const glInput        = document.getElementById('camp-gl');
+        const locationInput  = document.getElementById('camp-location');
+        const targetUrlsInput = document.getElementById('camp-target-urls');
+
+        cpName = nameInput?.value || '';
+        cpBio = bioInput?.value || '';
+        cpKeys = keysInput?.value || '';
+        cpGl = glInput?.value || '';
+        cpLoc = locationInput?.value || '';
+        if (targetUrlsInput && targetUrlsInput.value.trim()) {
+            targetUrls = targetUrlsInput.value.split('\n').map(u => u.trim()).filter(Boolean);
+            if (targetUrls.length > 10) {
+                targetUrls = targetUrls.slice(0, 10);
+            }
+        }
+    }
+
+    if (!cpName || !cpKeys) {
         showToast('Campaign Name and Keywords are required', 'error');
         return;
     }
 
-    let targetUrls = [];
-    if (targetUrlsInput && targetUrlsInput.value.trim()) {
-        targetUrls = targetUrlsInput.value.split('\n').map(u => u.trim()).filter(Boolean);
-        if (targetUrls.length > 10) {
-            showToast('Warning: Only the first 10 URLs will be prioritized.', 'error');
-            targetUrls = targetUrls.slice(0, 10);
-        }
-    }
-
     showToast('Setting up your search...', 'info');
     try {
-        const user = auth.currentUser;
+        const user = firebase.auth().currentUser;
         if (!user) return;
         const token = await user.getIdToken();
 
@@ -592,11 +606,11 @@ window.saveCampaignAction = async function() {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                name:        nameInput.value,
-                bio:         bioInput?.value || '',
-                keywords:    keysInput.value,
-                gl:          glInput?.value || '',
-                location:    locationInput?.value || '',
+                name:        cpName,
+                bio:         cpBio,
+                keywords:    cpKeys,
+                gl:          cpGl,
+                location:    cpLoc,
                 target_urls: targetUrls,
                 status:      'active'
             })
@@ -625,10 +639,11 @@ window.saveCampaignAction = async function() {
             }
         }
 
-        closeNewCampaignModal();
-        showToast(routerMsg, 'success');
+        const targetUrlsInput = document.getElementById('camp-target-urls');
         if (targetUrlsInput) targetUrlsInput.value = '';
+        
         loadDashboard();
+        showToast(routerMsg, 'success');
     } catch(err) {
         console.error('[saveCampaignAction]', err);
         showToast('Failed to save campaign. Check API permissions.', 'error');
@@ -1374,194 +1389,10 @@ function fcTimeAgo(ts) {
     return then.toLocaleDateString('en', { day: 'numeric', month: 'short' });
 }
 
-// Step 1: character hint update
-window.fcUpdateCharHint = function(el) {
-    const n = el.value.trim().length;
-    const hint = document.getElementById('fc-char-hint');
-    if (!hint) return;
-    if (n === 0)       hint.textContent = 'Press Enter or click below';
-    else if (n < 20)   hint.textContent = 'A bit more detail helps get better results â†“';
-    else if (n < 60)   hint.textContent = 'Good. Add a location for sharper targeting â†’';
-    else               hint.textContent = 'âœ“ Ready â€” click to proceed';
-};
+// =============================================================================
+// V18 DIGITAL TWIN OVERRIDES
+// =============================================================================
 
-// Fill template chip
-window.fcFillTemplate = function(btn) {
-    const ta = document.getElementById('fc-intent');
-    if (!ta) return;
-    // Strip emoji prefix from chip text
-    ta.value = btn.textContent.replace(/^[^\w]+/, '').trim();
-    ta.focus();
-    fcUpdateCharHint(ta);
-};
-
-// Step 1 â†’ Step 2
-window.fcStep1Next = function() {
-    const ta = document.getElementById('fc-intent');
-    if (!ta) return;
-    const sentence = ta.value.trim();
-    if (sentence.length < 5) {
-        ta.style.borderColor = '#ef4444';
-        ta.placeholder = 'Please describe who you want to reachâ€¦';
-        ta.focus();
-        setTimeout(() => { ta.style.borderColor = ''; }, 2000);
-        return;
-    }
-
-    const parsed = fcParseIntent(sentence);
-    window._fcState.gl       = parsed.gl;
-    window._fcState.location = parsed.where;
-    window._fcState.whoConfirmed = parsed.who;
-
-    // Populate step 2
-    const whoEl = document.getElementById('fc-confirm-who');
-    if (whoEl) whoEl.textContent = parsed.who;
-    const editWho = document.getElementById('fc-edit-who');
-    if (editWho) editWho.value = parsed.who;
-
-    // Auto-select location if parsed
-    if (parsed.gl) {
-        document.querySelectorAll('.fc-loc-chip').forEach(c => {
-            c.classList.toggle('selected', c.dataset.gl === parsed.gl);
-        });
-        const blockWhere = document.getElementById('fc-block-where');
-        if (blockWhere) blockWhere.style.borderColor = '';
-        document.getElementById('fc-where-required')?.classList.remove('show');
-    } else {
-        // No location detected â€” highlight location block
-        const blockWhere = document.getElementById('fc-block-where');
-        if (blockWhere) blockWhere.style.borderColor = '#f59e0b';
-        document.getElementById('fc-where-required')?.classList.add('show');
-    }
-
-    // Open "what" edit if bio not in sentence
-    const editWhat = document.getElementById('fc-edit-what');
-    if (editWhat) {
-        editWhat.classList.remove('hidden');
-        editWhat.style.display = '';
-    }
-    document.getElementById('fc-what-btn')?.setAttribute('data-open', '1');
-
-    // Transition
-    document.getElementById('fc-step-1').classList.add('hidden');
-    document.getElementById('fc-step-2').classList.remove('hidden');
-};
-
-// Back button
-window.fcGoBack = function() {
-    document.getElementById('fc-step-2').classList.add('hidden');
-    document.getElementById('fc-step-1').classList.remove('hidden');
-};
-
-// Toggle inline edit
-window.fcToggleEdit = function(field) {
-    if (field === 'who') {
-        const val  = document.getElementById('fc-confirm-who');
-        const inp  = document.getElementById('fc-edit-who');
-        if (!val || !inp) return;
-        const isOpen = !inp.classList.contains('hidden');
-        if (isOpen) {
-            // Save
-            const newVal = inp.value.trim() || val.textContent;
-            val.textContent = newVal;
-            window._fcState.whoConfirmed = newVal;
-            inp.classList.add('hidden');
-        } else {
-            inp.classList.remove('hidden');
-            inp.focus();
-        }
-    } else if (field === 'what') {
-        const inp = document.getElementById('fc-edit-what');
-        const btn = document.getElementById('fc-what-btn');
-        if (!inp) return;
-        const isOpen = inp.style.display !== 'none' && !inp.classList.contains('hidden');
-        if (isOpen) {
-            // Save
-            const v = inp.value.trim();
-            window._fcState.whatConfirmed = v;
-            const valEl = document.getElementById('fc-confirm-what');
-            if (valEl && v) { valEl.textContent = v; valEl.style.fontStyle = 'normal'; valEl.style.color = 'var(--text-main)'; }
-            if (btn) btn.textContent = 'Edit';
-            document.getElementById('fc-what-required')?.classList.remove('show');
-        } else {
-            inp.style.display = '';
-            inp.classList.remove('hidden');
-            inp.focus();
-            if (btn) btn.textContent = 'Save âœ“';
-        }
-    }
-};
-
-// Location chip selection
-window.fcSelectLocation = function(btn) {
-    document.querySelectorAll('.fc-loc-chip').forEach(c => c.classList.remove('selected'));
-    btn.classList.add('selected');
-    window._fcState.gl       = btn.dataset.gl || '';
-    window._fcState.location = btn.dataset.loc || '';
-    document.getElementById('fc-where-required')?.classList.remove('show');
-    const blockWhere = document.getElementById('fc-block-where');
-    if (blockWhere) blockWhere.style.borderColor = 'transparent';
-};
-
-// Launch (validation + submit)
-window.fcLaunch = function() {
-    const bar  = document.getElementById('fc-validation-bar');
-    const errs = [];
-
-    // Validate WHO
-    const who = document.getElementById('fc-edit-who')?.value.trim()
-             || document.getElementById('fc-confirm-who')?.textContent.trim()
-             || window._fcState.whoConfirmed;
-    if (!who || who === 'â€”') errs.push('Tell me who you want to reach.');
-
-    // Validate WHAT (required for bio)
-    const what = document.getElementById('fc-edit-what')?.value.trim()
-              || window._fcState.whatConfirmed;
-    if (!what || what.length < 15) {
-        errs.push("Add a short description of what you sell â€” this personalises every pitch.");
-        document.getElementById('fc-what-required')?.classList.add('show');
-    }
-
-    // Validate WHERE
-    if (!window._fcState.gl && !window._fcState.location) {
-        errs.push("Pick a location â€” even 'Worldwide' is fine.");
-        document.getElementById('fc-where-required')?.classList.add('show');
-        const blockWhere = document.getElementById('fc-block-where');
-        if (blockWhere) blockWhere.style.borderColor = '#f87171';
-    }
-
-    if (errs.length > 0) {
-        if (bar) { bar.textContent = 'âš¡ ' + errs[0]; bar.classList.remove('hidden'); }
-        return;
-    }
-    if (bar) bar.classList.add('hidden');
-
-    // Populate hidden fields for saveCampaignAction
-    const cityInput = document.getElementById('fc-edit-where-city');
-    const city = cityInput?.value.trim() || '';
-    const locationText = city ? `${city}, ${window._fcState.location}` : window._fcState.location;
-    document.getElementById('camp-gl').value       = window._fcState.gl;
-    document.getElementById('camp-location').value  = locationText;
-    document.getElementById('camp-name').value      = fcBuildCampaignName(who, window._fcState.location);
-    document.getElementById('camp-bio').value       = what;
-    // Use who-description as keywords (AI will extract from bio anyway)
-    document.getElementById('camp-keys').value      = who.substring(0, 120);
-    document.getElementById('camp-target-urls').value = '';
-
-    saveCampaignAction();
-};
-
-// Close modal — restored (was accidentally removed during V18 edit)
-window.closeNewCampaignModal = function() {
-    document.getElementById('new-campaign-modal').classList.add('hidden');
-    document.getElementById('fc-step-1').classList.remove('hidden');
-    document.getElementById('fc-step-2').classList.add('hidden');
-    const ta = document.getElementById('fc-intent');
-    if (ta) ta.value = '';
-    window._fcState = { gl:'', location:'', whoConfirmed:'', whatConfirmed:'' };
-};
-
-// Override openNewCampaignModal to use new modal instead
 window.openNewCampaignModal = async function() {
     // Defensive dual-path: activeWallet is the closure var (always set);
     // also check flattened root fields in case of DB schema migration.
@@ -1577,29 +1408,9 @@ window.openNewCampaignModal = async function() {
         showToast('Credits exhausted. Contact admin to reload.', 'error');
         return;
     }
-    document.getElementById('new-campaign-modal').classList.remove('hidden');
-    document.getElementById('fc-intent')?.focus();
-
-    // Auto-detect location and pre-select chip
-    try {
-        const resp = await fetch('https://ipapi.co/json/', { cache: 'force-cache' });
-        const json = await resp.json();
-        if (json.country_code) {
-            const glCode = json.country_code.toLowerCase();
-            window._fcState.gl = glCode;
-            // Pre-select country chip on step 2
-            document.querySelectorAll('.fc-loc-chip').forEach(c => {
-                if (c.dataset.gl === glCode) {
-                    c.classList.add('selected');
-                    window._fcState.location = c.dataset.loc;
-                }
-            });
-        }
-        if (json.city) {
-            const cityInput = document.getElementById('fc-edit-where-city');
-            if (cityInput) cityInput.value = json.city;
-        }
-    } catch(e) { /* silent â€” location is not required */ }
+    
+    // Pass control to the Digital Twin Onboarding Flow (View A)
+    window.openDTModal();
 };
 
 // =============================================================================
@@ -2195,38 +2006,7 @@ function dtPopulatePersonas(data, url) {
     }, 500);
 }
 
-// Skip DT — go directly to existing manual flow
-window.skipDTonboarding = function() {
-    closeDTModal();
-    openNewCampaignModal();
-};
-
-// Edit individual persona inline (simple prompt-based for now)
-window.dtEditPersona = function(field) {
-    if (field === 'company') {
-        const newDesc = prompt('Edit your company description:', window._dtState.companyDesc);
-        if (newDesc !== null) {
-            window._dtState.companyDesc = newDesc;
-            window._dtState.extractedBio = newDesc;
-            document.getElementById('dt-company-desc').textContent = newDesc;
-            document.getElementById('dt-extracted-bio').value = newDesc;
-        }
-    } else {
-        const idx = parseInt(field.split('-')[1]) - 1;
-        const t = window._dtState.targets[idx] || {};
-        const newName = prompt('Edit target persona name:', t.name || '');
-        if (newName !== null) {
-            window._dtState.targets[idx] = { ...t, name: newName };
-            document.getElementById(`dt-target-${idx+1}-name`).textContent = newName;
-            // Rebuild extractedWho
-            window._dtState.extractedWho = window._dtState.targets.map(t => t.name).filter(Boolean).join(', ');
-            document.getElementById('dt-extracted-who').value = window._dtState.extractedWho;
-        }
-    }
-};
-
-// View C "Launch Campaign" — pre-fills fc-step-2 and hands off for human review
-// Decision: DO NOT auto-launch. Show fc modal for final user confirmation.
+// View C "Launch Campaign" — hands off to direct API call, completely bypassing legacy DOM
 window.dtPrefillAndLaunch = function() {
     const bio = document.getElementById('dt-extracted-bio')?.value || window._dtState.extractedBio;
     const who = document.getElementById('dt-extracted-who')?.value || window._dtState.extractedWho;
@@ -2238,63 +2018,60 @@ window.dtPrefillAndLaunch = function() {
         return;
     }
 
-    // Close DT modal
-    closeDTModal();
-
-    // Pre-fill the hidden fc form fields and reveal fc-step-2 directly
-    // (bypassing step 1 since we already have the intent data)
-    const intentEl = document.getElementById('fc-intent');
-    if (intentEl) intentEl.value = `${who} for ${company || 'our company'}`;
-
-    // Set fc-step-2 confirmation display values
-    const whoEl = document.getElementById('fc-confirm-who');
-    const editWhoEl = document.getElementById('fc-edit-who');
-    const whatEl = document.getElementById('fc-confirm-what');
-    const editWhatEl = document.getElementById('fc-edit-what');
-
-    if (whoEl) whoEl.textContent = who;
-    if (editWhoEl) editWhoEl.value = who;
-    if (whatEl) { whatEl.textContent = bio; whatEl.style.fontStyle = 'normal'; whatEl.style.color = 'var(--text-main)'; }
-    if (editWhatEl) { editWhatEl.value = bio; editWhatEl.classList.remove('hidden'); }
-
-    // Set location if detected
-    if (gl) {
-        window._fcState = window._fcState || {};
-        window._fcState.gl = gl;
-        document.querySelectorAll('.fc-loc-chip').forEach(c => {
-            c.classList.toggle('selected', c.dataset.gl === gl);
-            if (c.dataset.gl === gl) window._fcState.location = c.dataset.loc || '';
-        });
-    }
-
-    // Set internal _fcState
-    window._fcState.whoConfirmed = who;
-    window._fcState.whatConfirmed = bio;
-
-    // Populate hidden form fields that saveCampaignAction() reads
     const now = new Date();
     const month = now.toLocaleString('en', { month: 'short' });
     const campName = `${who.substring(0, 35)} \u00B7 ${month} ${now.getFullYear()}`;
-    const campGl   = document.getElementById('camp-gl');
-    const campLoc  = document.getElementById('camp-location');
-    const campNm   = document.getElementById('camp-name');
-    const campBio  = document.getElementById('camp-bio');
-    const campKeys = document.getElementById('camp-keys');
-    if (campGl)   campGl.value   = gl;
-    if (campLoc)  campLoc.value  = window._fcState.location || '';
-    if (campNm)   campNm.value   = campName;
-    if (campBio)  campBio.value  = bio;
-    if (campKeys) campKeys.value = who.substring(0, 120);
+    const keys = who.substring(0, 120);
 
-    // Show fc modal at step 2 (human review before deploy)
-    const modal = document.getElementById('new-campaign-modal');
-    const step1  = document.getElementById('fc-step-1');
-    const step2  = document.getElementById('fc-step-2');
-    if (modal)  modal.classList.remove('hidden');
-    if (step1)  step1.classList.add('hidden');
-    if (step2)  step2.classList.remove('hidden');
+    closeDTModal();
 
-    showToast('Personas loaded — review and confirm before launching.', 'info');
+    saveCampaignAction({
+        name: campName,
+        bio: bio,
+        keywords: keys,
+        gl: gl,
+        location: '',
+        target_urls: []
+    });
+};
+
+// Natural Language Fallback Launch
+window.dtLaunchFallback = function() {
+    const fallbackInp = document.getElementById('dt-intent-fallback');
+    const txt = fallbackInp?.value.trim();
+    if (!txt || txt.length < 5) {
+        if (fallbackInp) { fallbackInp.style.borderColor = '#ef4444'; setTimeout(() => fallbackInp.style.borderColor='', 2000); }
+        showToast('Please type a few words about your ideal clients.', 'warn');
+        return;
+    }
+
+    const now = new Date();
+    const month = now.toLocaleString('en', { month: 'short' });
+    const campName = `${txt.substring(0, 35)} \u00B7 ${month} ${now.getFullYear()}`;
+
+    closeDTModal();
+
+    saveCampaignAction({
+        name: campName,
+        bio: 'Fallback intent processing required.', // LLM Backend Cartographer handles intent
+        keywords: txt.substring(0, 120),
+        gl: '',
+        location: '',
+        target_urls: []
+    });
+};
+
+// Transition from View A to View D
+window.dtFallbackToNaturalLanguage = function() {
+    document.getElementById('dt-view-a')?.classList.add('hidden');
+    document.getElementById('dt-view-d')?.classList.remove('hidden');
+    setTimeout(() => document.getElementById('dt-intent-fallback')?.focus(), 100);
+};
+
+// Transition back from View D to View A
+window.dtBackToViewA = function() {
+    document.getElementById('dt-view-d')?.classList.add('hidden');
+    document.getElementById('dt-view-a')?.classList.remove('hidden');
 };
 
 

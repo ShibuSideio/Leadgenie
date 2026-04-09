@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -446,107 +446,104 @@
     </div>
 
     <!-- ================================================================
-         FIND NEW CLIENTS MODAL (V17 â€” fully preserved)
+         V18 DIGITAL TWIN ONBOARDING MODAL
     ================================================================ -->
-    <div id="new-campaign-modal" class="hidden fc-overlay">
-        <div class="fc-modal glass-panel">
+    <div id="dt-onboarding-modal" class="hidden fc-overlay">
+        <div class="fc-modal glass-panel" style="max-width: 500px; padding: 40px 30px;">
+            <button class="fc-close-btn" onclick="closeDTModal()">&#10005;</button>
 
-            <!-- â”€â”€ STEP 1: Intent Input â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-            <div id="fc-step-1">
-                <button class="fc-close-btn" onclick="closeNewCampaignModal()">&#10005;</button>
-                <div class="fc-logo-mark">&#10022;</div>
-                <h2 class="fc-headline">Who are your next clients?</h2>
-                <p class="fc-sub">Describe them in plain English. We handle the rest.</p>
-
-                <div class="fc-input-wrap">
-                    <span class="fc-input-icon">&#128269;</span>
-                    <textarea id="fc-intent" class="fc-intent-input"
-                        placeholder="e.g. Small e-commerce businesses in the UK that are growing fast and need better marketing"
-                        rows="3"
-                        oninput="fcUpdateCharHint(this)"
-                        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();fcStep1Next();}">
-                    </textarea>
+            <!-- VIEW A: Magic URL Input -->
+            <div id="dt-view-a">
+                <div class="fc-logo-mark" style="color: var(--primary);">&#10022;</div>
+                <h2 class="fc-headline" style="font-size: 1.8rem; margin-bottom: 8px;">Find Your Next Clients</h2>
+                <p class="fc-sub" style="font-size: 1.05rem; margin-bottom: 30px;">Enter your website and our Digital Twin will build your target matrix instantly.</p>
+                
+                <div class="fc-input-wrap" style="margin-bottom: 20px;">
+                    <span class="fc-input-icon">&#127760;</span>
+                    <input type="text" id="dt-url-input" class="fc-intent-input" style="height: 54px; font-size: 1rem;" placeholder="e.g. acme-services.com" onkeydown="if(event.key==='Enter') window.dtStartAnalysis();">
                 </div>
-                <div class="fc-char-hint" id="fc-char-hint">Press Enter or click below</div>
+                
+                <button class="primary-btn" style="width: 100%; height: 54px; font-size: 1.1rem; margin-bottom: 20px;" onclick="window.dtStartAnalysis()">
+                    Scan Website &#8594;
+                </button>
+                
+                <div style="text-align: center;">
+                    <button class="text-btn" style="font-size: 0.9rem; color: var(--text-muted); padding: 8px;" onclick="window.dtFallbackToNaturalLanguage()">
+                        I don't have a website
+                    </button>
+                </div>
+            </div>
 
-                <div class="fc-templates">
-                    <p class="fc-templates-label">Quick start &#8595;</p>
-                    <div class="fc-chips">
-                        <button class="fc-chip" onclick="fcFillTemplate(this)">&#127978; Local service businesses that need more customers</button>
-                        <button class="fc-chip" onclick="fcFillTemplate(this)">&#128187; SaaS startups actively hiring sales engineers</button>
-                        <button class="fc-chip" onclick="fcFillTemplate(this)">&#128230; E-commerce stores running paid ads</button>
-                        <button class="fc-chip" onclick="fcFillTemplate(this)">&#127973; Healthcare clinics expanding into new areas</button>
+            <!-- VIEW B: Pulse Animation -->
+            <div id="dt-view-b" class="hidden" style="text-align: center; padding: 40px 0;">
+                <div class="pulse-ring" style="width: 80px; height: 80px; margin: 0 auto 30px auto; border-radius: 50%; background: var(--primary); opacity: 0.8; animation: dtPulse 1.5s infinite ease-in-out;"></div>
+                <style>
+                    @keyframes dtPulse {
+                        0% { transform: scale(0.8); opacity: 0.8; }
+                        50% { transform: scale(1.2); opacity: 0.4; }
+                        100% { transform: scale(0.8); opacity: 0.8; }
+                    }
+                </style>
+                <div id="dt-status-text" style="font-size: 1.2rem; font-weight: 500; color: var(--text-main); margin-bottom: 20px; transition: opacity 0.15s ease;">Scanning domain...</div>
+                <div style="width: 100%; height: 6px; background: rgba(0,0,0,0.05); border-radius: 3px; overflow: hidden;">
+                    <div id="dt-progress-fill" style="height: 100%; width: 5%; background: var(--primary); transition: width 0.3s ease;"></div>
+                </div>
+            </div>
+
+            <!-- VIEW C: Confirmation -->
+            <div id="dt-view-c" class="hidden">
+                <div class="fc-understood-badge" style="display:inline-block; margin-bottom: 16px;">&#10022; Digital Twin Created</div>
+                <p class="fc-sub" style="margin-bottom: 24px;">Confirm your AI-generated persona before we start sourcing.</p>
+                
+                <div style="background: rgba(255,255,255,0.4); border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
+                    <div style="font-size: 0.85rem; color: var(--primary); font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Company Bio</div>
+                    <div id="dt-company-desc" style="font-size: 1rem; color: var(--text-main); line-height: 1.5; cursor: pointer;" onclick="window.dtEditPersona('company')" title="Click to edit"></div>
+                </div>
+                
+                <div style="background: rgba(255,255,255,0.4); border-radius: 12px; padding: 20px; margin-bottom: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
+                    <div style="font-size: 0.85rem; color: var(--primary); font-weight: 600; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px;">Target Personas</div>
+                    
+                    <div style="margin-bottom: 16px; cursor: pointer;" onclick="window.dtEditPersona('target-1')" title="Click to edit name">
+                        <strong id="dt-target-1-name" style="display: block; font-size: 0.95rem; margin-bottom: 4px;"></strong>
+                        <span id="dt-target-1-desc" style="font-size: 0.9rem; color: var(--text-muted);"></span>
+                    </div>
+                    <div style="margin-bottom: 16px; cursor: pointer;" onclick="window.dtEditPersona('target-2')" title="Click to edit name">
+                        <strong id="dt-target-2-name" style="display: block; font-size: 0.95rem; margin-bottom: 4px;"></strong>
+                        <span id="dt-target-2-desc" style="font-size: 0.9rem; color: var(--text-muted);"></span>
+                    </div>
+                    <div style="cursor: pointer;" onclick="window.dtEditPersona('target-3')" title="Click to edit name">
+                        <strong id="dt-target-3-name" style="display: block; font-size: 0.95rem; margin-bottom: 4px;"></strong>
+                        <span id="dt-target-3-desc" style="font-size: 0.9rem; color: var(--text-muted);"></span>
                     </div>
                 </div>
 
-                <button class="fc-next-btn" id="fc-next-btn" onclick="fcStep1Next()">
-                    Find My Clients &#8594;
+                <input type="hidden" id="dt-extracted-bio">
+                <input type="hidden" id="dt-extracted-who">
+                <input type="hidden" id="dt-extracted-gl">
+                
+                <button class="primary-btn" style="width: 100%; height: 54px; font-size: 1.1rem; margin-top: 8px;" onclick="window.dtPrefillAndLaunch()">
+                    &#128640; Launch Campaign
                 </button>
             </div>
 
-            <!-- â”€â”€ STEP 2: Smart Confirmation Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-            <div id="fc-step-2" class="hidden">
-                <button class="fc-back-btn" onclick="fcGoBack()">&#8592; Back</button>
-                <button class="fc-close-btn" onclick="closeNewCampaignModal()">&#10005;</button>
-
-                <div class="fc-understood-badge">&#10003; Here's what I found</div>
-                <p class="fc-sub" style="margin-bottom:20px;">Confirm the details below &#8212; I'll personalise every lead to this.</p>
-
-                <!-- Block A: Who -->
-                <div class="fc-confirm-block" id="fc-block-who">
-                    <div class="fc-block-icon">&#127919;</div>
-                    <div class="fc-block-content">
-                        <div class="fc-block-label">You want to reach</div>
-                        <div class="fc-block-value" id="fc-confirm-who">&#8212;</div>
-                        <input class="fc-block-edit hidden" id="fc-edit-who" placeholder="Describe your ideal client..." />
-                    </div>
-                    <button class="fc-block-edit-btn" onclick="fcToggleEdit('who')">Edit</button>
+            <!-- VIEW D: Natural Language Fallback -->
+            <div id="dt-view-d" class="hidden">
+                <button class="fc-back-btn" onclick="window.dtBackToViewA()">&#8592; Back</button>
+                <div class="fc-logo-mark" style="color: var(--primary); margin-top: 10px;">&#10022;</div>
+                <h2 class="fc-headline" style="font-size: 1.6rem; margin-bottom: 8px;">Who are your clients?</h2>
+                <p class="fc-sub" style="font-size: 1rem; margin-bottom: 24px;">Describe them in plain English. No website required.</p>
+                
+                <div class="fc-input-wrap" style="margin-bottom: 16px;">
+                    <textarea id="dt-intent-fallback" class="fc-intent-input"
+                        placeholder="e.g. Local service businesses in the UK that need more customers..."
+                        rows="4"
+                        style="padding-top: 16px;"
+                        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();window.dtLaunchFallback();}"></textarea>
                 </div>
-
-                <!-- Block B: What you sell -->
-                <div class="fc-confirm-block" id="fc-block-what">
-                    <div class="fc-block-icon">&#128188;</div>
-                    <div class="fc-block-content">
-                        <div class="fc-block-label">What you offer them</div>
-                        <div class="fc-block-value" id="fc-confirm-what" style="color:var(--text-muted); font-style:italic;">Tell me what you sell&#8230;</div>
-                        <textarea class="fc-block-edit" id="fc-edit-what" placeholder="e.g. We build custom websites for service businesses. We help them get more enquiries online." rows="2"></textarea>
-                        <div class="fc-required-note" id="fc-what-required">&#9889; This helps us write a personalised pitch for every lead. Please add a sentence or two.</div>
-                    </div>
-                    <button class="fc-block-edit-btn" id="fc-what-btn" onclick="fcToggleEdit('what')">Add &#8595;</button>
-                </div>
-
-                <!-- Block C: Location -->
-                <div class="fc-confirm-block" id="fc-block-where" style="border-color:transparent;">
-                    <div class="fc-block-icon">&#128205;</div>
-                    <div class="fc-block-content">
-                        <div class="fc-block-label">Where should I look?</div>
-                        <div id="fc-location-chips" class="fc-location-chips">
-                            <button class="fc-loc-chip" data-gl="" data-loc="Worldwide" onclick="fcSelectLocation(this)">&#127757; Worldwide</button>
-                            <button class="fc-loc-chip" data-gl="in" data-loc="India" onclick="fcSelectLocation(this)">&#127470;&#127475; India</button>
-                            <button class="fc-loc-chip" data-gl="us" data-loc="United States" onclick="fcSelectLocation(this)">&#127482;&#127480; USA</button>
-                            <button class="fc-loc-chip" data-gl="uk" data-loc="United Kingdom" onclick="fcSelectLocation(this)">&#127468;&#127463; UK</button>
-                            <button class="fc-loc-chip" data-gl="ca" data-loc="Canada" onclick="fcSelectLocation(this)">&#127464;&#127462; Canada</button>
-                            <button class="fc-loc-chip" data-gl="au" data-loc="Australia" onclick="fcSelectLocation(this)">&#127462;&#127482; Australia</button>
-                        </div>
-                        <input class="fc-block-edit" id="fc-edit-where-city" placeholder="City or region (optional)" style="margin-top:8px;" />
-                        <div class="fc-required-note" id="fc-where-required">&#128205; Please pick a location so I know where to focus.</div>
-                        <input type="hidden" id="camp-gl" />
-                        <input type="hidden" id="camp-location" />
-                    </div>
-                </div>
-
-                <!-- Hidden internal fields -->
-                <input type="hidden" id="camp-name" />
-                <input type="hidden" id="camp-bio" />
-                <input type="hidden" id="camp-keys" />
-                <input type="hidden" id="camp-target-urls" />
-
-                <div class="fc-validation-bar hidden" id="fc-validation-bar"></div>
-
-                <button class="fc-next-btn" id="fc-launch-btn" onclick="fcLaunch()">
-                    &#128640; Find My Clients
+                
+                <button class="primary-btn" style="width: 100%; height: 54px; font-size: 1.1rem;" onclick="window.dtLaunchFallback()">
+                    Find My Clients &#8594;
                 </button>
-                <p class="fc-disclaimer">Leads are matched to your description. Quality over quantity, always.</p>
             </div>
 
         </div>
@@ -657,7 +654,7 @@
             });
         }
     </script>
-    <script src="app.js?v=31"></script>
+    <script src="app.js?v=32"></script>
 </body>
 </html>
 
