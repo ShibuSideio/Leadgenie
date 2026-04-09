@@ -1,4 +1,4 @@
-﻿// Firebase configuration (Placeholder)
+// Firebase configuration (Placeholder)
 const firebaseConfig = {
     apiKey: "AIzaSyCxqimZJ7kspuJJ8qXF34zguLkNXi6MWd4",
     authDomain: "lead-sniper-prod.firebaseapp.com",
@@ -133,11 +133,14 @@ async function loadMe() {
                 }
             }
 
-            // Defensively check both payload tracks mapping legacy or missing keys safely
-            const w = payload.wallet || data.wallet || {allocated_credits: 0, consumed_credits: 0};
+            // Null-safe wallet: use Number() to coerce Firestore int64 / undefined
+            // to a real JS number. NaN || 0 = 0, so balance never goes negative falsely.
+            const w = payload.wallet || data.wallet || {};
             activeWallet = w;
+            const allocated = Number(w.allocated_credits) || 0;
+            const consumed  = Number(w.consumed_credits)  || 0;
+            const credits   = allocated - consumed;
             const el = document.getElementById('wallet-balance');
-            const credits = (w.allocated_credits || 0) - (w.consumed_credits || 0);
             if (el) el.innerText = credits;
             
             const alertBanner = document.getElementById('wallet-alert-banner');
@@ -1372,7 +1375,8 @@ window.closeNewCampaignModal = function() {
 
 // Override openNewCampaignModal to use new modal instead
 window.openNewCampaignModal = async function() {
-    const remaining = (window.activeWallet?.allocated_credits || 0) - (window.activeWallet?.consumed_credits || 0);
+    const remaining = (Number(window.activeWallet?.allocated_credits) || 0)
+                    - (Number(window.activeWallet?.consumed_credits)  || 0);
     if (remaining <= 0) {
         showToast('Credits exhausted. Contact admin to reload.', 'error');
         return;

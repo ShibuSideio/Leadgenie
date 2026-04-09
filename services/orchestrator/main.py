@@ -525,14 +525,31 @@ def get_me():
     user_doc = db.collection("users").document(uid).get()
     if user_doc.exists:
         data = user_doc.to_dict()
-        wallet = data.get("wallet", {"allocated_credits": 0, "consumed_credits": 0})
-        
-        shard_sum = sum(shard.to_dict().get("consumed_credits", 0) for shard in db.collection("users").document(uid).collection("wallet_shards").stream())
-        wallet["consumed_credits"] += shard_sum
-        
+        # Null-safe wallet read: 'consumed_credits' may be absent after a DB
+        # wipe or schema migration. Use .get() with 0 fallback on every field.
+        raw_wallet = data.get("wallet", {})
+        allocated  = int(raw_wallet.get("allocated_credits", 0) or 0)
+        consumed   = int(raw_wallet.get("consumed_credits",  0) or 0)
+
+        # wallet_shards sub-collection may be empty after cutover — sum() of
+        # empty iterator = 0, so this is always safe.
+        shard_sum = sum(
+            int(shard.to_dict().get("consumed_credits", 0) or 0)
+            for shard in db.collection("users")
+                         .document(uid)
+                         .collection("wallet_shards")
+                         .stream()
+        )
+        consumed += shard_sum
+
+        wallet = {
+            "allocated_credits": allocated,
+            "consumed_credits":  consumed,
+        }
+
         return jsonify({
-            "status": "success", 
-            "data": data, 
+            "status": "success",
+            "data":   data,
             "wallet": wallet
         }), 200
     return jsonify({"error": "User structure missing"}), 404
