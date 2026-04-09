@@ -1,4 +1,4 @@
-﻿// Firebase configuration (Placeholder)
+// Firebase configuration (Placeholder)
 const firebaseConfig = {
     apiKey: "AIzaSyCxqimZJ7kspuJJ8qXF34zguLkNXi6MWd4",
     authDomain: "lead-sniper-prod.firebaseapp.com",
@@ -88,7 +88,9 @@ async function loadDashboard() {
     }
 }
 
-let activeWallet = { allocated_credits: 0, consumed_credits: 0 };
+// BUG FIX: must be window.activeWallet (not let) so the property
+// is accessible as window.activeWallet from any inline handler.
+window.activeWallet = { allocated_credits: 0, consumed_credits: 0 };
 async function loadMe() {
     try {
         const user = firebase.auth().currentUser;
@@ -133,13 +135,15 @@ async function loadMe() {
                 }
             }
 
-            // Null-safe wallet: use Number() to coerce Firestore int64 / undefined
-            // to a real JS number. NaN || 0 = 0, so balance never goes negative falsely.
+            // Defensive dual-path: check nested wallet map AND flattened root
+            // (DB migration may have stored fields at either level).
             const w = payload.wallet || data.wallet || {};
-            activeWallet = w;
-            const allocated = Number(w.allocated_credits) || 0;
-            const consumed  = Number(w.consumed_credits)  || 0;
+            const allocated = Number(w.allocated_credits  || data.allocated_credits  || 0) || 0;
+            const consumed  = Number(w.consumed_credits   || data.consumed_credits   || 0) || 0;
             const credits   = allocated - consumed;
+            window.activeWallet = { allocated_credits: allocated, consumed_credits: consumed };
+            console.log('[WALLET] payload.wallet:', payload.wallet, '| data.wallet:', data.wallet,
+                        '| allocated:', allocated, '| consumed:', consumed, '| balance:', credits);
             const el = document.getElementById('wallet-balance');
             if (el) el.innerText = credits;
             
@@ -1559,8 +1563,16 @@ window.closeNewCampaignModal = function() {
 
 // Override openNewCampaignModal to use new modal instead
 window.openNewCampaignModal = async function() {
-    const remaining = (Number(window.activeWallet?.allocated_credits) || 0)
-                    - (Number(window.activeWallet?.consumed_credits)  || 0);
+    // Defensive dual-path: activeWallet is the closure var (always set);
+    // also check flattened root fields in case of DB schema migration.
+    const aw = window.activeWallet || {};
+    const ud = window.currentUserData || {};
+    const allocated = Number(aw.allocated_credits || ud.allocated_credits || 0) || 0;
+    const consumed  = Number(aw.consumed_credits  || ud.consumed_credits  || 0) || 0;
+    const remaining = allocated - consumed;
+    console.log('[DEBUG WALLET] window.activeWallet:', aw,
+                '| currentUserData:', ud,
+                '| allocated:', allocated, '| consumed:', consumed, '| remaining:', remaining);
     if (remaining <= 0) {
         showToast('Credits exhausted. Contact admin to reload.', 'error');
         return;
