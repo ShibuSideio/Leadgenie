@@ -1,10 +1,10 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sideio — AI-Native Lead Intelligence</title>
+    <title>Sideio â€” AI-Native Lead Intelligence</title>
     <meta name="description" content="Grow your business pipeline on autopilot. Sideio's AI discovers and qualifies leads 24/7.">
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#4f46e5">
@@ -43,7 +43,7 @@
     ================================================================ -->
     <div id="app-container" class="hidden">
 
-        <!-- ── TOP NAV ─────────────────────────────────────────────── -->
+        <!-- â”€â”€ TOP NAV â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <nav class="glass-nav">
             <div class="logo">Sideio <span class="logo-mark">&#10022;</span></div>
 
@@ -87,12 +87,12 @@
             &#9888;&#65039; Your pipeline credits are running low (&lt;&nbsp;50). Contact admin to top up.
         </div>
 
-        <!-- ── MAIN CANVAS ──────────────────────────────────────────── -->
+        <!-- â”€â”€ MAIN CANVAS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <!-- TECH DEBT NOTE: .dashboard-grid kept as no-op selector for loadMe() JS compat.
              Refactor to remove in next sprint. -->
         <main class="dashboard-grid app-main">
 
-            <!-- ══ DASHBOARD VIEW ════════════════════════════════════ -->
+            <!-- â•â• DASHBOARD VIEW â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
             <section id="view-dashboard" class="main-feed">
 
                 <!-- Greeting + Hero CTA -->
@@ -134,7 +134,7 @@
                     <span>Value: <strong id="stat-value">&#x20b9;&nbsp;0</strong></span>
                 </div>
 
-                <!-- Pipeline funnel chart — conditional, only shown when leads.length > 0 -->
+                <!-- Pipeline funnel chart â€” conditional, only shown when leads.length > 0 -->
                 <div id="funnel-wrap" class="funnel-wrap hidden">
                     <div class="funnel-hdr">Pipeline Analytics</div>
                     <div style="height:160px; position:relative;">
@@ -161,7 +161,7 @@
                 </div>
             </section>
 
-            <!-- ══ MY SEARCHES VIEW ══════════════════════════════════ -->
+            <!-- â•â• MY SEARCHES VIEW â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
             <section id="view-target" class="main-feed hidden">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <h2>Active Campaign Matrix</h2>
@@ -184,7 +184,7 @@
                 </div>
             </section>
 
-            <!-- ══ TEAM VIEW (kept, hidden) ══════════════════════════ -->
+            <!-- â•â• TEAM VIEW (kept, hidden) â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
             <section id="view-team" class="main-feed hidden">
                 <h2>My Team</h2>
                 <div class="stats-box mt-3" style="background:#ffffff;">
@@ -193,7 +193,7 @@
                 </div>
             </section>
 
-            <!-- ══ REPORTS VIEW ══════════════════════════════════════ -->
+            <!-- â•â• REPORTS VIEW â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
             <section id="view-reports" class="main-feed hidden">
                 <h2>Custom Reports</h2>
                 <div class="stats-box mt-3" style="background:#ffffff; padding:24px;">
@@ -219,7 +219,7 @@
                 </div>
             </section>
 
-            <!-- ══ L0 ADMIN VIEW ════════════════════════════════════ -->
+            <!-- â•â• L0 ADMIN VIEW â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
             <section id="view-l0-admin" class="main-feed hidden">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <h2>L0 Enterprise Governance</h2>
@@ -277,7 +277,7 @@
                 </div>
             </section>
 
-            <!-- ══ PIPELINE CRM VIEW ═════════════════════════════════ -->
+            <!-- â•â• PIPELINE CRM VIEW â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
             <section id="view-crm-test" class="glass-panel main-feed hidden" style="padding:20px; overflow:hidden;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-shrink:0;">
                     <div>
@@ -325,7 +325,7 @@
 
         </main>
 
-        <!-- ── MOBILE BOTTOM DOCK (≤768px only, shown via CSS) ──────── -->
+        <!-- â”€â”€ MOBILE BOTTOM DOCK (â‰¤768px only, shown via CSS) â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <nav class="bottom-dock" id="bottom-dock" aria-label="Mobile navigation">
             <button class="dock-btn active" id="dock-tab-dashboard" onclick="switchTab('dashboard')">
                 <span class="dock-icon">&#127968;</span>
@@ -365,7 +365,7 @@
         <div class="dt-modal glass-panel">
             <button class="fc-close-btn" onclick="closeDTModal()">&#10005;</button>
 
-            <!-- ── View A: URL Input ─────────────────────────────── -->
+            <!-- â”€â”€ View A: URL Input â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
             <div id="dt-view-a">
                 <div class="fc-logo-mark">&#10022;</div>
                 <h2 class="fc-headline">Analyze Your Website</h2>
@@ -381,7 +381,7 @@
                 </p>
             </div>
 
-            <!-- ── View B: AI Analysis Animation ─────────────────── -->
+            <!-- â”€â”€ View B: AI Analysis Animation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
             <div id="dt-view-b" class="hidden dt-view-b-content">
                 <div class="ai-thinking-ring">
                     <div class="ai-three-dots">
@@ -397,7 +397,7 @@
                 </p>
             </div>
 
-            <!-- ── View C: Persona Cards ──────────────────────────── -->
+            <!-- â”€â”€ View C: Persona Cards â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
             <div id="dt-view-c" class="hidden">
                 <div class="fc-understood-badge">&#10003; Analysis Complete</div>
                 <p class="fc-sub" style="margin-bottom:20px;">Review the extracted personas. Edit any field, then launch to confirm.</p>
@@ -446,12 +446,12 @@
     </div>
 
     <!-- ================================================================
-         FIND NEW CLIENTS MODAL (V17 — fully preserved)
+         FIND NEW CLIENTS MODAL (V17 â€” fully preserved)
     ================================================================ -->
     <div id="new-campaign-modal" class="hidden fc-overlay">
         <div class="fc-modal glass-panel">
 
-            <!-- ── STEP 1: Intent Input ─────────────────────────── -->
+            <!-- â”€â”€ STEP 1: Intent Input â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
             <div id="fc-step-1">
                 <button class="fc-close-btn" onclick="closeNewCampaignModal()">&#10005;</button>
                 <div class="fc-logo-mark">&#10022;</div>
@@ -484,7 +484,7 @@
                 </button>
             </div>
 
-            <!-- ── STEP 2: Smart Confirmation Card ──────────────── -->
+            <!-- â”€â”€ STEP 2: Smart Confirmation Card â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
             <div id="fc-step-2" class="hidden">
                 <button class="fc-back-btn" onclick="fcGoBack()">&#8592; Back</button>
                 <button class="fc-close-btn" onclick="closeNewCampaignModal()">&#10005;</button>
@@ -657,6 +657,7 @@
             });
         }
     </script>
-    <script src="app.js?v=26"></script>
+    <script src="app.js?v=27"></script>
 </body>
 </html>
+

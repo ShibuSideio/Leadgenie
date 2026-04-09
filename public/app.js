@@ -1,4 +1,4 @@
-// Firebase configuration (Placeholder)
+﻿// Firebase configuration (Placeholder)
 const firebaseConfig = {
     apiKey: "AIzaSyCxqimZJ7kspuJJ8qXF34zguLkNXi6MWd4",
     authDomain: "lead-sniper-prod.firebaseapp.com",
@@ -1428,8 +1428,6 @@ window.createLeadCardV2 = function(docId, lead) {
     var copilotLbl = _copilotBtnLabel(lead);
     var isCont     = lead.status === 'contacted' || lead.status === 'replied';
 
-    // dmB64/urlB64 removed — copilot action reads from _leadsMap by docId
-
     var cInfo = '';
     if (lead.email || lead.phone) {
         cInfo = '<div class="lc-section" style="font-size:0.85rem;">' +
@@ -1441,6 +1439,7 @@ window.createLeadCardV2 = function(docId, lead) {
 
     var crmCls = 'lc-crm-btn' + (lead.is_in_crm ? ' in-crm' : '');
     var crmOC  = lead.is_in_crm ? '' : ("pushToCRM('" + docId + "','" + encodeURIComponent(JSON.stringify(lead)).replace(/\\/g,'\\\\') + "')");
+
 
     card.innerHTML =
         '<div class="lc-header">' +
@@ -1456,8 +1455,8 @@ window.createLeadCardV2 = function(docId, lead) {
         '</div>' +
         (signal ? '<div class="lc-signal">'+signal+'</div>' : '') +
         '<div class="lc-badges">'+prismBadge+bHTML+'</div>' +
-        '<button class="lc-expand-btn" onclick="lcToggleExpand(''+docId+'')">' +
-            '<span id="lc-expand-icon-'+docId+'">&#x2193;</span> See opening message & full intelligence' +
+        '<button class="lc-expand-btn" onclick="lcToggleExpand(\''+docId+'\')">' +
+            '<span id="lc-expand-icon-'+docId+'">&#x2193;</span> See opening message &amp; full intelligence' +
         '</button>' +
         '<div class="lc-expanded" id="'+expandId+'">' +
             (dm ? '<div class="lc-section"><div class="lc-section-label">Your Opening Message</div><div class="lc-icebreaker">'+dm+'</div></div>' : '') +
@@ -1466,19 +1465,19 @@ window.createLeadCardV2 = function(docId, lead) {
             cInfo +
         '</div>' +
         '<div class="lc-actions-primary">' +
-            '<button class="lc-contact-btn lc-copilot-btn'+(isCont?' lc-copilot-btn--contacted':'')+'"' +
-                ' id="copilot-btn-'+docId+'"' +
-                ' data-action="copilot" data-lead-id="'+docId+'"' +
-                (isCont?' disabled':'')+'>'+
-                (isCont ? '&#x2713; Contacted' : copilotLbl) +
-            '</button>' +
+            '<button class="lc-contact-btn lc-copilot-btn'+(isCont?' lc-copilot-btn--contacted':'')+'"' +
+                ' id="copilot-btn-'+docId+'"' +
+                ' data-action="copilot" data-lead-id="'+docId+'"' +
+                (isCont?' disabled':'')+'>' +
+                (isCont ? '&#x2713; Contacted' : copilotLbl) +
+            '</button>' +
             '<button class="'+crmCls+'" id="crm-btn-'+docId+'"'+(crmOC?' onclick="'+crmOC+'"':'')+(lead.is_in_crm?' disabled':'')+' title="Send to pipeline CRM">'+(lead.is_in_crm?'In CRM':'-> CRM')+'</button>' +
             '<div style="position:relative;">' +
-                '<button class="lc-more-btn" id="'+moreId+'" onclick="lcToggleMore(''+docId+'')" title="More options">...</button>' +
+                '<button class="lc-more-btn" id="'+moreId+'" onclick="lcToggleMore(\''+docId+'\')" title="More options">...</button>' +
                 '<div class="lc-overflow-menu" id="'+overflowId+'">' +
-                    '<button class="lc-overflow-item" onclick="updateLeadStatus(''+docId+'','converted');lcCloseMore(''+docId+'')">Mark Converted</button>' +
-                    '<button class="lc-overflow-item" onclick="viewLeadTimeline(''+encodeURIComponent(JSON.stringify(lead.interactions||[]))+'');lcCloseMore(''+docId+'')">View Timeline</button>' +
-                    '<button class="lc-overflow-item danger" onclick="updateLeadStatus(''+docId+'','ignored');lcCloseMore(''+docId+'')">Skip This Lead</button>' +
+                    '<button class="lc-overflow-item" onclick="updateLeadStatus(\''+docId+'\',\'converted\');lcCloseMore(\''+docId+'\')">Mark Converted</button>' +
+                    '<button class="lc-overflow-item" onclick="viewLeadTimeline(\''+encodeURIComponent(JSON.stringify(lead.interactions||[]))+'\');lcCloseMore(\''+docId+'\')">View Timeline</button>' +
+                    '<button class="lc-overflow-item danger" onclick="updateLeadStatus(\''+docId+'\',\'ignored\');lcCloseMore(\''+docId+'\')">Skip This Lead</button>' +
                 '</div>' +
             '</div>' +
         '</div>';

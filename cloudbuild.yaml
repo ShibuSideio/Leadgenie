@@ -1,8 +1,8 @@
-# =============================================================================
+﻿# =============================================================================
 # cloudbuild.yaml — Sideio Leads V16 Enterprise Build Pipeline
 # =============================================================================
 # Architecture:
-#   Phase 1: All 6 Docker images built IN PARALLEL (waitFor: ['-'])
+#   Phase 1: All 6 Docker images built IN PARALLEL (waitFor: ['syntax-check-appjs'])
 #   Phase 2: All 6 images pushed IN PARALLEL (waitFor: respective build id)
 #   Phase 3: Cloud Run Services deployed (parallel where independent)
 #   Phase 4: Cloud Run Job (autonomous-engine, depends on push only)
@@ -28,13 +28,31 @@ timeout: '3600s'
 steps:
 
 # =============================================================================
+# PHASE 0: FRONTEND SYNTAX GATE
+# Runs node --check on app.js BEFORE any Docker build or Firebase deploy.
+# A SyntaxError here fails the build instantly — zero chance of deploying
+# a broken frontend. Costs ~2s. Saves production lockouts entirely.
+# =============================================================================
+
+- id: 'syntax-check-appjs'
+  waitFor: ['-']
+  name: 'node:20-slim'
+  entrypoint: bash
+  args:
+  - '-c'
+  - |
+    echo "[GATE] Running JS syntax check on public/app.js..."
+    node --check public/app.js
+    echo "[GATE] app.js syntax OK — proceeding with build."
+
+# =============================================================================
 # PHASE 1: PARALLEL IMAGE BUILDS
 # All 6 services build simultaneously. Playwright/Chromium (~8 min) no longer
 # blocks the other 5 lightweight Python services.
 # =============================================================================
 
 - id: 'build-orchestrator'
-  waitFor: ['-']
+  waitFor: ['syntax-check-appjs']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -46,7 +64,7 @@ steps:
   - ./services/orchestrator
 
 - id: 'build-pipeline-main'
-  waitFor: ['-']
+  waitFor: ['syntax-check-appjs']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -58,7 +76,7 @@ steps:
   - ./services/pipeline-main
 
 - id: 'build-scraper-heavy'
-  waitFor: ['-']
+  waitFor: ['syntax-check-appjs']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -70,7 +88,7 @@ steps:
   - ./services/scraper-heavy
 
 - id: 'build-whatsapp-webhook'
-  waitFor: ['-']
+  waitFor: ['syntax-check-appjs']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -82,7 +100,7 @@ steps:
   - ./services/whatsapp-webhook
 
 - id: 'build-email-summary'
-  waitFor: ['-']
+  waitFor: ['syntax-check-appjs']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -94,7 +112,7 @@ steps:
   - ./services/email-summary
 
 - id: 'build-autonomous-engine'
-  waitFor: ['-']
+  waitFor: ['syntax-check-appjs']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -106,7 +124,7 @@ steps:
   - ./services/autonomous-engine
 
 - id: 'build-digital-twin-engine'
-  waitFor: ['-']
+  waitFor: ['syntax-check-appjs']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -119,7 +137,7 @@ steps:
 
 # V18: Shadow Learner Aggregator — Cloud Run Job (12h BQ aggregation cycle)
 - id: 'build-shadow-learner'
-  waitFor: ['-']
+  waitFor: ['syntax-check-appjs']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -590,7 +608,7 @@ steps:
 # =============================================================================
 
 - id: 'firebase-deploy'
-  waitFor: ['-']
+  waitFor: ['syntax-check-appjs']
   name: 'node:20-slim'
   entrypoint: bash
   args:
@@ -626,3 +644,4 @@ availableSecrets:
   secretManager:
   - versionName: projects/lead-sniper-prod/secrets/FIREBASE_SA_KEY/versions/latest
     env: 'FIREBASE_SA_KEY'
+
