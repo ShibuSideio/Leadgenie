@@ -1,6 +1,6 @@
-# Lead Sniper / Sideio Smart Growth — V13.22
+# Lead Sniper / Sideio Smart Growth — V17
 **Full Technical Specification Document (TSD)**
-*Last Updated: 2026-04-07 | Version: V13.22 Real-Time WebSocket Architecture*
+*Last Updated: 2026-04-09 | Version: V17 — Conversational UX + V16 Autonomous Engine + Epsilon-Greedy Router*
 
 ---
 
@@ -21,31 +21,37 @@ Sideio Lead Sniper is a fully automated, multi-tenant B2B lead generation SaaS p
 ```
 /sideio_leads
 ├── /public                          # Firebase Static Hosting (PWA)
-│   ├── index.html                   # DOM scaffolding, Firebase SDK init, Auth UI
-│   ├── app.js                       # All frontend logic (1100+ lines)
-│   ├── styles.css                   # CSS design system
+│   ├── index.html                   # DOM scaffolding, Firebase SDK init, Auth UI (V17 redesigned)
+│   ├── app.js                       # All frontend logic (2,280+ lines — V17 conversational modal)
+│   ├── styles.css                   # CSS design system (798 lines — V17 additions)
 │   ├── sw.js                        # Service Worker (cache v10-3, Firebase bypass)
 │   └── manifest.json                # PWA manifest
 ├── /services
-│   ├── /orchestrator                # Cloud Run: REST API Gateway + Cron Dispatcher
+│   ├── /orchestrator                # Cloud Run: REST API Gateway + Cron Dispatcher + Epsilon-Greedy Router
 │   │   ├── Dockerfile
-│   │   ├── main.py                  # 624 lines — all API routes + cron sweep
+│   │   ├── main.py                  # 1,237 lines — all API routes + cron sweep + POST /api/campaigns/{id}/run
 │   │   └── requirements.txt
-│   ├── /pipeline-main               # Cloud Run: AI Extraction Engine
+│   ├── /pipeline-main               # Cloud Run: AI Extraction Engine (Cartographer)
 │   │   ├── Dockerfile
 │   │   ├── main.py                  # 806 lines — search, scrape, score, write
 │   │   └── requirements.txt
-│   └── /scraper-heavy               # Cloud Run: Playwright Headless Browser
-│       ├── Dockerfile
-│       ├── main.py                  # 171 lines — async Chromium + proxy tiers
-│       └── requirements.txt
+│   ├── /scraper-heavy               # Cloud Run: Playwright Headless Browser
+│   │   ├── Dockerfile
+│   │   ├── main.py                  # 171 lines — async Chromium + proxy tiers
+│   │   └── requirements.txt
+│   ├── /autonomous-engine           # Cloud Run Job: Nightly Digital Exhaust Scraper (V16 NEW)
+│   │   ├── Dockerfile
+│   │   ├── engine.py                # Pre-scores leads into predictive_cache (72h TTL)
+│   │   └── requirements.txt
+│   ├── /whatsapp-webhook            # Cloud Run: WhatsApp Business API Receiver
+│   └── /email-summary               # Cloud Run: Email digest sender
 ├── /terraform                       # GCP infrastructure as code
 ├── .firebaserc                      # Firebase project binding (lead-sniper-prod)
 ├── firebase.json                    # Hosting config + Firestore rules pointer
-├── firestore.rules                  # V13.22 multi-tenant security rules
-├── firestore.indexes.json           # Composite index: tenant_id ASC + timestamp DESC
-├── cloudbuild.yaml                  # CI/CD: builds & deploys all 5 microservices
-└── architecture.md                  # This document
+├── firestore.rules                  # V13.22 multi-tenant security rules (BOM-stripped)
+├── firestore.indexes.json           # Composite index: tenant_id + timestamp + is_in_crm (BOM-stripped)
+├── cloudbuild.yaml                  # CI/CD: 20-step parallelized enterprise pipeline (V16)
+└── architecture.md                  # This document (V17)
 ```
 
 ---
@@ -59,6 +65,7 @@ Sideio Lead Sniper is a fully automated, multi-tenant B2B lead generation SaaS p
 | Scraper Heavy | `scraper-heavy` | `--no-allow-unauthenticated` | 2 Gi | asia-south1 |
 | WhatsApp Webhook | `whatsapp-webhook` | `--allow-unauthenticated` | 128 Mi | asia-south1 |
 | Email Summary | `email-summary` | `--no-allow-unauthenticated` | 128 Mi | asia-south1 |
+| **Autonomous Engine** | **`autonomous-engine`** | **Cloud Run Job (no HTTP)** | **512 Mi** | **asia-south1** |
 | Frontend | Firebase Hosting | Public CDN | — | Global |
 
 **GCP Project ID:** `sideio-leads-v16`  
@@ -599,6 +606,7 @@ Every protected route calls this function first:
 | GET | `/api/campaigns` | User | List all tenant campaigns (limit 100) |
 | POST | `/api/campaigns` | User | Create new campaign (runs quota check first) |
 | PUT | `/api/campaigns/{id}` | User | Update campaign (tenant ownership enforced) |
+| **POST** | **`/api/campaigns/{id}/run`** | **User** | **Epsilon-Greedy Router: splits quota between V16 cache + V14 Cartographer** |
 | GET | `/api/leads` | User | List all tenant leads (limit 100) — legacy polling fallback |
 | PUT | `/api/leads/{id}` | User | Update lead status + trigger RLHF backprop |
 | POST | `/api/settings` | User | Save WhatsApp credentials (KMS encrypted) |
@@ -1116,4 +1124,665 @@ To rebuild this system from scratch, follow this exact sequence:
 5. **SW Firebase bypass**: Never let the service worker intercept `googleapis.com` or `google.com` traffic
 6. **Wallet shards**: True balance = `allocated_credits - consumed_credits - SUM(wallet_shards/0-9)`
 7. **OIDC for cron**: `/api/internal/cron/sweep` validates `id_token` via `google.oauth2.id_token` — never use Firebase ID tokens here
+
+
+---
+
+## 17. V16 AUTONOMOUS ENGINE — NIGHTLY DIGITAL EXHAUST SCRAPER
+
+*Added: 2026-04-08 | Commit range: defb52a → e87b265*
+
+### 17.1 Overview
+
+The V16 Autonomous Engine is a **Cloud Run Job** (non-HTTP, not a Cloud Run Service) that runs nightly as a background job. It performs proactive "digital exhaust" scraping across the open web — social signals, hiring intent markers, and public sentiment data — and populates a `predictive_cache` collection with pre-scored leads. These cached leads are served with zero Serper API cost during the next campaign run via the Epsilon-Greedy Router.
+
+**Key difference from V14/V15 pipeline:** The autonomous engine runs *before* campaign triggers. It pre-populates the cache; the Router then decides whether to serve from cache or call Serper.
+
+### 17.2 New Infrastructure Components
+
+| Component | Type | Name | Region |
+|---|---|---|---|
+| Autonomous Engine | Cloud Run Job | `autonomous-engine` | asia-south1 |
+| Nightly Scheduler | Cloud Scheduler | `lead-sniper-nightly` | asia-south1 |
+
+**Cloud Run Job spec:**
+```yaml
+# Created idempotently by cloudbuild.yaml step gcloud-job-provision-autonomous-engine
+name: autonomous-engine
+image: gcr.io/$PROJECT_ID/autonomous-engine
+region: asia-south1
+service-account: lead-pipeline-sa
+task-timeout: 3600s   # 1-hour hard limit per execution
+max-retries: 1
+```
+
+**Cloud Scheduler trigger:**
+```yaml
+# Created idempotently by cloudbuild.yaml step gcloud-job-scheduler-autonomous-engine
+name: lead-sniper-nightly
+schedule: "0 2 * * *"    # 2 AM IST daily
+target: Cloud Run Job (not HTTP) — uses jobs.run API
+auth: OAuth2 service account token (roles/run.invoker)
+```
+
+### 17.3 New Firestore Collections
+
+#### `predictive_cache` Collection
+Pre-scored leads from the nightly autonomous scrape. TTL: 72 hours.
+
+```json
+{
+  "_id": "sha256(tenant_id + '_' + root_domain)",
+  "tenant_id": "uid_from_firebase_auth",
+  "url": "https://example.com",
+  "score": 8,
+  "pain_point": "AI-extracted pain signal from public posts",
+  "dm": "Pre-drafted outreach message",
+  "icebreaker_angle": "Opening hook specific to their public pain",
+  "tech_stack_found": ["hubspot", "stripe"],
+  "hiring_intent_found": "Yes",
+  "origin_engine": "autonomous",
+  "promotedAt": "<SERVER_TIMESTAMP>",
+  "expire_at": "<TIMESTAMP +72 hours>"
+}
+```
+
+**TTL:** Configured via Firestore TTL policy on field `expire_at`. Must be manually enabled in GCP Console: Firestore → Indexes → TTL → Collection `predictive_cache` → Field `expire_at`.
+
+#### Updated `leads` collection — new field
+```json
+{
+  "origin_engine": "autonomous"  // or "cartographer" (V14 Serper-driven)
+}
+```
+This field drives the `⚡ Predictive Match` badge on lead cards.
+
+### 17.4 Engine Logic (services/autonomous-engine/engine.py)
+
+```python
+# Entry point: runs as a Cloud Run Job (single invocation, exits when done)
+def main():
+    tenants = get_all_active_tenants()          # Reads users/ collection via Admin SDK
+    for tenant in tenants:
+        signals = harvest_digital_exhaust(tenant)  # Social scraping loop
+        for signal in signals:
+            if _can_use_gemini():                # Token kill-switch check
+                lead = score_and_cache(signal)   # Gemini scoring + cache write
+                store_in_predictive_cache(lead)
+
+def _can_use_gemini():
+    # Tracks daily Gemini call count via usage_metrics shards
+    # Resets at midnight IST
+    # Returns False when daily budget is exceeded → prevents runaway costs
+    total_calls = sum_usage_shards()
+    return total_calls < DAILY_GEMINI_BUDGET
+```
+
+**Token Kill-Switch (Critical Safety Mechanism):**
+- Reads `usage_metrics/{tenant_id}/shards/{0-9}` to sum total Gemini calls
+- Compares against `DAILY_GEMINI_BUDGET` environment variable
+- Resets at midnight IST daily
+- If budget exceeded: skips all Gemini calls, writes raw signals with `score: 0` (filtered out by score gate)
+- Prevents runaway API costs from engine loops
+
+### 17.5 Environment Variables (autonomous-engine)
+
+```bash
+PROJECT_ID=sideio-leads-v16
+DAILY_GEMINI_BUDGET=1000         # Max Gemini calls per nightly run
+DISCOVERY_ALLOCATION=0.15        # 15% of batch reserved for Serper discovery (Router config)
+MOCK_MODE=false                  # Set true for dry-run without actual API calls
+```
+
+---
+
+## 18. V16 EPSILON-GREEDY ROUTER — HYBRID LEAD SOURCING
+
+*Added: 2026-04-08 | Location: services/orchestrator/main.py — POST /api/campaigns/{id}/run*
+
+### 18.1 Overview
+
+The Epsilon-Greedy Router is integrated into the `POST /api/campaigns/{id}/run` endpoint in the Orchestrator. Every time a campaign run is initiated (either by the user clicking "Find My Clients" or by the background cron sweep), the Router dynamically splits the lead quota between:
+
+- **Exploit path (V16):** Serve pre-cached leads from `predictive_cache` (zero Serper cost)
+- **Explore path (V14):** Fire the Cartographer/Serper pipeline for fresh discovery
+
+### 18.2 Router Math (batch_size = 10, exploit_ratio = 0.10)
+
+```python
+batch_size    = 10
+exploit_ratio = 0.10   # Configurable via DISCOVERY_ALLOCATION env var
+
+# Step 1: Calculate split
+autonomous_target   = int(batch_size * exploit_ratio)  # = 1
+cartographer_target = batch_size - autonomous_target   # = 9
+
+# Step 2: Pop from predictive_cache
+cached_leads = _pop_from_predictive_cache(tenant_id, autonomous_target)
+autonomous_promoted = len(cached_leads)                # Actual served (may be < target)
+
+# Step 3: Deficit reallocation — CRITICAL SAFETY GUARANTEE
+deficit = autonomous_target - autonomous_promoted      # Leads not served from cache
+cartographer_actual = cartographer_target + deficit    # All deficit reallocated to Serper
+
+# Step 4: Dispatch to Cartographer (Serper)
+if cartographer_actual > 0:
+    _dispatch_cartographer(campaign_id, tenant_id, cartographer_actual)
+
+# Step 5: Promote cached leads to live leads collection
+for lead in cached_leads:
+    _promote_cached_lead(lead, campaign_id)
+```
+
+**Vulnerability A — Empty cache safety:** If `predictive_cache` has 0 leads, `_pop_from_predictive_cache` returns `[]`, deficit = `autonomous_target`, and full reallocation goes to Serper. No crash, no infinite loop.
+
+**Vulnerability B — Serper payload cap:** The Cartographer receives exactly `cartographer_actual` (never the full `batch_size`). The Serper `/produce` payload is capped at `cartographer_target`. This is audited and confirmed safe.
+
+### 18.3 Response Payload (POST /api/campaigns/{id}/run)
+
+```json
+{
+  "status": "dispatched",
+  "autonomous_promoted": 1,
+  "cartographer_queued": 9,
+  "total": 10
+}
+```
+
+This response is surfaced on the frontend as a toast:
+> "Engine dispatched: ⚡ 1 Predictive + 🔍 9 Cartographer leads"
+
+### 18.4 `_pop_from_predictive_cache` — Safe Empty-Cache Handler
+
+```python
+def _pop_from_predictive_cache(tenant_id: str, count: int) -> list:
+    """
+    Fetches up to `count` leads from predictive_cache for this tenant.
+    Returns empty list (never raises) if cache is empty.
+    Deletes fetched docs atomically to prevent double-serving.
+    """
+    ref = db.collection("predictive_cache") \
+            .where("tenant_id", "==", tenant_id) \
+            .limit(count)
+    docs = ref.get()
+    if not docs:
+        return []   # Safe: caller handles deficit via reallocation
+    
+    batch = db.batch()
+    leads = []
+    for doc in docs:
+        leads.append(doc.to_dict())
+        batch.delete(doc.reference)   # Atomic pop
+    batch.commit()
+    return leads
+```
+
+### 18.5 OIDC-Protected Internal Endpoints
+
+All cron-triggered endpoints are protected by Google OIDC token verification. Frontend Firebase ID tokens are explicitly rejected:
+
+```python
+# Cron endpoints: /api/internal/cron/*
+# Verified via: google.oauth2.id_token.verify_oauth2_token()
+# Audience: Cloud Run service URL
+# Rejects: Firebase ID tokens (wrong issuer)
+```
+
+---
+
+## 19. ENTERPRISE CLOUD BUILD PIPELINE (V16)
+
+*Updated: 2026-04-08 | Build steps: 20 total | Strategy: Fully parallelized*
+
+### 19.1 Pipeline Architecture
+
+The `cloudbuild.yaml` was completely rewritten from a sequential 16-step pipeline to a **20-step parallelized enterprise pipeline**. Docker builds across all 6 services run simultaneously in `waitFor: ['-']` parallel groups.
+
+```
+Step Group 1 (parallel — all fire at once):
+  #0  build-orchestrator           → gcr.io/$PROJECT_ID/lead-orchestrator
+  #1  build-pipeline-main          → gcr.io/$PROJECT_ID/lead-pipeline-main
+  #2  build-scraper-heavy          → gcr.io/$PROJECT_ID/scraper-heavy
+  #3  build-whatsapp-webhook       → gcr.io/$PROJECT_ID/whatsapp-webhook
+  #4  build-email-summary          → gcr.io/$PROJECT_ID/email-summary
+  #5  build-autonomous-engine      → gcr.io/$PROJECT_ID/autonomous-engine
+  #19 firebase-deploy              → Firebase Hosting + Firestore rules
+
+Step Group 2 (parallel — after group 1 pushes):
+  #6  push-orchestrator
+  #7  push-pipeline-main
+  #8  push-scraper-heavy
+  #9  push-whatsapp-webhook
+  #10 push-email-summary
+  #11 push-autonomous-engine
+
+Step Group 3 (parallel — after pushes):
+  #12 deploy-orchestrator          → Cloud Run Service (--allow-unauthenticated)
+  #13 deploy-pipeline-main         → Cloud Run Service (--no-allow-unauthenticated)
+  #14 deploy-scraper-heavy         → Cloud Run Service (--no-allow-unauthenticated)
+  #15 deploy-whatsapp-webhook      → Cloud Run Service (--allow-unauthenticated)
+  #16 deploy-email-summary         → Cloud Run Service (--no-allow-unauthenticated)
+  #17 deploy-autonomous-engine     → Cloud Run Job (gcloud run jobs deploy)
+
+Step #18 (sequential — after all deploys):
+  gcloud-job-provision-autonomous-engine  → Creates/updates Cloud Run Job definition
+  gcloud-job-scheduler-autonomous-engine  → Creates/updates Cloud Scheduler job (idempotent)
+```
+
+### 19.2 Idempotent Provisioning Pattern
+
+Cloud Scheduler creation uses `--quiet` and falls back gracefully if the job already exists:
+
+```bash
+gcloud scheduler jobs create http lead-sniper-nightly \
+  --schedule="0 2 * * *" \
+  --uri="$NIGHTLY_URL" \
+  --oidc-service-account-email="$SA_EMAIL" \
+  --location=asia-south1 --quiet || \
+gcloud scheduler jobs update http lead-sniper-nightly \
+  --schedule="0 2 * * *" \
+  --uri="$NIGHTLY_URL" \
+  --oidc-service-account-email="$SA_EMAIL" \
+  --location=asia-south1 --quiet
+```
+
+This pattern prevents Cloud Build failures on subsequent deploys when the scheduler job already exists.
+
+### 19.3 Build Substitutions (All Required)
+
+```yaml
+substitutions:
+  _PROJECT_ID: "sideio-leads-v16"
+  _REGION: "asia-south1"
+  _FIREBASE_PROJECT: "lead-sniper-prod"
+  _PIPELINE_SA_EMAIL: "lead-pipeline-sa@sideio-leads-v16.iam.gserviceaccount.com"
+  _PIPELINE_URL: "https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch"
+  _SCRAPER_URL: "https://scraper-heavy-222247989819.asia-south1.run.app/scrape"
+  _ORCH_URL: "https://orchestrator-222247989819.asia-south1.run.app"
+```
+
+> ⚠️ **Critical:** All bash variable substitutions in shell commands use `$$VAR` (double dollar) to prevent Cloud Build from attempting to substitute them as build substitutions.
+
+### 19.4 Dependency Matrix Fixes (V16)
+
+The following dependency conflicts were resolved during V16 enterprise audit:
+
+| Service | Package | Before | After | Reason |
+|---|---|---|---|---|
+| orchestrator | `httpx` | `==0.26.0` (pinned) | `>=0.26.0` | google-genai requires newer httpx |
+| pipeline-main | `httpx` | `==0.26.0` (pinned) | `>=0.26.0` | pip backtracking resolved |
+| email-summary | `httpx` | `==0.26.0` (pinned) | `>=0.26.0` | pip backtracking resolved |
+| pipeline-main | `google-protobuf` | present | **removed** | Package does not exist; google-api-core handles it |
+| pipeline-main | `google-cloud-firestore` | `>=2.14.0` | `==2.14.0` (pinned) | Prevents grpcio version conflicts |
+
+**Root cause of pip backtracking:** `google-genai` SDK depends on `httpx>=0.28.0`, which conflicted with the old pinned `==0.26.0`. Relaxing to `>=0.26.0` allows pip to resolve both constraints without backtracking.
+
+### 19.5 Firebase CLI UTF-8 BOM Fix
+
+`firestore.rules` and `firestore.indexes.json` were saved with UTF-8 BOM (Byte Order Mark) by Windows editors. The Firebase CLI parser does not handle BOM and threw `token recognition error at: '&#65279;'` (BOM character). Both files were re-saved without BOM using PowerShell `Set-Content -Encoding UTF8` (without BOM).
+
+---
+
+## 20. FORENSIC SECURITY AUDIT (V16 PRE-IGNITION)
+
+*Conducted: 2026-04-08 | Scope: 4 critical nodes*
+
+This audit was conducted before enabling live Serper API traffic (4,000 credits loaded). All 4 nodes passed.
+
+### Node 1: Epsilon-Greedy Router — PASS ✅
+- **Vulnerability A (Empty cache crash):** `_pop_from_predictive_cache` returns `[]` on empty cache. Deficit is reallocated 100% to Cartographer. No crash, no infinite loop.
+- **Vulnerability B (Serper payload overflow):** Cartographer receives `cartographer_target + deficit`, never `batch_size`. Serper payload is capped correctly.
+- **Math verification (batch=10, exploit=0.10):** autonomous_target=1, cartographer_target=9. If cache empty: deficit=1, cartographer_actual=10. Matches expected behavior.
+
+### Node 2: Gemini Token Kill-Switch — PASS ✅
+- `_can_use_gemini()` reads shard aggregates from `usage_metrics/{tenant_id}/shards/*`
+- Resets at midnight IST via timestamp comparison
+- If `total_calls >= DAILY_GEMINI_BUDGET`: returns `False`, all Gemini calls skipped
+- Leads with `score: 0` are rejected by the score gate (>= 7 required) — no garbage written to `leads` collection
+
+### Node 3: Deduplication Ledger — PASS ✅
+- `lead_id = sha256(tenant_id + '_' + root_domain)` — deterministic
+- `doc_ref.create()` raises `AlreadyExists` on duplicate → caught, campaign appended to `matched_campaigns` array, loop continues
+- Cross-tenant: `global_lead_locks` collection provides 14-day exclusivity per domain
+- No lead can appear twice for the same tenant; no lead can be served to two tenants simultaneously
+
+### Node 4: Endpoint Security — PASS ✅
+- All public endpoints: Firebase ID token verified via `firebase_admin.auth.verify_id_token()`
+- Cron endpoints (`/api/internal/cron/*`): Google OIDC token verified via `google.oauth2.id_token.verify_oauth2_token()`
+- Internal service-to-service: OIDC tokens fetched from GCP metadata server with exponential backoff
+- `super_admin` routes: role checked from Firestore `users/{uid}.role` field after token verification
+
+---
+
+## 21. V17 FRONTEND — GOOGLE-LIKE UX REDESIGN
+
+*Added: 2026-04-08 | Commit: e87b265 | Files: public/index.html, public/app.js, public/styles.css*
+
+### 21.1 Design Philosophy
+
+The V17 redesign transitions the Sideio interface from a developer-centric legacy tool to a **perception-first business growth platform**. The design principle follows the Google Search paradigm: replace complex multi-field forms with a single conversational input that hides technical complexity from the business owner.
+
+**Before V17:** 6-field form (Name, Bio, Keywords, Country dropdown, City input, Target URLs)
+**After V17:** One sentence describing who you want to reach → system auto-generates all technical parameters
+
+### 21.2 Navigation Simplification
+
+| Old Label | New Label | Reason |
+|---|---|---|
+| Dashboard | Home | Business-owner language |
+| Targeting | My Searches | Describes what they did, not the tech |
+| (new) | Pipeline CRM | Direct link to the CRM view |
+| Custom Reports | Reports | Simplified |
+| L0 Admin | Admin | Hidden unless super_admin role |
+| My Team | (removed) | Unused, added noise |
+
+### 21.3 "Find New Clients" — 2-Step Conversational Modal
+
+#### Step 1: Single-Sentence Intent Input
+
+The modal opens to a single large textarea styled like a Google Search bar:
+
+```
+Who are your next clients?
+Describe them in plain English. We handle the rest.
+
+[  🔍 Small e-commerce businesses in the UK that are growing fast...  ]
+
+Quick start ↓
+[🏪 Local service businesses that need more customers]
+[💻 SaaS startups actively hiring sales engineers]
+[📦 E-commerce stores running paid ads]
+[🏥 Healthcare clinics expanding into new areas]
+
+[  Find My Clients →  ]
+```
+
+**Template chips:** Clicking a chip fills the textarea — eliminates blank-state anxiety.
+**Enter key:** Submits Step 1 (Shift+Enter inserts newline).
+**Character hint:** Dynamically updates: "A bit more detail helps get better results ↓" → "Good. Add a location for sharper targeting →" → "✓ Ready — click to proceed".
+
+#### Step 2: Smart Confirmation Card
+
+The system parses the sentence and shows what it understood:
+
+```
+✓ Here's what I found
+
+🎯 You want to reach
+   "e-commerce businesses in the UK that are growing fast"  [Edit]
+
+💼 What you offer them
+   Tell me what you sell…                                   [Add ↓]
+   ⚡ This helps us write a personalised pitch for each lead.
+
+📍 Where should I look?
+   [🌍 Worldwide] [🇮🇳 India] [🇺🇸 USA] [🇬🇧 UK] [🇨🇦 Canada] [🇦🇺 Australia]
+                                                          ← auto-selected from Step 1
+   [City or region (optional)]
+
+[🚀 Find My Clients]
+Leads are matched to your description. Quality over quantity, always.
+```
+
+#### Intent Parser (`fcParseIntent`)
+
+Extracts location from the natural language sentence using regex matching:
+
+```javascript
+const locationMap = [
+    { re: /\b(united\s*states|usa)\b/i,    gl: 'us', label: 'United States' },
+    { re: /\b(united\s*kingdom|uk|britain|london)\b/i, gl: 'uk', label: 'United Kingdom' },
+    { re: /\b(canada|toronto|vancouver)\b/i, gl: 'ca', label: 'Canada' },
+    { re: /\b(australia|sydney|melbourne)\b/i, gl: 'au', label: 'Australia' },
+    { re: /\b(india|mumbai|delhi|bangalore|bangalore|hyderabad|pune|chennai|kolkata)\b/i, gl: 'in', label: 'India' },
+];
+// Strips location phrase from "who" summary
+// Auto-selects the correct country chip in Step 2
+```
+
+#### Campaign Name Auto-Generation (`fcBuildCampaignName`)
+
+Campaign name is auto-generated — the user never types a technical name:
+
+```javascript
+function fcBuildCampaignName(who, where) {
+    const base = who.length > 35 ? who.substring(0, 35).trim() + '…' : who;
+    return where ? `${base} · ${where} · ${month} ${year}` : `${base} · ${month} ${year}`;
+    // Example: "e-commerce businesses growing fast · UK · Apr 2026"
+}
+```
+
+#### Smart Validation (Conversational, Not Error Messages)
+
+| Missing field | User sees |
+|---|---|
+| Intent sentence < 5 chars | Textarea border turns red, refocuses, no error modal |
+| Product bio < 15 chars | "⚡ This helps us write a personalised pitch for every lead. Please add a sentence or two." |
+| No location selected | "📍 Please pick a location so I know where to focus." |
+
+No technical error messages. All guidance is framed as the system helping the user get better results.
+
+#### Hidden Fields (Backend Compatibility)
+
+The conversational modal populates the same hidden `<input>` fields that `saveCampaignAction()` already reads, maintaining full backend compatibility:
+
+```html
+<input type="hidden" id="camp-gl" />        <!-- Country code: "uk" -->
+<input type="hidden" id="camp-location" />   <!-- "London, United Kingdom" -->
+<input type="hidden" id="camp-name" />       <!-- Auto-generated name -->
+<input type="hidden" id="camp-bio" />        <!-- What the user sells -->
+<input type="hidden" id="camp-keys" />       <!-- First 120 chars of who-description -->
+<input type="hidden" id="camp-target-urls" /> <!-- Empty (user doesn't see this) -->
+```
+
+#### Auto Geo-Detection
+
+When the modal opens, `ipapi.co/json/` is called to detect the user's country and city. The matching country chip is pre-selected in Step 2 — the user usually doesn't need to pick a location at all.
+
+### 21.4 Dashboard Greeting Bar + KPI Tiles
+
+Replaces the static "Your Latest Hot Leads" header.
+
+```
+Good morning, Sunilkumar.          [+ Find New Clients]
+
+[🔥 1 New leads] [💬 0 Contacted] [🏆 0 Converted]
+```
+
+**Greeting logic:**
+```javascript
+function fcUpdateGreeting(firstName) {
+    const hr = new Date().getHours();
+    const g  = hr < 12 ? 'Good morning' : hr < 17 ? 'Good afternoon' : 'Good evening';
+    el.textContent = firstName ? `${g}, ${firstName}.` : `${g}.`;
+}
+// Called from loadMe() after wallet/user data loads, using auth.currentUser.displayName
+```
+
+**KPI tile data source:**
+```javascript
+function fcUpdateKPIs(leadsArray) {
+    const counts = { new: 0, contacted: 0, converted: 0 };
+    leadsArray.forEach(l => {
+        if (l.status === 'new' || l.status === 'processing') counts.new++;
+        else if (l.status === 'contacted' || l.status === 'replied') counts.contacted++;
+        else if (l.status === 'converted') counts.converted++;
+    });
+    // Updates #kpi-new-count, #kpi-contacted-count, #kpi-won-count
+}
+// Called from Firestore onSnapshot handler on every leads update
+```
+
+### 21.5 Lead Card V2 — Fold Architecture (`createLeadCardV2`)
+
+New lead card design. Default state shows minimal information. Full intelligence requires a single click.
+
+#### Default (Folded) State
+
+```
+[Company Name ↗]                                        [🔥 ⣿⣿⣿⣿⣿⣿⣿⣿░░ 8/10]
+Web Signal · 2h ago
+
+Complaining about high customer acquisition costs on public posts.
+
+[⚡ Predictive] [🔒 Exclusive] [🟢 Hiring] [🎯 Competitor: SalesLoft]
+
+↓ See opening message & full intelligence
+
+[  ✉ Contact This Lead  ] [→ CRM] [···]
+```
+
+#### Expanded State (single click)
+
+```
+YOUR OPENING MESSAGE ────────────────────────────────────────────
+│ Hey [Name], noticed you mentioned on LinkedIn that your CAC has
+│ been climbing this quarter. We've helped 3 similar SaaS companies
+│ cut acquisition cost by 34% using targeted outreach…
+
+WHY THIS LEAD ───────────────────────────────────────────────────
+Active hiring for a Head of Growth. This means they recognize the
+need to scale acquisition — prime timing for an outreach tool pitch.
+
+LIKELY OBJECTION ────────────────────────────────────────────────
+⚠️ They use HubSpot internally — may feel they have enough tooling.
+
+CONTACT INFO ───────────────────────────────────────────────────
+✉ hr@techcorp.com  📞 +1-312-555-0199
+```
+
+#### Action Row Consolidation
+
+| Before V17 | After V17 | Change |
+|---|---|---|
+| 📋 Copy Message | ✉ Contact This Lead | Primary action |
+| ☁️ Push to CRM | → CRM | Secondary action |
+| 🚫 Ignore | ··· → Skip This Lead | In overflow menu |
+| 🎯 Converted | ··· → Mark Converted | In overflow menu |
+| 🕒 View Timeline Logs | ··· → View Timeline | In overflow menu |
+
+**From 5 visible buttons → 2 primary buttons + 1 overflow menu (···)**
+
+#### Score Visualization
+
+| Before V17 | After V17 |
+|---|---|
+| `Score: 8/10` (text badge) | 🔥 gradient heat bar + emoji |
+| Green badge color | `linear-gradient(90deg, #f97316, #ef4444)` fill |
+| — | Emoji: 🔥 (9-10), ⚡ (7-8), 👍 (5-6), 📋 (<5) |
+
+#### Source Labels (Human-Readable)
+
+| Internal value | Displayed as |
+|---|---|
+| `origin_engine: "autonomous"` | `AI Match` |
+| `origin_engine: "cartographer"` | `Web Signal` |
+| Timestamp | Relative: `2h ago`, `Found yesterday` |
+
+### 21.6 Virtual Observer — V17 Update
+
+The IntersectionObserver was updated to use `createLeadCardV2` (DOM element replacement) instead of `generateLeadInnerHtml` (innerHTML string injection):
+
+```javascript
+// Before V17 (innerHTML injection):
+entry.target.innerHTML = generateLeadInnerHtml(leadId, lead);
+entry.target.setAttribute('data-rendered', 'true');
+
+// After V17 (element replacement):
+const newCard = window.createLeadCardV2(leadId, lead);
+entry.target.replaceWith(newCard);           // replaceWith preserves scroll position
+virtualObserver.unobserve(entry.target);
+virtualObserver.observe(newCard);
+newCard.setAttribute('data-rendered', 'true');
+```
+
+**Why `replaceWith()` instead of `innerHTML`:** The V2 card contains event handlers bound in JavaScript (overflow menus, expand toggles). innerHTML injection loses event handler scope context. DOM element replacement preserves the full element tree including event closures.
+
+### 21.7 CSS Design System Additions (V17)
+
+All new styles are additive — appended to `styles.css` without removing existing classes.
+
+| CSS Class Group | Purpose |
+|---|---|
+| `.fc-overlay`, `.fc-modal` | Conversational modal container + animation |
+| `.fc-intent-input`, `.fc-input-wrap` | Google-like single search input |
+| `.fc-chip`, `.fc-chips` | Quick-start template buttons |
+| `.fc-loc-chip`, `.fc-location-chips` | Flag-based location selector |
+| `.fc-confirm-block`, `.fc-block-*` | Step 2 confirmation card rows |
+| `.fc-validation-bar` | Non-modal validation message bar |
+| `.greeting-bar`, `.find-clients-hero-btn` | Dashboard greeting + hero CTA |
+| `.kpi-tiles`, `.kpi-tile`, `.kpi-*` | 3-tile KPI row |
+| `.lead-card-v2`, `.lc-*` | New folded lead card system |
+| `.lc-heat-bar`, `.lc-heat-fill` | Score gradient heat bar |
+| `.lc-expanded`, `.lc-expanded.open` | Fold/expand animation |
+| `.lc-overflow-menu`, `.lc-overflow-item` | ··· action overflow popup |
+
+### 21.8 New JavaScript Utilities (V17)
+
+| Function | Purpose |
+|---|---|
+| `fcParseIntent(sentence)` | Extracts who/where from natural language |
+| `fcBuildCampaignName(who, where)` | Auto-generates campaign name with date stamp |
+| `fcTimeAgo(timestamp)` | Formats Firestore timestamps as "2h ago" |
+| `fcUpdateGreeting(firstName)` | Sets time-aware greeting (Good morning/afternoon/evening) |
+| `fcUpdateKPIs(leadsArray)` | Computes and renders KPI tile counts |
+| `fcStep1Next()` | Validates Step 1, parses intent, transitions to Step 2 |
+| `fcGoBack()` | Transitions Step 2 → Step 1 |
+| `fcToggleEdit(field)` | Inline edit toggle for who/what blocks |
+| `fcSelectLocation(btn)` | Location chip selection handler |
+| `fcLaunch()` | Final validation → populates hidden fields → calls saveCampaignAction() |
+| `fcFillTemplate(btn)` | Fills textarea from quick-start chip |
+| `fcUpdateCharHint(el)` | Character count hint updater |
+| `closeNewCampaignModal()` | Closes modal + resets all step state |
+| `createLeadCardV2(docId, lead)` | Builds full folded lead card DOM element |
+| `lcToggleExpand(docId)` | Expand/collapse intelligence section |
+| `lcToggleMore(docId)` | Open/close ··· overflow menu |
+| `getScoreEmoji(score)` | Returns heat emoji for score (🔥 ⚡ 👍 📋) |
+
+### 21.9 Updated UI Element IDs
+
+New DOM IDs introduced in V17 (required for JS bindings):
+
+| ID | Location | Purpose |
+|---|---|---|
+| `greeting-message` | Dashboard heading | Greeting text target |
+| `greeting-sub` | Dashboard subheading | Subtitle text target |
+| `kpi-new-count` | KPI tile | New leads count |
+| `kpi-contacted-count` | KPI tile | Contacted count |
+| `kpi-won-count` | KPI tile | Converted count |
+| `fc-step-1` | Modal | Step 1 container |
+| `fc-step-2` | Modal | Step 2 container |
+| `fc-intent` | Modal Step 1 | Intent textarea |
+| `fc-char-hint` | Modal Step 1 | Character hint text |
+| `fc-confirm-who` | Modal Step 2 | Parsed "who" display |
+| `fc-confirm-what` | Modal Step 2 | Product bio display |
+| `fc-edit-who` | Modal Step 2 | Editable who field |
+| `fc-edit-what` | Modal Step 2 | Editable bio textarea |
+| `fc-edit-where-city` | Modal Step 2 | City input |
+| `fc-what-required` | Modal Step 2 | Bio validation hint |
+| `fc-where-required` | Modal Step 2 | Location validation hint |
+| `fc-validation-bar` | Modal Step 2 | Error message bar |
+| `fc-what-btn` | Modal Step 2 | Add/Save bio button |
+| `fc-block-where` | Modal Step 2 | Location block container |
+| `nav-credit-pill` | Navigation | Credits display container |
+
+---
+
+## 22. KEY DESIGN INVARIANTS (UPDATED — V17)
+
+These are added to the existing invariants in Section 16.
+
+8. **Campaign name is never user-typed:** `fcBuildCampaignName()` auto-generates it from the parsed intent + location + date. Users should never see a "Campaign Name" input field.
+
+9. **The conversational modal owns the hidden fields:** `camp-gl`, `camp-location`, `camp-name`, `camp-bio`, `camp-keys` are all `<input type="hidden">` populated by `fcLaunch()`. `saveCampaignAction()` reads them as before — no change to backend call sequence.
+
+10. **Lead card V2 is additive:** `createLeadCard()` (V14 renderer) is retained in the codebase. `createLeadCardV2()` is the active renderer. The VirtualObserver calls `createLeadCardV2` exclusively. Do not delete `createLeadCard` — it may be referenced by legacy flows.
+
+11. **Serper credits are guarded conversationally:** Validation in Step 2 ensures `camp-bio` (what you sell) and location are always present before `saveCampaignAction()` fires. This prevents sending empty/low-quality parameters to Serper that would waste API credits.
+
+12. **Autonomous engine is a Cloud Run Job, not a Service:** It has no HTTP endpoint. It is triggered exclusively via Cloud Scheduler using the `gcloud run jobs execute` API flow. Never configure it as a Service with HTTP traffic.
+
+13. **predictive_cache TTL:** TTL policy must be enabled manually in GCP Console. Cloud Build cannot enable it programmatically. The TTL field is `expire_at`. After initial deployment, an operator must enable TTL in: GCP Console → Firestore → Indexes → TTL → add for collection `predictive_cache`, field `expire_at`.
+
+14. **DISCOVERY_ALLOCATION controls the Epsilon-Greedy split:** Default 0.15 (15% from cache, 85% from Serper). Raise this as the autonomous engine cache fills up. Lower it during early operation when cache is sparse.
 
