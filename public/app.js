@@ -302,6 +302,148 @@ function initAnalyticsChart(newC, contactedC, convertedC) {
     });
 }
 
+
+// =============================================================================
+// FIRESTORE LIVE FEED
+// =============================================================================
+
+let unsubscribeLeads = null;
+
+async function loadLeads() {
+    leadsList.innerHTML = '<div class="lead-card pulse">Connecting to Secure Orchestrator...</div>';
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) return handleAuthRejection();
+        if (unsubscribeLeads) { unsubscribeLeads(); }
+        unsubscribeLeads = firebase.firestore()
+            .collection('leads')
+            .where('tenant_id', '==', user.uid)
+            .where('is_in_crm', '==', false)
+            .onSnapshot((snapshot) => {
+                rawLeadsCache = [];
+                snapshot.forEach(doc => {
+                    let data = doc.data();
+                    data.id = doc.id;
+                    rawLeadsCache.push(data);
+                });
+                if (rawLeadsCache.length === 0) { renderLeads(); initAnalyticsChart(0,0,0); return; }
+                rawLeadsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
+                let cNew = 0, cContact = 0, cConvert = 0;
+                let cDiscovered = rawLeadsCache.length, cActionable = 0, cIgnored = 0;
+                rawLeadsCache.forEach(l => {
+                    if (l.status === 'ignored') { cIgnored++; return; }
+                    if (l.status === 'new' || !l.status) cActionable++;
+                    if (l.status === 'contacted') { cContact++; }
+                    else if (l.status === 'converted') { cConvert++; }
+                    else { cNew++; }
+                });
+                const elDisc = document.getElementById('stat-discovered');
+                const elAct  = document.getElementById('stat-actionable');
+                const elIgn  = document.getElementById('stat-ignored');
+                if (elDisc) elDisc.innerText = cDiscovered;
+                if (elAct)  elAct.innerText  = cActionable;
+                if (elIgn)  elIgn.innerText  = cIgnored;
+                initAnalyticsChart(cNew, cContact, cConvert);
+                fcUpdateKPIs(rawLeadsCache);
+                renderLeads();
+            }, (error) => {
+                console.error('[Firestore] onSnapshot error:', error);
+                if (error.code === 'failed-precondition') {
+                    showToast('Feed index missing — see console for index link.', 'error');
+                    leadsList.innerHTML = '<div class="lead-card" style="color:#f59e0b;border-color:#f59e0b;padding:16px;">⚠ Firestore composite index required.<br><small>Open the browser console for the GCP link.</small></div>';
+                    return;
+                }
+                if (error.code === 'permission-denied') { console.warn('[Firestore] Permission denied.'); return; }
+                showToast('Live feed error — refresh to reconnect.', 'error');
+            });
+    } catch (error) {
+        console.error('Firestore Initialization Error:', error);
+        leadsList.innerHTML = '<div class="lead-card" style="color:#ef4444;border-color:#ef4444;">Could not connect to database. Check your network.</div>';
+        showToast('Connection Refused', 'error');
+    }
+}
+
+// =============================================================================
+// VIRTUAL SCROLL OBSERVER
+// =============================================================================
+
+let virtualObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+        if (entry.isIntersecting && !entry.target.hasAttribute('data-rendered')) {
+            const leadId = entry.target.getAttribute('data-lead-id');
+            const lead = rawLeadsCache.find(l => (l.id || l.doc_id) === leadId);
+            if (lead) {
+                const newCard = window.createLeadCardV2(leadId, lead);
+                entry.target.replaceWith(newCard);
+                virtualObserver.observe(newCard);
+                newCard.setAttribute('data-rendered', 'true');
+            }
+        }
+    });
+}, { rootMargin: '600px' });
+
+function renderLeads() {
+    const filteredLeads = rawLeadsCache.filter(lead => {
+        if (!['new', 'contacted', 'converted'].includes(lead.status || 'new')) return false;
+        if (currentCampaignFilter !== 'all') {
+            const matched = Array.isArray(lead.matched_campaigns)
+                ? lead.matched_campaigns.includes(currentCampaignFilter)
+                : lead.campaign_id === currentCampaignFilter;
+            if (!matched) return false;
+        }
+        return true;
+    });
+    if (filteredLeads.length === 0) {
+        leadsList.innerHTML = '<div class="lead-card" style="text-align:center;padding:40px;border:none;background:transparent;box-shadow:none;"><div style="font-size:3rem;margin-bottom:12px;opacity:0.8;">🎯</div><h3 style="color:var(--text-main);margin-bottom:8px;">Hunting for leads...</h3><p style="color:var(--text-muted);font-size:0.95rem;line-height:1.5;">We are actively scanning the web. Check back in a few minutes.</p></div>';
+        return;
+    }
+    leadsList.innerHTML = '';
+    virtualObserver.disconnect();
+    filteredLeads.forEach(lead => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'lead-card';
+        wrapper.style.minHeight = '180px';
+        wrapper.id = lead.id || lead.doc_id;
+        wrapper.setAttribute('data-lead-id', lead.id || lead.doc_id);
+        leadsList.appendChild(wrapper);
+        virtualObserver.observe(wrapper);
+    });
+}
+
+// =============================================================================
+// TOAST UI ENGINE
+// =============================================================================
+
+window.showToast = function(message, type = 'info') {
+    const container = document.getElementById('toast-container');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(() => toast.classList.add('show'), 10);
+    setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 300); }, 3500);
+};
+
+// Timeline Audit Modal
+window.viewLeadTimeline = function(eventsJson) {
+    try {
+        const events = JSON.parse(decodeURIComponent(eventsJson)) || [];
+        const feed = document.getElementById('audit-timeline-feed');
+        if (!feed) return;
+        if (events.length === 0) {
+            feed.innerHTML = '<p style="color:var(--text-muted);text-align:center;">No CRM interactions recorded yet.</p>';
+        } else {
+            feed.innerHTML = events.map(e => `
+                <div style="padding:12px;border-left:3px solid var(--primary);margin-bottom:12px;background:white;border-radius:0 4px 4px 0;box-shadow:0 1px 2px rgba(0,0,0,0.05);">
+                    <small style="color:var(--text-muted);display:block;margin-bottom:4px;">${e.date}</small>
+                    <strong style="color:var(--text-main);font-size:0.95rem;">${e.action}</strong>
+                </div>`).join('');
+        }
+        document.getElementById('audit-log-modal')?.classList.remove('hidden');
+    } catch(e) { console.error('Timeline error', e); }
+};
+
 // SPA Router — V18: syncs both top cmd-bar (desktop) and bottom dock (mobile)
 window.switchTab = function(tabName) {
     document.querySelectorAll('.main-feed').forEach(el => el.classList.add('hidden'));
