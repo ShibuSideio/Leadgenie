@@ -391,20 +391,19 @@ steps:
     set -eo pipefail
     echo "[JOB] Deploying shadow-learner-aggregator Cloud Run Job: $COMMIT_SHA"
 
-    # Resolve which SA to use. shadow-learner-sa requires actAs IAM binding.
-    # If that SA doesn't exist yet, fall back to lead-pipeline-sa so the build
-    # succeeds. Run the one-time fix command documented in the readme to promote.
-    SHADOW_SA="shadow-learner-sa@$PROJECT_ID.iam.gserviceaccount.com"
-    FALLBACK_SA="lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com"
-
-    if gcloud iam service-accounts describe "$$SHADOW_SA" \
-        --project=$PROJECT_ID --quiet 2>/dev/null; then
-      JOB_SA="$$SHADOW_SA"
-      echo "[JOB] Using shadow-learner-sa"
-    else
-      JOB_SA="$$FALLBACK_SA"
-      echo "[JOB] shadow-learner-sa not found — falling back to lead-pipeline-sa"
-    fi
+    # Uses lead-pipeline-sa as the Cloud Run Job identity.
+    # To switch to shadow-learner-sa (BQ DataEditor + Firestore access), first
+    # grant the one-time IAM binding in YOUR OWN terminal (requires iam.admin):
+    #
+    #   gcloud iam service-accounts add-iam-policy-binding \
+    #     shadow-learner-sa@lead-sniper-prod.iam.gserviceaccount.com \
+    #     --member="serviceAccount:222247989819-compute@developer.gserviceaccount.com" \
+    #     --role="roles/iam.serviceAccountUser" \
+    #     --project=lead-sniper-prod
+    #
+    # After granting, replace "lead-pipeline-sa" below with "shadow-learner-sa".
+    JOB_SA="lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com"
+    echo "[JOB] Using service account: $$JOB_SA"
 
     if gcloud run jobs describe shadow-learner-aggregator \
         --region=asia-south1 \
@@ -418,7 +417,7 @@ steps:
         --cpu=1 \
         --task-timeout=3600s \
         --max-retries=1 \
-        --service-account=shadow-learner-sa@$PROJECT_ID.iam.gserviceaccount.com \
+        --service-account="$$JOB_SA" \
         --set-env-vars="PROJECT_ID=$PROJECT_ID,BQ_DATASET=swarm_analytics,BQ_TABLE=rlhf_events,WINDOW_HOURS=12" \
         --quiet
     else
@@ -430,7 +429,7 @@ steps:
         --cpu=1 \
         --task-timeout=3600s \
         --max-retries=1 \
-        --service-account=shadow-learner-sa@$PROJECT_ID.iam.gserviceaccount.com \
+        --service-account="$$JOB_SA" \
         --set-env-vars="PROJECT_ID=$PROJECT_ID,BQ_DATASET=swarm_analytics,BQ_TABLE=rlhf_events,WINDOW_HOURS=12" \
         --quiet
     fi
