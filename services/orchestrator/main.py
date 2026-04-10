@@ -803,6 +803,24 @@ def trigger_daily_sweep(path):
                 is_valid, status_code, err_msg = check_quota(tenant_id)
                 if not is_valid:
                     return jsonify({"error": err_msg}), status_code
+                    
+                # Schema Map: Location -> GL Logic
+                loc_raw = (data.get('location') or '').strip().lower()
+                gl_map = {
+                    "usa": "us", "united states": "us", "uk": "uk", 
+                    "united kingdom": "uk", "canada": "ca", "australia": "au",
+                    "germany": "de", "singapore": "sg", "uae": "ae", 
+                    "dubai": "ae", "india": "in"
+                }
+                
+                # If explicit match, set GL. If not, Serper defaults to 'us' but 
+                # loc_raw remains in 'location' string to be appended to Vertex Search Context.
+                if loc_raw in gl_map:
+                    data['gl'] = gl_map[loc_raw]
+                elif loc_raw == "worldwide" or not loc_raw:
+                    data['gl'] = "us" # default fallback
+                else:
+                    data['gl'] = "us" # custom cities fallback to US GL, append loc string elsewhere
 
                 # Hard limit N active product/service campaigns per tenant
                 active_campaigns_count = len(list(db.collection("campaigns")

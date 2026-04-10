@@ -2222,6 +2222,9 @@ window.openChildCampaignModal = async function() {
                         
                         <label style="font-size:0.8rem; color:var(--text-muted); display: block;">Unfair Advantage</label>
                         <textarea id="c-adv-${idx}" class="fc-intent-input" style="min-height:60px; padding:8px; margin-bottom:12px; width: 100%; border: 1px solid #d1d5db; border-radius: 8px;">${(camp.unfair_advantage || '')}</textarea>
+
+                        <label style="font-size:0.8rem; color:var(--text-muted); display: block;">Target Location</label>
+                        <input type="text" id="c-loc-${idx}" class="fc-intent-input" style="height:36px; padding:8px; margin-bottom:12px; width: 100%; border: 1px solid #d1d5db; border-radius: 8px;" placeholder="e.g. London, UK, Worldwide" value="${window._dtState?.extractedGl || ''}">
                         
                         <button class="primary-btn" style="width:100%; font-size:0.9rem; padding:8px; background:#10b981; border:none; border-radius: 20px; color:white; font-weight: 600; cursor: pointer;" onclick="window.deployPredictiveCard(${idx}, '${bProd}', '${bHook}', '${bAdv}')">Deploy Campaign</button>
                     </div>
@@ -2245,7 +2248,13 @@ window.deployPredictiveCard = function(idx, origProd, origHook, origAdv) {
     const prod = (document.getElementById('c-prod-' + idx)?.value || '').trim();
     const hook = (document.getElementById('c-hook-' + idx)?.value || '').trim();
     const adv  = (document.getElementById('c-adv-' + idx)?.value || '').trim();
+    const loc  = (document.getElementById('c-loc-' + idx)?.value || '').trim();
     
+    if (!loc && loc.toLowerCase() !== 'worldwide') {
+        showToast('Target Location is required.', 'error');
+        return;
+    }
+
     // basic diff via btoa
     const wasEdited = (btoa(prod.replace(/['"]/g, '')) !== origProd) || 
                       (btoa(hook.replace(/['"]/g, '')) !== origHook) || 
@@ -2256,9 +2265,12 @@ window.deployPredictiveCard = function(idx, origProd, origHook, origAdv) {
     saveCampaignAction({
         name: prod,
         bio: 'CHILD_CAMPAIGN_OVERRIDE',
-        keywords: (hook + ' | ' + adv).substring(0, 150),
+        keywords: '',
+        campaign_focus: prod,
+        pain_point: hook,
+        unfair_advantage: adv,
         gl: '',
-        location: '',
+        location: loc, // Captured here
         target_urls: [],
         human_edited: wasEdited,
         target_angle_hook: hook,
@@ -2275,12 +2287,19 @@ window.showCcCustomFallback = function() {
 
 window.saveChildCampaign = function() {
     const focusEl = document.getElementById('cc-focus');
+    const locEl = document.getElementById('cc-location');
     const painEl = document.getElementById('cc-pain');
     const advEl = document.getElementById('cc-advantage');
     
     const focus = focusEl?.value.trim() || 'Custom Campaign';
+    const loc = locEl?.value.trim() || '';
     const pain = painEl?.value.trim() || '';
     const adv = advEl?.value.trim() || '';
+
+    if (!loc && loc.toLowerCase() !== 'worldwide') {
+        showToast('Target Geography is required.', 'error');
+        return;
+    }
 
     document.getElementById('child-campaign-modal')?.classList.add('hidden');
 
@@ -2293,7 +2312,7 @@ window.saveChildCampaign = function() {
         pain_point: pain,
         unfair_advantage: adv,
         gl: '',
-        location: '',
+        location: loc,
         target_urls: []
     });
 };
