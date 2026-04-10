@@ -352,7 +352,7 @@ def sanitize_document(doc):
     """
     Statically unpacks and sanitizes Firestore Documents dynamically serializing Timestamps securely.
     """
-    data = doc.to_dict()
+    data = doc.to_dict() or {}
     data['id'] = doc.id
     
     # Process Timestamps explicitly bypassing Flask JSONEncoder errors natively.
@@ -570,6 +570,9 @@ def trigger_daily_sweep(path):
     # -----------------------------------------------------------------------------------------
     # REST API Gateway Protocol (Frontend Database Reading)
     # -----------------------------------------------------------------------------------------
+    if request.method == 'OPTIONS':
+        return '', 204
+
     if request.path in ["/api/campaigns", "/api/leads", "/api/tenant_profiles"] and request.method == "GET":
         try:
             uid, tenant_id, user_role = authenticate_request(request)

@@ -94,6 +94,10 @@ async function fetchTenantProfile() {
             headers: { 'Authorization': `Bearer ${token}` } 
         });
         if (response.ok) {
+        if (!response.ok) {
+            console.error('Backend Error (fetchTenantProfile):', await response.text());
+            return null;
+        }
             const data = await response.json();
             if (data && data.data && data.data.length > 0) return data.data[0];
         }
@@ -160,6 +164,10 @@ async function loadMe() {
             } 
         });
         if (response.ok) {
+        if (!response.ok) {
+            console.error('Backend Error (loadMe):', await response.text());
+            return;
+        }
             const payload = await response.json();
             const data = payload.data || {};
             
@@ -270,6 +278,11 @@ async function loadCampaigns() {
             return handleAuthRejection();
         }
         
+        if (!response.ok) {
+            console.error('Backend Error (loadCampaigns):', await response.text());
+            if (tableBody) tableBody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load campaigns.</td></tr>';
+            return;
+        }
         const payload = await response.json();
         const campaigns = payload.data || [];
         
