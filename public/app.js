@@ -124,9 +124,17 @@ async function initializeDashboardState() {
 }
 
 function renderZeroState() {
-    const h = document.getElementById('btn-new-twin-hero'); if(h) h.style.display = 'block';
+    const h = document.getElementById('btn-new-twin-hero'); 
+    if(h) {
+        h.style.display = 'block';
+        h.onclick = () => window.openNewCampaignModal();
+    }
     const ah = document.getElementById('btn-add-campaign-hero'); if(ah) ah.style.display = 'none';
-    const m = document.getElementById('btn-new-twin-matrix'); if(m) m.style.display = 'block';
+    const m = document.getElementById('btn-new-twin-matrix'); 
+    if(m) {
+        m.style.display = 'block';
+        m.onclick = () => window.openNewCampaignModal();
+    }
     const am = document.getElementById('btn-add-campaign-matrix'); if(am) am.style.display = 'none';
 }
 
@@ -1928,7 +1936,11 @@ window.openDTModal = function() {
     document.getElementById('dt-view-c')?.classList.add('hidden');
     const urlInput = document.getElementById('dt-url-input');
     if (urlInput) urlInput.value = '';
-    document.getElementById('dt-onboarding-modal')?.classList.remove('hidden');
+    const modal = document.getElementById('dt-onboarding-modal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        modal.style.display = 'block';
+    }
     setTimeout(() => document.getElementById('dt-url-input')?.focus(), 100);
 };
 
