@@ -33,6 +33,13 @@
         }
       },
       {
+        "source": "/api/**",
+        "run": {
+          "serviceId": "orchestrator",
+          "region": "asia-south1"
+        }
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }

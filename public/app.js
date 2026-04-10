@@ -13,7 +13,7 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 
-const API_BASE = "https://orchestrator-222247989819.asia-south1.run.app";
+const API_BASE = "";
 
 // Digital Twin Engine — Reverse Proxy via Firebase
 const DT_ENGINE_URL = "";
