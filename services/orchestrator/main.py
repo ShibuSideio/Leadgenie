@@ -762,7 +762,7 @@ def trigger_daily_sweep(path):
                 db.collection("tenant_profiles").document(tenant_id).set(data, merge=True)
                 return jsonify({"status": "success", "id": tenant_id}), 201
 
-                        elif request.path == "/api/tenant_profiles/extract-kb" and request.method == "POST":
+            elif request.path == "/api/tenant_profiles/extract-kb" and request.method == "POST":
                 filepath = data.get("filepath")
                 if not filepath:
                     return jsonify({"error": "Missing filepath"}), 400
@@ -779,7 +779,7 @@ def trigger_daily_sweep(path):
                     extracted_text = ""
                     if filepath.lower().endswith('.pdf'):
                         pdf = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-                        extracted_text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
+                        extracted_text = "\\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
                     elif filepath.lower().endswith('.txt'):
                         extracted_text = file_bytes.decode('utf-8', errors='ignore')
                     else:
