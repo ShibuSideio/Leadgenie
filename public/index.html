@@ -16,7 +16,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=34">
+    <link rel="stylesheet" href="styles.css?v=35">
 </head>
 <body>
 
@@ -372,17 +372,20 @@
             <button class="fc-close-btn" onclick="document.getElementById('child-campaign-modal').classList.add('hidden')">&#10005;</button>
             <div style="text-align: center; padding: 20px 0;">
                 <div class="fc-logo-mark" style="color: var(--primary); font-size: 2.5rem; margin-bottom: 12px;">&#10022;</div>
-                <h2 class="fc-headline" style="font-size: 2rem; font-weight: 700; margin-bottom: 12px; color: #111827;">New Campaign</h2>
-                <p class="fc-sub" style="font-size: 1.1rem; color: #4b5563; margin-bottom: 32px;">Master Twin is active. What is the specific product, service, or angle for this campaign?</p>
+                <h2 class="fc-headline" style="font-size: 1.8rem; font-weight: 700; margin-bottom: 8px; color: #111827;">Market Opportunities Detected</h2>
+                <p class="fc-sub" style="font-size: 1rem; color: #4b5563; margin-bottom: 24px;">Based on your website and current B2B trends, here is what you should launch first.</p>
                 <div class="fc-input-wrap" style="text-align: left; margin-bottom: 24px;">
-                    <label class="fc-label">Campaign Name</label>
-                    <input type="text" id="cc-name" class="fc-intent-input" placeholder="e.g. SEO Audit Push" />
+                <div id="cc-recommendation-cards" style="text-align: left; margin-bottom: 24px;"></div>
+                <div id="cc-custom-fallback-container" class="hidden">
+                    <div class="fc-input-wrap" style="text-align: left; margin-bottom: 24px;">
+                        <label class="fc-label">Custom Campaign Name</label>
+                        <input type="text" id="cc-name" class="fc-intent-input" placeholder="e.g. SEO Audit Push" />
+                    </div>
+                    <button class="primary-btn full-width" onclick="window.saveChildCampaign()">Launch Campaign</button>
                 </div>
-                <div class="fc-input-wrap" style="text-align: left; margin-bottom: 24px;">
-                    <label class="fc-label">Target Angle & Description</label>
-                    <textarea id="cc-desc" class="fc-intent-input" style="min-height: 100px;" placeholder="Describe what you are offering and who specifically should receive this..."></textarea>
+                <div style="margin-top: 16px;">
+                    <a href="#" onclick="window.showCcCustomFallback(); return false;" style="font-size: 0.9rem; color: var(--primary); text-decoration: underline;">I want to launch a custom product instead.</a>
                 </div>
-                <button class="primary-btn full-width" onclick="window.saveChildCampaign()">Launch Campaign</button>
             </div>
         </div>
     </div>
@@ -433,8 +436,8 @@
 
             <!-- VIEW C: Confirmation -->
             <div id="dt-view-c" class="hidden">
-                <div class="fc-understood-badge" style="display:inline-block; margin-bottom: 16px;">&#10022; Digital Twin Created</div>
-                <p class="fc-sub" style="margin-bottom: 24px;">Confirm your AI-generated persona before we start sourcing.</p>
+                <div class="fc-understood-badge" style="display:inline-block; margin-bottom: 16px;">&#10022; Profile Context Parsed</div>
+                <p class="fc-sub" style="margin-bottom: 24px;">Here is what I gathered about your business. Does this look accurate?</p>
                 
                 <div style="background: rgba(255,255,255,0.4); border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
                     <div style="font-size: 0.85rem; color: var(--primary); font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Company Bio</div>
@@ -463,7 +466,7 @@
                 <input type="hidden" id="dt-extracted-gl">
                 
                 <button class="primary-btn" style="width: 100%; height: 54px; font-size: 1.1rem; margin-top: 8px;" onclick="window.dtPrefillAndLaunch()">
-                    &#128640; Launch Campaign
+                    Save Profile
                 </button>
             </div>
 
@@ -595,7 +598,7 @@
             });
         }
     </script>
-    <script src="app.js?v=39"></script>
+    <script src="app.js?v=40"></script>
 </body>
 </html>
 
