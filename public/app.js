@@ -1972,7 +1972,11 @@ window.dtStartAnalysis = async function() {
 
         const apiCall = fetch(`${DT_ENGINE_URL}/api/analyze-website`, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            headers: { 
+                'Authorization': `Bearer ${token}`, 
+                'X-Forwarded-Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json' 
+            },
             body: JSON.stringify({ url })
         });
 
