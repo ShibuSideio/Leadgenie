@@ -104,7 +104,7 @@ def _verify_firebase_token(req) -> str | None:
     Returns the uid string if the token is valid, else None.
     Tolerates clock drift up to 5 min (Firebase default).
     """
-    auth_header = req.headers.get("Authorization") or req.headers.get("X-Forwarded-Authorization", "")
+    auth_header = req.headers.get("Authorization") or req.headers.get("X-Firebase-Auth", "")
     if not auth_header.startswith("Bearer "):
         return None
     token = auth_header[len("Bearer "):]

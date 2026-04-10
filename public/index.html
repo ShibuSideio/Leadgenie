@@ -365,93 +365,6 @@
     </div>
 
     <!-- ================================================================
-         DIGITAL TWIN ONBOARDING MODAL (3 Views)
-    ================================================================ -->
-    <div id="dt-onboarding-modal" class="hidden fc-overlay dt-overlay">
-        <div class="dt-modal glass-panel">
-            <button class="fc-close-btn" onclick="closeDTModal()">&#10005;</button>
-
-            <!-- â”€â”€ View A: URL Input â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-            <div id="dt-view-a">
-                <div class="fc-logo-mark">&#10022;</div>
-                <h2 class="fc-headline">Analyze Your Website</h2>
-                <p class="fc-sub">Enter your website URL. Our AI reads your Company DNA and builds precise target client personas in seconds.</p>
-                <div class="dt-url-wrap">
-                    <input type="url" id="dt-url-input" class="dt-url-input"
-                        placeholder="https://yourcompany.com"
-                        onkeydown="if(event.key==='Enter') dtStartAnalysis();" />
-                    <button class="dt-analyze-btn" onclick="dtStartAnalysis()">Analyze &#8594;</button>
-                </div>
-                <p class="dt-skip-row">
-                    or <button class="dt-skip-link" onclick="window.dtFallbackToNaturalLanguage()">describe your targets manually instead</button>
-                </p>
-            </div>
-
-            <!-- â”€â”€ View B: AI Analysis Animation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-            <div id="dt-view-b" class="hidden dt-view-b-content">
-                <div class="ai-thinking-ring">
-                    <div class="ai-three-dots">
-                        <span></span><span></span><span></span>
-                    </div>
-                </div>
-                <div class="dt-status-text" id="dt-status-text">Reading site...</div>
-                <div class="dt-progress-track">
-                    <div class="dt-progress-fill" id="dt-progress-fill" style="width:0%"></div>
-                </div>
-                <p class="dt-skip-row" style="margin-top:24px;">
-                    <button class="dt-skip-link" onclick="closeDTModal()">Cancel</button>
-                </p>
-            </div>
-
-            <!-- â”€â”€ View C: Persona Cards â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-            <div id="dt-view-c" class="hidden">
-                <div class="fc-understood-badge">&#10003; Analysis Complete</div>
-                <p class="fc-sub" style="margin-bottom:20px;">Review the extracted personas. Edit any field, then launch to confirm.</p>
-                <div class="dt-personas-grid">
-                    <!-- Company Persona -->
-                    <div class="dt-persona-card dt-company-card">
-                        <div class="dt-persona-type">Your Company</div>
-                        <div class="dt-persona-name" id="dt-company-name">&#8212;</div>
-                        <div class="dt-persona-desc" id="dt-company-desc">&#8212;</div>
-                        <div class="dt-persona-value" id="dt-company-value"></div>
-                        <button class="dt-persona-edit-btn" onclick="dtEditPersona('company')">Edit</button>
-                    </div>
-                    <!-- Target Persona 1 -->
-                    <div class="dt-persona-card">
-                        <div class="dt-persona-type">Target Persona 1</div>
-                        <div class="dt-persona-name" id="dt-target-1-name">&#8212;</div>
-                        <div class="dt-persona-desc" id="dt-target-1-desc">&#8212;</div>
-                        <button class="dt-persona-edit-btn" onclick="dtEditPersona('target-1')">Edit</button>
-                    </div>
-                    <!-- Target Persona 2 -->
-                    <div class="dt-persona-card">
-                        <div class="dt-persona-type">Target Persona 2</div>
-                        <div class="dt-persona-name" id="dt-target-2-name">&#8212;</div>
-                        <div class="dt-persona-desc" id="dt-target-2-desc">&#8212;</div>
-                        <button class="dt-persona-edit-btn" onclick="dtEditPersona('target-2')">Edit</button>
-                    </div>
-                    <!-- Target Persona 3 -->
-                    <div class="dt-persona-card">
-                        <div class="dt-persona-type">Target Persona 3</div>
-                        <div class="dt-persona-name" id="dt-target-3-name">&#8212;</div>
-                        <div class="dt-persona-desc" id="dt-target-3-desc">&#8212;</div>
-                        <button class="dt-persona-edit-btn" onclick="dtEditPersona('target-3')">Edit</button>
-                    </div>
-                </div>
-                <!-- Hidden store for extracted data -->
-                <input type="hidden" id="dt-extracted-bio" />
-                <input type="hidden" id="dt-extracted-who" />
-                <input type="hidden" id="dt-extracted-gl" />
-                <button class="fc-next-btn dt-launch-btn" onclick="dtPrefillAndLaunch()">
-                    Launch Campaign &#8594;
-                </button>
-                <p class="fc-disclaimer">This opens a final confirmation step. Nothing is launched until you confirm.</p>
-            </div>
-
-        </div>
-    </div>
-
-    <!-- ================================================================
          V18 CHILD CAMPAIGN MODAL
     ================================================================ -->
     <div id="child-campaign-modal" class="hidden fc-overlay">
@@ -682,7 +595,7 @@
             });
         }
     </script>
-    <script src="app.js?v=37"></script>
+    <script src="app.js?v=38"></script>
 </body>
 </html>
 

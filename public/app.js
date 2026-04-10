@@ -1974,7 +1974,7 @@ window.dtStartAnalysis = async function() {
             method: 'POST',
             headers: { 
                 'Authorization': `Bearer ${token}`, 
-                'X-Forwarded-Authorization': `Bearer ${token}`,
+                'X-Firebase-Auth': `Bearer ${token}`,
                 'Content-Type': 'application/json' 
             },
             body: JSON.stringify({ url })
