@@ -15,9 +15,8 @@ const auth = firebase.auth();
 
 const API_BASE = "https://orchestrator-222247989819.asia-south1.run.app";
 
-// Digital Twin Engine — dedicated microservice (POST /api/analyze-website)
-// Update this URL after first `gcloud run deploy digital-twin-engine` completes.
-const DT_ENGINE_URL = "https://digital-twin-engine-222247989819.asia-south1.run.app";
+// Digital Twin Engine — Reverse Proxy via Firebase
+const DT_ENGINE_URL = "";
 
 
 
