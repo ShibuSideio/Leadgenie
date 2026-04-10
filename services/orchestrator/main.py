@@ -12,7 +12,9 @@ import httpx
 from google.protobuf import timestamp_pb2
 from flask import Flask, request, jsonify, make_response
 from google.cloud import tasks_v2
-from google.cloud import secretmanager
+from google.cloud import secretmanager, firestore, bigquery, storage
+import PyPDF2
+import io
 from google.cloud import kms
 from cryptography.fernet import Fernet
 import base64
@@ -757,6 +759,43 @@ def trigger_daily_sweep(path):
                 db.collection("tenant_profiles").document(tenant_id).set(data, merge=True)
                 return jsonify({"status": "success", "id": tenant_id}), 201
 
+                        elif request.path == "/api/tenant_profiles/extract-kb" and request.method == "POST":
+                filepath = data.get("filepath")
+                if not filepath:
+                    return jsonify({"error": "Missing filepath"}), 400
+                
+                bucket_name = os.environ.get("FIREBASE_STORAGE_BUCKET", f"{PROJECT_ID}.appspot.com")
+                print(f"[KB] Extracting document from gs://{bucket_name}/{filepath}")
+                
+                try:
+                    storage_client = storage.Client()
+                    bucket = storage_client.bucket(bucket_name)
+                    blob = bucket.blob(filepath)
+                    file_bytes = blob.download_as_bytes()
+                    
+                    extracted_text = ""
+                    if filepath.lower().endswith('.pdf'):
+                        pdf = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+                        extracted_text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
+                    elif filepath.lower().endswith('.txt'):
+                        extracted_text = file_bytes.decode('utf-8', errors='ignore')
+                    else:
+                        return jsonify({"error": "Unsupported file format. Use PDF or TXT."}), 400
+                        
+                    if extracted_text.strip():
+                        # Cap the length to avoid firing massive arrays into Firestore limits blindly
+                        extracted_text = extracted_text.strip()[:10000] 
+                        # Use ArrayUnion to push to knowledge_base_text
+                        db.collection("tenant_profiles").document(tenant_id).update({
+                            "knowledge_base_text": firestore.ArrayUnion([extracted_text])
+                        })
+                        
+                        return jsonify({"status": "success", "message": "Knowledge base appended"}), 200
+                    return jsonify({"error": "No textual content extracted"}), 400
+                except Exception as e:
+                    print(f"[KB] Failed extraction: {e}")
+                    return jsonify({"error": f"Extraction failed: {str(e)}"}), 500
+                
             elif request.path == "/api/campaigns" and request.method == "POST":
                 is_valid, status_code, err_msg = check_quota(tenant_id)
                 if not is_valid:

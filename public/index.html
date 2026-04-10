@@ -14,6 +14,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="styles.css?v=35">
@@ -377,9 +378,17 @@
                 <div class="fc-input-wrap" style="text-align: left; margin-bottom: 24px;">
                 <div id="cc-recommendation-cards" style="text-align: left; margin-bottom: 24px;"></div>
                 <div id="cc-custom-fallback-container" class="hidden">
+                    <div class="fc-input-wrap" style="text-align: left; margin-bottom: 16px;">
+                        <label class="fc-label">1. Product Focus</label>
+                        <input type="text" id="cc-focus" class="fc-intent-input" placeholder="e.g. Enterprise SEO Audit" />
+                    </div>
+                    <div class="fc-input-wrap" style="text-align: left; margin-bottom: 16px;">
+                        <label class="fc-label">2. Core Pain Point</label>
+                        <textarea id="cc-pain" class="fc-intent-input" placeholder="What keeps them up at night?"></textarea>
+                    </div>
                     <div class="fc-input-wrap" style="text-align: left; margin-bottom: 24px;">
-                        <label class="fc-label">Custom Campaign Name</label>
-                        <input type="text" id="cc-name" class="fc-intent-input" placeholder="e.g. SEO Audit Push" />
+                        <label class="fc-label">3. Unfair Advantage</label>
+                        <textarea id="cc-advantage" class="fc-intent-input" placeholder="Why should they choose you?"></textarea>
                     </div>
                     <button class="primary-btn full-width" onclick="window.saveChildCampaign()">Launch Campaign</button>
                 </div>
