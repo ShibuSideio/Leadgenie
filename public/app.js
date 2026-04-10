@@ -124,17 +124,9 @@ async function initializeDashboardState() {
 }
 
 function renderZeroState() {
-    const h = document.getElementById('btn-new-twin-hero'); 
-    if(h) {
-        h.style.display = 'block';
-        h.onclick = () => window.openNewCampaignModal();
-    }
+    const h = document.getElementById('btn-new-twin-hero'); if(h) h.style.display = 'block';
     const ah = document.getElementById('btn-add-campaign-hero'); if(ah) ah.style.display = 'none';
-    const m = document.getElementById('btn-new-twin-matrix'); 
-    if(m) {
-        m.style.display = 'block';
-        m.onclick = () => window.openNewCampaignModal();
-    }
+    const m = document.getElementById('btn-new-twin-matrix'); if(m) m.style.display = 'block';
     const am = document.getElementById('btn-add-campaign-matrix'); if(am) am.style.display = 'none';
 }
 
@@ -2427,3 +2419,18 @@ window.uploadKnowledgeBase = async function() {
         showToast('Upload or extraction failed.', 'error');
     }
 };
+
+
+// Global Event Delegation for Dynamic DOM Elements
+document.body.addEventListener('click', function(e) {
+    if (e.target.id === 'btn-new-twin-hero' || e.target.id === 'btn-new-twin-matrix' || e.target.closest('#btn-new-twin-hero, #btn-new-twin-matrix')) {
+        if (typeof window.openNewCampaignModal === 'function') {
+            window.openNewCampaignModal();
+        }
+    }
+    if (e.target.id === 'btn-add-campaign-hero' || e.target.id === 'btn-add-campaign-matrix' || e.target.closest('#btn-add-campaign-hero, #btn-add-campaign-matrix')) {
+        if (typeof window.openChildCampaignModal === 'function') {
+            window.openChildCampaignModal();
+        }
+    }
+});
