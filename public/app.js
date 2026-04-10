@@ -77,13 +77,72 @@ async function loadDashboard() {
         loadLeads()
     ]);
 
-    // V15.1 HOTFIX: crmAutoOpen resolved here â€” inside the real loadDashboard,
-    // NOT via a recursive override. loadMe() must have run first so
-    // window.currentUserData (and .role) is populated before switchTab checks it.
+    await initializeDashboardState();
+
     if (window.crmAutoOpen) {
         window.crmAutoOpen = false;
-        // switchTab contains its own super_admin gate; no recursion possible.
         switchTab('crm-test');
+    }
+}
+
+async function fetchTenantProfile() {
+    try {
+        const user = window.firebase.auth().currentUser;
+        const token = await user.getIdToken();
+        const response = await fetch(`${API_BASE}/api/tenant_profiles`, { 
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` } 
+        });
+        if (response.ok) {
+            const data = await response.json();
+            if (data && data.data && data.data.length > 0) return data.data[0];
+        }
+    } catch (e) { console.error("fetchTenantProfile error", e); }
+    return null;
+}
+
+async function initializeDashboardState() {
+    try {
+        const tenantProfile = await fetchTenantProfile();
+        // Fallback or count length of existing items
+        const rawRows = document.querySelectorAll('#campaign-list-table tr').length;
+        const fallbackCount = document.getElementById('campaign-list-table').innerHTML.includes('No active campaigns') ? 0 : rawRows;
+        const activeCount = window.activeCampaignCount !== undefined ? window.activeCampaignCount : fallbackCount;
+        
+        if (tenantProfile) {
+            renderExpansionState(activeCount);
+        } else {
+            renderZeroState();
+        }
+    } catch (error) {
+        console.error("Failed to load tenant state:", error);
+    }
+}
+
+function renderZeroState() {
+    const h = document.getElementById('btn-new-twin-hero'); if(h) h.style.display = 'block';
+    const ah = document.getElementById('btn-add-campaign-hero'); if(ah) ah.style.display = 'none';
+    const m = document.getElementById('btn-new-twin-matrix'); if(m) m.style.display = 'block';
+    const am = document.getElementById('btn-add-campaign-matrix'); if(am) am.style.display = 'none';
+}
+
+function renderExpansionState(activeCount) {
+    const h = document.getElementById('btn-new-twin-hero'); if(h) h.style.display = 'none';
+    const m = document.getElementById('btn-new-twin-matrix'); if(m) m.style.display = 'none';
+    
+    const ah = document.getElementById('btn-add-campaign-hero');
+    const am = document.getElementById('btn-add-campaign-matrix');
+    if(ah) ah.style.display = 'block';
+    if(am) am.style.display = 'block';
+    
+    if (activeCount >= 5) {
+        const txt = 'Campaign Limit Reached (5/5)';
+        if(ah) { ah.innerText = txt; ah.disabled = true; ah.style.opacity = '0.5'; ah.style.cursor = 'not-allowed'; }
+        if(am) { am.innerText = txt; am.disabled = true; am.style.opacity = '0.5'; am.style.cursor = 'not-allowed'; }
+    } else {
+        const txt = `+ Add Campaign (${activeCount}/5)`;
+        if(ah) { ah.innerHTML = txt; ah.disabled = false; ah.style.opacity = '1'; ah.style.cursor = 'pointer'; }
+        if(am) { am.innerHTML = txt; am.disabled = false; am.style.opacity = '1'; am.style.cursor = 'pointer'; }
     }
 }
 
@@ -2097,4 +2156,50 @@ window.dtBackToViewA = function() {
     document.getElementById('dt-view-a')?.classList.remove('hidden');
 };
 
+// =============================================================================
+// V18 MULTI-CAMPAIGN: CHILD CAMPAIGN CREATION (STATE B)
+// =============================================================================
 
+window.openChildCampaignModal = function() {
+    const aw = window.activeWallet || {};
+    const ud = window.currentUserData || {};
+    const allocated = Number(aw.allocated_credits || ud.allocated_credits || 0) || 0;
+    const consumed  = Number(aw.consumed_credits  || ud.consumed_credits  || 0) || 0;
+    const remaining = allocated - consumed;
+    
+    if (remaining <= 0) {
+        showToast('Credits exhausted. Contact admin to reload.', 'error');
+        return;
+    }
+
+    const modal = document.getElementById('child-campaign-modal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        document.getElementById('cc-name').value = '';
+        document.getElementById('cc-desc').value = '';
+    }
+};
+
+window.saveChildCampaign = function() {
+    const nameInput = document.getElementById('cc-name');
+    const descInput = document.getElementById('cc-desc');
+    const name = nameInput?.value.trim() || 'Untitled Campaign';
+    const desc = descInput?.value.trim();
+
+    if (!desc || desc.length < 5) {
+        if (descInput) { descInput.style.borderColor = '#ef4444'; setTimeout(() => descInput.style.borderColor='', 2000); }
+        showToast('Please describe the specific angle or target for this campaign.', 'warn');
+        return;
+    }
+
+    document.getElementById('child-campaign-modal')?.classList.add('hidden');
+
+    saveCampaignAction({
+        name: name,
+        bio: 'CHILD_CAMPAIGN_OVERRIDE', // Backend relies on Master Twin bio, this signals it is a child
+        keywords: desc.substring(0, 150),
+        gl: '',
+        location: '',
+        target_urls: []
+    });
+};

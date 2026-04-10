@@ -101,7 +101,10 @@
                         <span id="greeting-message">Welcome back.</span>
                         <span id="greeting-sub" style="color:var(--text-muted); font-size:0.9rem; margin-left:8px;"></span>
                     </div>
-                    <button class="find-clients-hero-btn" onclick="openNewCampaignModal()">&#43; Find New Clients</button>
+                    <div id="hero-btn-container">
+                        <button id="btn-new-twin-hero" class="find-clients-hero-btn" onclick="openNewCampaignModal()" style="display:none">&#43; Find New Clients</button>
+                        <button id="btn-add-campaign-hero" class="find-clients-hero-btn" onclick="window.openChildCampaignModal()" style="display:none">&#43; Add Campaign</button>
+                    </div>
                 </div>
 
                 <!-- KPI Tiles -->
@@ -165,7 +168,10 @@
             <section id="view-target" class="main-feed hidden">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <h2>Active Campaign Matrix</h2>
-                    <button class="primary-btn" onclick="openNewCampaignModal()">&#43; New Search</button>
+                    <div id="matrix-btn-container">
+                        <button id="btn-new-twin-matrix" class="primary-btn" onclick="openNewCampaignModal()" style="display:none">&#43; Find New Clients</button>
+                        <button id="btn-add-campaign-matrix" class="primary-btn" onclick="window.openChildCampaignModal()" style="display:none">&#43; Add Campaign</button>
+                    </div>
                 </div>
                 <div class="stats-box mt-3" style="background:#ffffff; padding:0; overflow:hidden;">
                     <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.9rem;">
@@ -446,6 +452,29 @@
     </div>
 
     <!-- ================================================================
+         V18 CHILD CAMPAIGN MODAL
+    ================================================================ -->
+    <div id="child-campaign-modal" class="hidden fc-overlay">
+        <div class="fc-modal glass-panel" style="max-width: 500px; padding: 40px 30px;">
+            <button class="fc-close-btn" onclick="document.getElementById('child-campaign-modal').classList.add('hidden')">&#10005;</button>
+            <div style="text-align: center; padding: 20px 0;">
+                <div class="fc-logo-mark" style="color: var(--primary); font-size: 2.5rem; margin-bottom: 12px;">&#10022;</div>
+                <h2 class="fc-headline" style="font-size: 2rem; font-weight: 700; margin-bottom: 12px; color: #111827;">New Campaign</h2>
+                <p class="fc-sub" style="font-size: 1.1rem; color: #4b5563; margin-bottom: 32px;">Master Twin is active. What is the specific product, service, or angle for this campaign?</p>
+                <div class="fc-input-wrap" style="text-align: left; margin-bottom: 24px;">
+                    <label class="fc-label">Campaign Name</label>
+                    <input type="text" id="cc-name" class="fc-intent-input" placeholder="e.g. SEO Audit Push" />
+                </div>
+                <div class="fc-input-wrap" style="text-align: left; margin-bottom: 24px;">
+                    <label class="fc-label">Target Angle & Description</label>
+                    <textarea id="cc-desc" class="fc-intent-input" style="min-height: 100px;" placeholder="Describe what you are offering and who specifically should receive this..."></textarea>
+                </div>
+                <button class="primary-btn full-width" onclick="window.saveChildCampaign()">Launch Campaign</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================
          V18 DIGITAL TWIN ONBOARDING MODAL
     ================================================================ -->
     <div id="dt-onboarding-modal" class="hidden fc-overlay">
@@ -653,7 +682,7 @@
             });
         }
     </script>
-    <script src="app.js?v=35"></script>
+    <script src="app.js?v=36"></script>
 </body>
 </html>
 

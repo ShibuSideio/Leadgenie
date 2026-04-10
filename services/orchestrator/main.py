@@ -65,6 +65,9 @@ if not firebase_admin._apps:
 db = firestore.client()
 tasks_client = tasks_v2.CloudTasksClient()
 
+MAX_CHILD_CAMPAIGNS = int(os.environ.get("MAX_CHILD_CAMPAIGNS", 5))
+
+# Use the explicitly deployed Vertex GenAI region
 PROJECT_ID = os.environ.get("PROJECT_ID", "sideio-leads-v16")
 LOCATION = os.environ.get("LOCATION", "asia-south1")
 QUEUE            = os.environ.get("QUEUE",            "lead-pipeline-queue")
@@ -565,7 +568,7 @@ def trigger_daily_sweep(path):
     # -----------------------------------------------------------------------------------------
     # REST API Gateway Protocol (Frontend Database Reading)
     # -----------------------------------------------------------------------------------------
-    if request.path in ["/api/campaigns", "/api/leads"] and request.method == "GET":
+    if request.path in ["/api/campaigns", "/api/leads", "/api/tenant_profiles"] and request.method == "GET":
         try:
             uid, tenant_id, user_role = authenticate_request(request)
             
@@ -584,6 +587,11 @@ def trigger_daily_sweep(path):
                 elif crm_param == "false":
                     q = q.where(field_path="is_in_crm", op_string="==", value=False)
                 docs = q.limit(200).stream()
+
+            elif request.path == "/api/tenant_profiles":
+                # Master Twin fetch explicitly for Dashboard syncing
+                doc = db.collection("tenant_profiles").document(tenant_id).get()
+                docs = [doc] if doc.exists else []
 
             results = [sanitize_document(doc) for doc in docs]
             return jsonify({"status": "success", "data": results}), 200
@@ -754,14 +762,14 @@ def trigger_daily_sweep(path):
                 if not is_valid:
                     return jsonify({"error": err_msg}), status_code
 
-                # Hard limit 4 active product/service campaigns per tenant
+                # Hard limit N active product/service campaigns per tenant
                 active_campaigns_count = len(list(db.collection("campaigns")
                     .where(filter=FieldFilter("tenant_id", "==", tenant_id))
                     .where(filter=FieldFilter("status", "==", "active"))
                     .stream()))
                 
-                if active_campaigns_count >= 4:
-                    return jsonify({"error": "Maximum of 4 active product/service campaigns allowed per tenant."}), 403
+                if active_campaigns_count >= MAX_CHILD_CAMPAIGNS:
+                    return jsonify({"error": f"Maximum of {MAX_CHILD_CAMPAIGNS} active product/service campaigns allowed per tenant."}), 403
 
                 data['tenant_id'] = tenant_id
                 data['createdAt'] = firestore.SERVER_TIMESTAMP
