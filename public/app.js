@@ -1970,13 +1970,9 @@ window.dtStartAnalysis = async function() {
         if (!user) throw new Error('Not authenticated');
         const token = await user.getIdToken();
 
-        const apiCall = fetch(`${DT_ENGINE_URL}/api/analyze-website`, {
+        const apiCall = fetch('/api/analyze-website', {
             method: 'POST',
-            headers: { 
-                'Authorization': `Bearer ${token}`, 
-                'X-Firebase-Auth': `Bearer ${token}`,
-                'Content-Type': 'application/json' 
-            },
+            headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
             body: JSON.stringify({ url })
         });
 
