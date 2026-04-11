@@ -1864,6 +1864,35 @@ window.closeSettingsModal = function() {
     document.getElementById('settings-modal')?.classList.add('hidden');
 };
 
+// =============================================================================
+// TERMS OF SERVICE: agreeToTerms()
+//
+// BUG A ROOT CAUSE: This function was called by the TOS modal button
+// (onclick="agreeToTerms()") but was NEVER DEFINED anywhere in the codebase.
+// Every click threw: ReferenceError: agreeToTerms is not defined
+// This trapped ALL new users permanently in the TOS modal with no escape.
+// =============================================================================
+window.agreeToTerms = async function() {
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken();
+        // Persist agreement timestamp to user doc via PUT /api/me
+        await fetch(`${API_BASE}/api/me`, {
+            method: 'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agreed_to_terms: true })
+        });
+    } catch (e) {
+        console.warn('[TOS] Failed to persist agreement, continuing anyway:', e);
+    } finally {
+        // Always dismiss the modal regardless of API success —
+        // network failure should not re-trap the user.
+        document.getElementById('tos-modal')?.classList.add('hidden');
+        showToast('Terms accepted. Welcome to Sideio!', 'success');
+    }
+};
+
 // Close settings modal on overlay click
 document.addEventListener('DOMContentLoaded', () => {
     const settingsOverlay = document.getElementById('settings-modal');
@@ -1924,16 +1953,16 @@ window._dtState = {
 window.openDTModal = function() {
     document.getElementById('user-dropdown')?.classList.add('hidden');
     document.getElementById('user-pill-btn')?.classList.remove('open');
-    // Reset to View A
+    // Reset ALL views — including dt-view-d (fallback path) which was not reset,
+    // causing view-a and view-d to overlap on second open (Bug E fix).
     document.getElementById('dt-view-a')?.classList.remove('hidden');
     document.getElementById('dt-view-b')?.classList.add('hidden');
     document.getElementById('dt-view-c')?.classList.add('hidden');
+    document.getElementById('dt-view-d')?.classList.add('hidden');
     const urlInput = document.getElementById('dt-url-input');
     if (urlInput) urlInput.value = '';
     const modal = document.getElementById('dt-onboarding-modal');
     if (modal) {
-        // BUG FIX: Do NOT set style.display='block' — fc-overlay uses display:flex
-        // for centering. Overriding with block made the modal render off-screen.
         modal.classList.remove('hidden');
     }
     setTimeout(() => document.getElementById('dt-url-input')?.focus(), 100);
@@ -2429,16 +2458,19 @@ window.uploadKnowledgeBase = async function() {
 };
 
 
-// Global Event Delegation for Dynamic DOM Elements
+// =============================================================================
+// REMOVED: Global body click delegation for btn-new-twin-* and btn-add-campaign-*.
+//
+// BUG ROOT CAUSE (Double-Fire): Both buttons have onclick="..." attributes directly
+// in the HTML AND were also caught here via body delegation, causing every click
+// to fire openNewCampaignModal() / openChildCampaignModal() TWICE. The second
+// async call was resetting modal state while the first was still executing.
+//
+// Fix: The onclick attributes on the HTML buttons are sufficient. Body delegation
+// for these specific buttons has been removed. The body listener below is kept
+// only for genuinely dynamic elements that are rendered via innerHTML (no onclick).
+// =============================================================================
 document.body.addEventListener('click', function(e) {
-    if (e.target.id === 'btn-new-twin-hero' || e.target.id === 'btn-new-twin-matrix' || e.target.closest('#btn-new-twin-hero, #btn-new-twin-matrix')) {
-        if (typeof window.openNewCampaignModal === 'function') {
-            window.openNewCampaignModal();
-        }
-    }
-    if (e.target.id === 'btn-add-campaign-hero' || e.target.id === 'btn-add-campaign-matrix' || e.target.closest('#btn-add-campaign-hero, #btn-add-campaign-matrix')) {
-        if (typeof window.openChildCampaignModal === 'function') {
-            window.openChildCampaignModal();
-        }
-    }
+    // Intentionally empty — kept for future dynamic element delegation only.
+    // Do NOT re-add btn-new-twin-* or btn-add-campaign-* here.
 });
