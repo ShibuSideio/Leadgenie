@@ -2039,14 +2039,8 @@ window.openDTModal = function() {
     if (urlInput) urlInput.value = '';
     const modal = document.getElementById('dt-onboarding-modal');
     if (modal) {
-        // CRITICAL FIX: Use explicit inline style display:flex.
-        // Removing the .hidden class alone is insufficient if the browser
-        // CSS cascade is not yet settled. Setting display:flex directly
-        // matches the .fc-overlay intent and guarantees the modal appears.
-        modal.classList.remove('hidden');
+        // Modals now use style.display (not .hidden class) to avoid !important conflicts.
         modal.style.display = 'flex';
-        modal.style.visibility = 'visible';
-        modal.style.opacity = '1';
     }
     setTimeout(() => document.getElementById('dt-url-input')?.focus(), 100);
 };
@@ -2055,9 +2049,6 @@ window.closeDTModal = function() {
     const modal = document.getElementById('dt-onboarding-modal');
     if (modal) {
         modal.style.display = 'none';
-        modal.style.visibility = '';
-        modal.style.opacity = '';
-        modal.classList.add('hidden');
     }
 };
 
@@ -2314,7 +2305,7 @@ window.openChildCampaignModal = async function() {
 
     const modal = document.getElementById('child-campaign-modal');
     if (modal) {
-        modal.classList.remove('hidden');
+        modal.style.display = 'flex';
         const fallbackCont = document.getElementById('cc-custom-fallback-container');
         if(fallbackCont) fallbackCont.classList.add('hidden');
         const cardsEl = document.getElementById('cc-recommendation-cards');
@@ -2388,7 +2379,7 @@ window.deployPredictiveCard = function(idx, origProd, origHook, origAdv) {
                       (btoa(hook.replace(/['"]/g, '')) !== origHook) || 
                       (btoa(adv.replace(/['"]/g, '')) !== origAdv);
                       
-    document.getElementById('child-campaign-modal')?.classList.add('hidden');
+    document.getElementById('child-campaign-modal').style.display = 'none';
 
     saveCampaignAction({
         name: prod,
@@ -2431,7 +2422,7 @@ window.saveChildCampaign = function() {
         return;
     }
 
-    document.getElementById('child-campaign-modal')?.classList.add('hidden');
+    document.getElementById('child-campaign-modal').style.display = 'none';
 
     // Guardrail 2: Route distinctly, DO NOT concat into keywords
     saveCampaignAction({
