@@ -1932,8 +1932,9 @@ window.openDTModal = function() {
     if (urlInput) urlInput.value = '';
     const modal = document.getElementById('dt-onboarding-modal');
     if (modal) {
+        // BUG FIX: Do NOT set style.display='block' — fc-overlay uses display:flex
+        // for centering. Overriding with block made the modal render off-screen.
         modal.classList.remove('hidden');
-        modal.style.display = 'block';
     }
     setTimeout(() => document.getElementById('dt-url-input')?.focus(), 100);
 };
