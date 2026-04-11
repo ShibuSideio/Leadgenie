@@ -22,20 +22,32 @@ const DT_ENGINE_URL = "";
 
 // DOM Elements
 const authContainer = document.getElementById('auth-container');
-const appContainer = document.getElementById('app-container');
-const loginBtn = document.getElementById('login-btn');
-const logoutBtn = document.getElementById('logout-btn');
-const leadsList = document.getElementById('leads-list');
+const appContainer  = document.getElementById('app-container');
+const loginBtn      = document.getElementById('login-btn');
+const leadsList     = document.getElementById('leads-list');
 
 // Selected Filter State
 let currentCampaignFilter = 'all';
 let rawLeadsCache = [];
-// V18: O(1) lead lookup for Event Delegation copilot action
-// Keyed by Firestore docId. Populated in createLeadCardV2.
+let unsubscribeLeads = null;   // declared here to avoid temporal dead zone
 const _leadsMap = new Map();
 
+// Toast — defined as function declaration so it is hoisted and available
+// everywhere, including in loadLeads which runs before window.showToast assignment.
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toast-container');
+    if (!container) { console.warn('[Toast]', type, message); return; }
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(() => toast.classList.add('show'), 10);
+    setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 300); }, 3500);
+}
+window.showToast = showToast; // expose to inline HTML handlers
+
 function handleAuthRejection() {
-    showToast("Session Expired or Unauthorized Access.", "error");
+    showToast('Session Expired or Unauthorized Access.', 'error');
     auth.signOut();
 }
 
@@ -66,17 +78,13 @@ auth.onAuthStateChanged(async user => {
 });
 
 // Login Handler
-loginBtn.addEventListener('click', () => {
-    const provider = new firebase.auth.GoogleAuthProvider();
-    auth.signInWithPopup(provider).catch(error => {
-        console.error("Error signing in:", error);
+if (loginBtn) {
+    loginBtn.addEventListener('click', () => {
+        const provider = new firebase.auth.GoogleAuthProvider();
+        auth.signInWithPopup(provider).catch(err => console.error('Sign-in error:', err));
     });
-});
-
-// Logout Handler
-logoutBtn.addEventListener('click', () => {
-    auth.signOut();
-});
+}
+// Note: Sign-out is handled via onclick="firebase.auth().signOut()" in the user dropdown.
 
 // Unified Dashboard Loader
 async function loadDashboard() {
@@ -398,8 +406,7 @@ function initAnalyticsChart(newC, contactedC, convertedC) {
 // =============================================================================
 // FIRESTORE LIVE FEED
 // =============================================================================
-
-let unsubscribeLeads = null;
+// (unsubscribeLeads declared at top-level to avoid temporal dead zone)
 
 async function loadLeads() {
     leadsList.innerHTML = '<div class="lead-card pulse">Connecting to Secure Orchestrator...</div>';
@@ -506,16 +513,7 @@ function renderLeads() {
 // TOAST UI ENGINE
 // =============================================================================
 
-window.showToast = function(message, type = 'info') {
-    const container = document.getElementById('toast-container');
-    if (!container) return;
-    const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.textContent = message;
-    container.appendChild(toast);
-    setTimeout(() => toast.classList.add('show'), 10);
-    setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 300); }, 3500);
-};
+// window.showToast is already defined as a hoisted function at top of file.
 
 // Timeline Audit Modal
 window.viewLeadTimeline = function(eventsJson) {
