@@ -93,14 +93,14 @@ async function fetchTenantProfile() {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${token}` } 
         });
-        if (response.ok) {
+        // BUG FIX: Corrected from double-nested if(ok){if(!ok)} which made error
+        // path dead code. Now correctly structured as if(!ok)/else.
         if (!response.ok) {
             console.error('Backend Error (fetchTenantProfile):', await response.text());
             return null;
         }
-            const data = await response.json();
-            if (data && data.data && data.data.length > 0) return data.data[0];
-        }
+        const data = await response.json();
+        if (data && data.data && data.data.length > 0) return data.data[0];
     } catch (e) { console.error("fetchTenantProfile error", e); }
     return null;
 }
@@ -163,11 +163,13 @@ async function loadMe() {
                 'Authorization': `Bearer ${token}`
             } 
         });
-        if (response.ok) {
+        // BUG FIX: Corrected from double-nested if(ok){if(!ok)} — error path
+        // was dead code because !ok is always false inside if(ok).
         if (!response.ok) {
             console.error('Backend Error (loadMe):', await response.text());
             return;
         }
+        {
             const payload = await response.json();
             const data = payload.data || {};
             
@@ -2254,7 +2256,10 @@ window.deployPredictiveCard = function(idx, origProd, origHook, origAdv) {
     const adv  = (document.getElementById('c-adv-' + idx)?.value || '').trim();
     const loc  = (document.getElementById('c-loc-' + idx)?.value || '').trim();
     
-    if (!loc && loc.toLowerCase() !== 'worldwide') {
+    // BUG FIX: Previous logic `!loc && loc.toLowerCase() !== 'worldwide'` was
+    // inverted — it would always fire validation error on empty string.
+    // Correct intent: require a non-empty location value.
+    if (!loc) {
         showToast('Target Location is required.', 'error');
         return;
     }
@@ -2300,7 +2305,9 @@ window.saveChildCampaign = function() {
     const pain = painEl?.value.trim() || '';
     const adv = advEl?.value.trim() || '';
 
-    if (!loc && loc.toLowerCase() !== 'worldwide') {
+    // BUG FIX: Same inverted validation as deployPredictiveCard.
+    // Require any non-empty location string.
+    if (!loc) {
         showToast('Target Geography is required.', 'error');
         return;
     }

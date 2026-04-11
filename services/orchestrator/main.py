@@ -749,7 +749,113 @@ def trigger_daily_sweep(path):
             # Remove any forged tenant injections
             data.pop('tenant_id', None)
             
-            if request.path == "/api/tenant_profiles" and request.method == "POST":
+            # ── /api/analyze-website ───────────────────────────────────────────
+            # V18 Digital Twin Onboarding: Scrapes the user's website and uses
+            # Gemini to extract a structured company persona + target audience
+            # profile. Called by dtStartAnalysis() in app.js (View A → B → C).
+            #
+            # Returns JSON matching dtPopulatePersonas() schema:
+            #   { company: {name, description, value},
+            #     targets: [{name, description}, ...],
+            #     detected_gl: "us",
+            #     recommended_campaigns: [{product_name, market_trend_hook, unfair_advantage}, ...] }
+            # ──────────────────────────────────────────────────────────────────
+            if request.path == "/api/analyze-website" and request.method == "POST":
+                import re as _re
+                url = data.get("url", "").strip()
+                if not url:
+                    return jsonify({"error": "Missing url"}), 400
+                if not url.startswith(("http://", "https://")):
+                    url = f"https://{url}"
+
+                print(f"[ANALYZE-WEBSITE] Starting analysis for: {url} | tenant: {tenant_id}")
+
+                try:
+                    # Step 1: Fetch website HTML with a 10s timeout
+                    r = httpx.get(
+                        url, timeout=10, follow_redirects=True,
+                        headers={"User-Agent": "Mozilla/5.0 (compatible; Sideio/1.0; +https://sideio.com)"}
+                    )
+                    raw_html = r.text[:25000]
+
+                    # Step 2: Strip HTML tags and collapse whitespace
+                    clean_text = _re.sub(r'<[^>]+>', ' ', raw_html)
+                    clean_text = _re.sub(r'\s+', ' ', clean_text).strip()[:4000]
+
+                    if len(clean_text) < 80:
+                        print(f"[ANALYZE-WEBSITE] Insufficient content extracted from {url}")
+                        return jsonify({"error": "Insufficient content on page to analyze"}), 422
+
+                    # Step 3: Gemini extraction prompt
+                    prompt = f"""You are a B2B market intelligence engine. A user has provided their website content below.
+
+Your job is to extract structured intelligence from it and return ONLY valid JSON — no markdown, no code blocks, no explanation.
+
+--- WEBSITE CONTENT ---
+{clean_text}
+--- END CONTENT ---
+
+Return a JSON object with this EXACT structure:
+{{
+  "company": {{
+    "name": "Short company name",
+    "description": "2-3 sentence description of what the company does and the value it provides",
+    "value": "Core value proposition in 8 words or less"
+  }},
+  "targets": [
+    {{"name": "Target Persona 1 Name", "description": "Who they are and why they need this company's services"}},
+    {{"name": "Target Persona 2 Name", "description": "Who they are and why they need this company's services"}},
+    {{"name": "Target Persona 3 Name", "description": "Who they are and why they need this company's services"}}
+  ],
+  "detected_gl": "ISO 2-letter country code based on company location (e.g. 'in', 'us', 'uk'). Use 'us' if unknown.",
+  "recommended_campaigns": [
+    {{
+      "product_name": "Specific product or service to campaign for",
+      "market_trend_hook": "Current market trend or pain point driving demand for this product",
+      "unfair_advantage": "Why this company specifically wins against alternatives"
+    }},
+    {{
+      "product_name": "Second product or service",
+      "market_trend_hook": "Current market trend or pain point",
+      "unfair_advantage": "Why this company specifically wins"
+    }}
+  ]
+}}
+
+Rules:
+- All values must be strings. No nulls.
+- Return ONLY the JSON object. No other text.
+- If the website is in a non-English language, still return English output."""
+
+                    model = GenerativeModel("gemini-2.5-flash")
+                    gemini_resp = model.generate_content(
+                        prompt,
+                        generation_config=GenerationConfig(temperature=0.2)
+                    )
+                    raw_output = gemini_resp.text.strip()
+
+                    # Strip any accidental markdown fences
+                    raw_output = _re.sub(r'^```(?:json)?\s*', '', raw_output, flags=_re.M)
+                    raw_output = _re.sub(r'\s*```$', '', raw_output, flags=_re.M)
+
+                    persona_data = json.loads(raw_output)
+                    print(f"[ANALYZE-WEBSITE] Successfully extracted persona for {url} | company: {persona_data.get('company', {}).get('name', 'unknown')}")
+                    return jsonify({"status": "success", "data": persona_data}), 200
+
+                except httpx.TimeoutException:
+                    print(f"[ANALYZE-WEBSITE] Timeout fetching {url}")
+                    return jsonify({"error": "Website took too long to respond"}), 422
+                except httpx.RequestError as e:
+                    print(f"[ANALYZE-WEBSITE] Network error fetching {url}: {e}")
+                    return jsonify({"error": f"Could not reach website: {str(e)}"}), 422
+                except json.JSONDecodeError as e:
+                    print(f"[ANALYZE-WEBSITE] Gemini returned non-JSON for {url}: {e}")
+                    return jsonify({"error": "AI analysis returned unexpected format"}), 422
+                except Exception as e:
+                    print(f"[ANALYZE-WEBSITE] Unexpected error for {url}: {e}")
+                    return jsonify({"error": str(e)}), 422
+
+            elif request.path == "/api/tenant_profiles" and request.method == "POST":
                 is_valid, status_code, err_msg = check_quota(tenant_id)
                 if not is_valid:
                     return jsonify({"error": err_msg}), status_code
