@@ -630,6 +630,83 @@ window.updateCampaignAction = async function(id) {
 };
 
 // =============================================================================
+// CAMPAIGN EDIT MODAL — openEditModal / closeEditModal / saveEditedCampaign
+// These functions were removed during the campaign<>persona decoupling but
+// are still called from the dynamically-generated campaign table HTML.
+// All three were missing — causing ReferenceError on every Edit button click.
+// =============================================================================
+
+window.handleCountryChange = function(glSelectId, locationInputId) {
+    const gl = document.getElementById(glSelectId)?.value || '';
+    const locInput = document.getElementById(locationInputId);
+    if (!locInput) return;
+    if (!gl) {
+        locInput.placeholder = 'City, State/Region';
+        locInput.value = '';
+    } else {
+        locInput.placeholder = 'e.g. New York, London, Mumbai';
+    }
+};
+
+window.openEditModal = function(id, name, bio, keywords, gl, location, targetUrls) {
+    document.getElementById('edit-camp-id').value        = id       || '';
+    document.getElementById('edit-camp-name').value      = name     || '';
+    document.getElementById('edit-camp-bio').value       = bio      || '';
+    document.getElementById('edit-camp-keys').value      = keywords || '';
+    const glEl = document.getElementById('edit-camp-gl');
+    if (glEl) glEl.value = gl || '';
+    document.getElementById('edit-camp-location').value  = location || '';
+    const urlsEl = document.getElementById('edit-camp-target-urls');
+    if (urlsEl) {
+        const urls = Array.isArray(targetUrls) ? targetUrls : JSON.parse(targetUrls || '[]');
+        urlsEl.value = urls.join('\n');
+    }
+    const modal = document.getElementById('edit-campaign-modal');
+    if (modal) {
+        modal.classList.remove('hidden');
+        modal.style.display = 'flex';
+    }
+};
+
+window.closeEditModal = function() {
+    const modal = document.getElementById('edit-campaign-modal');
+    if (modal) {
+        modal.style.display = 'none';
+        modal.classList.add('hidden');
+    }
+};
+
+window.saveEditedCampaign = async function() {
+    const id       = document.getElementById('edit-camp-id')?.value        || '';
+    const name     = document.getElementById('edit-camp-name')?.value      || '';
+    const bio      = document.getElementById('edit-camp-bio')?.value       || '';
+    const keywords = document.getElementById('edit-camp-keys')?.value      || '';
+    const gl       = document.getElementById('edit-camp-gl')?.value        || '';
+    const location = document.getElementById('edit-camp-location')?.value  || '';
+    const urlsRaw  = document.getElementById('edit-camp-target-urls')?.value || '';
+    const targetUrls = urlsRaw.split('\n').map(u => u.trim()).filter(Boolean).slice(0, 10);
+
+    if (!id)   { showToast('Campaign ID missing. Please refresh.', 'error'); return; }
+    if (!name) { showToast('Campaign name is required.', 'error'); return; }
+
+    try {
+        const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', {
+            name, bio, keywords, gl, location, target_urls: targetUrls
+        });
+        if (success) {
+            showToast('Campaign updated successfully!', 'success');
+            window.closeEditModal();
+            loadDashboard();
+        } else {
+            showToast('Update failed. Please try again.', 'error');
+        }
+    } catch(err) {
+        console.error('saveEditedCampaign error:', err);
+        showToast('API error updating campaign.', 'error');
+    }
+};
+
+// =============================================================================
 // SAVE CAMPAIGN ACTION — called from fc modal Step 2 "Launch" button
 // =============================================================================
 
@@ -1953,8 +2030,7 @@ window._dtState = {
 window.openDTModal = function() {
     document.getElementById('user-dropdown')?.classList.add('hidden');
     document.getElementById('user-pill-btn')?.classList.remove('open');
-    // Reset ALL views — including dt-view-d (fallback path) which was not reset,
-    // causing view-a and view-d to overlap on second open (Bug E fix).
+    // Reset ALL views — including dt-view-d (fallback path)
     document.getElementById('dt-view-a')?.classList.remove('hidden');
     document.getElementById('dt-view-b')?.classList.add('hidden');
     document.getElementById('dt-view-c')?.classList.add('hidden');
@@ -1963,13 +2039,26 @@ window.openDTModal = function() {
     if (urlInput) urlInput.value = '';
     const modal = document.getElementById('dt-onboarding-modal');
     if (modal) {
+        // CRITICAL FIX: Use explicit inline style display:flex.
+        // Removing the .hidden class alone is insufficient if the browser
+        // CSS cascade is not yet settled. Setting display:flex directly
+        // matches the .fc-overlay intent and guarantees the modal appears.
         modal.classList.remove('hidden');
+        modal.style.display = 'flex';
+        modal.style.visibility = 'visible';
+        modal.style.opacity = '1';
     }
     setTimeout(() => document.getElementById('dt-url-input')?.focus(), 100);
 };
 
 window.closeDTModal = function() {
-    document.getElementById('dt-onboarding-modal')?.classList.add('hidden');
+    const modal = document.getElementById('dt-onboarding-modal');
+    if (modal) {
+        modal.style.display = 'none';
+        modal.style.visibility = '';
+        modal.style.opacity = '';
+        modal.classList.add('hidden');
+    }
 };
 
 // View A → View B: validate URL and start analysis
