@@ -2,7 +2,6 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sideio &mdash; AI-Native Lead Intelligence</title>
     <meta name="description" content="Grow your business pipeline on autopilot. Sideio's AI discovers and qualifies leads 24/7.">
@@ -10,612 +9,570 @@
     <meta name="theme-color" content="#4f46e5">
     <link rel="apple-touch-icon" href="icon-192x192.png">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-    <!-- Firebase -->
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
-    <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=37">
+    <link rel="stylesheet" href="styles.css?v=38">
+    <style>
+        /* ── MODAL SYSTEM ────────────────────────────────── */
+        .sio-modal-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(15,23,42,0.75);
+            backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+            z-index: 1000;
+            display: none;                  /* JS sets display:flex to open */
+            justify-content: center;
+            align-items: center;
+            animation: sioFadeIn 0.2s ease;
+        }
+        .sio-modal-overlay.open { display: flex; }
+        @keyframes sioFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        .sio-modal-box {
+            background: rgba(255,255,255,0.92);
+            backdrop-filter: blur(20px);
+            border-radius: 24px;
+            padding: 40px 36px 32px;
+            width: 520px; max-width: 94vw;
+            max-height: 90vh; overflow-y: auto;
+            position: relative;
+            box-shadow: 0 24px 64px rgba(0,0,0,0.18);
+            animation: sioSlideUp 0.3s cubic-bezier(0.16,1,0.3,1);
+        }
+        @keyframes sioSlideUp { from { transform:translateY(28px); opacity:0; } to { transform:translateY(0); opacity:1; } }
+
+        .sio-modal-close {
+            position: absolute; top: 16px; right: 16px;
+            background: none; border: none; font-size: 1.1rem;
+            color: #64748b; cursor: pointer; padding: 6px 10px;
+            border-radius: 8px; font-family: 'Inter', sans-serif;
+            transition: background 0.15s;
+        }
+        .sio-modal-close:hover { background: #f1f5f9; color: #0f172a; }
+
+        .sio-view { display: none; }
+        .sio-view.active { display: block; }
+
+        /* pulse ring for analysis view */
+        .pulse-ring {
+            width: 80px; height: 80px; margin: 0 auto 30px;
+            border-radius: 50%; background: #4f46e5; opacity: 0.8;
+            animation: dtPulse 1.5s infinite ease-in-out;
+        }
+        @keyframes dtPulse {
+            0%   { transform: scale(0.8); opacity: 0.8; }
+            50%  { transform: scale(1.2); opacity: 0.4; }
+            100% { transform: scale(0.8); opacity: 0.8; }
+        }
+
+        /* Edit campaign modal — fixed, not fc-overlay */
+        #edit-campaign-modal {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); z-index: 999;
+            display: none;
+            justify-content: center; align-items: center;
+        }
+        #audit-log-modal {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); z-index: 999;
+            display: none;
+            justify-content: center; align-items: center;
+        }
+        #tos-modal {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.8); z-index: 9999;
+            display: none;
+            justify-content: center; align-items: center;
+            backdrop-filter: blur(4px);
+        }
+        #waitroom-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9); z-index: 1000;
+            display: none;
+            justify-content: center; align-items: center;
+            backdrop-filter: blur(8px);
+        }
+    </style>
 </head>
 <body>
 
-    <!-- ================================================================
-         AUTH SCREEN
-    ================================================================ -->
-    <div id="auth-container" class="glass-panel">
-        <div class="auth-logo-mark">&#10022;</div>
-        <h1>Your AI Growth Copilot.</h1>
-        <p>Discover and qualify leads while you focus on closing.</p>
-        <button id="login-btn" class="primary-btn auth-google-btn">
-            <svg viewBox="0 0 24 24" width="18" height="18" style="flex-shrink:0;">
-                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-            </svg>
-            Continue with Google
-        </button>
-    </div>
+<!-- ════════════════════════════════════════════
+     AUTH SCREEN
+════════════════════════════════════════════ -->
+<div id="auth-container" class="glass-panel">
+    <div class="auth-logo-mark">&#10022;</div>
+    <h1>Your AI Growth Copilot.</h1>
+    <p>Discover and qualify leads while you focus on closing.</p>
+    <button id="login-btn" class="primary-btn auth-google-btn">
+        <svg viewBox="0 0 24 24" width="18" height="18" style="flex-shrink:0;">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+        </svg>
+        Continue with Google
+    </button>
+</div>
 
-    <!-- ================================================================
-         APP SHELL
-    ================================================================ -->
-    <div id="app-container" class="hidden">
+<!-- ════════════════════════════════════════════
+     APP SHELL
+════════════════════════════════════════════ -->
+<div id="app-container" style="display:none; flex-direction:column; flex:1;">
 
-        <!-- â”€â”€ TOP NAV â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-        <nav class="glass-nav">
-            <div class="logo">Sideio <span class="logo-mark">&#10022;</span></div>
-
-            <!-- Desktop Top Command Bar (hidden on mobile via CSS) -->
-            <div class="top-cmd-bar" id="top-cmd-bar">
-                <button class="cmd-btn active" id="tab-dashboard" onclick="switchTab('dashboard')">Home</button>
-                <button class="cmd-btn" id="tab-campaigns" onclick="switchTab('target')">Searches</button>
-                <button class="cmd-btn" id="tab-reports" onclick="switchTab('reports')">Reports</button>
-                <button class="cmd-btn hidden" id="tab-l0-admin" onclick="switchTab('l0-admin')">Admin</button>
-            </div>
-
-            <!-- User Pill Dropdown -->
-            <div class="user-pill-wrap">
-                <button class="user-pill" id="user-pill-btn" onclick="toggleUserDropdown()">
-                    <div class="user-avatar" id="user-avatar-initials">?</div>
-                    <svg class="user-pill-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                </button>
-                <div class="user-dropdown hidden" id="user-dropdown">
-                    <div class="ud-header">
-                        <div class="ud-avatar-large" id="ud-avatar-large">?</div>
-                        <div>
-                            <div class="ud-name" id="ud-display-name">&#8212;</div>
-                            <div class="ud-email" id="ud-email">&#8212;</div>
-                        </div>
-                    </div>
-                    <div class="ud-wallet-chip">
-                        <span class="ud-wallet-label">&#10022; Credits Remaining</span>
-                        <strong class="ud-wallet-value" id="wallet-balance">&#8212;</strong>
-                    </div>
-                    <div class="ud-divider"></div>
-                    <button class="ud-item" onclick="openDTModal()">&#128064; Analyze My Website</button>
-                    <button class="ud-item" onclick="openSettingsModal()">&#9881;&#65039; Integrations &amp; Settings</button>
-                    <div class="ud-divider"></div>
-                    <button class="ud-item ud-item-danger" id="logout-btn" onclick="firebase.auth().signOut()">Sign Out</button>
-                </div>
-            </div>
-        </nav>
-
-        <!-- Wallet Alert Banner -->
-        <div id="wallet-alert-banner" class="hidden wallet-alert-banner">
-            &#9888;&#65039; Your pipeline credits are running low (&lt;&nbsp;50). Contact admin to top up.
+    <!-- TOP NAV -->
+    <nav class="glass-nav">
+        <div class="logo">Sideio <span class="logo-mark">&#10022;</span></div>
+        <div class="top-cmd-bar" id="top-cmd-bar">
+            <button class="cmd-btn active" id="tab-dashboard" onclick="switchTab('dashboard')">Home</button>
+            <button class="cmd-btn" id="tab-campaigns" onclick="switchTab('target')">Searches</button>
+            <button class="cmd-btn" id="tab-reports" onclick="switchTab('reports')">Reports</button>
+            <button class="cmd-btn" id="tab-l0-admin" style="display:none;" onclick="switchTab('l0-admin')">Admin</button>
         </div>
-
-        <!-- â”€â”€ MAIN CANVAS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
-        <!-- TECH DEBT NOTE: .dashboard-grid kept as no-op selector for loadMe() JS compat.
-             Refactor to remove in next sprint. -->
-        <main class="dashboard-grid app-main">
-
-            <!-- â•â• DASHBOARD VIEW â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
-            <section id="view-dashboard" class="main-feed">
-
-                <!-- Greeting + Hero CTA -->
-                <div id="dashboard-greeting" class="greeting-bar">
-                    <div class="greeting-text">
-                        <span id="greeting-message">Welcome back.</span>
-                        <span id="greeting-sub" style="color:var(--text-muted); font-size:0.9rem; margin-left:8px;"></span>
-                    </div>
-                    <div id="hero-btn-container">
-                        <button id="btn-new-twin-hero" class="find-clients-hero-btn" onclick="openNewCampaignModal()" style="display:none">&#43; Find New Clients</button>
-                        <button id="btn-add-campaign-hero" class="find-clients-hero-btn" onclick="window.openChildCampaignModal()" style="display:none">&#43; Add Campaign</button>
-                    </div>
-                </div>
-
-                <!-- KPI Tiles -->
-                <div class="kpi-tiles" id="kpi-tiles">
-                    <div class="kpi-tile kpi-hot">
-                        <div class="kpi-icon">&#128293;</div>
-                        <div class="kpi-value" id="kpi-new-count">&#8212;</div>
-                        <div class="kpi-label">New Leads</div>
-                    </div>
-                    <div class="kpi-tile kpi-active">
-                        <div class="kpi-icon">&#128172;</div>
-                        <div class="kpi-value" id="kpi-contacted-count">&#8212;</div>
-                        <div class="kpi-label">Contacted</div>
-                    </div>
-                    <div class="kpi-tile kpi-won">
-                        <div class="kpi-icon">&#127942;</div>
-                        <div class="kpi-value" id="kpi-won-count">&#8212;</div>
-                        <div class="kpi-label">Converted</div>
-                    </div>
-                </div>
-
-                <!-- Mini stats bar (preserves JS-referenced IDs) -->
-                <div class="mini-stats-bar" id="mini-stats-bar">
-                    <span>Discovered: <strong id="stat-discovered">0</strong></span>
-                    <span class="mstat-div">&#183;</span>
-                    <span>Actionable: <strong id="stat-actionable">0</strong></span>
-                    <span class="mstat-div">&#183;</span>
-                    <span>Ignored: <strong id="stat-ignored">0</strong></span>
-                    <span class="mstat-div">&#183;</span>
-                    <span>Value: <strong id="stat-value">&#x20b9;&nbsp;0</strong></span>
-                </div>
-
-                <!-- Pipeline funnel chart â€” conditional, only shown when leads.length > 0 -->
-                <div id="funnel-wrap" class="funnel-wrap hidden">
-                    <div class="funnel-hdr">Pipeline Analytics</div>
-                    <div style="height:160px; position:relative;">
-                        <canvas id="funnelChart"></canvas>
-                    </div>
-                </div>
-
-                <!-- Campaign status feed + filter -->
-                <div class="feed-header">
-                    <h3 class="feed-title">Lead Intelligence Feed</h3>
-                    <select id="campaign-filter" class="feed-filter" onchange="filterLeadsByCampaign(this.value)">
-                        <option value="all">All Searches</option>
-                    </select>
-                </div>
-                <div id="active-campaign-feed"></div>
-
-                <!-- Lead cards -->
-                <div id="leads-list" class="leads-list">
-                    <div class="lead-card pulse">Connecting to intelligence engine...</div>
-                </div>
-
-                <div class="load-more-row">
-                    <button class="secondary-btn" onclick="loadMoreLeads()" style="padding:10px 24px;">Load Older Leads</button>
-                </div>
-            </section>
-
-            <!-- â•â• MY SEARCHES VIEW â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
-            <section id="view-target" class="main-feed hidden">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <h2>Active Campaign Matrix</h2>
-                    <div id="matrix-btn-container">
-                        <button id="btn-new-twin-matrix" class="primary-btn" onclick="openNewCampaignModal()" style="display:none">&#43; Find New Clients</button>
-                        <button id="btn-add-campaign-matrix" class="primary-btn" onclick="window.openChildCampaignModal()" style="display:none">&#43; Add Campaign</button>
-                    </div>
-                </div>
-                <div class="stats-box mt-3" style="background:#ffffff; padding:0; overflow:hidden;">
-                    <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.9rem;">
-                        <thead style="background:rgba(79,70,229,0.05); border-bottom:1px solid var(--glass-border);">
-                            <tr>
-                                <th style="padding:12px;">Campaign</th>
-                                <th style="padding:12px;">Keywords</th>
-                                <th style="padding:12px;">Status</th>
-                                <th style="padding:12px; text-align:right;">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="campaign-list-table">
-                            <tr><td colspan="4" style="padding:16px; text-align:center;">Loading campaigns...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </section>
-
-            <!-- â•â• TEAM VIEW (kept, hidden) â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
-            <section id="view-team" class="main-feed hidden">
-                <h2>My Team</h2>
-                <div class="stats-box mt-3" style="background:#ffffff;">
-                    <p>You are currently the sole administrator of this pipeline.</p>
-                    <button class="primary-btn mt-3" onclick="showToast('Invite link copied to clipboard', 'success')">&#43; Invite Member</button>
-                </div>
-            </section>
-
-            <!-- â•â• REPORTS VIEW â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
-            <section id="view-reports" class="main-feed hidden">
-                <h2>Custom Reports</h2>
-                <div class="stats-box mt-3" style="background:#ffffff; padding:24px;">
-                    <div style="display:flex; gap:16px; margin-bottom:16px;">
-                        <div style="flex:1;">
-                            <label style="font-size:0.8rem; color:var(--text-muted);">Start Date</label>
-                            <input type="date" id="report-start" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
-                        </div>
-                        <div style="flex:1;">
-                            <label style="font-size:0.8rem; color:var(--text-muted);">End Date</label>
-                            <input type="date" id="report-end" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
-                        </div>
-                    </div>
-                    <label style="font-size:0.8rem; color:var(--text-muted);">Campaign Source</label>
-                    <select id="report-campaign-select" class="full-width" style="margin-bottom:16px; padding:10px; border:1px solid var(--glass-border); border-radius:6px; background:white;">
-                        <option value="all">All Campaigns</option>
-                    </select>
-                    <button class="primary-btn full-width" onclick="showToast('Aggregating Intelligence Arrays...', 'info')">Generate Report</button>
-                    <div style="display:flex; gap:8px; margin-top:12px;">
-                        <button class="secondary-btn full-width" style="font-size:0.8rem;" onclick="window.print()">Download PDF</button>
-                        <button class="secondary-btn full-width" style="font-size:0.8rem;" onclick="sendEmailReport()">Email Report</button>
-                    </div>
-                </div>
-            </section>
-
-            <!-- â•â• L0 ADMIN VIEW â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
-            <section id="view-l0-admin" class="main-feed hidden">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <h2>L0 Enterprise Governance</h2>
-                    <button class="primary-btn" onclick="fetchL0Telemetry()" style="background:#dc2626;">Refresh Telemetry</button>
-                </div>
-                <div style="display:flex; gap:16px; margin-top:16px;">
-                    <div class="stats-box" style="flex:1; background:#ffffff;">
-                        <h4 style="color:var(--text-muted); font-size:0.8rem;">Total Platform Leads</h4>
-                        <div id="l0-stat-total-leads" style="font-size:1.5rem; font-weight:600; color:var(--text-main);">0</div>
-                    </div>
-                    <div class="stats-box" style="flex:1; background:#ffffff;">
-                        <h4 style="color:var(--text-muted); font-size:0.8rem;">Global Actionable Pulse</h4>
-                        <div id="l0-stat-conversion" style="font-size:1.5rem; font-weight:600; color:var(--text-main);">0%</div>
-                    </div>
-                    <div class="stats-box" style="flex:1; background:#ffffff;">
-                        <h4 style="color:var(--text-muted); font-size:0.8rem;">Active Tenants</h4>
-                        <div id="l0-stat-tenants" style="font-size:1.5rem; font-weight:600; color:var(--text-main);">0</div>
-                    </div>
-                </div>
-                <div class="stats-box mt-3" style="background:#ffffff; padding:0; overflow:hidden;">
-                    <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.9rem;">
-                        <thead style="background:rgba(220,38,38,0.05); border-bottom:1px solid var(--glass-border);">
-                            <tr>
-                                <th style="padding:12px; cursor:pointer;" onclick="sortL0Table('email')">User Email &#8597;</th>
-                                <th style="padding:12px;">Status</th>
-                                <th style="padding:12px; cursor:pointer;" onclick="sortL0Table('wallet')">Available Credits &#8597;</th>
-                                <th style="padding:12px; text-align:right; cursor:pointer;" onclick="sortL0Table('leads')">Total Leads &#8597;</th>
-                                <th style="padding:12px; text-align:right;">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="l0-telemetry-table">
-                            <tr><td colspan="5" style="padding:16px; text-align:center;">Awaiting L0 Telemetry Arrays...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:32px;">
-                    <h2>Active Campaign Intelligence</h2>
-                    <button class="primary-btn" onclick="fetchMacroTrends()" style="background:#4f46e5;">Refresh Campaigns</button>
-                </div>
-                <div class="stats-box mt-3" style="background:#ffffff; padding:0; overflow:hidden;">
-                    <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.9rem;">
-                        <thead style="background:rgba(79,70,229,0.05); border-bottom:1px solid var(--glass-border);">
-                            <tr>
-                                <th style="padding:12px; width:15%;">Tenant Email</th>
-                                <th style="padding:12px; width:20%;">Campaign Target</th>
-                                <th style="padding:12px; width:35%;">Bio Intent</th>
-                                <th style="padding:12px; width:20%;">Keywords</th>
-                                <th style="padding:12px; width:10%; text-align:right;">Leads Pulled</th>
-                            </tr>
-                        </thead>
-                        <tbody id="campaign-intelligence-table">
-                            <tr><td colspan="5" style="padding:16px; text-align:center;">Awaiting Telemetry Calculation...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </section>
-
-            <!-- â•â• PIPELINE CRM VIEW â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• -->
-            <section id="view-crm-test" class="glass-panel main-feed hidden" style="padding:20px; overflow:hidden;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-shrink:0;">
+        <div class="user-pill-wrap">
+            <button class="user-pill" id="user-pill-btn" onclick="toggleUserDropdown()">
+                <div class="user-avatar" id="user-avatar-initials">?</div>
+                <svg class="user-pill-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="user-dropdown" id="user-dropdown" style="display:none;">
+                <div class="ud-header">
+                    <div class="ud-avatar-large" id="ud-avatar-large">?</div>
                     <div>
-                        <h2 style="margin:0;">Pipeline CRM</h2>
-                        <p style="margin:4px 0 0; font-size:0.82rem; color:var(--text-muted);">Leads you've pushed are shown here. Drag cards to update their stage.</p>
-                    </div>
-                    <button class="secondary-btn" onclick="loadCrmBoard()" style="font-size:0.8rem;">&#8635; Refresh</button>
-                </div>
-                <div class="crm-health-bar" id="crm-health-bar">
-                    <div class="crm-health-stat"><div class="label">Negotiating</div><div class="value" id="crm-negotiating-sum">&#x20b9;0</div></div>
-                    <div class="crm-health-divider"></div>
-                    <div class="crm-health-stat"><div class="label">Won</div><div class="value" id="crm-won-sum">&#x20b9;0</div></div>
-                    <div class="crm-health-divider"></div>
-                    <div class="crm-health-stat"><div class="label">Pipeline Total</div><div class="value" id="crm-pipeline-total">&#x20b9;0</div></div>
-                    <div class="crm-health-divider"></div>
-                    <div class="crm-health-stat"><div class="label">In CRM</div><div class="value" id="crm-total-count">0</div></div>
-                </div>
-                <div class="kanban-board" id="kanban-board">
-                    <div class="kanban-col col-new" data-status="new" id="col-new">
-                        <div class="kanban-col-header">New Lead <span class="col-count" id="cnt-new">0</span></div>
-                        <div class="kanban-col-body" id="body-new"></div>
-                    </div>
-                    <div class="kanban-col col-contacted" data-status="contacted" id="col-contacted">
-                        <div class="kanban-col-header">Contacted <span class="col-count" id="cnt-contacted">0</span></div>
-                        <div class="kanban-col-body" id="body-contacted"></div>
-                    </div>
-                    <div class="kanban-col col-replied" data-status="replied" id="col-replied">
-                        <div class="kanban-col-header">Replied <span class="col-count" id="cnt-replied">0</span></div>
-                        <div class="kanban-col-body" id="body-replied"></div>
-                    </div>
-                    <div class="kanban-col col-negotiating" data-status="negotiating" id="col-negotiating">
-                        <div class="kanban-col-header">Negotiating <span class="col-count" id="cnt-negotiating">0</span></div>
-                        <div class="kanban-col-body" id="body-negotiating"></div>
-                    </div>
-                    <div class="kanban-col col-won" data-status="won" id="col-won">
-                        <div class="kanban-col-header">Won &#127942; <span class="col-count" id="cnt-won">0</span></div>
-                        <div class="kanban-col-body" id="body-won"></div>
-                    </div>
-                    <div class="kanban-col col-lost" data-status="lost" id="col-lost">
-                        <div class="kanban-col-header">Lost <span class="col-count" id="cnt-lost">0</span></div>
-                        <div class="kanban-col-body" id="body-lost"></div>
+                        <div class="ud-name" id="ud-display-name">&#8212;</div>
+                        <div class="ud-email" id="ud-email">&#8212;</div>
                     </div>
                 </div>
-            </section>
-
-        </main>
-
-        <!-- â”€â”€ MOBILE BOTTOM DOCK (â‰¤768px only, shown via CSS) â”€â”€â”€â”€â”€â”€â”€â”€ -->
-        <nav class="bottom-dock" id="bottom-dock" aria-label="Mobile navigation">
-            <button class="dock-btn active" id="dock-tab-dashboard" onclick="switchTab('dashboard')">
-                <span class="dock-icon">&#127968;</span>
-                <span class="dock-label">Home</span>
-            </button>
-            <button class="dock-btn" id="dock-tab-campaigns" onclick="switchTab('target')">
-                <span class="dock-icon">&#128269;</span>
-                <span class="dock-label">Searches</span>
-            </button>
-            <button class="dock-btn" id="dock-tab-reports" onclick="switchTab('reports')">
-                <span class="dock-icon">&#128202;</span>
-                <span class="dock-label">Reports</span>
-            </button>
-            <button class="dock-btn" onclick="openSettingsModal()">
-                <span class="dock-icon">&#9881;</span>
-                <span class="dock-label">Settings</span>
-            </button>
-        </nav>
-
-    </div><!-- /app-container -->
-
-    <!-- ================================================================
-         CRM MICRO-DOSSIER SIDE PANEL
-    ================================================================ -->
-    <div id="crm-side-panel" class="crm-side-panel">
-        <div class="crm-panel-header">
-            <h3 id="crm-panel-title">Lead Dossier</h3>
-            <button class="crm-panel-close" onclick="closeCrmPanel()">&#10005;</button>
-        </div>
-        <div class="crm-panel-body" id="crm-panel-body"></div>
-    </div>
-
-    <!-- ================================================================
-         V18 CHILD CAMPAIGN MODAL
-    ================================================================ -->
-    <div id="child-campaign-modal" class="fc-overlay" style="display:none;">
-        <div class="fc-modal glass-panel" style="max-width: 500px; padding: 40px 30px;">
-            <button class="fc-close-btn" onclick="document.getElementById('child-campaign-modal').style.display='none'">&#10005;</button>
-            <div style="text-align: center; padding: 20px 0;">
-                <div class="fc-logo-mark" style="color: var(--primary); font-size: 2.5rem; margin-bottom: 12px;">&#10022;</div>
-                <h2 class="fc-headline" style="font-size: 1.8rem; font-weight: 700; margin-bottom: 8px; color: #111827;">Market Opportunities Detected</h2>
-                <p class="fc-sub" style="font-size: 1rem; color: #4b5563; margin-bottom: 24px;">Based on your website and current B2B trends, here is what you should launch first.</p>
-                <div class="fc-input-wrap" style="text-align: left; margin-bottom: 24px;">
-                <div id="cc-recommendation-cards" style="text-align: left; margin-bottom: 24px;"></div>
-                <div id="cc-custom-fallback-container" class="hidden">
-                    <div class="fc-input-wrap" style="text-align: left; margin-bottom: 16px;">
-                        <label class="fc-label">1. Product Focus</label>
-                        <input type="text" id="cc-focus" class="fc-intent-input" placeholder="e.g. Enterprise SEO Audit" />
-                    </div>
-                    <div class="fc-input-wrap" style="text-align: left; margin-bottom: 16px;">
-                        <label class="fc-label">2. Target Geography</label>
-                        <input type="text" id="cc-location" class="fc-intent-input" placeholder="e.g. New York, EMEA, Worldwide" />
-                    </div>
-                    <div class="fc-input-wrap" style="text-align: left; margin-bottom: 16px;">
-                        <label class="fc-label">3. Core Pain Point</label>
-                        <textarea id="cc-pain" class="fc-intent-input" placeholder="What keeps them up at night?"></textarea>
-                    </div>
-                    <div class="fc-input-wrap" style="text-align: left; margin-bottom: 24px;">
-                        <label class="fc-label">4. Unfair Advantage</label>
-                        <textarea id="cc-advantage" class="fc-intent-input" placeholder="Why should they choose you?"></textarea>
-                    </div>
-                    <button class="primary-btn full-width" onclick="window.saveChildCampaign()">Launch Campaign</button>
+                <div class="ud-wallet-chip">
+                    <span class="ud-wallet-label">&#10022; Credits Remaining</span>
+                    <strong class="ud-wallet-value" id="wallet-balance">&#8212;</strong>
                 </div>
-                <div style="margin-top: 16px;">
-                    <a href="#" onclick="window.showCcCustomFallback(); return false;" style="font-size: 0.9rem; color: var(--primary); text-decoration: underline;">I want to launch a custom product instead.</a>
-                </div>
+                <div class="ud-divider"></div>
+                <button class="ud-item" onclick="openDTModal()">&#128064; Analyze My Website</button>
+                <button class="ud-item" onclick="openSettingsModal()">&#9881;&#65039; Integrations &amp; Settings</button>
+                <div class="ud-divider"></div>
+                <button class="ud-item ud-item-danger" onclick="firebase.auth().signOut()">Sign Out</button>
             </div>
         </div>
+    </nav>
+
+    <!-- WALLET ALERT BANNER -->
+    <div id="wallet-alert-banner" class="wallet-alert-banner" style="display:none;">
+        &#9888;&#65039; Your pipeline credits are running low (&lt;&nbsp;50). Contact admin to top up.
     </div>
 
-    <!-- ================================================================
-         V18 DIGITAL TWIN ONBOARDING MODAL
-    ================================================================ -->
-    <div id="dt-onboarding-modal" class="fc-overlay" style="display:none;">
-        <div class="fc-modal glass-panel" style="max-width: 500px; padding: 40px 30px;">
-            <button class="fc-close-btn" onclick="closeDTModal()">&#10005;</button>
+    <!-- MAIN CANVAS -->
+    <main class="dashboard-grid app-main">
 
-            <!-- VIEW A: Magic URL Input -->
-            <div id="dt-view-a" style="text-align: center; padding: 20px 0;">
-                <div class="fc-logo-mark" style="color: var(--primary); font-size: 2.5rem; margin-bottom: 12px;">&#10022;</div>
-                <h2 class="fc-headline" style="font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 12px; color: #111827;">Let's build your pipeline.</h2>
-                <p class="fc-sub" style="font-size: 1.1rem; color: #4b5563; margin-bottom: 32px; max-width: 85%; margin-left: auto; margin-right: auto;">Drop your website link below. I'll read through your offering and map out exactly who we should target first.</p>
-                
-                <div class="fc-input-wrap" style="margin-bottom: 24px; display: flex; justify-content: center;">
-                    <input type="text" id="dt-url-input" class="fc-intent-input" style="width: 100%; max-width: 400px; height: 60px; font-size: 1.1rem; text-align: center; border-radius: 30px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); background: rgba(255, 255, 255, 0.4); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.5); color: #111;" placeholder="Where can I read about your business? (e.g., sideio.com)" onkeydown="if(event.key==='Enter') window.dtStartAnalysis();">
+        <!-- DASHBOARD VIEW -->
+        <section id="view-dashboard" class="main-feed">
+            <div id="dashboard-greeting" class="greeting-bar">
+                <div class="greeting-text">
+                    <span id="greeting-message">Welcome back.</span>
                 </div>
-                
-                <button class="primary-btn" style="width: 100%; max-width: 400px; height: 56px; font-size: 1.15rem; border-radius: 28px; font-weight: 600; margin-bottom: 24px; box-shadow: 0 8px 20px rgba(79,70,229,0.3);" onclick="window.dtStartAnalysis()">
-                    Map My Targets &#10024;
-                </button>
-                
-                <div>
-                    <button class="text-btn" style="font-size: 0.95rem; color: #6b7280; padding: 8px; font-weight: 500;" onclick="window.dtFallbackToNaturalLanguage()">
-                        I don't have a website
-                    </button>
+                <div id="hero-btn-container">
+                    <button id="btn-new-twin-hero" class="find-clients-hero-btn" onclick="openNewCampaignModal()" style="display:none;">&#43; Find New Clients</button>
+                    <button id="btn-add-campaign-hero" class="find-clients-hero-btn" onclick="openChildCampaignModal()" style="display:none;">&#43; Add Campaign</button>
                 </div>
             </div>
 
-            <!-- VIEW B: Pulse Animation -->
-            <div id="dt-view-b" class="hidden" style="text-align: center; padding: 40px 0;">
-                <div class="pulse-ring" style="width: 80px; height: 80px; margin: 0 auto 30px auto; border-radius: 50%; background: var(--primary); opacity: 0.8; animation: dtPulse 1.5s infinite ease-in-out;"></div>
-                <style>
-                    @keyframes dtPulse {
-                        0% { transform: scale(0.8); opacity: 0.8; }
-                        50% { transform: scale(1.2); opacity: 0.4; }
-                        100% { transform: scale(0.8); opacity: 0.8; }
-                    }
-                </style>
-                <div id="dt-status-text" style="font-size: 1.2rem; font-weight: 500; color: var(--text-main); margin-bottom: 20px; transition: opacity 0.15s ease;">Scanning domain...</div>
-                <div style="width: 100%; height: 6px; background: rgba(0,0,0,0.05); border-radius: 3px; overflow: hidden;">
-                    <div id="dt-progress-fill" style="height: 100%; width: 5%; background: var(--primary); transition: width 0.3s ease;"></div>
+            <div class="kpi-tiles" id="kpi-tiles">
+                <div class="kpi-tile kpi-hot">
+                    <div class="kpi-icon">&#128293;</div>
+                    <div class="kpi-value" id="kpi-new-count">&#8212;</div>
+                    <div class="kpi-label">New Leads</div>
+                </div>
+                <div class="kpi-tile kpi-active">
+                    <div class="kpi-icon">&#128172;</div>
+                    <div class="kpi-value" id="kpi-contacted-count">&#8212;</div>
+                    <div class="kpi-label">Contacted</div>
+                </div>
+                <div class="kpi-tile kpi-won">
+                    <div class="kpi-icon">&#127942;</div>
+                    <div class="kpi-value" id="kpi-won-count">&#8212;</div>
+                    <div class="kpi-label">Converted</div>
                 </div>
             </div>
 
-            <!-- VIEW C: Confirmation -->
-            <div id="dt-view-c" class="hidden">
-                <div class="fc-understood-badge" style="display:inline-block; margin-bottom: 16px;">&#10022; Profile Context Parsed</div>
-                <p class="fc-sub" style="margin-bottom: 24px;">Here is what I gathered about your business. Does this look accurate?</p>
-                
-                <div style="background: rgba(255,255,255,0.4); border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
-                    <div style="font-size: 0.85rem; color: var(--primary); font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px;">Company Bio</div>
-                    <div id="dt-company-desc" style="font-size: 1rem; color: var(--text-main); line-height: 1.5; cursor: pointer;" onclick="window.dtEditPersona('company')" title="Click to edit"></div>
-                </div>
-                
-                <div style="background: rgba(255,255,255,0.4); border-radius: 12px; padding: 20px; margin-bottom: 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.02);">
-                    <div style="font-size: 0.85rem; color: var(--primary); font-weight: 600; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px;">Target Personas</div>
-                    
-                    <div style="margin-bottom: 16px; cursor: pointer;" onclick="window.dtEditPersona('target-1')" title="Click to edit name">
-                        <strong id="dt-target-1-name" style="display: block; font-size: 0.95rem; margin-bottom: 4px;"></strong>
-                        <span id="dt-target-1-desc" style="font-size: 0.9rem; color: var(--text-muted);"></span>
-                    </div>
-                    <div style="margin-bottom: 16px; cursor: pointer;" onclick="window.dtEditPersona('target-2')" title="Click to edit name">
-                        <strong id="dt-target-2-name" style="display: block; font-size: 0.95rem; margin-bottom: 4px;"></strong>
-                        <span id="dt-target-2-desc" style="font-size: 0.9rem; color: var(--text-muted);"></span>
-                    </div>
-                    <div style="cursor: pointer;" onclick="window.dtEditPersona('target-3')" title="Click to edit name">
-                        <strong id="dt-target-3-name" style="display: block; font-size: 0.95rem; margin-bottom: 4px;"></strong>
-                        <span id="dt-target-3-desc" style="font-size: 0.9rem; color: var(--text-muted);"></span>
-                    </div>
-                </div>
-
-                <input type="hidden" id="dt-extracted-bio">
-                <input type="hidden" id="dt-extracted-who">
-                <input type="hidden" id="dt-extracted-gl">
-                
-                <button class="primary-btn" style="width: 100%; height: 54px; font-size: 1.1rem; margin-top: 8px;" onclick="window.dtPrefillAndLaunch()">
-                    Save Profile
-                </button>
+            <div class="mini-stats-bar" id="mini-stats-bar">
+                <span>Discovered: <strong id="stat-discovered">0</strong></span>
+                <span class="mstat-div">&#183;</span>
+                <span>Actionable: <strong id="stat-actionable">0</strong></span>
+                <span class="mstat-div">&#183;</span>
+                <span>Ignored: <strong id="stat-ignored">0</strong></span>
+                <span class="mstat-div">&#183;</span>
+                <span>Value: <strong id="stat-value">&#x20b9;&nbsp;0</strong></span>
             </div>
 
-            <!-- VIEW D: Natural Language Fallback -->
-            <div id="dt-view-d" class="hidden">
-                <button class="fc-back-btn" onclick="window.dtBackToViewA()">&#8592; Back</button>
-                <div class="fc-logo-mark" style="color: var(--primary); margin-top: 10px;">&#10022;</div>
-                <h2 class="fc-headline" style="font-size: 1.6rem; margin-bottom: 8px;">Who are your clients?</h2>
-                <p class="fc-sub" style="font-size: 1rem; margin-bottom: 24px;">Describe them in plain English. No website required.</p>
-                
-                <div class="fc-input-wrap" style="margin-bottom: 16px;">
-                    <textarea id="dt-intent-fallback" class="fc-intent-input"
-                        placeholder="e.g. Local service businesses in the UK that need more customers..."
-                        rows="4"
-                        style="padding-top: 16px;"
-                        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();window.dtLaunchFallback();}"></textarea>
+            <div id="funnel-wrap" class="funnel-wrap" style="display:none;">
+                <div class="funnel-hdr">Pipeline Analytics</div>
+                <div style="height:160px; position:relative;">
+                    <canvas id="funnelChart"></canvas>
                 </div>
-                
-                <button class="primary-btn" style="width: 100%; height: 54px; font-size: 1.1rem;" onclick="window.dtLaunchFallback()">
-                    Find My Clients &#8594;
-                </button>
             </div>
 
-        </div>
-    </div>
-
-    <!-- ================================================================
-         SETTINGS / INTEGRATIONS MODAL
-    ================================================================ -->
-    <div id="settings-modal" class="hidden fc-overlay">
-        <div class="settings-modal-panel glass-panel">
-            <button class="fc-close-btn" onclick="closeSettingsModal()">&#10005;</button>
-            <div class="fc-logo-mark">&#9881;&#65039;</div>
-            <h2 class="fc-headline">Integrations &amp; Settings</h2>
-
-            <div class="settings-section">
-                <h3 class="settings-section-title">CRM Webhook</h3>
-                <p class="settings-section-desc">Automatically push converted leads to your CRM, Make.com, or Zapier flow.</p>
-                <label class="settings-label">Webhook URL</label>
-                <input type="text" id="crm-webhook-url" class="settings-input" placeholder="https://hook.make.com/..." />
-                <button class="primary-btn" style="margin-top:12px; width:100%;" onclick="saveCRMWebhook()">Save Integration</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- ================================================================
-         EDIT CAMPAIGN MODAL (fully preserved)
-    ================================================================ -->
-    <div id="edit-campaign-modal" class="hidden" style="position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:999; justify-content:center; align-items:center;">
-        <div class="glass-panel" style="width:400px; max-width:90%;">
-            <h2>Edit Campaign Rules</h2>
-            <br>
-            <input type="hidden" id="edit-camp-id">
-            <label style="font-size:0.8rem; color:var(--text-muted);">Campaign Name</label>
-            <input type="text" id="edit-camp-name" class="full-width" style="margin-bottom:12px; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
-            <label style="font-size:0.8rem; color:var(--text-muted);">Product Bio</label>
-            <input type="text" id="edit-camp-bio" class="full-width" style="margin-bottom:12px; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
-            <label style="font-size:0.8rem; color:var(--text-muted);">Target Keywords</label>
-            <input type="text" id="edit-camp-keys" class="full-width" style="margin-bottom:12px; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
-            <label style="font-size:0.8rem; color:var(--text-muted);">Geographic Targeting</label>
-            <div style="display:flex; gap:8px; margin-bottom:12px;">
-                <select id="edit-camp-gl" onchange="handleCountryChange('edit-camp-gl','edit-camp-location')" style="flex:1; padding:10px; border:1px solid var(--glass-border); border-radius:6px; background:white;">
-                    <option value="">Global</option>
-                    <option value="us">United States</option>
-                    <option value="uk">United Kingdom</option>
-                    <option value="ca">Canada</option>
-                    <option value="au">Australia</option>
-                    <option value="in">India</option>
+            <div class="feed-header">
+                <h3 class="feed-title">Lead Intelligence Feed</h3>
+                <select id="campaign-filter" class="feed-filter" onchange="filterLeadsByCampaign(this.value)">
+                    <option value="all">All Searches</option>
                 </select>
-                <input type="text" id="edit-camp-location" placeholder="City, State/Region" style="flex:2; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
             </div>
-            <label style="font-size:0.8rem; color:var(--text-muted);">Priority Target Websites (Max 10)</label>
-            <textarea id="edit-camp-target-urls" placeholder="Paste specific URLs to prioritize (one per line)." class="full-width" rows="3" style="margin-bottom:24px; padding:10px; border:1px solid var(--glass-border); border-radius:6px; resize:vertical;"></textarea>
-            <div style="display:flex; gap:12px;">
-                <button class="primary-btn full-width" onclick="saveEditedCampaign()">Update Engine</button>
-                <button class="secondary-btn full-width" onclick="closeEditModal()">Cancel</button>
+            <div id="active-campaign-feed"></div>
+            <div id="leads-list" class="leads-list">
+                <div class="lead-card pulse">Connecting to intelligence engine...</div>
+            </div>
+            <div class="load-more-row">
+                <button class="secondary-btn" onclick="loadMoreLeads()" style="padding:10px 24px;">Load Older Leads</button>
+            </div>
+        </section>
+
+        <!-- SEARCHES VIEW -->
+        <section id="view-target" class="main-feed" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h2>Active Campaign Matrix</h2>
+                <div id="matrix-btn-container">
+                    <button id="btn-new-twin-matrix" class="primary-btn" onclick="openNewCampaignModal()" style="display:none;">&#43; Find New Clients</button>
+                    <button id="btn-add-campaign-matrix" class="primary-btn" onclick="openChildCampaignModal()" style="display:none;">&#43; Add Campaign</button>
+                </div>
+            </div>
+            <div class="stats-box mt-3" style="background:#ffffff; padding:0; overflow:hidden;">
+                <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.9rem;">
+                    <thead style="background:rgba(79,70,229,0.05); border-bottom:1px solid var(--glass-border);">
+                        <tr>
+                            <th style="padding:12px;">Campaign</th>
+                            <th style="padding:12px;">Keywords</th>
+                            <th style="padding:12px;">Status</th>
+                            <th style="padding:12px; text-align:right;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="campaign-list-table">
+                        <tr><td colspan="4" style="padding:16px; text-align:center;">Loading campaigns...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- REPORTS VIEW -->
+        <section id="view-reports" class="main-feed" style="display:none;">
+            <h2>Custom Reports</h2>
+            <div class="stats-box mt-3" style="background:#ffffff; padding:24px;">
+                <div style="display:flex; gap:16px; margin-bottom:16px;">
+                    <div style="flex:1;">
+                        <label style="font-size:0.8rem; color:var(--text-muted);">Start Date</label>
+                        <input type="date" id="report-start" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
+                    </div>
+                    <div style="flex:1;">
+                        <label style="font-size:0.8rem; color:var(--text-muted);">End Date</label>
+                        <input type="date" id="report-end" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
+                    </div>
+                </div>
+                <button class="primary-btn full-width" onclick="showToast('Aggregating Intelligence Arrays...', 'info')">Generate Report</button>
+                <div style="display:flex; gap:8px; margin-top:12px;">
+                    <button class="secondary-btn full-width" style="font-size:0.8rem;" onclick="window.print()">Download PDF</button>
+                    <button class="secondary-btn full-width" style="font-size:0.8rem;" onclick="sendEmailReport()">Email Report</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- L0 ADMIN VIEW -->
+        <section id="view-l0-admin" class="main-feed" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h2>L0 Enterprise Governance</h2>
+                <button class="primary-btn" onclick="fetchL0Telemetry()" style="background:#dc2626;">Refresh Telemetry</button>
+            </div>
+            <div style="display:flex; gap:16px; margin-top:16px;">
+                <div class="stats-box" style="flex:1; background:#ffffff;">
+                    <h4 style="color:var(--text-muted); font-size:0.8rem;">Total Platform Leads</h4>
+                    <div id="l0-stat-total-leads" style="font-size:1.5rem; font-weight:600;">0</div>
+                </div>
+                <div class="stats-box" style="flex:1; background:#ffffff;">
+                    <h4 style="color:var(--text-muted); font-size:0.8rem;">Global Actionable Pulse</h4>
+                    <div id="l0-stat-conversion" style="font-size:1.5rem; font-weight:600;">0%</div>
+                </div>
+                <div class="stats-box" style="flex:1; background:#ffffff;">
+                    <h4 style="color:var(--text-muted); font-size:0.8rem;">Active Tenants</h4>
+                    <div id="l0-stat-tenants" style="font-size:1.5rem; font-weight:600;">0</div>
+                </div>
+            </div>
+            <div class="stats-box mt-3" style="background:#ffffff; padding:0; overflow:hidden;">
+                <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.9rem;">
+                    <thead style="background:rgba(220,38,38,0.05); border-bottom:1px solid var(--glass-border);">
+                        <tr>
+                            <th style="padding:12px; cursor:pointer;" onclick="sortL0Table('email')">User Email &#8597;</th>
+                            <th style="padding:12px;">Status</th>
+                            <th style="padding:12px; cursor:pointer;" onclick="sortL0Table('wallet')">Credits &#8597;</th>
+                            <th style="padding:12px; text-align:right; cursor:pointer;" onclick="sortL0Table('leads')">Leads &#8597;</th>
+                            <th style="padding:12px; text-align:right;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="l0-telemetry-table">
+                        <tr><td colspan="5" style="padding:16px; text-align:center;">Awaiting L0 Telemetry...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- CRM VIEW -->
+        <section id="view-crm-test" class="glass-panel main-feed" style="display:none; padding:20px; overflow:hidden;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-shrink:0;">
+                <div>
+                    <h2 style="margin:0;">Pipeline CRM</h2>
+                    <p style="margin:4px 0 0; font-size:0.82rem; color:var(--text-muted);">Drag cards to update their stage.</p>
+                </div>
+                <button class="secondary-btn" onclick="loadCrmBoard()" style="font-size:0.8rem;">&#8635; Refresh</button>
+            </div>
+            <div class="crm-health-bar" id="crm-health-bar">
+                <div class="crm-health-stat"><div class="label">Negotiating</div><div class="value" id="crm-negotiating-sum">&#x20b9;0</div></div>
+                <div class="crm-health-divider"></div>
+                <div class="crm-health-stat"><div class="label">Won</div><div class="value" id="crm-won-sum">&#x20b9;0</div></div>
+                <div class="crm-health-divider"></div>
+                <div class="crm-health-stat"><div class="label">Pipeline Total</div><div class="value" id="crm-pipeline-total">&#x20b9;0</div></div>
+                <div class="crm-health-divider"></div>
+                <div class="crm-health-stat"><div class="label">In CRM</div><div class="value" id="crm-total-count">0</div></div>
+            </div>
+            <div class="kanban-board" id="kanban-board">
+                <div class="kanban-col col-new" data-status="new"><div class="kanban-col-header">New Lead <span class="col-count" id="cnt-new">0</span></div><div class="kanban-col-body" id="body-new"></div></div>
+                <div class="kanban-col col-contacted" data-status="contacted"><div class="kanban-col-header">Contacted <span class="col-count" id="cnt-contacted">0</span></div><div class="kanban-col-body" id="body-contacted"></div></div>
+                <div class="kanban-col col-replied" data-status="replied"><div class="kanban-col-header">Replied <span class="col-count" id="cnt-replied">0</span></div><div class="kanban-col-body" id="body-replied"></div></div>
+                <div class="kanban-col col-negotiating" data-status="negotiating"><div class="kanban-col-header">Negotiating <span class="col-count" id="cnt-negotiating">0</span></div><div class="kanban-col-body" id="body-negotiating"></div></div>
+                <div class="kanban-col col-won" data-status="won"><div class="kanban-col-header">Won &#127942; <span class="col-count" id="cnt-won">0</span></div><div class="kanban-col-body" id="body-won"></div></div>
+                <div class="kanban-col col-lost" data-status="lost"><div class="kanban-col-header">Lost <span class="col-count" id="cnt-lost">0</span></div><div class="kanban-col-body" id="body-lost"></div></div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- MOBILE BOTTOM DOCK -->
+    <nav class="bottom-dock" id="bottom-dock">
+        <button class="dock-btn active" id="dock-tab-dashboard" onclick="switchTab('dashboard')">
+            <span class="dock-icon">&#127968;</span><span class="dock-label">Home</span>
+        </button>
+        <button class="dock-btn" id="dock-tab-campaigns" onclick="switchTab('target')">
+            <span class="dock-icon">&#128269;</span><span class="dock-label">Searches</span>
+        </button>
+        <button class="dock-btn" id="dock-tab-reports" onclick="switchTab('reports')">
+            <span class="dock-icon">&#128202;</span><span class="dock-label">Reports</span>
+        </button>
+        <button class="dock-btn" onclick="openSettingsModal()">
+            <span class="dock-icon">&#9881;</span><span class="dock-label">Settings</span>
+        </button>
+    </nav>
+
+</div><!-- /app-container -->
+
+<!-- ════════════════════════════════════════════
+     CRM SIDE PANEL
+════════════════════════════════════════════ -->
+<div id="crm-side-panel" class="crm-side-panel">
+    <div class="crm-panel-header">
+        <h3 id="crm-panel-title">Lead Dossier</h3>
+        <button class="crm-panel-close" onclick="closeCrmPanel()">&#10005;</button>
+    </div>
+    <div class="crm-panel-body" id="crm-panel-body"></div>
+</div>
+
+<!-- ════════════════════════════════════════════
+     DIGITAL TWIN ONBOARDING MODAL
+     Uses .sio-modal-overlay — JS adds/removes .open class
+════════════════════════════════════════════ -->
+<div id="dt-onboarding-modal" class="sio-modal-overlay">
+    <div class="sio-modal-box">
+        <button class="sio-modal-close" onclick="closeDTModal()">&#10005;</button>
+
+        <!-- VIEW A: URL Input -->
+        <div id="dt-view-a" class="sio-view active" style="text-align:center; padding:20px 0;">
+            <div style="font-size:2.5rem; color:var(--primary); margin-bottom:12px;">&#10022;</div>
+            <h2 style="font-size:2rem; font-weight:700; letter-spacing:-0.02em; margin-bottom:12px; color:#111827;">Let's build your pipeline.</h2>
+            <p style="font-size:1.1rem; color:#4b5563; margin-bottom:32px; max-width:85%; margin-left:auto; margin-right:auto;">Drop your website link below. I'll read through your offering and map out exactly who we should target first.</p>
+            <input type="text" id="dt-url-input"
+                style="width:100%; max-width:400px; height:60px; font-size:1.1rem; text-align:center; border-radius:30px; border:2px solid #e2e8f0; padding:0 20px; font-family:'Inter',sans-serif; outline:none; display:block; margin:0 auto 20px;"
+                placeholder="e.g. sideio.com"
+                onkeydown="if(event.key==='Enter') dtStartAnalysis();">
+            <button class="primary-btn"
+                style="width:100%; max-width:400px; height:56px; font-size:1.15rem; border-radius:28px; font-weight:600; margin-bottom:20px; display:block; margin:0 auto 20px;"
+                onclick="dtStartAnalysis()">Map My Targets &#10024;</button>
+            <button style="background:none; border:none; font-size:0.95rem; color:#6b7280; cursor:pointer; font-family:'Inter',sans-serif; padding:8px; display:block; margin:0 auto;" onclick="dtFallbackToNaturalLanguage()">I don't have a website</button>
+        </div>
+
+        <!-- VIEW B: Analysis in progress -->
+        <div id="dt-view-b" class="sio-view" style="text-align:center; padding:40px 0;">
+            <div class="pulse-ring"></div>
+            <div id="dt-status-text" style="font-size:1.2rem; font-weight:500; color:var(--text-main); margin-bottom:20px; transition:opacity 0.15s ease;">Scanning domain...</div>
+            <div style="width:100%; height:6px; background:rgba(0,0,0,0.05); border-radius:3px; overflow:hidden;">
+                <div id="dt-progress-fill" style="height:100%; width:5%; background:var(--primary); transition:width 0.3s ease; border-radius:3px;"></div>
             </div>
         </div>
-    </div>
 
-    <!-- ================================================================
-         TIMELINE EVENT AUDIT LOG MODAL
-    ================================================================ -->
-    <div id="audit-log-modal" class="hidden" style="position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:999; justify-content:center; align-items:center;">
-        <div class="glass-panel" style="width:500px; max-width:90%; max-height:80vh; overflow-y:auto;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-                <h2 style="margin:0;">CRM Interaction Audit Log</h2>
-                <button class="secondary-btn" style="padding:4px 8px;" onclick="document.getElementById('audit-log-modal').classList.add('hidden')">Close</button>
+        <!-- VIEW C: Persona confirmation -->
+        <div id="dt-view-c" class="sio-view">
+            <div style="display:inline-block; background:#dcfce7; color:#15803d; font-size:0.8rem; font-weight:600; padding:4px 12px; border-radius:20px; border:1px solid #bbf7d0; margin-bottom:16px;">&#10022; Profile Context Parsed</div>
+            <p style="color:#64748b; font-size:0.95rem; margin-bottom:24px; line-height:1.5;">Here is what I gathered about your business. Does this look accurate?</p>
+            <div style="background:rgba(255,255,255,0.5); border-radius:12px; padding:20px; margin-bottom:16px; border:1px solid rgba(255,255,255,0.3);">
+                <div style="font-size:0.85rem; color:var(--primary); font-weight:600; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.5px;">Company Bio</div>
+                <div id="dt-company-desc" style="font-size:1rem; color:var(--text-main); line-height:1.5;"></div>
             </div>
-            <div id="audit-timeline-feed" style="background:#f8fafc; padding:16px; border-radius:6px; border:1px solid var(--glass-border);"></div>
+            <div style="background:rgba(255,255,255,0.5); border-radius:12px; padding:20px; margin-bottom:24px; border:1px solid rgba(255,255,255,0.3);">
+                <div style="font-size:0.85rem; color:var(--primary); font-weight:600; margin-bottom:12px; text-transform:uppercase; letter-spacing:0.5px;">Target Personas</div>
+                <div style="margin-bottom:12px;"><strong id="dt-target-1-name" style="display:block; font-size:0.95rem; margin-bottom:4px;"></strong><span id="dt-target-1-desc" style="font-size:0.9rem; color:var(--text-muted);"></span></div>
+                <div style="margin-bottom:12px;"><strong id="dt-target-2-name" style="display:block; font-size:0.95rem; margin-bottom:4px;"></strong><span id="dt-target-2-desc" style="font-size:0.9rem; color:var(--text-muted);"></span></div>
+                <div><strong id="dt-target-3-name" style="display:block; font-size:0.95rem; margin-bottom:4px;"></strong><span id="dt-target-3-desc" style="font-size:0.9rem; color:var(--text-muted);"></span></div>
+            </div>
+            <input type="hidden" id="dt-extracted-bio">
+            <input type="hidden" id="dt-extracted-who">
+            <input type="hidden" id="dt-extracted-gl">
+            <button class="primary-btn" style="width:100%; height:54px; font-size:1.1rem;" onclick="dtPrefillAndLaunch()">Save Profile</button>
+        </div>
+
+        <!-- VIEW D: Natural language fallback -->
+        <div id="dt-view-d" class="sio-view">
+            <button style="background:none; border:none; font-size:0.85rem; color:#64748b; cursor:pointer; font-family:'Inter',sans-serif; padding:4px 0; margin-bottom:16px; display:block;" onclick="dtBackToViewA()">&#8592; Back</button>
+            <div style="font-size:1.8rem; color:var(--primary); margin-bottom:12px;">&#10022;</div>
+            <h2 style="font-size:1.6rem; font-weight:700; margin-bottom:8px; color:#111827;">Who are your clients?</h2>
+            <p style="color:#64748b; font-size:1rem; margin-bottom:24px; line-height:1.5;">Describe them in plain English. No website required.</p>
+            <textarea id="dt-intent-fallback"
+                style="width:100%; min-height:100px; border:2px solid #e2e8f0; border-radius:12px; padding:14px 16px; font-family:'Inter',sans-serif; font-size:1rem; outline:none; resize:vertical; margin-bottom:20px;"
+                placeholder="e.g. Local service businesses in the UK that need more customers..."
+                onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();dtLaunchFallback();}"></textarea>
+            <button class="primary-btn" style="width:100%; height:54px; font-size:1.1rem;" onclick="dtLaunchFallback()">Find My Clients &#8594;</button>
         </div>
     </div>
+</div>
 
-    <!-- ================================================================
-         WAITROOM OVERLAY
-    ================================================================ -->
-    <div id="waitroom-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); z-index:1000; justify-content:center; align-items:center; backdrop-filter:blur(8px);">
-        <div class="glass-panel" style="width:500px; max-width:90%; text-align:center; border:1px solid rgba(255,255,255,0.1);">
-            <div style="font-size:3rem; margin-bottom:16px;">&#9203;</div>
-            <h2 style="color:white; margin-bottom:12px;">Waiting Room</h2>
-            <p style="color:#cbd5e1; font-size:1.1rem; line-height:1.6; margin-bottom:24px;">Your application is under review. You will be notified once the Admin grants access.</p>
-            <button class="secondary-btn" onclick="firebase.auth().signOut()">Sign Out</button>
+<!-- ════════════════════════════════════════════
+     CHILD CAMPAIGN MODAL
+════════════════════════════════════════════ -->
+<div id="child-campaign-modal" class="sio-modal-overlay">
+    <div class="sio-modal-box" style="max-width:500px;">
+        <button class="sio-modal-close" onclick="closeModal('child-campaign-modal')">&#10005;</button>
+        <div style="text-align:center; margin-bottom:20px;">
+            <div style="font-size:2rem; color:var(--primary); margin-bottom:8px;">&#10022;</div>
+            <h2 style="font-size:1.8rem; font-weight:700; color:#111827; margin-bottom:8px;">Market Opportunities Detected</h2>
+            <p style="color:#4b5563; font-size:1rem;">Based on your website and current B2B trends, here is what you should launch first.</p>
+        </div>
+        <div id="cc-recommendation-cards" style="margin-bottom:24px; text-align:left;"></div>
+        <div id="cc-custom-fallback-container" style="display:none; text-align:left;">
+            <div style="margin-bottom:16px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:6px;">1. Product Focus</label>
+                <input type="text" id="cc-focus" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif;" placeholder="e.g. Enterprise SEO Audit">
+            </div>
+            <div style="margin-bottom:16px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:6px;">2. Target Geography</label>
+                <input type="text" id="cc-location" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif;" placeholder="e.g. New York, EMEA, Worldwide">
+            </div>
+            <div style="margin-bottom:16px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:6px;">3. Core Pain Point</label>
+                <textarea id="cc-pain" style="width:100%; min-height:80px; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; resize:vertical;" placeholder="What keeps them up at night?"></textarea>
+            </div>
+            <div style="margin-bottom:24px;">
+                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:6px;">4. Unfair Advantage</label>
+                <textarea id="cc-advantage" style="width:100%; min-height:80px; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; resize:vertical;" placeholder="Why should they choose you?"></textarea>
+            </div>
+            <button class="primary-btn full-width" onclick="saveChildCampaign()">Launch Campaign</button>
+        </div>
+        <div style="margin-top:16px; text-align:center;">
+            <a href="#" onclick="showCcCustomFallback(); return false;" style="font-size:0.9rem; color:var(--primary); text-decoration:underline;">I want to launch a custom product instead.</a>
         </div>
     </div>
+</div>
 
-    <!-- ================================================================
-         TERMS OF SERVICE MODAL
-    ================================================================ -->
-    <div id="tos-modal" class="hidden" style="position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:9999; display:flex; justify-content:center; align-items:center; backdrop-filter:blur(4px);">
-        <div class="glass-panel" style="width:500px; max-width:90%;">
-            <h2>Compliance Agreement</h2>
-            <p style="color:var(--text-muted); font-size:0.95rem; line-height:1.5; margin-bottom:24px; margin-top:12px;">By accessing this B2B intelligence pipeline, you agree to our Terms of Service. You are explicitly responsible for ensuring compliance with CAN-SPAM, GDPR, and regional privacy regulations when initiating contact sequences.</p>
-            <button class="primary-btn full-width" onclick="agreeToTerms()">I Understand &amp; Agree</button>
+<!-- ════════════════════════════════════════════
+     SETTINGS MODAL
+════════════════════════════════════════════ -->
+<div id="settings-modal" class="sio-modal-overlay" onclick="if(event.target===this)closeModal('settings-modal')">
+    <div class="sio-modal-box settings-modal-panel">
+        <button class="sio-modal-close" onclick="closeModal('settings-modal')">&#10005;</button>
+        <div style="font-size:1.8rem; margin-bottom:8px; display:block;">&#9881;&#65039;</div>
+        <h2 style="font-size:1.5rem; font-weight:700; margin-bottom:24px;">Integrations &amp; Settings</h2>
+        <div class="settings-section">
+            <h3 class="settings-section-title">CRM Webhook</h3>
+            <p class="settings-section-desc">Automatically push converted leads to your CRM, Make.com, or Zapier flow.</p>
+            <label class="settings-label">Webhook URL</label>
+            <input type="text" id="crm-webhook-url" class="settings-input" placeholder="https://hook.make.com/...">
+            <button class="primary-btn" style="margin-top:12px; width:100%;" onclick="saveCRMWebhook()">Save Integration</button>
         </div>
     </div>
+</div>
 
-    <!-- Toast System -->
-    <div id="toast-container" class="toast-container"></div>
+<!-- ════════════════════════════════════════════
+     EDIT CAMPAIGN MODAL
+════════════════════════════════════════════ -->
+<div id="edit-campaign-modal" onclick="if(event.target===this)closeEditModal()">
+    <div class="glass-panel" style="width:400px; max-width:90%;">
+        <h2>Edit Campaign Rules</h2><br>
+        <input type="hidden" id="edit-camp-id">
+        <label style="font-size:0.8rem; color:var(--text-muted);">Campaign Name</label>
+        <input type="text" id="edit-camp-name" class="full-width" style="margin-bottom:12px; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
+        <label style="font-size:0.8rem; color:var(--text-muted);">Product Bio</label>
+        <input type="text" id="edit-camp-bio" class="full-width" style="margin-bottom:12px; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
+        <label style="font-size:0.8rem; color:var(--text-muted);">Target Keywords</label>
+        <input type="text" id="edit-camp-keys" class="full-width" style="margin-bottom:12px; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
+        <label style="font-size:0.8rem; color:var(--text-muted);">Geographic Targeting</label>
+        <div style="display:flex; gap:8px; margin-bottom:12px;">
+            <select id="edit-camp-gl" onchange="handleCountryChange('edit-camp-gl','edit-camp-location')" style="flex:1; padding:10px; border:1px solid var(--glass-border); border-radius:6px; background:white;">
+                <option value="">Global</option>
+                <option value="us">United States</option>
+                <option value="uk">United Kingdom</option>
+                <option value="ca">Canada</option>
+                <option value="au">Australia</option>
+                <option value="in">India</option>
+            </select>
+            <input type="text" id="edit-camp-location" placeholder="City, State/Region" style="flex:2; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
+        </div>
+        <label style="font-size:0.8rem; color:var(--text-muted);">Priority Target Websites (Max 10)</label>
+        <textarea id="edit-camp-target-urls" placeholder="Paste specific URLs to prioritize (one per line)." class="full-width" rows="3" style="margin-bottom:24px; padding:10px; border:1px solid var(--glass-border); border-radius:6px; resize:vertical;"></textarea>
+        <div style="display:flex; gap:12px;">
+            <button class="primary-btn full-width" onclick="saveEditedCampaign()">Update Engine</button>
+            <button class="secondary-btn full-width" onclick="closeEditModal()">Cancel</button>
+        </div>
+    </div>
+</div>
 
-    <!-- Service Worker -->
-    <script>
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/sw.js').then(reg => {
-                    console.log('SW registered:', reg.scope);
-                }).catch(err => {
-                    console.log('SW failed:', err);
-                });
-            });
-        }
-    </script>
-    <script src="app.js?v=47"></script>
+<!-- ════════════════════════════════════════════
+     AUDIT LOG MODAL
+════════════════════════════════════════════ -->
+<div id="audit-log-modal" onclick="if(event.target===this)this.style.display='none'">
+    <div class="glass-panel" style="width:500px; max-width:90%; max-height:80vh; overflow-y:auto;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+            <h2 style="margin:0;">CRM Interaction Audit Log</h2>
+            <button class="secondary-btn" style="padding:4px 8px;" onclick="document.getElementById('audit-log-modal').style.display='none'">Close</button>
+        </div>
+        <div id="audit-timeline-feed" style="background:#f8fafc; padding:16px; border-radius:6px; border:1px solid var(--glass-border);"></div>
+    </div>
+</div>
+
+<!-- ════════════════════════════════════════════
+     WAITROOM OVERLAY
+════════════════════════════════════════════ -->
+<div id="waitroom-overlay">
+    <div class="glass-panel" style="width:500px; max-width:90%; text-align:center; border:1px solid rgba(255,255,255,0.1);">
+        <div style="font-size:3rem; margin-bottom:16px;">&#9203;</div>
+        <h2 style="color:white; margin-bottom:12px;">Waiting Room</h2>
+        <p style="color:#cbd5e1; font-size:1.1rem; line-height:1.6; margin-bottom:24px;">Your application is under review. You will be notified once the Admin grants access.</p>
+        <button class="secondary-btn" onclick="firebase.auth().signOut()">Sign Out</button>
+    </div>
+</div>
+
+<!-- ════════════════════════════════════════════
+     TERMS OF SERVICE MODAL
+════════════════════════════════════════════ -->
+<div id="tos-modal">
+    <div class="glass-panel" style="width:500px; max-width:90%;">
+        <h2>Compliance Agreement</h2>
+        <p style="color:var(--text-muted); font-size:0.95rem; line-height:1.5; margin-bottom:24px; margin-top:12px;">By accessing this B2B intelligence pipeline, you agree to our Terms of Service. You are explicitly responsible for ensuring compliance with CAN-SPAM, GDPR, and regional privacy regulations when initiating contact sequences.</p>
+        <button class="primary-btn full-width" onclick="agreeToTerms()">I Understand &amp; Agree</button>
+    </div>
+</div>
+
+<!-- Toast System -->
+<div id="toast-container" class="toast-container"></div>
+
+<script>
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('/sw.js').catch(err => console.log('SW failed:', err));
+        });
+    }
+</script>
+<script src="app.js?v=48"></script>
 </body>
 </html>
-
-
-
-
-

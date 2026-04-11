@@ -39,17 +39,29 @@ function handleAuthRejection() {
     auth.signOut();
 }
 
+// ─── MODAL UTILITY — single source of truth for all modal show/hide ──────────
+// All modals now use style.display. Never classList.add/remove('hidden') for modals.
+window.showModal = function(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('open'); // .sio-modal-overlay.open => display:flex via CSS
+};
+window.closeModal = function(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('open');
+};
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Authentication state observer
 auth.onAuthStateChanged(async user => {
+    const authEl = document.getElementById('auth-container');
+    const appEl  = document.getElementById('app-container');
     if (user) {
-        // Render UI directly (Thin Client architecture: token validated on the backend API layer)
-        authContainer.classList.add('hidden');
-        appContainer.classList.remove('hidden');
+        if (authEl) authEl.style.display = 'none';
+        if (appEl)  appEl.style.display  = 'flex';
         loadDashboard();
     } else {
-        // User logged out
-        authContainer.classList.remove('hidden');
-        appContainer.classList.add('hidden');
+        if (authEl) authEl.style.display = '';
+        if (appEl)  appEl.style.display  = 'none';
     }
 });
 
@@ -241,7 +253,7 @@ async function loadMe() {
 
             if (!data.agreed_to_terms) {
                 const tosModal = document.getElementById('tos-modal');
-                if (tosModal) tosModal.classList.remove('hidden');
+                if (tosModal) tosModal.style.display = 'flex';
             }
 
             const hookInput = document.getElementById('crm-webhook-url');
@@ -520,7 +532,7 @@ window.viewLeadTimeline = function(eventsJson) {
                     <strong style="color:var(--text-main);font-size:0.95rem;">${e.action}</strong>
                 </div>`).join('');
         }
-        document.getElementById('audit-log-modal')?.classList.remove('hidden');
+        document.getElementById('audit-log-modal').style.display = 'flex';
     } catch(e) { console.error('Timeline error', e); }
 };
 
@@ -662,18 +674,12 @@ window.openEditModal = function(id, name, bio, keywords, gl, location, targetUrl
         urlsEl.value = urls.join('\n');
     }
     const modal = document.getElementById('edit-campaign-modal');
-    if (modal) {
-        modal.classList.remove('hidden');
-        modal.style.display = 'flex';
-    }
+    if (modal) modal.style.display = 'flex';
 };
 
 window.closeEditModal = function() {
     const modal = document.getElementById('edit-campaign-modal');
-    if (modal) {
-        modal.style.display = 'none';
-        modal.classList.add('hidden');
-    }
+    if (modal) modal.style.display = 'none';
 };
 
 window.saveEditedCampaign = async function() {
@@ -1904,19 +1910,22 @@ window.toggleUserDropdown = function() {
     const dropdown = document.getElementById('user-dropdown');
     const pill = document.getElementById('user-pill-btn');
     if (!dropdown) return;
-    const isOpen = !dropdown.classList.contains('hidden');
+    const isOpen = dropdown.style.display === 'flex' || dropdown.classList.contains('open');
     if (isOpen) {
-        dropdown.classList.add('hidden');
+        dropdown.style.display = 'none';
+        dropdown.classList.remove('open');
         if (pill) pill.classList.remove('open');
     } else {
-        dropdown.classList.remove('hidden');
+        dropdown.style.display = 'flex';
+        dropdown.classList.add('open');
         if (pill) pill.classList.add('open');
         // Auto-close on outside click
         setTimeout(() => {
             const handler = (e) => {
-                const wrap = document.getElementById('user-pill-wrap') || pill?.closest('.user-pill-wrap');
+                const wrap = pill?.closest('.user-pill-wrap');
                 if (!wrap || !wrap.contains(e.target)) {
-                    dropdown.classList.add('hidden');
+                    dropdown.style.display = 'none';
+                    dropdown.classList.remove('open');
                     if (pill) pill.classList.remove('open');
                     document.removeEventListener('click', handler);
                 }
@@ -1931,14 +1940,12 @@ window.toggleUserDropdown = function() {
 // =============================================================================
 
 window.openSettingsModal = function() {
-    // Close user dropdown if open
-    document.getElementById('user-dropdown')?.classList.add('hidden');
-    document.getElementById('user-pill-btn')?.classList.remove('open');
-    document.getElementById('settings-modal')?.classList.remove('hidden');
+    document.getElementById('user-dropdown')?.classList.remove('open');
+    showModal('settings-modal');
 };
 
 window.closeSettingsModal = function() {
-    document.getElementById('settings-modal')?.classList.add('hidden');
+    closeModal('settings-modal');
 };
 
 // =============================================================================
@@ -1965,7 +1972,7 @@ window.agreeToTerms = async function() {
     } finally {
         // Always dismiss the modal regardless of API success —
         // network failure should not re-trap the user.
-        document.getElementById('tos-modal')?.classList.add('hidden');
+        document.getElementById('tos-modal').style.display = 'none';
         showToast('Terms accepted. Welcome to Sideio!', 'success');
     }
 };
@@ -2026,31 +2033,32 @@ window._dtState = {
     extractedGl: ''
 };
 
-// Open the Digital Twin modal
+// ─── MODAL: Digital Twin Onboarding ─────────────────────────────────────────
+function dtSwitchView(viewId) {
+    ['dt-view-a','dt-view-b','dt-view-c','dt-view-d'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.toggle('active', el.id === viewId);
+    });
+}
+
 window.openDTModal = function() {
-    document.getElementById('user-dropdown')?.classList.add('hidden');
-    document.getElementById('user-pill-btn')?.classList.remove('open');
-    // Reset ALL views — including dt-view-d (fallback path)
-    document.getElementById('dt-view-a')?.classList.remove('hidden');
-    document.getElementById('dt-view-b')?.classList.add('hidden');
-    document.getElementById('dt-view-c')?.classList.add('hidden');
-    document.getElementById('dt-view-d')?.classList.add('hidden');
+    // Close the user dropdown if open
+    document.getElementById('user-dropdown')?.classList.remove('open');
+    // Reset to View A
+    dtSwitchView('dt-view-a');
     const urlInput = document.getElementById('dt-url-input');
     if (urlInput) urlInput.value = '';
-    const modal = document.getElementById('dt-onboarding-modal');
-    if (modal) {
-        // Modals now use style.display (not .hidden class) to avoid !important conflicts.
-        modal.style.display = 'flex';
-    }
-    setTimeout(() => document.getElementById('dt-url-input')?.focus(), 100);
+    // Show modal via CSS class toggle (no !important conflicts)
+    showModal('dt-onboarding-modal');
+    setTimeout(() => urlInput?.focus(), 150);
 };
 
 window.closeDTModal = function() {
-    const modal = document.getElementById('dt-onboarding-modal');
-    if (modal) {
-        modal.style.display = 'none';
-    }
+    closeModal('dt-onboarding-modal');
 };
+
+window.dtFallbackToNaturalLanguage = function() { dtSwitchView('dt-view-d'); };
+window.dtBackToViewA = function() { dtSwitchView('dt-view-a'); };
 
 // View A → View B: validate URL and start analysis
 window.dtStartAnalysis = async function() {
@@ -2067,8 +2075,7 @@ window.dtStartAnalysis = async function() {
     const url = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
 
     // Transition to View B
-    document.getElementById('dt-view-a')?.classList.add('hidden');
-    document.getElementById('dt-view-b')?.classList.remove('hidden');
+    dtSwitchView('dt-view-b');
 
     // Animate progress text
     const statusEl = document.getElementById('dt-status-text');
@@ -2130,8 +2137,7 @@ window.dtStartAnalysis = async function() {
         dtPopulatePersonas(dtMockPersona(url), url);
     } else {
         // Production graceful failure
-        document.getElementById('dt-view-b')?.classList.add('hidden');
-        document.getElementById('dt-view-a')?.classList.remove('hidden');
+        dtSwitchView('dt-view-a');
         showToast('Digital Twin engine is currently provisioning. Please use manual entry.', 'error');
     }
 };
@@ -2196,8 +2202,7 @@ function dtPopulatePersonas(data, url) {
 
     // Transition to View C
     setTimeout(() => {
-        document.getElementById('dt-view-b')?.classList.add('hidden');
-        document.getElementById('dt-view-c')?.classList.remove('hidden');
+        dtSwitchView('dt-view-c');
     }, 500);
 }
 
@@ -2276,16 +2281,10 @@ window.dtLaunchFallback = function() {
 
 // Transition from View A to View D
 window.dtFallbackToNaturalLanguage = function() {
-    document.getElementById('dt-view-a')?.classList.add('hidden');
-    document.getElementById('dt-view-d')?.classList.remove('hidden');
+    dtSwitchView('dt-view-d');
     setTimeout(() => document.getElementById('dt-intent-fallback')?.focus(), 100);
 };
 
-// Transition back from View D to View A
-window.dtBackToViewA = function() {
-    document.getElementById('dt-view-d')?.classList.add('hidden');
-    document.getElementById('dt-view-a')?.classList.remove('hidden');
-};
 
 // =============================================================================
 // V18 MULTI-CAMPAIGN: CHILD CAMPAIGN CREATION (STATE B)
@@ -2305,7 +2304,7 @@ window.openChildCampaignModal = async function() {
 
     const modal = document.getElementById('child-campaign-modal');
     if (modal) {
-        modal.style.display = 'flex';
+        showModal('child-campaign-modal');
         const fallbackCont = document.getElementById('cc-custom-fallback-container');
         if(fallbackCont) fallbackCont.classList.add('hidden');
         const cardsEl = document.getElementById('cc-recommendation-cards');
@@ -2379,7 +2378,7 @@ window.deployPredictiveCard = function(idx, origProd, origHook, origAdv) {
                       (btoa(hook.replace(/['"]/g, '')) !== origHook) || 
                       (btoa(adv.replace(/['"]/g, '')) !== origAdv);
                       
-    document.getElementById('child-campaign-modal').style.display = 'none';
+    closeModal('child-campaign-modal');
 
     saveCampaignAction({
         name: prod,
@@ -2422,7 +2421,7 @@ window.saveChildCampaign = function() {
         return;
     }
 
-    document.getElementById('child-campaign-modal').style.display = 'none';
+    closeModal('child-campaign-modal');
 
     // Guardrail 2: Route distinctly, DO NOT concat into keywords
     saveCampaignAction({
