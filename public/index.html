@@ -130,20 +130,30 @@
                 <svg class="user-pill-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
             </button>
             <div class="user-dropdown" id="user-dropdown" style="display:none;">
+                <!-- Profile Header -->
                 <div class="ud-header">
                     <div class="ud-avatar-large" id="ud-avatar-large">?</div>
                     <div>
-                        <div class="ud-name" id="ud-display-name">&#8212;</div>
-                        <div class="ud-email" id="ud-email">&#8212;</div>
+                        <div class="ud-name" id="ud-display-name">&mdash;</div>
+                        <div class="ud-email" id="ud-email">&mdash;</div>
                     </div>
                 </div>
+                <!-- Credits Chip -->
                 <div class="ud-wallet-chip">
-                    <span class="ud-wallet-label">&#10022; Credits Remaining</span>
-                    <strong class="ud-wallet-value" id="wallet-balance">&#8212;</strong>
+                    <div style="display:flex; align-items:center; justify-content:space-between;">
+                        <span class="ud-wallet-label">&#10022; Pipeline Credits</span>
+                        <strong class="ud-wallet-value" id="wallet-balance">&mdash;</strong>
+                    </div>
+                    <div id="ud-credit-bar-wrap" style="margin-top:8px; background:#e9ecef; border-radius:4px; height:4px; overflow:hidden;">
+                        <div id="ud-credit-bar" style="height:4px; background:var(--primary); border-radius:4px; width:100%; transition:width 0.4s;"></div>
+                    </div>
+                    <div style="font-size:0.72rem; color:#6b7280; margin-top:4px;"><span id="ud-credits-consumed">0</span> used of <span id="ud-credits-total">0</span></div>
                 </div>
+                <!-- Actions -->
                 <div class="ud-divider"></div>
-                <button class="ud-item" onclick="openDTModal()">&#128064; Analyze My Website</button>
-                <button class="ud-item" onclick="openSettingsModal()">&#9881;&#65039; Integrations &amp; Settings</button>
+                <button class="ud-item" onclick="dtReanalyzeWebsite();">&#128269; Re-analyze My Website</button>
+                <button class="ud-item" onclick="openSettingsModal(); toggleUserDropdown();">&#128279; Webhook Integration</button>
+                <button class="ud-item" onclick="openSettingsModal(); toggleUserDropdown();">&#9881;&#65039; Settings</button>
                 <div class="ud-divider"></div>
                 <button class="ud-item ud-item-danger" onclick="firebase.auth().signOut()">Sign Out</button>
             </div>
@@ -590,6 +600,6 @@
         });
     }
 </script>
-<script src="app.js?v=53"></script>
+<script src="app.js?v=54"></script>
 </body>
 </html>

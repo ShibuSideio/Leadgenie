@@ -233,7 +233,19 @@ async function loadMe() {
             console.log('[WALLET] payload.wallet:', payload.wallet, '| data.wallet:', data.wallet,
                         '| allocated:', allocated, '| consumed:', consumed, '| balance:', credits);
             const el = document.getElementById('wallet-balance');
-            if (el) el.innerText = credits;
+            if (el) el.innerText = credits.toLocaleString();
+
+            // Credit usage bar in dropdown
+            const barEl = document.getElementById('ud-credit-bar');
+            const consumedEl = document.getElementById('ud-credits-consumed');
+            const totalEl = document.getElementById('ud-credits-total');
+            if (barEl && allocated > 0) {
+                const pct = Math.max(0, Math.min(100, Math.round((credits / allocated) * 100)));
+                barEl.style.width = pct + '%';
+                barEl.style.background = pct < 20 ? '#ef4444' : pct < 50 ? '#f59e0b' : 'var(--primary)';
+            }
+            if (consumedEl) consumedEl.textContent = consumed.toLocaleString();
+            if (totalEl) totalEl.textContent = allocated.toLocaleString();
             
             const alertBanner = document.getElementById('wallet-alert-banner');
             const newCampBtn = document.querySelector('button[onclick="openNewCampaignModal()"]');
@@ -706,14 +718,43 @@ window.openEditModal = function(id) {
         console.error('[openEditModal] id not in store:', id);
         return;
     }
-    // Populate fields directly from the store object — no HTML attribute parsing
-    document.getElementById('edit-camp-id').value   = id;
-    document.getElementById('edit-camp-name').value  = camp.name     || '';
-    document.getElementById('edit-camp-bio').value   = camp.bio      || '';
-    document.getElementById('edit-camp-keys').value  = camp.keywords || '';
+
+    document.getElementById('edit-camp-id').value  = id;
+    document.getElementById('edit-camp-name').value = camp.name || '';
+
+    // ── Child Campaign Bio Resolution ──────────────────────────────────────────
+    // CHILD_CAMPAIGN_OVERRIDE is set when a campaign originates from the
+    // Digital Twin website analysis flow. The real bio comes from
+    // campaign_focus + pain_point + unfair_advantage fields on the campaign doc.
+    // ───────────────────────────────────────────────────
+    const isChildCampaign = camp.bio === 'CHILD_CAMPAIGN_OVERRIDE';
+    let bioDisplay, keywordsDisplay;
+
+    if (isChildCampaign) {
+        // Build readable bio from the DT fields
+        const focus = camp.campaign_focus || camp.name || '';
+        const pain  = camp.pain_point     || '';
+        const adv   = camp.unfair_advantage || '';
+        bioDisplay = [
+            focus  ? `Product/Service: ${focus}` : '',
+            pain   ? `Market Hook: ${pain}` : '',
+            adv    ? `Competitive Advantage: ${adv}` : ''
+        ].filter(Boolean).join('\n\n');
+        // keywords was saved as '' for child campaigns — use company bio from profile if available
+        const tenantBio = window.currentUserData?.company_description || window.currentUserData?.bio || '';
+        keywordsDisplay = tenantBio || camp.keywords || '';
+    } else {
+        bioDisplay      = camp.bio      || '';
+        keywordsDisplay = camp.keywords || '';
+    }
+
+    document.getElementById('edit-camp-bio').value  = bioDisplay;
+    document.getElementById('edit-camp-keys').value = keywordsDisplay;
+
     const glEl = document.getElementById('edit-camp-gl');
     if (glEl) glEl.value = camp.gl || '';
     document.getElementById('edit-camp-location').value = camp.location || '';
+
     const urlsEl = document.getElementById('edit-camp-target-urls');
     if (urlsEl) {
         const urls = Array.isArray(camp.target_urls) ? camp.target_urls : [];
@@ -2104,6 +2145,21 @@ window.closeDTModal = function() {
     closeModal('dt-onboarding-modal');
 };
 
+// Re-analyze Website — triggered from user dropdown
+// Pre-fills the saved website URL from the tenant profile, then opens the DT modal
+window.dtReanalyzeWebsite = function() {
+    toggleUserDropdown(); // close dropdown first
+    const savedUrl = window.currentUserData?.website_url
+                  || window.currentUserData?.website
+                  || window.currentUserData?.url
+                  || '';
+    dtSwitchView('dt-view-a');
+    const urlInput = document.getElementById('dt-url-input');
+    if (urlInput && savedUrl) urlInput.value = savedUrl;
+    showModal('dt-onboarding-modal');
+    setTimeout(() => urlInput?.focus(), 150);
+};
+
 window.dtFallbackToNaturalLanguage = function() { dtSwitchView('dt-view-d'); };
 window.dtBackToViewA = function() { dtSwitchView('dt-view-a'); };
 
@@ -2445,9 +2501,9 @@ window.deployPredictiveCard = function(idx, origProd, origHook, origAdv) {
 
 window.showCcCustomFallback = function() {
     const r = document.getElementById('cc-recommendation-cards');
-    if(r) r.style.display = 'none';
+    if (r) r.style.display = 'none';
     const f = document.getElementById('cc-custom-fallback-container');
-    if(f) f.classList.remove('hidden');
+    if (f) f.style.display = 'block';
 };
 
 window.saveChildCampaign = function() {
