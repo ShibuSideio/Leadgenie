@@ -965,14 +965,12 @@ body {
 .ud-email { font-size: 0.75rem; color: var(--text-muted); }
 
 .ud-wallet-chip {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+    display: block;
     margin: 6px 12px;
     background: linear-gradient(135deg, rgba(79, 70, 229, 0.07), rgba(124, 58, 237, 0.07));
     border: 1px solid rgba(79, 70, 229, 0.15);
     border-radius: 10px;
-    padding: 8px 12px;
+    padding: 10px 12px;
 }
 .ud-wallet-label { font-size: 0.75rem; color: var(--primary); font-weight: 600; }
 .ud-wallet-value { font-size: 0.9rem; font-weight: 700; color: var(--primary); }

@@ -329,6 +329,8 @@ async function loadCampaigns() {
         campaigns.forEach(c => window._campaignsStore.set(c.id, c));
 
         if (campaigns.length === 0) {
+            window.activeCampaignCount = 0;
+            renderExpansionState(0);
             if (feed)      feed.innerHTML = '';
             if (tableBody) tableBody.innerHTML = '<tr><td colspan="4" style="padding:16px;text-align:center;">No campaigns found. Click \u201cFind New Clients\u201d to get started.</td></tr>';
             return;
@@ -377,6 +379,10 @@ async function loadCampaigns() {
         });
 
         if (tableBody) tableBody.innerHTML = tableRows;
+
+        // Sync global counter — consumed by initializeDashboardState / renderExpansionState
+        window.activeCampaignCount = activeCount;
+        renderExpansionState(activeCount);
 
         if (filterSel) {
             const prev = filterSel.value;
