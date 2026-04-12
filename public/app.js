@@ -806,41 +806,44 @@ window.saveCampaignAction = async function(payload) {
 
 // SPA Router — V18: syncs both top cmd-bar (desktop) and bottom dock (mobile)
 window.switchTab = function(tabName) {
-    document.querySelectorAll('.main-feed').forEach(el => el.classList.add('hidden'));
+    // Hide all views via style.display (new HTML uses style="display:none", not class="hidden")
+    document.querySelectorAll('.main-feed').forEach(el => el.style.display = 'none');
     document.querySelectorAll('.cmd-btn').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.dock-btn').forEach(el => el.classList.remove('active'));
 
-    const activateTab = (topId, dockId) => {
-        const topEl = document.getElementById(topId);
-        const dockEl = document.getElementById(dockId);
-        if (topEl) topEl.classList.add('active');
-        if (dockEl) dockEl.classList.add('active');
+    const show = id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = '';   // restore to CSS default (block/flex from stylesheet)
+    };
+    const activateNav = (topId, dockId) => {
+        const t = document.getElementById(topId);
+        const d = document.getElementById(dockId);
+        if (t) t.classList.add('active');
+        if (d) d.classList.add('active');
     };
 
     if (tabName === 'dashboard') {
-        document.getElementById('view-dashboard').classList.remove('hidden');
-        activateTab('tab-dashboard', 'dock-tab-dashboard');
+        show('view-dashboard');
+        activateNav('tab-dashboard', 'dock-tab-dashboard');
     } else if (tabName === 'target') {
-        if (document.getElementById('view-target')) document.getElementById('view-target').classList.remove('hidden');
-        activateTab('tab-campaigns', 'dock-tab-campaigns');
-    } else if (tabName === 'team') {
-        if (document.getElementById('view-team')) document.getElementById('view-team').classList.remove('hidden');
+        show('view-target');
+        activateNav('tab-campaigns', 'dock-tab-campaigns');
     } else if (tabName === 'reports') {
-        if (document.getElementById('view-reports')) document.getElementById('view-reports').classList.remove('hidden');
-        activateTab('tab-reports', 'dock-tab-reports');
+        show('view-reports');
+        activateNav('tab-reports', 'dock-tab-reports');
     } else if (tabName === 'l0-admin') {
-        if (document.getElementById('view-l0-admin')) document.getElementById('view-l0-admin').classList.remove('hidden');
+        show('view-l0-admin');
         const l0Tab = document.getElementById('tab-l0-admin');
         if (l0Tab) l0Tab.classList.add('active');
         fetchL0Telemetry();
     } else if (tabName === 'macro') {
-        if (document.getElementById('view-macro')) document.getElementById('view-macro').classList.remove('hidden');
-        fetchMacroTrends();
+        show('view-macro');
+        if (typeof fetchMacroTrends === 'function') fetchMacroTrends();
     } else if (tabName === 'crm-test') {
         const isAdmin = window.currentUserData?.role === 'super_admin';
         if (!isAdmin) { showToast('CRM module is restricted to L0 administrators.', 'error'); return; }
-        const crmView = document.getElementById('view-crm-test');
-        if (crmView) { crmView.classList.remove('hidden'); loadCrmBoard(); }
+        show('view-crm-test');
+        loadCrmBoard();
     }
 };
 
