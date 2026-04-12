@@ -967,13 +967,30 @@ Rules:
                 data['updatedAt'] = firestore.SERVER_TIMESTAMP
                 update_time, doc_ref = db.collection("campaigns").add(data)
 
-                # V14: Gate the LLM vector classification to campaign creation only
+                # V14: Gate the LLM vector classification to campaign creation only.
+                # V19: CHILD_CAMPAIGN_OVERRIDE campaigns skip Gemini classification —
+                # bio is a sentinel marker, not a real product description.
+                # Default vector to Classic B2B; store campaign_focus as effective_bio
+                # so pipeline-main can use real signal instead of the sentinel string.
                 bio = data.get("bio", "")
-                if bio:
+                if bio and bio != "CHILD_CAMPAIGN_OVERRIDE":
                     weights = get_vector_weights()
                     vector = classify_sourcing_vector(bio, weights)
                     doc_ref.update({"sourcing_vector": vector})
                     print(f"[SYNAPTIC ROUTER] Campaign {doc_ref.id} classified as: '{vector}'")
+                elif bio == "CHILD_CAMPAIGN_OVERRIDE":
+                    # DT child campaign: derive effective bio from AI-extracted fields
+                    effective_bio = " | ".join(filter(None, [
+                        data.get("campaign_focus", ""),
+                        data.get("pain_point",     ""),
+                        data.get("unfair_advantage", "")
+                    ]))
+                    doc_ref.update({
+                        "sourcing_vector": "Classic B2B",
+                        "effective_bio":   effective_bio,
+                    })
+                    print(f"[SYNAPTIC ROUTER] DT child campaign {doc_ref.id} — "
+                          f"defaulted to Classic B2B, effective_bio='{effective_bio[:80]}'")
 
                 # ── V19: ZERO-WAIT DIRECT ENQUEUE ────────────────────────────────────────
                 # Do NOT wait for the cron sweep. Push the Day-1 producer task directly
@@ -1225,6 +1242,20 @@ Rules:
                     if 'bio' in data and data['bio']:
                         weights = get_vector_weights()
                         data['sourcing_vector'] = classify_sourcing_vector(data['bio'], weights)
+                        # ── V19: CHILD_CAMPAIGN_OVERRIDE sentinel guard ──────────────────────────
+                        # DT child campaigns set bio='CHILD_CAMPAIGN_OVERRIDE' as a routing marker.
+                        # Feeding this string to Gemini causes garbage-in → zero usable queries.
+                        # Substitute with effective_bio (built from campaign_focus + pain_point +
+                        # unfair_advantage by the orchestrator at creation time) so Gemini receives
+                        # real signal. Fall back to keywords if effective_bio is absent.
+                        # ──────────────────────────────────────────────────────────────────────────
+                        if data['bio'] == "CHILD_CAMPAIGN_OVERRIDE":
+                            campaign = doc_data.to_dict()
+                            data['bio'] = campaign.get("effective_bio", "") or \
+                                          campaign.get("campaign_focus", "") or \
+                                          ", ".join(campaign.get("keywords", []))
+                            print(f"[PRODUCER] CHILD_CAMPAIGN_OVERRIDE resolved → effective_bio='{data['bio'][:80]}'")
+
                         print(f"[SYNAPTIC ROUTER] Campaign {doc_id} re-classified as: '{data['sourcing_vector']}'")
                     doc_ref.update(data)
                     # V18: Cloud Tasks RLHF telemetry enqueue — guaranteed execution outside

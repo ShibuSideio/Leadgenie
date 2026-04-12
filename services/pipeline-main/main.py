@@ -818,6 +818,19 @@ def produce():
         print(f"[PRODUCER] Campaign {campaign_id}: empty keywords. Aborting.")
         return jsonify({"error": "Empty keywords matrix"}), 400
 
+    # ── V19: CHILD_CAMPAIGN_OVERRIDE sentinel guard ──────────────────────────────
+    # DT child campaigns set bio='CHILD_CAMPAIGN_OVERRIDE' as a routing marker.
+    # Feeding this literal string to Gemini causes garbage-in → zero usable queries
+    # → empty smart_keywords list → Serper loop never runs → silent 200.
+    # Resolve: use effective_bio (stored at creation by orchestrator), then fall
+    # back to campaign_focus, then to synthesized keywords string.
+    # ────────────────────────────────────────────────────────────────────────────
+    if bio == "CHILD_CAMPAIGN_OVERRIDE":
+        bio = (campaign.get("effective_bio") or
+               campaign.get("campaign_focus") or
+               ", ".join(keywords))
+        print(f"[PRODUCER] CHILD_CAMPAIGN_OVERRIDE resolved → bio='{bio[:80]}'")
+
     print(f"[SYNAPTIC ROUTER] Campaign {campaign_id} → sourcing vector: '{sourcing_vector}'")
 
     # ── Step 3: Intent Translation + Smart Query Generation ─────────────────
