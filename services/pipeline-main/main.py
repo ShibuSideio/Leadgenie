@@ -1885,6 +1885,7 @@ def dispatch():
                 "confidence_tier":  url_to_tier.get(url, "High"),
                 "sourcing_vector":  sourcing_vector,
                 "status":           "processing",
+                "is_in_crm":        False,      # Required: UI query filters .where('is_in_crm','==',false)
                 "createdAt":        firestore.SERVER_TIMESTAMP,
                 "expire_at":        _expire_at,
             })
@@ -2055,6 +2056,8 @@ def dispatch():
                         "origin_engine":                "cartographer",
                         "score":                        evaluation.get("score", 0),
                         "matched_campaign_ids":         evaluation.get("matched_campaign_ids", []),
+                        "matched_campaigns":            [campaign_id],          # UI filter field
+                        "campaign_id":                  campaign_id,            # UI scalar fallback
                         "trend_mapped":                 evaluation.get("trend_mapped", False),
                         "highest_campaign_id":          evaluation.get("highest_campaign_id", "Unknown"),
                         "pain_point":                   evaluation.get("pain_point", ""),
@@ -2068,14 +2071,14 @@ def dispatch():
                         "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
                         "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
                         "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
-                        "company_name":                 evaluation.get("company_name"),   # Optional
-                        "dossier_text":                 None,                              # V16 placeholder
+                        "company_name":                 evaluation.get("company_name"),
+                        "dossier_text":                 None,
                         "sourcing_vector":               sourcing_vector,
                         "confidence_tier":               url_to_tier.get(url, "High"),
-                        # V18: Prism Engine provenance fields (funnel analytics)
                         "prism_mode":                   prism_mode,
                         "prism_fallback":                fallback_used,
                         "status":                        "new",
+                        "is_in_crm":                     False,  # Required: UI query .where('is_in_crm','==',false)
                     }
                     validate_and_update_lead(lead_payload, doc_ref)
 
@@ -2279,6 +2282,8 @@ def finalize():
                 "origin_engine":                "cartographer",
                 "score":                        evaluation.get("score", 0),
                 "matched_campaign_ids":         evaluation.get("matched_campaign_ids", []),
+                "matched_campaigns":            [campaign_id],          # UI filter field
+                "campaign_id":                  campaign_id,            # UI scalar fallback
                 "trend_mapped":                 evaluation.get("trend_mapped", False),
                 "highest_campaign_id":          evaluation.get("highest_campaign_id", "Unknown"),
                 "pain_point":                   evaluation.get("pain_point", ""),
@@ -2292,10 +2297,11 @@ def finalize():
                 "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
                 "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
                 "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
-                "company_name":                 evaluation.get("company_name"),   # Optional
-                "dossier_text":                 None,                              # V16 placeholder
+                "company_name":                 evaluation.get("company_name"),
+                "dossier_text":                 None,
                 "sourcing_vector":               sourcing_vector,
                 "status":                        "new",
+                "is_in_crm":                     False,  # Required: UI query .where('is_in_crm','==',false)
             }
             validate_and_update_lead(lead_payload, doc_ref)
             
