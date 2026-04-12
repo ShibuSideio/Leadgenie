@@ -238,12 +238,12 @@ async function loadMe() {
             const alertBanner = document.getElementById('wallet-alert-banner');
             const newCampBtn = document.querySelector('button[onclick="openNewCampaignModal()"]');
             if (credits <= 0) {
-                if (alertBanner) { alertBanner.textContent = 'Wallet Empty: You have 0 credits. Contact admin to top up.'; alertBanner.classList.remove('hidden'); }
+                if (alertBanner) { alertBanner.textContent = 'Wallet Empty: You have 0 credits. Contact admin to top up.'; alertBanner.style.display = 'block'; }
                 if (newCampBtn) { newCampBtn.textContent = 'Upgrade Plan (0 Credits)'; newCampBtn.disabled = true; newCampBtn.style.background = '#94a3b8'; }
             } else if (credits < 50) {
-                if (alertBanner) alertBanner.classList.remove('hidden');
+                if (alertBanner) alertBanner.style.display = 'block';
             } else {
-                if (alertBanner) alertBanner.classList.add('hidden');
+                if (alertBanner) alertBanner.style.display = 'none';
                 if (newCampBtn) { newCampBtn.textContent = '+ Find New Clients'; newCampBtn.disabled = false; newCampBtn.style.background = 'var(--primary)'; }
             }
 
@@ -396,9 +396,9 @@ function initAnalyticsChart(newC, contactedC, convertedC) {
     // Show/hide the wrapper based on whether there is any data
     if (wrapper) {
         if (totalLeads > 0) {
-            wrapper.classList.remove('hidden');
+            wrapper.style.display = '';
         } else {
-            wrapper.classList.add('hidden');
+            wrapper.style.display = 'none';
             return; // No data — keep canvas clean
         }
     }
@@ -636,6 +636,27 @@ window.toggleCampaignStatus = async function(id, currentStatus) {
         if (success) { showToast(`Campaign ${newStatus} successfully`, 'success'); loadDashboard(); }
     } catch(err) {
         showToast('Status update failed', 'error');
+    }
+};
+
+// Campaign filter dropdown — called by onchange="filterLeadsByCampaign(this.value)"
+window.filterLeadsByCampaign = function(campaignId) {
+    currentCampaignFilter = campaignId || 'all';
+    renderLeads();
+};
+
+// CRM Webhook save — called by "Save Integration" button in settings modal
+window.saveCRMWebhook = async function() {
+    const url = document.getElementById('crm-webhook-url')?.value?.trim();
+    if (!url) { showToast('Please enter a webhook URL.', 'error'); return; }
+    try {
+        const success = await performApiMutation('/api/me', 'PUT', { crm_webhook_url: url });
+        if (success) {
+            if (window.currentUserData) window.currentUserData.crm_webhook_url = url;
+            showToast('CRM integration saved!', 'success');
+        }
+    } catch(err) {
+        showToast('Failed to save webhook URL.', 'error');
     }
 };
 

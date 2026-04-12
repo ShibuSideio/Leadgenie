@@ -67,13 +67,7 @@
             100% { transform: scale(0.8); opacity: 0.8; }
         }
 
-        /* Edit campaign modal — fixed, not fc-overlay */
-        #edit-campaign-modal {
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.8); z-index: 999;
-            display: none;
-            justify-content: center; align-items: center;
-        }
+        /* #edit-campaign-modal is now .sio-modal-overlay — no separate CSS needed */
         #audit-log-modal {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0,0,0,0.8); z-index: 999;
@@ -596,6 +590,6 @@
         });
     }
 </script>
-<script src="app.js?v=52"></script>
+<script src="app.js?v=53"></script>
 </body>
 </html>
