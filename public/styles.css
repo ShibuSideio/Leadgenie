@@ -1572,3 +1572,42 @@ body {
 .dt-modal-content::-webkit-scrollbar-track {
     background: transparent;
 }
+
+/* ==========================================================================
+   EDIT CAMPAIGN MODAL — new field system
+   ========================================================================== */
+.edit-field-group {
+    margin-bottom: 16px;
+}
+.edit-field-label {
+    display: block;
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #6b7280;
+    margin-bottom: 7px;
+}
+.edit-field-input {
+    width: 100%;
+    padding: 11px 14px;
+    border: 1.5px solid #e2e8f0;
+    border-radius: 10px;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.95rem;
+    color: var(--text-main);
+    background: #f8fafc;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+    box-sizing: border-box;
+}
+.edit-field-input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(79,70,229,0.1);
+    background: #fff;
+}
+.edit-field-textarea {
+    resize: vertical;
+    min-height: 72px;
+    line-height: 1.55;
+}

@@ -14,7 +14,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=38">
+    <link rel="stylesheet" href="styles.css?v=39">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -494,35 +494,58 @@
 </div>
 
 <!-- ════════════════════════════════════════════
-     EDIT CAMPAIGN MODAL
+     EDIT CAMPAIGN MODAL — sio-modal-overlay system
 ════════════════════════════════════════════ -->
-<div id="edit-campaign-modal" onclick="if(event.target===this)closeEditModal()">
-    <div class="glass-panel" style="width:400px; max-width:90%;">
-        <h2>Edit Campaign Rules</h2><br>
+<div id="edit-campaign-modal" class="sio-modal-overlay" onclick="if(event.target===this)closeEditModal()">
+    <div class="sio-modal-box" style="max-width:480px;">
+        <button class="sio-modal-close" onclick="closeEditModal()">&#10005;</button>
         <input type="hidden" id="edit-camp-id">
-        <label style="font-size:0.8rem; color:var(--text-muted);">Campaign Name</label>
-        <input type="text" id="edit-camp-name" class="full-width" style="margin-bottom:12px; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
-        <label style="font-size:0.8rem; color:var(--text-muted);">Product Bio</label>
-        <input type="text" id="edit-camp-bio" class="full-width" style="margin-bottom:12px; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
-        <label style="font-size:0.8rem; color:var(--text-muted);">Target Keywords</label>
-        <input type="text" id="edit-camp-keys" class="full-width" style="margin-bottom:12px; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
-        <label style="font-size:0.8rem; color:var(--text-muted);">Geographic Targeting</label>
-        <div style="display:flex; gap:8px; margin-bottom:12px;">
-            <select id="edit-camp-gl" onchange="handleCountryChange('edit-camp-gl','edit-camp-location')" style="flex:1; padding:10px; border:1px solid var(--glass-border); border-radius:6px; background:white;">
-                <option value="">Global</option>
-                <option value="us">United States</option>
-                <option value="uk">United Kingdom</option>
-                <option value="ca">Canada</option>
-                <option value="au">Australia</option>
-                <option value="in">India</option>
-            </select>
-            <input type="text" id="edit-camp-location" placeholder="City, State/Region" style="flex:2; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
+
+        <div style="font-size:1.4rem; color:var(--primary); margin-bottom:8px;">&#9881;&#65039;</div>
+        <h2 style="font-size:1.5rem; font-weight:700; letter-spacing:-0.01em; margin-bottom:4px; color:#111827;">Edit Campaign Rules</h2>
+        <p style="font-size:0.9rem; color:#6b7280; margin-bottom:24px;">Update your targeting parameters. Changes take effect on the next scrape cycle.</p>
+
+        <div class="edit-field-group">
+            <label class="edit-field-label">Campaign Name</label>
+            <input type="text" id="edit-camp-name" class="edit-field-input" placeholder="e.g. UK SaaS Founders">
         </div>
-        <label style="font-size:0.8rem; color:var(--text-muted);">Priority Target Websites (Max 10)</label>
-        <textarea id="edit-camp-target-urls" placeholder="Paste specific URLs to prioritize (one per line)." class="full-width" rows="3" style="margin-bottom:24px; padding:10px; border:1px solid var(--glass-border); border-radius:6px; resize:vertical;"></textarea>
+
+        <div class="edit-field-group">
+            <label class="edit-field-label">Product Bio <span style="color:#9ca3af; font-weight:400;">(What you sell)</span></label>
+            <textarea id="edit-camp-bio" class="edit-field-input edit-field-textarea" rows="3" placeholder="e.g. We build AI-powered outbound tools for B2B SaaS companies looking to scale pipeline."></textarea>
+        </div>
+
+        <div class="edit-field-group">
+            <label class="edit-field-label">Target Keywords</label>
+            <textarea id="edit-camp-keys" class="edit-field-input edit-field-textarea" rows="3" placeholder="e.g. digital marketing agency, SEO consultant, growth hacker"></textarea>
+        </div>
+
+        <div class="edit-field-group">
+            <label class="edit-field-label">Geographic Targeting</label>
+            <div style="display:flex; gap:10px;">
+                <select id="edit-camp-gl" onchange="handleCountryChange('edit-camp-gl','edit-camp-location')" class="edit-field-input" style="flex:1; cursor:pointer;">
+                    <option value="">Global</option>
+                    <option value="us">United States</option>
+                    <option value="uk">United Kingdom</option>
+                    <option value="ca">Canada</option>
+                    <option value="au">Australia</option>
+                    <option value="in">India</option>
+                    <option value="sg">Singapore</option>
+                    <option value="de">Germany</option>
+                    <option value="ae">UAE</option>
+                </select>
+                <input type="text" id="edit-camp-location" placeholder="City or Region" class="edit-field-input" style="flex:2;">
+            </div>
+        </div>
+
+        <div class="edit-field-group" style="margin-bottom:28px;">
+            <label class="edit-field-label">Priority Target Websites <span style="color:#9ca3af; font-weight:400;">(Max 10, one per line)</span></label>
+            <textarea id="edit-camp-target-urls" class="edit-field-input edit-field-textarea" rows="4" placeholder="https://example.com&#10;https://another-target.io"></textarea>
+        </div>
+
         <div style="display:flex; gap:12px;">
-            <button class="primary-btn full-width" onclick="saveEditedCampaign()">Update Engine</button>
-            <button class="secondary-btn full-width" onclick="closeEditModal()">Cancel</button>
+            <button class="primary-btn" style="flex:2; padding:14px; font-size:1rem; border-radius:12px;" onclick="saveEditedCampaign()">Update Engine</button>
+            <button class="secondary-btn" style="flex:1; padding:14px; font-size:1rem; border-radius:12px;" onclick="closeEditModal()">Cancel</button>
         </div>
     </div>
 </div>
@@ -573,6 +596,6 @@
         });
     }
 </script>
-<script src="app.js?v=50"></script>
+<script src="app.js?v=51"></script>
 </body>
 </html>

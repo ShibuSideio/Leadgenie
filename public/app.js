@@ -671,13 +671,11 @@ window.openEditModal = function(id, name, bio, keywords, gl, location, targetUrl
         const urls = Array.isArray(targetUrls) ? targetUrls : JSON.parse(targetUrls || '[]');
         urlsEl.value = urls.join('\n');
     }
-    const modal = document.getElementById('edit-campaign-modal');
-    if (modal) modal.style.display = 'flex';
+    showModal('edit-campaign-modal');
 };
 
 window.closeEditModal = function() {
-    const modal = document.getElementById('edit-campaign-modal');
-    if (modal) modal.style.display = 'none';
+    closeModal('edit-campaign-modal');
 };
 
 window.saveEditedCampaign = async function() {
