@@ -280,84 +280,104 @@ async function loadMe() {
     }
 }
 
+// ─── CAMPAIGN DATA STORE ────────────────────────────────────────────────────
+// Campaign objects are stored here at load time.
+// Buttons in the DOM only carry data-campaign-id — no data in onclick attrs.
+// openEditModal(id) does an O(1) Map lookup — eliminates all char-escaping bugs.
+window._campaignsStore = new Map();
+
 // Dynamic Campaign Hydration via REST API
 async function loadCampaigns() {
-    const feed = document.getElementById('active-campaign-feed');
+    const feed      = document.getElementById('active-campaign-feed');
     const tableBody = document.getElementById('campaign-list-table');
-    const filterSelect = document.getElementById('campaign-filter');
-    
+    const filterSel = document.getElementById('campaign-filter');
+
     try {
         const user = firebase.auth().currentUser;
         if (!user) return handleAuthRejection();
-        
-        const token = await user.getIdToken(); 
-        const response = await fetch(`${API_BASE}/api/campaigns`, {
+
+        const token = await user.getIdToken();
+        const res   = await fetch(`${API_BASE}/api/campaigns`, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${token}` }
         });
-        
-        if (response.status === 401 || response.status === 403) {
-            return handleAuthRejection();
-        }
-        
-        if (!response.ok) {
-            console.error('Backend Error (loadCampaigns):', await response.text());
+
+        if (res.status === 401 || res.status === 403) return handleAuthRejection();
+        if (!res.ok) {
+            console.error('loadCampaigns HTTP error:', res.status, await res.text());
             if (tableBody) tableBody.innerHTML = '<tr><td colspan="4" class="empty-state">Failed to load campaigns.</td></tr>';
             return;
         }
-        const payload = await response.json();
-        const campaigns = payload.data || [];
-        
+
+        const payload   = await res.json();
+        const campaigns = Array.isArray(payload.data) ? payload.data : [];
+
+        // populate store — all downstream reads come from here
+        window._campaignsStore.clear();
+        campaigns.forEach(c => window._campaignsStore.set(c.id, c));
+
         if (campaigns.length === 0) {
-            if (feed) feed.innerHTML = '';
-            if (tableBody) tableBody.innerHTML = '<tr><td colspan="4" style="padding:16px; text-align:center;">No campaigns found. Click "New Search" to start.</td></tr>';
+            if (feed)      feed.innerHTML = '';
+            if (tableBody) tableBody.innerHTML = '<tr><td colspan="4" style="padding:16px;text-align:center;">No campaigns found. Click \u201cFind New Clients\u201d to get started.</td></tr>';
             return;
         }
-        
-        let activeCount = 0;
-        let tableHTML = '';
-        let filterHTML = '<option value="all">All Campaigns</option>';
-        
+
         campaigns.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-        
+
+        let activeCount = 0;
+        let tableRows   = '';
+        let filterOpts  = '<option value="all">All Searches</option>';
+
         campaigns.forEach(camp => {
-            const id = camp.id;
+            const id       = camp.id;
             const isActive = camp.status === 'active';
             if (isActive) activeCount++;
-            
+
             const statusColor = isActive ? '#25D366' : '#ef4444';
-            const statusBadge = `<span style="font-size:0.75rem; padding: 2px 6px; border-radius:4px; border: 1px solid ${statusColor}; color: ${statusColor}">${(camp.status || 'unknown').toUpperCase()}</span>`;
-            
-            const hasLocation = camp.gl && camp.location;
-            const locationWarn = hasLocation ? '' : '<br><span style="color: #ea580c; font-size: 0.75rem; display:block; margin-top:4px;">âš ï¸  Location Missing: Edit Campaign to set Targeting</span>';
-            
-            tableHTML += `
-                <tr style="border-bottom: 1px solid var(--glass-border);">
-                    <td style="padding: 12px;"><strong>${camp.name || 'Untitled'}</strong>${locationWarn}</td>
-                    <td style="padding: 12px;"><i style="color:var(--text-muted); font-size:0.85rem">${camp.keywords || 'N/A'}</i></td>
-                    <td style="padding: 12px;">${statusBadge}</td>
-                    <td style="padding: 12px; text-align:right;">
-                        <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; margin-right: 4px;" onclick="openEditModal('${id}', '${(camp.name || '').replace(/'/g, "\\'")}', '${(camp.bio || '').replace(/'/g, "\\'")}', '${(camp.keywords || '').replace(/'/g, "\\'")}', '${(camp.gl || '').replace(/'/g, "\\'")}', '${(camp.location || '').replace(/'/g, "\\'")}', ${JSON.stringify(camp.target_urls || [])})">Edit</button>
-                        <button class="secondary-btn" style="padding: 4px 8px; font-size: 0.75rem; border-color: ${statusColor}; color: ${statusColor}" onclick="toggleCampaignStatus('${id}', '${camp.status}')">${isActive ? 'Pause' : 'Resume'}</button>
+            const statusBadge = `<span style="font-size:0.75rem;padding:2px 8px;border-radius:4px;border:1px solid ${statusColor};color:${statusColor};">${(camp.status || 'unknown').toUpperCase()}</span>`;
+            const geoWarn     = (camp.gl && camp.location) ? '' : '<span style="color:#ea580c;font-size:0.75rem;display:block;margin-top:4px;">&#9888; Location Missing: Edit to set targeting</span>';
+
+            // Truncate keywords for display only
+            const kw = (camp.keywords || 'N/A');
+            const kwDisplay = kw.length > 80 ? kw.substring(0, 80) + '\u2026' : kw;
+
+            // ── CRITICAL: only data-campaign-id on the button, zero data in onclick ──
+            tableRows += `
+                <tr style="border-bottom:1px solid var(--glass-border);">
+                    <td style="padding:12px;">
+                        <strong>${camp.name || 'Untitled'}</strong>
+                        ${geoWarn}
                     </td>
-                </tr>
-            `;
-            filterHTML += `<option value="${id}">${camp.name}</option>`;
+                    <td style="padding:12px;">
+                        <span style="color:var(--text-muted);font-size:0.85rem;">${kwDisplay}</span>
+                    </td>
+                    <td style="padding:12px;">${statusBadge}</td>
+                    <td style="padding:12px;text-align:right;white-space:nowrap;">
+                        <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;margin-right:4px;"
+                            data-campaign-id="${id}"
+                            onclick="openEditModal(this.dataset.campaignId)">Edit</button>
+                        <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;border-color:${statusColor};color:${statusColor};"
+                            onclick="toggleCampaignStatus('${id}','${camp.status}')">${isActive ? 'Pause' : 'Resume'}</button>
+                    </td>
+                </tr>`;
+
+            filterOpts += `<option value="${id}">${camp.name}</option>`;
         });
-        
-        if (tableBody) tableBody.innerHTML = tableHTML;
-        if (filterSelect) {
-            const currentVal = filterSelect.value;
-            filterSelect.innerHTML = filterHTML;
-            filterSelect.value = currentVal || 'all';
+
+        if (tableBody) tableBody.innerHTML = tableRows;
+
+        if (filterSel) {
+            const prev = filterSel.value;
+            filterSel.innerHTML = filterOpts;
+            filterSel.value = prev || 'all';
         }
+
         if (feed) {
             feed.innerHTML = `
-                <div class="competitor-monitor" style="background: rgba(79, 70, 229, 0.05); border: 1px solid rgba(79, 70, 229, 0.2); padding: 12px; border-radius: 8px; margin-bottom: 24px;">
-                    <span class="badge" style="background: var(--primary);">System Status: Online</span>
-                    <span style="color: var(--text-muted); font-size: 0.9rem; margin-left: 8px;">Scraping ${activeCount} Active Target Matrices</span>
-                </div>
-            `;
+                <div style="background:rgba(79,70,229,0.05);border:1px solid rgba(79,70,229,0.2);padding:12px;border-radius:8px;margin-bottom:24px;">
+                    <span class="badge" style="background:var(--primary);">System Status: Online</span>
+                    <span style="color:var(--text-muted);font-size:0.9rem;margin-left:8px;">Scanning ${activeCount} Active Target Matrix${activeCount !== 1 ? 'es' : ''}</span>
+                </div>`;
         }
     } catch (error) {
         console.error("Campaign Hook Error:", error);
@@ -658,17 +678,24 @@ window.handleCountryChange = function(glSelectId, locationInputId) {
     }
 };
 
-window.openEditModal = function(id, name, bio, keywords, gl, location, targetUrls) {
-    document.getElementById('edit-camp-id').value        = id       || '';
-    document.getElementById('edit-camp-name').value      = name     || '';
-    document.getElementById('edit-camp-bio').value       = bio      || '';
-    document.getElementById('edit-camp-keys').value      = keywords || '';
+window.openEditModal = function(id) {
+    const camp = window._campaignsStore.get(id);
+    if (!camp) {
+        showToast('Campaign data not found. Please refresh.', 'error');
+        console.error('[openEditModal] id not in store:', id);
+        return;
+    }
+    // Populate fields directly from the store object — no HTML attribute parsing
+    document.getElementById('edit-camp-id').value   = id;
+    document.getElementById('edit-camp-name').value  = camp.name     || '';
+    document.getElementById('edit-camp-bio').value   = camp.bio      || '';
+    document.getElementById('edit-camp-keys').value  = camp.keywords || '';
     const glEl = document.getElementById('edit-camp-gl');
-    if (glEl) glEl.value = gl || '';
-    document.getElementById('edit-camp-location').value  = location || '';
+    if (glEl) glEl.value = camp.gl || '';
+    document.getElementById('edit-camp-location').value = camp.location || '';
     const urlsEl = document.getElementById('edit-camp-target-urls');
     if (urlsEl) {
-        const urls = Array.isArray(targetUrls) ? targetUrls : JSON.parse(targetUrls || '[]');
+        const urls = Array.isArray(camp.target_urls) ? camp.target_urls : [];
         urlsEl.value = urls.join('\n');
     }
     showModal('edit-campaign-modal');
