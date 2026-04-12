@@ -247,7 +247,7 @@ steps:
   - --image=gcr.io/$PROJECT_ID/lead-orchestrator:$COMMIT_SHA
   - --region=asia-south1
   - --platform=managed
-  - --memory=256Mi
+  - --memory=512Mi
   - --cpu=1
   - --min-instances=0
   - --max-instances=10
