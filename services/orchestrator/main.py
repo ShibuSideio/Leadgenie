@@ -1356,7 +1356,7 @@ Rules:
         # Pull active campaigns with an aggressive limit of 500
         campaigns = list(db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(500).stream())
 
-        audit_trail = ["Executed V14.4 Dual-Mode Sweep (Producer=24h / Consumer=4h)."]
+        audit_trail = ["Executed V19 Dual-Mode Sweep (Producer=24h / Consumer=4h)."]
         queue_path  = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
         sa_email    = get_service_account_email().strip()
         base_url    = PIPELINE_URL.split('/dispatch')[0]   # base URL without /dispatch
@@ -1453,7 +1453,7 @@ Rules:
                     audit_trail.append(f"⚙️ CONSUMER queued for {campaign_id} (queue_depth={queue_depth}, jitter={jitter}s, next in {DRIP_INTERVAL_H}h)")
 
         return jsonify({
-            "message":            f"V14.4 Sweep: {produce_dispatched} producers + {consume_dispatched} consumers dispatched.",
+            "message":            f"V19 Sweep: {produce_dispatched} producers + {consume_dispatched} consumers dispatched.",
             "produce_dispatched": produce_dispatched,
             "consume_dispatched": consume_dispatched,
             "audit_trail":        audit_trail
