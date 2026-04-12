@@ -838,9 +838,29 @@ window.saveCampaignAction = async function(payload) {
         }
     }
 
-    if (!cpName || !cpKeys) {
-        showToast('Campaign Name and Keywords are required', 'error');
+    // ── PLG Validation: Child Campaign Path ──────────────────────────────────
+    // DT/AI-generated campaigns pass bio='CHILD_CAMPAIGN_OVERRIDE' + campaign_focus
+    // instead of manual keywords. Synthesize keywords from AI fields so the backend
+    // producer guard (requires non-empty keywords) never trips on AI payloads.
+    // Manual campaigns still require both name and keywords.
+    // ──────────────────────────────────────────────────────────────────────────
+    if (!cpName) {
+        showToast('Campaign Name is required.', 'error');
         return;
+    }
+
+    const isAIGenerated = (cpBio === 'CHILD_CAMPAIGN_OVERRIDE') || (payload && payload.campaign_focus);
+    if (!cpKeys) {
+        if (isAIGenerated) {
+            // Synthesize keywords from the AI-extracted DT fields
+            const focus = payload?.campaign_focus || cpName;
+            const pain  = payload?.pain_point     || '';
+            const adv   = payload?.unfair_advantage || '';
+            cpKeys = [focus, pain, adv].filter(Boolean).join(', ');
+        } else {
+            showToast('Target Keywords are required.', 'error');
+            return;
+        }
     }
 
     showToast('Setting up your search...', 'info');
