@@ -1080,20 +1080,114 @@ Rules:
                         return jsonify({"error": err_msg, "ignite": False}), status_code
 
                 try:
+                    _sa_email      = get_service_account_email().strip()
+                    _base_url      = PIPELINE_URL.split("/dispatch")[0]
+                    _produce_url   = f"{_base_url}/produce"
+                    _consume_url   = f"{_base_url}/dispatch"
+                    _queue_path    = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+                    _now           = datetime.datetime.now(datetime.timezone.utc)
+                    import random as _r
+
+                    def _ignite_task(url, delay_s):
+                        _ts = timestamp_pb2.Timestamp()
+                        _ts.FromDatetime(_now + datetime.timedelta(seconds=delay_s))
+                        _t = {
+                            "http_request": {
+                                "http_method": tasks_v2.HttpMethod.POST,
+                                "url":         url,
+                                "headers":     {"Content-Type": "application/json"},
+                                "body":        json.dumps({
+                                    "tenant_id":   tenant_id,
+                                    "campaign_id": campaign_id,
+                                }).encode(),
+                            },
+                            "schedule_time": _ts,
+                        }
+                        if _sa_email:
+                            _t["http_request"]["oidc_token"] = {
+                                "service_account_email": _sa_email,
+                                "audience":              _base_url,
+                            }
+                        return _t
+
+                    # ── Task A: Producer ── fires in 3-5s ────────────────────
+                    _prod_jitter = _r.randint(3, 5)
+                    tasks_client.create_task(request={
+                        "parent": _queue_path,
+                        "task":   _ignite_task(_produce_url, _prod_jitter)
+                    })
+                    print(f"[IGNITE] Producer enqueued for {campaign_id} "
+                          f"(fires in {_prod_jitter}s)")
+
+                    # ── Task B: Consumer ── fires in 3 minutes ───────────────
+                    # 3 min gives the Producer (Serper fetch + filter, ~30-90s)
+                    # enough time to populate unprocessed_queue before dispatch
+                    # tries to drain it. Day-1 UX: leads appear in ~3 min.
+                    _CONSUMER_DELAY_S = 180  # 3 minutes
+                    tasks_client.create_task(request={
+                        "parent": _queue_path,
+                        "task":   _ignite_task(_consume_url, _CONSUMER_DELAY_S)
+                    })
+                    # Unlock next_drip_due immediately so the consumer task
+                    # is not blocked by the +4h lock set at creation.
+                    camp_ref.update({
+                        "next_drip_due": _now + datetime.timedelta(seconds=_CONSUMER_DELAY_S - 10)
+                    })
+                    print(f"[IGNITE] Consumer enqueued for {campaign_id} "
+                          f"(fires in {_CONSUMER_DELAY_S}s, next_drip_due unlocked)")
+
+                    return jsonify({
+                        "status":              "dual_ignited",
+                        "campaign_id":         campaign_id,
+                        "producer_fires_in_s": _prod_jitter,
+                        "consumer_fires_in_s": _CONSUMER_DELAY_S,
+                        "ignite":              True,
+                    }), 200
+
+                except Exception as _ign_err:
+                    print(f"[IGNITE] Cloud Tasks enqueue failed: {_ign_err}")
+                    return jsonify({
+                        "error": str(_ign_err),
+                        "ignite": False,
+                    }), 500
+
+            elif (request.path.startswith("/api/campaigns/")
+                  and request.path.endswith("/consume")
+                  and request.method == "POST"):
+                # ── V19: MANUAL CONSUME (QA BYPASS) ──────────────────────────
+                # Directly enqueues a Consumer (dispatch) task for a specific
+                # campaign, bypassing the 4-hour next_drip_due lock.
+                # Use from the browser console for QA:
+                #   fetch('/api/campaigns/<id>/consume', {method:'POST',
+                #     headers:{'Authorization':'Bearer <token>','Content-Type':'application/json'},
+                #     body:'{}'})
+                # ─────────────────────────────────────────────────────────────
+                campaign_id = request.path.split("/")[-2]
+                camp_ref    = db.collection("campaigns").document(campaign_id)
+                camp_doc    = camp_ref.get()
+
+                if not camp_doc.exists or camp_doc.to_dict().get("tenant_id") != tenant_id:
+                    return jsonify({"error": "Forbidden"}), 403
+
+                queue_depth = len((camp_doc.to_dict() or {}).get("unprocessed_queue", []))
+                if queue_depth == 0:
+                    return jsonify({
+                        "status":      "noop",
+                        "reason":      "unprocessed_queue is empty — run /ignite first",
+                        "queue_depth": 0,
+                    }), 200
+
+                try:
                     _sa_email   = get_service_account_email().strip()
                     _base_url   = PIPELINE_URL.split("/dispatch")[0]
                     _queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
-                    import random as _r
-                    _jitter     = _r.randint(1, 5)
+                    _now        = datetime.datetime.now(datetime.timezone.utc)
                     _ts         = timestamp_pb2.Timestamp()
-                    _ts.FromDatetime(
-                        datetime.datetime.now(datetime.timezone.utc)
-                        + datetime.timedelta(seconds=_jitter)
-                    )
+                    _ts.FromDatetime(_now + datetime.timedelta(seconds=2))
                     _t = {
                         "http_request": {
                             "http_method": tasks_v2.HttpMethod.POST,
-                            "url":         f"{_base_url}/produce",
+                            "url":         f"{_base_url}/dispatch",
                             "headers":     {"Content-Type": "application/json"},
                             "body":        json.dumps({
                                 "tenant_id":   tenant_id,
@@ -1108,20 +1202,20 @@ Rules:
                             "audience":              _base_url,
                         }
                     tasks_client.create_task(request={"parent": _queue_path, "task": _t})
-                    print(f"[IGNITE] Day-1 producer enqueued for campaign {campaign_id} "
-                          f"(jitter={_jitter}s)")
+                    # Reset drip lock to now so cron doesn't double-fire within 4h
+                    camp_ref.update({
+                        "next_drip_due": _now + datetime.timedelta(hours=4)
+                    })
+                    print(f"[CONSUME-QA] Manual dispatch enqueued for campaign {campaign_id} "
+                          f"(queue_depth={queue_depth})")
                     return jsonify({
-                        "status": "ignited",
+                        "status":      "consume_enqueued",
                         "campaign_id": campaign_id,
-                        "produce_jitter_s": _jitter,
-                        "ignite": True,
+                        "queue_depth": queue_depth,
+                        "fires_in_s":  2,
                     }), 200
-                except Exception as _ign_err:
-                    print(f"[IGNITE] Cloud Tasks enqueue failed: {_ign_err}")
-                    return jsonify({
-                        "error": str(_ign_err),
-                        "ignite": False,
-                    }), 500
+                except Exception as _ce:
+                    return jsonify({"error": str(_ce)}), 500
 
             elif (request.path.startswith("/api/campaigns/")
                   and request.path.endswith("/run")
