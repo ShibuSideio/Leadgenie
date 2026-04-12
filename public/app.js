@@ -886,31 +886,36 @@ window.saveCampaignAction = async function(payload) {
         const createData = await createResp.json();
         const campaignId = createData.id;
 
-        // Fire Epsilon-Greedy Router for immediate first batch
-        let routerMsg = 'System is now looking for clients!';
+        // ── V19 IGNITION: fire Day-1 producer immediately ────────────────────
+        // /ignite bypasses the epsilon-greedy quota math and directly enqueues
+        // the Serper producer task. Errors are surfaced, not swallowed.
+        let igniteMsg = 'Campaign active — scanning for leads...';
+        console.log('[V19] Create response:', createData);
         if (campaignId) {
             try {
-                const routerResp = await fetch(`${API_BASE}/api/campaigns/${campaignId}/run`, {
+                const igniteResp = await fetch(`${API_BASE}/api/campaigns/${campaignId}/ignite`, {
                     method:  'POST',
                     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
                     body:    JSON.stringify({})
                 });
-                if (routerResp.ok) {
-                    const r    = await routerResp.json();
-                    const v16  = r.autonomous_promoted || 0;
-                    const v14  = r.cartographer_queued || 0;
-                    routerMsg  = `Engine dispatched: ${v16} Predictive + ${v14} Cartographer leads queued`;
+                const igniteData = await igniteResp.json();
+                console.log('[V19 IGNITE] Response:', igniteData);
+                if (igniteResp.ok && igniteData.ignite) {
+                    igniteMsg = `🚀 Engine ignited! Scanning starts in ~${igniteData.produce_jitter_s || 5}s`;
+                } else {
+                    console.warn('[IGNITE] Ignition call returned error:', igniteData);
+                    igniteMsg = 'Campaign created — first scan queued by cron (≤5 min).';
                 }
-            } catch (routerErr) {
-                console.warn('[ROUTER] Router call failed — Cartographer sweep will pick up:', routerErr);
+            } catch (igniteErr) {
+                console.warn('[IGNITE] Ignition fetch failed:', igniteErr);
             }
         }
 
         const targetUrlsInput = document.getElementById('camp-target-urls');
         if (targetUrlsInput) targetUrlsInput.value = '';
-        
+
         loadDashboard();
-        showToast(routerMsg, 'success');
+        showToast(igniteMsg, 'success');
     } catch(err) {
         console.error('[saveCampaignAction]', err);
         showToast('Failed to save campaign. Check API permissions.', 'error');

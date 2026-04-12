@@ -1040,6 +1040,73 @@ Rules:
                 }), 201
                 
             elif (request.path.startswith("/api/campaigns/")
+                  and request.path.endswith("/ignite")
+                  and request.method == "POST"):
+                # ── V19: DAY-1 IGNITION ───────────────────────────────────────
+                # Dedicated first-run trigger. Called by the frontend immediately
+                # after campaign creation. Bypasses epsilon-greedy quota math and
+                # directly enqueues a Serper producer task.
+                # Quota is still enforced to prevent abuse, but the error is
+                # surfaced (not swallowed) so the frontend can react.
+                # ─────────────────────────────────────────────────────────────
+                campaign_id = request.path.split("/")[-2]  # /api/campaigns/{id}/ignite
+                camp_ref    = db.collection("campaigns").document(campaign_id)
+                camp_doc    = camp_ref.get()
+
+                if not camp_doc.exists or camp_doc.to_dict().get("tenant_id") != tenant_id:
+                    return jsonify({"error": "Forbidden"}), 403
+
+                role = (db.collection("users").document(tenant_id).get().to_dict() or {}).get("role")
+                if role != "super_admin":
+                    is_valid, status_code, err_msg = check_quota(tenant_id)
+                    if not is_valid:
+                        return jsonify({"error": err_msg, "ignite": False}), status_code
+
+                try:
+                    _sa_email   = get_service_account_email().strip()
+                    _base_url   = PIPELINE_URL.split("/dispatch")[0]
+                    _queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+                    import random as _r
+                    _jitter     = _r.randint(1, 5)
+                    _ts         = timestamp_pb2.Timestamp()
+                    _ts.FromDatetime(
+                        datetime.datetime.now(datetime.timezone.utc)
+                        + datetime.timedelta(seconds=_jitter)
+                    )
+                    _t = {
+                        "http_request": {
+                            "http_method": tasks_v2.HttpMethod.POST,
+                            "url":         f"{_base_url}/produce",
+                            "headers":     {"Content-Type": "application/json"},
+                            "body":        json.dumps({
+                                "tenant_id":   tenant_id,
+                                "campaign_id": campaign_id,
+                            }).encode(),
+                        },
+                        "schedule_time": _ts,
+                    }
+                    if _sa_email:
+                        _t["http_request"]["oidc_token"] = {
+                            "service_account_email": _sa_email,
+                            "audience":              _base_url,
+                        }
+                    tasks_client.create_task(request={"parent": _queue_path, "task": _t})
+                    print(f"[IGNITE] Day-1 producer enqueued for campaign {campaign_id} "
+                          f"(jitter={_jitter}s)")
+                    return jsonify({
+                        "status": "ignited",
+                        "campaign_id": campaign_id,
+                        "produce_jitter_s": _jitter,
+                        "ignite": True,
+                    }), 200
+                except Exception as _ign_err:
+                    print(f"[IGNITE] Cloud Tasks enqueue failed: {_ign_err}")
+                    return jsonify({
+                        "error": str(_ign_err),
+                        "ignite": False,
+                    }), 500
+
+            elif (request.path.startswith("/api/campaigns/")
                   and request.path.endswith("/run")
                   and request.method == "POST"):
                 # ── EPSILON-GREEDY ROUTER (Phase 4) ──────────────────────────
