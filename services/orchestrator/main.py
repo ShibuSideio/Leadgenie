@@ -975,7 +975,69 @@ Rules:
                     doc_ref.update({"sourcing_vector": vector})
                     print(f"[SYNAPTIC ROUTER] Campaign {doc_ref.id} classified as: '{vector}'")
 
-                return jsonify({"status": "success", "id": doc_ref.id}), 201
+                # ── V19: ZERO-WAIT DIRECT ENQUEUE ────────────────────────────────────────
+                # Do NOT wait for the cron sweep. Push the Day-1 producer task directly
+                # into Cloud Tasks immediately after document creation.
+                #
+                # Timestamp safety contract (prevents cron double-firing):
+                #   next_produce_due = now + 24h  → cron locked out until Day 2
+                #   next_drip_due    = now + 4h   → consumer fires on next 4-hour tick
+                #   unprocessed_queue = []         → clean state; producer will populate it
+                # ─────────────────────────────────────────────────────────────────────────
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                doc_ref.update({
+                    "unprocessed_queue": [],
+                    "next_produce_due":  now_utc + datetime.timedelta(hours=24),
+                    "next_drip_due":     now_utc + datetime.timedelta(hours=4),
+                })
+
+                _zero_wait_enqueue_error = None
+                try:
+                    _base_url    = PIPELINE_URL.split("/dispatch")[0]
+                    _produce_url = f"{_base_url}/produce"
+                    _queue_path  = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+                    _sa_email    = get_service_account_email().strip()
+
+                    # 5-second jitter prevents thundering-herd on bulk campaign creates
+                    import random as _random
+                    _jitter   = _random.randint(1, 5)
+                    _sched_ts = timestamp_pb2.Timestamp()
+                    _sched_ts.FromDatetime(now_utc + datetime.timedelta(seconds=_jitter))
+
+                    _task = {
+                        "http_request": {
+                            "http_method": tasks_v2.HttpMethod.POST,
+                            "url":         _produce_url,
+                            "headers":     {"Content-Type": "application/json"},
+                            "body":        json.dumps({
+                                "tenant_id":   tenant_id,
+                                "campaign_id": doc_ref.id,
+                            }).encode(),
+                        },
+                        "schedule_time": _sched_ts,
+                    }
+                    if _sa_email:
+                        _task["http_request"]["oidc_token"] = {
+                            "service_account_email": _sa_email,
+                            "audience":              _base_url,
+                        }
+
+                    tasks_client.create_task(request={"parent": _queue_path, "task": _task})
+                    print(f"[ZERO-WAIT] Enqueued Day-1 producer for campaign {doc_ref.id} "
+                          f"(jitter={_jitter}s, next_produce_due=+24h)")
+
+                except Exception as _enq_err:
+                    # Non-fatal: cron will pick this up within 5 minutes as a fallback.
+                    # We never block campaign creation on an infrastructure failure.
+                    _zero_wait_enqueue_error = str(_enq_err)
+                    print(f"[ZERO-WAIT] Direct enqueue failed (non-fatal, cron fallback active): {_enq_err}")
+
+                return jsonify({
+                    "status":              "success",
+                    "id":                  doc_ref.id,
+                    "zero_wait_enqueued":  _zero_wait_enqueue_error is None,
+                    "enqueue_error":       _zero_wait_enqueue_error,
+                }), 201
                 
             elif (request.path.startswith("/api/campaigns/")
                   and request.path.endswith("/run")
