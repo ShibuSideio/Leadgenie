@@ -1704,8 +1704,60 @@ class PrismPipeline:
 
 
 # =============================================================================
-# END OF PRISM ENGINE
+# FIX 1: CREDIT SETTLEMENT HELPER
+# Called after each URL completes in dispatch() and finalize().
+# Enqueues a Cloud Task to /api/internal/credits/settle on the orchestrator.
+# outcome="success": total_consumed += 1, reserved_credits -= 1 (settled)
+# outcome="failure": reserved_credits -= 1 only (refund, no credit consumed)
 # =============================================================================
+ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "")
+
+
+def _settle_credit(tenant_id: str, outcome: str, count: int = 1):
+    """
+    Non-blocking credit settlement via Cloud Tasks.
+    Failure is swallowed — settlement must never block the pipeline.
+    Falls back to direct wallet_shards write if ORCHESTRATOR_URL is not set.
+    """
+    if not ORCHESTRATOR_URL:
+        # Pre-migration fallback: direct shard increment
+        try:
+            _shard_id = random.randint(0, 9)
+            if outcome == "success":
+                db.collection("users").document(tenant_id).collection("wallet_shards") \
+                    .document(str(_shard_id)).set(
+                        {"consumed_credits": firestore.Increment(1)}, merge=True
+                    )
+        except Exception as fb_e:
+            print(f"[SETTLE-FALLBACK] Shard write failed: {fb_e}")
+        return
+
+    try:
+        from google.cloud import tasks_v2 as _tv2
+        _tc         = _tv2.CloudTasksClient()
+        _queue_path = _tc.queue_path(
+            os.environ.get("PROJECT_ID", ""),
+            os.environ.get("LOCATION", "us-central1"),
+            os.environ.get("QUEUE", "lead-pipeline-queue"),
+        )
+        _body = json.dumps({
+            "tenant_id": tenant_id,
+            "outcome":   outcome,
+            "count":     count,
+        }).encode()
+        _tc.create_task(
+            parent=_queue_path,
+            task={
+                "http_request": {
+                    "http_method": _tv2.HttpMethod.POST,
+                    "url":         f"{ORCHESTRATOR_URL}/api/internal/credits/settle",
+                    "headers":     {"Content-Type": "application/json"},
+                    "body":        _body,
+                }
+            }
+        )
+    except Exception as e:
+        print(f"[SETTLE] Enqueue failed (non-fatal): {e}")
 
 
 @app.route("/dispatch", methods=["POST"])
@@ -1879,15 +1931,16 @@ def dispatch():
             # pushToCRM() sets expire_at=null to permanently exempt CRM leads.
             _expire_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=90)
             doc_ref.create({
-                "tenant_id":        tenant_id,
+                "tenant_id":         tenant_id,
                 "matched_campaigns": [campaign_id],
-                "url":              url,
-                "confidence_tier":  url_to_tier.get(url, "High"),
-                "sourcing_vector":  sourcing_vector,
-                "status":           "processing",
-                "is_in_crm":        False,      # Required: UI query filters .where('is_in_crm','==',false)
-                "createdAt":        firestore.SERVER_TIMESTAMP,
-                "expire_at":        _expire_at,
+                "url":               url,
+                "lock_entity":       lock_entity,    # FIX 2: stored for zombie recovery
+                "confidence_tier":   url_to_tier.get(url, "High"),
+                "sourcing_vector":   sourcing_vector,
+                "status":            "processing",
+                "is_in_crm":         False,
+                "createdAt":         firestore.SERVER_TIMESTAMP,
+                "expire_at":         _expire_at,
             })
         except AlreadyExists:
             print(f"[UAR] Cross-campaign duplicate for {target_domain}. Updating matched_campaigns.")
@@ -1996,6 +2049,7 @@ def dispatch():
                 shard_id = random.randint(0, 9)
                 db.collection("usage_metrics").document(tenant_id).collection("shards") \
                     .document(str(shard_id)).set({"gemini_calls": firestore.Increment(1)}, merge=True)
+                # FIX 1: wallet_shards retained for analytics; authoritative settlement via orchestrator
                 db.collection("users").document(tenant_id).collection("wallet_shards") \
                     .document(str(shard_id)).set({"consumed_credits": firestore.Increment(1)}, merge=True)
 
@@ -2081,6 +2135,7 @@ def dispatch():
                         "is_in_crm":                     False,  # Required: UI query .where('is_in_crm','==',false)
                     }
                     validate_and_update_lead(lead_payload, doc_ref)
+                    _settle_credit(tenant_id, "success")  # FIX 1: settle reservation
 
                     scrape_success += 1
 

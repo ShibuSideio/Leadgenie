@@ -615,21 +615,57 @@ def analyze_website():
             "code": "insufficient_data"
         }), 422
 
-    # ── Phase 4: Gemini Synthesis & Predictive Chain ─────────────────────────
+    # ── Phase 4: Gemini Synthesis & Predictive Chain (FIX 4a) ─────────────────
+    # PROBLEM (original): two sequential .result(timeout=7) calls stack timeouts
+    #   → worst-case wall clock: 7s (f_core) + 7s (f_pred) = 14s+
+    # FIX: single concurrent.futures.wait(timeout=BUDGET) gives BOTH futures
+    #   the same shared 7s wall-clock budget, then we inspect done/not_done.
+    #   f_core is mandatory; f_pred degrades gracefully if not completed in time.
+    import time as _time
+    PHASE4_BUDGET_S = 7.0
+    _phase4_start   = _time.monotonic()
     try:
-        prompt   = _build_gemini_prompt(root_domain, combined_text)
-        
+        prompt = _build_gemini_prompt(root_domain, combined_text)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             f_core = pool.submit(_call_gemini, prompt)
             f_pred = pool.submit(_run_predictive_chain, root_domain, combined_text)
-            
-            gemini_result = f_core.result(timeout=7.0)
-            try:
-                predictive_campaigns = f_pred.result(timeout=7.0)
-            except Exception as e:
-                print(f"[DT] Predictive chain failed or timed out: {e}")
-                predictive_campaigns = []
-                
+
+            # Single wait: both futures share PHASE4_BUDGET_S wall-clock cap.
+            done, not_done = concurrent.futures.wait(
+                {f_core, f_pred},
+                timeout=PHASE4_BUDGET_S,
+                return_when=concurrent.futures.ALL_COMPLETED,
+            )
+
+            _elapsed = _time.monotonic() - _phase4_start
+            print(f"[DT] Phase 4 wait: {_elapsed:.2f}s | "
+                  f"done={len(done)} | timed_out={len(not_done)}")
+
+            # f_core is mandatory — persona extraction must succeed
+            if f_core not in done:
+                f_pred.cancel()
+                raise TimeoutError(
+                    f"Core Gemini synthesis did not complete within "
+                    f"{PHASE4_BUDGET_S}s (elapsed={_elapsed:.2f}s)"
+                )
+
+            # f_core completed — retrieve result (non-blocking, already computed)
+            gemini_result = f_core.result()
+
+            # f_pred is optional — degrade gracefully if not done in budget
+            predictive_campaigns = []
+            if f_pred in done:
+                try:
+                    predictive_campaigns = f_pred.result()
+                    print(f"[DT] Predictive chain OK: {len(predictive_campaigns)} campaigns.")
+                except Exception as pe:
+                    print(f"[DT] Predictive chain error (non-fatal): {pe}")
+            else:
+                f_pred.cancel()
+                print(f"[DT] Predictive chain did not complete within budget "
+                      f"({_elapsed:.2f}s). Degrading gracefully.")
+
     except (TimeoutError, concurrent.futures.TimeoutError):
         return jsonify({
             "success": False,

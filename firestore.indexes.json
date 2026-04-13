@@ -48,11 +48,20 @@
       ]
     },
     {
+      "collectionGroup": "leads",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status",    "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "predictive_cache",
       "queryScope": "COLLECTION_GROUP",
       "fields": [
-        { "fieldPath": "status", "order": "ASCENDING" },
-        { "fieldPath": "score",  "order": "DESCENDING" }
+        { "fieldPath": "status",    "order": "ASCENDING" },
+        { "fieldPath": "expire_at", "order": "ASCENDING" },
+        { "fieldPath": "score",     "order": "DESCENDING" }
       ]
     },
     {

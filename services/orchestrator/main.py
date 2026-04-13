@@ -137,18 +137,61 @@ def _get_router_config(db) -> dict:
     return doc.to_dict()
 
 
+# =============================================================================
+# FIX 3: CAS TRANSACTIONAL POP — _cas_pop_one + _pop_from_predictive_cache
+# Each candidate gets its own Firestore transaction. Concurrent orchestrator
+# instances that grab the same doc will find it deleted and skip it cleanly.
+# expire_at filter applied at query level AND re-validated inside the transaction
+# to guard against Firestore TTL eventual-consistency lag (up to 7 days).
+# =============================================================================
+from google.cloud.firestore_v1.transaction import transactional as _firestore_transactional
+
+
+@_firestore_transactional
+def _cas_pop_one(transaction, cache_ref, leads_ref, now_utc):
+    """
+    Atomically promotes one predictive_cache document to the leads collection.
+    Guards: exists, status=='new', expire_at > now (freshness re-check inside txn).
+    Raises ValueError on any validation failure — caller skips that doc.
+    """
+    snap = cache_ref.get(transaction=transaction)
+    if not snap.exists:
+        raise ValueError("already_consumed: deleted by concurrent instance")
+
+    data   = snap.to_dict() or {}
+    status = data.get("status")
+    if status != "new":
+        raise ValueError(f"status_changed: now '{status}'")
+
+    expire_at = data.get("expire_at")
+    if expire_at is not None:
+        if hasattr(expire_at, "tzinfo") and expire_at.tzinfo is None:
+            expire_at = expire_at.replace(tzinfo=datetime.timezone.utc)
+        if expire_at <= now_utc:
+            raise ValueError(f"expired: expire_at={expire_at.isoformat()}")
+
+    promoted_data = dict(data)
+    promoted_data["status"]       = "new"
+    promoted_data["promotedAt"]   = firestore.SERVER_TIMESTAMP
+    promoted_data["origin_engine"] = "autonomous"
+    promoted_data["expire_at"]    = now_utc + datetime.timedelta(days=90)
+
+    transaction.set(leads_ref, promoted_data, merge=True)
+    transaction.delete(cache_ref)
+    return promoted_data
+
+
 def _pop_from_predictive_cache(tenant_id: str, db, count: int) -> list:
     """
-    Pops up to `count` leads from users/{tenant_id}/predictive_cache.
-    Sort: score DESC (highest quality first).
-    Semantics: TRUE MOVE — each popped doc is written to main leads collection
-    and immediately deleted from the cache. No stale copies left.
-
-    Returns list of lead dicts that were successfully moved.
+    FIX 3: CAS-safe pop from predictive_cache.
+    Adds expire_at > now query filter and uses individual Firestore transactions
+    per document to prevent double-serve under concurrent orchestrator instances.
+    Over-fetches (count*3) to absorb expected CAS rejections.
     """
     if count <= 0:
         return []
 
+    now_utc   = datetime.datetime.now(datetime.timezone.utc)
     cache_col = (
         db.collection('users')
         .document(tenant_id)
@@ -156,48 +199,40 @@ def _pop_from_predictive_cache(tenant_id: str, db, count: int) -> list:
     )
 
     try:
-        # Exclude already-expired entries and sort by score DESC
-        cache_docs = (
+        # FIX 3B: expire_at > now filter guards against TTL-lag stale docs
+        candidates = (
             cache_col
-            .where(filter=FieldFilter('status', '==', 'new'))
+            .where(filter=FieldFilter('status',    '==', 'new'))
+            .where(filter=FieldFilter('expire_at', '>',  now_utc))
+            .order_by('expire_at')
             .order_by('score', direction='DESCENDING')
-            .limit(count)
+            .limit(count * 3)
             .stream()
         )
-        cache_docs = list(cache_docs)
+        candidates = list(candidates)
     except Exception as e:
-        print(f"[ROUTER] predictive_cache query failed for {tenant_id}: {e}")
+        print(f"[ROUTER-CAS] Cache query failed for {tenant_id}: {e}")
         return []
 
     promoted = []
-    batch    = db.batch()
+    for cache_doc in candidates:
+        if len(promoted) >= count:
+            break
+        doc_id    = cache_doc.id
+        cache_ref = cache_col.document(doc_id)
+        leads_ref = db.collection('leads').document(doc_id)
+        txn = db.transaction()
+        try:
+            lead_data = _cas_pop_one(txn, cache_ref, leads_ref, now_utc)
+            promoted.append(lead_data)
+            print(f"[ROUTER-CAS] Promoted {doc_id[:12]}... score={lead_data.get('score')}")
+        except ValueError as ve:
+            print(f"[ROUTER-CAS] CAS skip {doc_id[:12]}...: {ve}")
+        except Exception as txn_err:
+            print(f"[ROUTER-CAS] Transaction error {doc_id[:12]}...: {txn_err}")
 
-    for cache_doc in cache_docs:
-        lead_data = cache_doc.to_dict()
-        lead_id   = cache_doc.id
-
-        # Promote to main leads collection with status=new
-        lead_data['status']    = 'new'
-        lead_data['promotedAt'] = firestore.SERVER_TIMESTAMP
-        # Extend TTL from 72h cache to 90-day DPDP window
-        lead_data['expire_at'] = (
-            datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=90)
-        )
-
-        leads_ref = db.collection('leads').document(lead_id)
-        batch.set(leads_ref, lead_data, merge=True)
-
-        # Immediately delete from predictive_cache (true move)
-        batch.delete(cache_col.document(lead_id))
-        promoted.append(lead_data)
-
-    try:
-        batch.commit()
-        print(f"[ROUTER] Promoted {len(promoted)} autonomous leads from cache -> leads for {tenant_id}")
-    except Exception as e:
-        print(f"[ROUTER] Batch commit failed for {tenant_id}: {e}")
-        return []
-
+    print(f"[ROUTER-CAS] Promoted {len(promoted)}/{count} from cache "
+          f"(candidates={len(candidates)})")
     return promoted
 
 def get_service_account_email():
@@ -293,6 +328,105 @@ def check_quota(tenant_id):
             
         return True, 200, "OK"
     return False, 401, "Unknown identity."
+
+
+# =============================================================================
+# FIX 1: RESERVE-AND-REFUND — Atomic Firestore Transactional Credit Guard
+# =============================================================================
+import concurrent.futures as _cf_orch
+
+
+@_firestore_transactional
+def _reserve_credits_txn(transaction, user_ref, batch_cost: int):
+    """
+    Atomically reserves batch_cost credits from wallet.
+    Reads ONLY root user document (no sub-collection reads in transaction).
+    Fields: wallet.allocated_credits, wallet.total_consumed, wallet.reserved_credits.
+    Raises ValueError on insufficient funds.
+    """
+    snapshot = user_ref.get(transaction=transaction)
+    if not snapshot.exists:
+        raise ValueError("Tenant wallet document does not exist.")
+    wallet    = (snapshot.to_dict() or {}).get("wallet", {})
+    allocated = int(wallet.get("allocated_credits", 0) or 0)
+    consumed  = int(wallet.get("total_consumed",    0) or 0)
+    reserved  = int(wallet.get("reserved_credits",  0) or 0)
+    available = allocated - consumed - reserved
+    if available < batch_cost:
+        raise ValueError(
+            f"Insufficient credits: {available} available, {batch_cost} requested. "
+            f"(allocated={allocated}, consumed={consumed}, reserved={reserved})"
+        )
+    transaction.update(user_ref, {
+        "wallet.reserved_credits": firestore.Increment(batch_cost)
+    })
+    print(f"[RESERVE] Tenant {user_ref.id}: reserved {batch_cost}. "
+          f"Remaining after: {available - batch_cost}")
+    return available - batch_cost
+
+
+def reserve_credits(tenant_id: str, batch_cost: int) -> bool:
+    """Public entry point. True if reservation succeeded, False otherwise."""
+    if batch_cost <= 0:
+        return True
+    user_ref = db.collection("users").document(tenant_id)
+    txn      = db.transaction()
+    try:
+        _reserve_credits_txn(txn, user_ref, batch_cost)
+        return True
+    except ValueError as ve:
+        print(f"[RESERVE] Denied for {tenant_id}: {ve}")
+        return False
+    except Exception as e:
+        print(f"[RESERVE] Transaction error for {tenant_id}: {e}")
+        return False
+
+
+def release_reservation(tenant_id: str, count: int = 1):
+    """Atomic refund: decrement reserved_credits without touching consumed."""
+    if count <= 0:
+        return
+    try:
+        db.collection("users").document(tenant_id).update({
+            "wallet.reserved_credits": firestore.Increment(-count)
+        })
+        print(f"[REFUND] Released {count} reserved credits for {tenant_id}")
+    except Exception as e:
+        print(f"[REFUND] Failed for {tenant_id}: {e}")
+
+
+# =============================================================================
+# FIX 4b: BOUNDED GEMINI WRAPPER
+# Enforces a 15s hard wall-clock cap — prevents gunicorn thread starvation
+# when Vertex API is under scheduling pressure.
+# =============================================================================
+
+def _call_gemini_bounded(prompt: str, config=None, timeout_s: float = 15.0):
+    """
+    Calls model.generate_content() with a hard wall-clock timeout via
+    ThreadPoolExecutor. Raises TimeoutError on cap breach.
+    """
+    model = GenerativeModel("gemini-2.5-flash")
+
+    def _invoke():
+        if config:
+            return model.generate_content(prompt, generation_config=config)
+        return model.generate_content(
+            prompt,
+            generation_config=GenerationConfig(temperature=0.2)
+        )
+
+    with _cf_orch.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_invoke)
+        try:
+            return future.result(timeout=timeout_s)
+        except _cf_orch.TimeoutError:
+            future.cancel()
+            raise TimeoutError(
+                f"Gemini 2.5 Flash exceeded {timeout_s}s hard cap "
+                f"(Vertex API scheduling pressure)."
+            )
+
 
 # ---------------------------------------------------------------------------
 # V14: SYNAPTIC ROUTER HELPERS
@@ -827,11 +961,15 @@ Rules:
 - Return ONLY the JSON object. No other text.
 - If the website is in a non-English language, still return English output."""
 
-                    model = GenerativeModel("gemini-2.5-flash")
-                    gemini_resp = model.generate_content(
-                        prompt,
-                        generation_config=GenerationConfig(temperature=0.2)
-                    )
+                    # FIX 4b: bounded 15s call — prevents gunicorn worker starvation
+                    try:
+                        gemini_resp = _call_gemini_bounded(prompt, timeout_s=15.0)
+                    except TimeoutError as _te:
+                        print(f"[ANALYZE-WEBSITE] Gemini timeout for {url}: {_te}")
+                        return jsonify({
+                            "error": "AI analysis timed out. Please try again.",
+                            "code":  "gemini_timeout"
+                        }), 504
                     raw_output = gemini_resp.text.strip()
 
                     # Strip any accidental markdown fences
@@ -1220,10 +1358,8 @@ Rules:
             elif (request.path.startswith("/api/campaigns/")
                   and request.path.endswith("/run")
                   and request.method == "POST"):
-                # ── EPSILON-GREEDY ROUTER (Phase 4) ──────────────────────────
-                # Intercepts the user-triggered "Find Clients" action.
-                # Blends V16 Autonomous (predictive_cache) + V14 Cartographer (Serper).
-                campaign_id = request.path.split("/")[-2]  # /api/campaigns/{id}/run
+                # ── EPSILON-GREEDY ROUTER — FIX 1: Reserve-Before-Dispatch ───
+                campaign_id = request.path.split("/")[-2]
                 camp_ref    = db.collection("campaigns").document(campaign_id)
                 camp_doc    = camp_ref.get()
 
@@ -1232,88 +1368,107 @@ Rules:
 
                 camp_data   = camp_doc.to_dict()
                 batch_size  = int(camp_data.get("lead_target", data.get("batch_size", 10)))
-
-                # Quota check
                 role = (db.collection("users").document(tenant_id).get().to_dict() or {}).get("role")
-                if role != "super_admin":
-                    is_valid, status_code, err_msg = check_quota(tenant_id)
-                    if not is_valid:
-                        return jsonify({"error": err_msg}), status_code
 
-                # Fetch router config (auto-initializes system_config/router if missing)
-                router_cfg     = _get_router_config(db)
-                exploit_ratio  = float(router_cfg.get("exploit_ratio", 0.10))
-
-                # Epsilon-Greedy quota math
-                autonomous_target  = max(0, round(batch_size * exploit_ratio))
+                router_cfg          = _get_router_config(db)
+                exploit_ratio       = float(router_cfg.get("exploit_ratio", 0.10))
+                autonomous_target   = max(0, round(batch_size * exploit_ratio))
                 cartographer_target = batch_size - autonomous_target
+                cartographer_cost   = cartographer_target
 
-                print(f"[ROUTER] batch={batch_size} | "
-                      f"autonomous_target={autonomous_target} | "
-                      f"cartographer_target={cartographer_target} | "
-                      f"exploit_ratio={exploit_ratio}")
+                print(f"[ROUTER] batch={batch_size} | autonomous={autonomous_target} | "
+                      f"cartographer={cartographer_target} | exploit_ratio={exploit_ratio}")
 
                 audit_trail = []
 
-                # ── Step A: EXPLOIT — pop from predictive_cache ──────────────
+                # ── FIX 1: Atomic reservation BEFORE any Cloud Task is enqueued
+                # Autonomous hits are pre-scored cache pops — no new Gemini cost.
+                # Cartographer path (Serper+Gemini) costs 1 credit per URL.
+                if role != "super_admin" and cartographer_cost > 0:
+                    if not reserve_credits(tenant_id, cartographer_cost):
+                        return jsonify({
+                            "error": "Insufficient credits to run this campaign. "
+                                     "Contact admin to top up your wallet.",
+                            "code":  "insufficient_credits"
+                        }), 402
+                    audit_trail.append(
+                        f"Reserved {cartographer_cost} credits atomically before dispatch."
+                    )
+
+                # ── Step A: EXPLOIT — CAS pop from predictive_cache ──────────
                 promoted = []
                 if autonomous_target > 0:
                     promoted = _pop_from_predictive_cache(tenant_id, db, autonomous_target)
                     deficit  = autonomous_target - len(promoted)
                     if deficit > 0:
-                        # Cache miss: dynamically reallocate deficit to Cartographer
-                        cartographer_target += deficit
-                        print(f"[ROUTER] Cache deficit={deficit}. "
-                              f"Cartographer target adjusted to {cartographer_target}")
-                        audit_trail.append(
-                            f"Cache deficit: {deficit} reallocated to Cartographer."
-                        )
+                        if role != "super_admin":
+                            if reserve_credits(tenant_id, deficit):
+                                cartographer_target += deficit
+                                cartographer_cost   += deficit
+                                audit_trail.append(
+                                    f"Cache deficit={deficit}: reserved extra, "
+                                    f"reallocated to Cartographer."
+                                )
+                            else:
+                                audit_trail.append(
+                                    f"Cache deficit={deficit}: insufficient credits "
+                                    f"for extra allocation."
+                                )
+                        else:
+                            cartographer_target += deficit
                     audit_trail.append(
                         f"Autonomous: {len(promoted)}/{autonomous_target} leads promoted from cache."
                     )
 
-                # ── Step B: EXPLORE — enqueue Cartographer for remainder ──────
+                # ── Step B: EXPLORE — enqueue Cartographer Cloud Task ─────────
                 produce_dispatched = 0
                 if cartographer_target > 0:
                     try:
-                        sa_email    = get_service_account_email().strip()
-                        base_url    = PIPELINE_URL.split('/dispatch')[0]
-                        queue_path  = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+                        sa_email   = get_service_account_email().strip()
+                        base_url   = PIPELINE_URL.split('/dispatch')[0]
+                        queue_path = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
                         import random
-                        jitter      = random.randint(1, 30)
-                        sched_t     = timestamp_pb2.Timestamp()
+                        jitter  = random.randint(1, 30)
+                        sched_t = timestamp_pb2.Timestamp()
                         sched_t.FromDatetime(
                             datetime.datetime.now(datetime.timezone.utc)
                             + datetime.timedelta(seconds=jitter)
                         )
                         task_body = {
-                            "tenant_id":   tenant_id,
-                            "campaign_id": campaign_id,
-                            "lead_target": cartographer_target,
+                            "tenant_id":            tenant_id,
+                            "campaign_id":          campaign_id,
+                            "lead_target":          cartographer_target,
+                            "reserved_credit_cost": cartographer_cost,
                         }
                         t = {
                             "http_request": {
                                 "http_method": tasks_v2.HttpMethod.POST,
-                                "url": f"{base_url}/produce",
-                                "headers": {"Content-Type": "application/json"},
-                                "body": json.dumps(task_body).encode()
-                            }
+                                "url":         f"{base_url}/produce",
+                                "headers":     {"Content-Type": "application/json"},
+                                "body":        json.dumps(task_body).encode()
+                            },
+                            "schedule_time": sched_t,
                         }
                         if sa_email:
                             t["http_request"]["oidc_token"] = {
                                 "service_account_email": sa_email,
-                                "audience": base_url
+                                "audience":              base_url,
                             }
-                        t["schedule_time"] = sched_t
                         tasks_client.create_task(request={"parent": queue_path, "task": t})
                         produce_dispatched = 1
                         audit_trail.append(
                             f"Cartographer: producer queued for {cartographer_target} leads "
-                            f"(jitter={jitter}s)."
+                            f"(jitter={jitter}s, reserved={cartographer_cost} credits)."
                         )
                     except Exception as task_err:
-                        print(f"[ROUTER] Cloud Tasks enqueue failed: {task_err}")
-                        audit_trail.append(f"Cartographer enqueue failed: {task_err}")
+                        # Enqueue failed — refund entire reservation immediately
+                        if role != "super_admin":
+                            release_reservation(tenant_id, cartographer_cost)
+                        print(f"[ROUTER] Enqueue failed, reservation refunded: {task_err}")
+                        audit_trail.append(
+                            f"Cartographer enqueue failed, {cartographer_cost} credits "
+                            f"refunded: {task_err}"
+                        )
 
                 return jsonify({
                     "status":               "router_dispatched",
@@ -1322,6 +1477,7 @@ Rules:
                     "autonomous_promoted":  len(promoted),
                     "cartographer_queued":  cartographer_target,
                     "producer_dispatched":  produce_dispatched,
+                    "reserved_credits":     cartographer_cost,
                     "audit_trail":          audit_trail,
                 }), 200
 
@@ -1524,6 +1680,37 @@ Rules:
         status_code = 200 if success else 500
         return jsonify({"ok": success}), status_code
 
+    # ── FIX 1: Credit Settlement Endpoint ────────────────────────────────────
+    # Called by pipeline-main via Cloud Tasks after each URL processes.
+    # outcome="success": total_consumed += 1, reserved -= 1 (settled)
+    # outcome="failure": reserved -= 1 only (refund, no credit consumed)
+    if request.path == "/api/internal/credits/settle" and request.method == "POST":
+        if not request.headers.get("X-CloudTasks-QueueName"):
+            return jsonify({"error": "Forbidden"}), 403
+        payload   = request.json or {}
+        tenant_id = payload.get("tenant_id")
+        outcome   = payload.get("outcome")
+        count     = int(payload.get("count", 1))
+        if not tenant_id or outcome not in ("success", "failure") or count <= 0:
+            return jsonify({"error": "Invalid settlement payload"}), 400
+        user_ref = db.collection("users").document(tenant_id)
+        try:
+            if outcome == "success":
+                user_ref.update({
+                    "wallet.total_consumed":   firestore.Increment(count),
+                    "wallet.reserved_credits": firestore.Increment(-count),
+                })
+                print(f"[SETTLE] {tenant_id}: +{count} consumed, -{count} reserved.")
+            else:
+                user_ref.update({
+                    "wallet.reserved_credits": firestore.Increment(-count),
+                })
+                print(f"[SETTLE] {tenant_id}: REFUND {count} credits (failure).")
+        except Exception as se:
+            print(f"[SETTLE] Write failed for {tenant_id}: {se}")
+            return jsonify({"ok": False, "error": str(se)}), 500
+        return jsonify({"ok": True, "outcome": outcome, "count": count}), 200
+
     if request.path == "/purge" and request.method == "POST":
         return handle_purge(request)
 
@@ -1644,11 +1831,93 @@ Rules:
                     consume_dispatched += 1
                     audit_trail.append(f"⚙️ CONSUMER queued for {campaign_id} (queue_depth={queue_depth}, jitter={jitter}s, next in {DRIP_INTERVAL_H}h)")
 
+        # ── FIX 2: ZOMBIE LEAD RECOVERY ───────────────────────────────────────
+        # Leads stuck in "processing" > 15min: scraper-heavy OOM or Cloud Tasks
+        # max-retry exhaustion. Resets to failed, releases domain lock, refunds credit.
+        ZOMBIE_CUTOFF_MINUTES = 15
+        zombie_cutoff         = now_utc - datetime.timedelta(minutes=ZOMBIE_CUTOFF_MINUTES)
+        zombie_recovered      = 0
+        zombie_locks_released = 0
+        try:
+            zombie_docs = (
+                db.collection("leads")
+                .where(filter=FieldFilter("status",    "==", "processing"))
+                .where(filter=FieldFilter("createdAt", "<",  zombie_cutoff))
+                .limit(100)
+                .stream()
+            )
+            for zombie_doc in zombie_docs:
+                zombie_data = zombie_doc.to_dict() or {}
+                try:
+                    zombie_doc.reference.update({
+                        "status":       "failed",
+                        "error":        (
+                            f"Zombie recovery: no finalize() callback within "
+                            f"{ZOMBIE_CUTOFF_MINUTES}min. Likely scraper-heavy OOM."
+                        ),
+                        "recovered_at": firestore.SERVER_TIMESTAMP,
+                    })
+                    zombie_recovered += 1
+                except Exception as zw:
+                    print(f"[ZOMBIE] Mark-failed error {zombie_doc.id}: {zw}")
+                    continue
+
+                # Release global_lead_lock — stored on stub via Fix 2a (lock_entity field)
+                lock_entity = zombie_data.get("lock_entity")
+                if not lock_entity:
+                    from urllib.parse import urlparse as _up
+                    import hashlib as _hs
+                    zombie_url = zombie_data.get("url", "")
+                    if zombie_url:
+                        _p  = _up(zombie_url)
+                        _nl = (_p.netloc or "").lower().replace("www.", "")
+                        _SOC = {"reddit.com","facebook.com","linkedin.com",
+                                "instagram.com","x.com","twitter.com",
+                                "quora.com","youtube.com","team-bhp.com"}
+                        if any(_nl.endswith(s) for s in _SOC):
+                            lock_entity = _hs.sha256(
+                                f"{_nl}{_p.path}".lower().encode()
+                            ).hexdigest()
+                        else:
+                            lock_entity = _nl
+
+                if lock_entity:
+                    try:
+                        lock_ref = db.collection("global_lead_locks").document(lock_entity)
+                        if lock_ref.get().exists:
+                            lock_ref.delete()
+                            zombie_locks_released += 1
+                    except Exception as le:
+                        print(f"[ZOMBIE] Lock release error {lock_entity}: {le}")
+
+                # Refund in-flight credit reservation
+                zombie_tenant = zombie_data.get("tenant_id")
+                if zombie_tenant:
+                    try:
+                        db.collection("users").document(zombie_tenant).update({
+                            "wallet.reserved_credits": firestore.Increment(-1)
+                        })
+                    except Exception as re_err:
+                        print(f"[ZOMBIE] Credit refund error {zombie_tenant}: {re_err}")
+
+                audit_trail.append(
+                    f"🧟 ZOMBIE: {zombie_doc.id[:12]}... recovered, "
+                    f"lock_released={lock_entity is not None}"
+                )
+        except Exception as zse:
+            print(f"[ZOMBIE] Sweep scan failed: {zse}")
+            audit_trail.append(f"⚠️ Zombie sweep error: {zse}")
+
+        print(f"[ZOMBIE] Recovered={zombie_recovered}, locks_released={zombie_locks_released}")
+        # ── END FIX 2 ────────────────────────────────────────────────────────
+
         return jsonify({
-            "message":            f"V19 Sweep: {produce_dispatched} producers + {consume_dispatched} consumers dispatched.",
-            "produce_dispatched": produce_dispatched,
-            "consume_dispatched": consume_dispatched,
-            "audit_trail":        audit_trail
+            "message":               f"V19 Sweep: {produce_dispatched} producers + {consume_dispatched} consumers dispatched.",
+            "produce_dispatched":    produce_dispatched,
+            "consume_dispatched":    consume_dispatched,
+            "zombie_recovered":      zombie_recovered,
+            "zombie_locks_released": zombie_locks_released,
+            "audit_trail":           audit_trail,
         }), 200
 
     # -----------------------------------------------------------------------------------------
