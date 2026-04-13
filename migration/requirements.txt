@@ -1,0 +1,4 @@
+# Migration script dependencies
+# Run: pip install -r migration/requirements.txt
+google-cloud-firestore>=2.14.0
+google-auth>=2.22.0
