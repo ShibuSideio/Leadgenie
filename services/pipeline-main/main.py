@@ -655,20 +655,50 @@ Look for patterns like '/u/', '/user/', '/profile/', '@username', or any author 
         "keywords": c.get("keywords", "")
     } for c in active_campaigns], indent=2)
 
-    prompt = f"""You are an Elite Extraction Engine evaluating a lead against multiple campaigns using the "Spear & Shield" strategy.
+    prompt = f"""You are a Dynamic Intent Analyzer evaluating a lead against multiple campaigns.
+Your evaluation mode adapts based on the source context:
+- SOURCE TYPE: {'SOCIAL/FORUM POST' if is_social_source else 'COMPANY WEBSITE/FORMAL PAGE'}
+- PLATFORM: {social_platform.upper()}
 
 # STEP 1 — CROSS-POLLINATION EVALUATION MATRIX
 Read the text DOM and evaluate it against EACH of these active campaigns:
 {campaigns_str}
 
-Score the lead (1-10) for EACH campaign based on how well the target fits the campaign's bio and keywords.
-Only return campaigns where the user is genuinely a good fit (score >= 4).
+Score the lead (1-10) for EACH campaign. Return only campaigns where score >= 4.
 
-# STEP 2 — "SPEAR & SHIELD" COPILOT DRAFT
-1. Identify the campaign with the HIGHEST match score. Use this as the primary pain point to open the message ("Spear").
-2. If other campaigns also matched (score >= 4), weave them fluidly into the second sentence as supporting value to show deep understanding ("Shield").
-3. NEVER pitch a bundle; pitch a primary solution with secondary benefits.
-4. Tone: Provide a warm, personal, direct message. No fluff, no generic greetings.
+## SCORING MODE — applies based on SOURCE TYPE:
+
+[IF COMPANY WEBSITE / FORMAL PAGE]
+Base the score on how well the target's business, industry, and explicit needs match the campaign's bio and keywords.
+Require clear B2B signals: industry fit, company size, tech stack indicators, or stated business problems.
+
+[IF SOCIAL/FORUM POST — Reddit, Facebook, Quora, or any forum]
+IGNORE the lack of formal company structure, B2B keywords, or domain authority.
+Base the score PURELY on the intensity and specificity of the pain point expressed in the post or comment.
+A score of 8-10 is valid for a person posting a raw, urgent, personal frustration that directly matches a campaign's solution.
+A score of 4-6 is valid for general curiosity or exploratory questions about the problem space.
+Do NOT penalise for missing company details — this is expected on social platforms.
+
+# STEP 2 — OUTREACH COPILOT DRAFT
+Identify the campaign with the HIGHEST match score (primary pain point).
+If other campaigns also matched (score >= 4), incorporate them as secondary "Shield" value.
+NEVER pitch a bundle; lead with one solution, reinforce with secondary benefits.
+
+## TONE MODE — adapts based on {social_platform}:
+
+[IF {social_platform} is 'linkedin' OR source is a company website]
+Use the direct, professional "Spear & Shield" pitch.
+Tone: warm, confident, peer-to-peer. No fluff, no generic greetings.
+Open with the specific pain signal you detected, then state the solution clearly.
+
+[IF {social_platform} is 'reddit' OR 'facebook' OR 'other' (forums/communities)]
+Do NOT pitch immediately. This is a community-native context.
+Write a SHORT, casual, empathetic opening message that:
+  1. Acknowledges the exact frustration they posted about in their own language
+  2. Asks a single, open-ended question to invite a reply (conversation-first)
+  3. Only hints at a potential solution in the final sentence — do not hard-sell
+Tone: like a helpful community member who genuinely gets it, not a salesperson.
+Length: max 3 sentences total.
 
 # STEP 3 — EXTRACTION RULES
 For hiring_intent_found: Return ONLY 'Yes' or 'No'. No explanation.
@@ -687,6 +717,13 @@ Do NOT invent contacts. Only extract what is explicitly present.
 
 For intent_signal: Write one precise sentence explaining the specific signal proving they need the solution.
 
+## SCHEMA GRACE FOR SOCIAL LEADS:
+If the source is a social/forum post, it is CORRECT and EXPECTED to output:
+- decision_maker_title: "Unknown" (individuals on social platforms rarely have formal titles)
+- company_size_tier: "Unknown" (no company affiliation required for social leads)
+- company_name: the poster's username or "Unknown" if not determinable
+Never mark these as failures — social leads are scored on pain intensity, not B2B formality.
+
 CONTEXTUAL DORKING DATA:
 {context_payload}
 
@@ -697,7 +734,16 @@ DETECTED TECH STACK:
         prompt += f"\nPast successful converted messages (match tone and length strictly): {historical_dms}\n"
     prompt += f"\nUsing all context, output your evaluation and drafting.\n\nText DOM:\n{text}"
 
-    sys_inst = "You are an Elite Extraction Engine with dynamic persona intelligence. Never hallucinate contacts."
+    sys_inst = (
+        "You are a Dynamic Intent Analyzer with adaptive persona intelligence. "
+        "When evaluating COMPANY WEBSITE sources: act as an elite B2B profiler — "
+        "demand formal business signals, extract decision-makers, and score based on industry fit. "
+        "When evaluating SOCIAL/FORUM POST sources: act as a community intelligence analyst — "
+        "score purely on pain point intensity and emotional urgency, ignore missing B2B structure, "
+        "and draft empathetic conversation-starter outreach rather than pitches. "
+        "Never hallucinate contacts. Never drop a lead solely because it lacks a company domain."
+    )
+
 
     schema = {
         "type": "OBJECT",
