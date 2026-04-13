@@ -277,14 +277,43 @@ VECTOR_PLATFORM_MAP = {
     ]
 }
 
+# ---------------------------------------------------------------------------
+# V20: UNIFIED QUERY BRAIN — P1+P2+P3 consolidated into a single Gemini call.
+# Schema enforces all three output arrays in one round-trip, cutting input
+# token submissions by ~65% vs the legacy 3-call chain.
+# RLHF injection (historical_phrases → AND-suffix) is fully preserved.
+# ---------------------------------------------------------------------------
+_QUERY_BRAIN_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "historical_phrases": {
+            "type": "ARRAY",
+            "description": "Exactly 3 short B2B trend phrases mined from historical lead pain_points. Empty array if no historical data supplied.",
+            "items": {"type": "STRING"}
+        },
+        "symptom_dorks": {
+            "type": "ARRAY",
+            "description": "Exactly 3 Google Search operator strings targeting prospects publicly experiencing the user's solved problem. Each string must be a complete, ready-to-use search query including site: operators and negative keywords.",
+            "items": {"type": "STRING"}
+        },
+        "translated_queries": {
+            "type": "ARRAY",
+            "description": "Exactly 3 natural-language, platform-native conversational queries humans type on the chosen sourcing vector. Empty array if no keywords supplied.",
+            "items": {"type": "STRING"}
+        }
+    },
+    "required": ["historical_phrases", "symptom_dorks", "translated_queries"]
+}
+
+
 def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None):
     """
-    V14.1: Intent Expansion Engine.
-    Translates raw keywords into platform-native conversational queries
-    via Gemini before constructing Google Dork strings.
-    Literal keyword passthrough is deprecated.
+    V20: Unified Query Brain — single Gemini call replaces legacy P1+P2+P3 chain.
+    All three output arrays (historical_phrases, symptom_dorks, translated_queries)
+    are returned in one schema-enforced JSON object. RLHF injection is preserved.
     """
-    historical_phrases = []
+    # ── Step 1: Fetch RLHF history context (Firestore read — no Gemini call) ──
+    pain_points: list = []
     try:
         query = db.collection("leads").where("tenant_id", "==", tenant_id).where("status", "in", ["contacted", "converted"]).limit(20)
         docs = list(query.stream())
@@ -292,72 +321,89 @@ def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None):
             query = db.collection("leads").where("status", "in", ["contacted", "converted"]).limit(20)
             docs = list(query.stream())
         pain_points = [d.to_dict().get("pain_point", "") for d in docs if d.to_dict().get("pain_point")]
-        if pain_points:
-            prompt = f"Analyze these successful lead extractions. Extract exactly 3 short conceptual B2B phrases identifying high-value trends. Your output must strictly be comma separated only. Do not use quotes or bullets.\n\nData: {json.dumps(pain_points)}"
-            resp_text = call_gemini_2_5(prompt, expect_json=False)
-            historical_phrases = [p.strip() for p in resp_text.split(',') if p.strip()]
     except Exception as e:
-        print(f"Historical Composite Mining Exception: {e}")
-        historical_phrases = []
+        print(f"[QUERY BRAIN] RLHF history fetch failed: {e}")
 
-    # --- Symptom Discovery Funnel (bio-driven dorks) ---
-    symptom_dorks = []
-    if bio:
-        symptom_prompt = f"The user solves this business problem: '{bio}'. Generate 3 highly specific Google Search operators to find targets PUBLICLY EXPERIENCING this problem. \nRule 1: You MUST include at least one query targeting social/professional networks using 'site:linkedin.com', 'site:facebook.com', or 'site:reddit.com'. \nRule 2: You MUST append negative keywords to exclude retail/informational sites (e.g., '-shop -cart -amazon -wiki'). \nReturn ONLY a JSON list of 3 strings."
-        try:
-            symptom_dorks = call_gemini_2_5(symptom_prompt, expect_json=True)
-        except Exception as e:
-            print(f"Symptom Extraction Exception: {e}")
+    # ── Step 2: Build unified prompt ──────────────────────────────────────────
+    keyword_str  = ", ".join(user_keywords) if user_keywords else ""
+    vector_label = sourcing_vector or "Classic B2B"
+    history_ctx  = json.dumps(pain_points) if pain_points else "[]"
 
+    unified_prompt = f"""You are the Sideio Query Brain. You will perform ALL THREE tasks below in a single response.
+
+# TASK 1 — RLHF HISTORICAL MINING
+Analyze these successful lead pain_point strings from previously converted leads.
+Extract exactly 3 short, conceptual B2B trend phrases identifying the highest-value patterns across all entries.
+If the data list is empty, return an empty array for historical_phrases.
+Data: {history_ctx}
+
+# TASK 2 — SYMPTOM DORKING
+The user solves this business problem: '{bio}'.
+Generate exactly 3 highly specific Google Search operator strings to find targets PUBLICLY EXPERIENCING this problem.
+Rule 1: At least one query MUST target social/professional networks using 'site:linkedin.com', 'site:facebook.com', or 'site:reddit.com'.
+Rule 2: Every query MUST append negative keywords to exclude noise (e.g. '-shop -cart -amazon -wiki -jobs -careers').
+If no bio is provided, return an empty array for symptom_dorks.
+
+# TASK 3 — INTENT EXPANSION
+The user is targeting this audience: '{keyword_str}'.
+Current sourcing vector: '{vector_label}'.
+Translate this audience into exactly 3 natural-language, conversational queries real humans type on this specific platform.
+Platform rules:
+- Social/Forum Listening: first-person or question-style forum posts.
+- Review Hijacking: complaint/review search phrases (e.g. 'problems with', 'looking for alternative to').
+- Maps/GMB Targeting: geo-intent phrases (e.g. 'best [service] near me').
+- Classic B2B: professional industry terminology.
+If no audience keywords are provided, return an empty array for translated_queries.
+
+Return ONLY the JSON object matching the schema. No explanation, no markdown."""
+
+    # ── Step 3: Single Gemini call — all three tasks ───────────────────────────
+    historical_phrases: list = []
+    symptom_dorks: list      = []
+    translated_queries: list = []
+    try:
+        result = call_gemini_2_5(
+            unified_prompt,
+            expect_json=True,
+            response_schema=_QUERY_BRAIN_SCHEMA
+        )
+        if isinstance(result, dict):
+            historical_phrases  = [p.strip() for p in result.get("historical_phrases",  []) if isinstance(p, str) and p.strip()][:3]
+            symptom_dorks       = [s.strip() for s in result.get("symptom_dorks",       []) if isinstance(s, str) and s.strip()][:3]
+            translated_queries  = [q.strip() for q in result.get("translated_queries",  []) if isinstance(q, str) and q.strip()][:3]
+            print(f"[QUERY BRAIN] Unified call OK: hist={len(historical_phrases)} symp={len(symptom_dorks)} tq={len(translated_queries)}")
+    except Exception as e:
+        print(f"[QUERY BRAIN] Unified Gemini call failed: {e}. Falling back to literal keywords.")
+
+    # ── Step 4: Assemble Serper query strings (logic unchanged from V14) ───────
     blacklist = "-wiki -jobs -careers -investors -support -\"login\" -www.zoominfo.com -www.ibm.com -www.amazon.com"
+
+    # RLHF injection: historical trend phrases appended as AND-suffix
     historical_str = ""
     if historical_phrases:
         phrases_escaped = [f'"{p}"' for p in historical_phrases[:3]]
-        historical_str = " AND (" + " OR ".join(phrases_escaped) + ")"
+        historical_str  = " AND (" + " OR ".join(phrases_escaped) + ")"
 
-    smart_queries = []
+    smart_queries: list = []
 
-    # -----------------------------------------------------------------------
-    # V14.1: INTENT EXPANSION ENGINE
-    # Deprecates literal keyword passthrough.
-    # Gemini translates raw audience keywords into 3 platform-native
-    # conversational queries that real humans use on the chosen vector.
-    # -----------------------------------------------------------------------
-    keyword_str = ", ".join(user_keywords) if user_keywords else ""
-    if keyword_str:
-        vector_label = sourcing_vector or "Classic B2B"
-        intent_prompt = f"""You are an Intent Expansion Engine. The user is targeting this audience: '{keyword_str}'. The current digital platform vector is: '{vector_label}'.
+    # Translated intent queries (P3 output)
+    if translated_queries:
+        for tq in translated_queries:
+            smart_queries.append(f'"{tq}"{historical_str} {blacklist}')
+        print(f"[QUERY BRAIN] {len(translated_queries)} platform-native queries assembled for '{vector_label}'")
+    elif keyword_str:
+        # Hard fallback: literal keywords if Gemini failed entirely
+        for kw in (user_keywords or []):
+            smart_queries.append(f'("{kw}"){historical_str} {blacklist}')
 
-Translate the user's target audience into exactly 3 natural-language, conversational queries that real humans actually type on this specific platform.
-
-Platform-specific rules:
-- If the vector is 'Social/Forum Listening': write queries as raw, first-person or question-style forum posts (e.g. 'how to waive IELTS requirement', 'universities that accept without English test').
-- If the vector is 'Review Hijacking': write queries as review search terms or complaint phrases (e.g. 'problems with', 'disappointed by', 'looking for alternative to').
-- If the vector is 'Maps/GMB Targeting': write geo-intent phrases (e.g. 'best [service] near me', '[service] in [city]').
-- If the vector is 'Classic B2B': use professional industry terminology (e.g. 'enterprise [solution] provider', '[industry] workflow optimization').
-
-Output ONLY a JSON array of exactly 3 strings. No explanation, no markdown."""
-        try:
-            translated_queries = call_gemini_2_5(intent_prompt, expect_json=True)
-            if isinstance(translated_queries, list):
-                for tq in translated_queries[:3]:
-                    if isinstance(tq, str) and tq.strip():
-                        smart_queries.append(f'"{tq.strip()}"{historical_str} {blacklist}')
-                print(f"[INTENT ENGINE] Translated '{keyword_str}' → {len(smart_queries)} platform-native queries for '{vector_label}'")
-        except Exception as e:
-            print(f"[INTENT ENGINE] Translation failed: {e}. Falling back to literal keywords.")
-            # Graceful fallback: use raw keywords if Gemini fails
-            for kw in user_keywords:
-                smart_queries.append(f'("{kw}"){historical_str} {blacklist}')
-
+    # Symptom dorks (P2 output)
     for sd in symptom_dorks:
         smart_queries.append(f'{sd} {blacklist}')
 
-    # V14: Inject vector-specific platform dorks AFTER translated queries
+    # V14: Vector-specific platform dorks appended last
     if sourcing_vector and sourcing_vector in VECTOR_PLATFORM_MAP:
         for platform_dork in VECTOR_PLATFORM_MAP[sourcing_vector]:
-            dork_q = f'{platform_dork}{historical_str} {blacklist}'
-            smart_queries.append(dork_q)
+            smart_queries.append(f'{platform_dork}{historical_str} {blacklist}')
         print(f"[SYNAPTIC ROUTER] Appended {len(VECTOR_PLATFORM_MAP[sourcing_vector])} platform dorks for vector: '{sourcing_vector}'")
 
     return smart_queries

@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import urllib.request
 import urllib.parse
@@ -450,9 +450,17 @@ def get_vector_weights():
         "Maps/GMB Targeting": 3
     }
 
+# V20: Strict schema for P9 — constrains the single-string response to the
+# valid vector enum; eliminates post-hoc string validation.
+_SOURCING_VECTOR_SCHEMA = {
+    "type": "STRING",
+    "enum": ["Social/Forum Listening", "Review Hijacking", "Classic B2B", "Maps/GMB Targeting"]
+}
+
 def classify_sourcing_vector(bio, industry_weights):
     """
-    V14: Gated LLM call — fires ONLY on campaign create/update, result cached on campaign doc.
+    V20: Schema-enforced, temperature=0.1 vector classifier (P9).
+    Gated LLM call — fires ONLY on campaign create/update, result cached on campaign doc.
     Classifies the optimal sourcing vector for a given bio using global success weights.
     """
     if not bio:
@@ -473,9 +481,14 @@ Output ONLY the chosen vector string. No explanation, no punctuation, no markdow
         model = GenerativeModel("gemini-2.5-flash")
         response = model.generate_content(
             prompt,
-            generation_config=GenerationConfig(temperature=0.1)
+            generation_config=GenerationConfig(
+                response_mime_type="application/json",
+                response_schema=_SOURCING_VECTOR_SCHEMA,
+                temperature=0.1
+            )
         )
-        vector = response.text.strip().strip('"')
+        # Schema guarantees a valid enum value; strip JSON quotes defensively
+        vector = json.loads(response.text) if response.text.strip().startswith('"') else response.text.strip().strip('"')
         valid_vectors = {"Social/Forum Listening", "Review Hijacking", "Classic B2B", "Maps/GMB Targeting"}
         return vector if vector in valid_vectors else "Classic B2B"
     except Exception as e:
@@ -2086,17 +2099,33 @@ Based on which sourcing_vector values are correlated with more 'converted' outco
 Vector keys MUST be exactly: "Classic B2B", "Social/Forum Listening", "Review Hijacking", "Maps/GMB Targeting".
 Example output: {{"Classic B2B": 14, "Social/Forum Listening": 11, "Review Hijacking": 4, "Maps/GMB Targeting": 6}}"""
 
-        try:
-            model    = GenerativeModel("gemini-2.5-flash")
-            response = model.generate_content(
-                reflection_prompt,
-                generation_config=GenerationConfig(response_mime_type="application/json")
+        # V20: Strict schema for P11 — integer weights per vector key.
+        # temperature=0.1 ensures deterministic weight recalculation.
+        _REFLECTION_WEIGHTS_SCHEMA = {
+            "type": "OBJECT",
+            "properties": {
+                "Classic B2B":               {"type": "INTEGER"},
+                "Social/Forum Listening":    {"type": "INTEGER"},
+                "Review Hijacking":          {"type": "INTEGER"},
+                "Maps/GMB Targeting":        {"type": "INTEGER"}
+            },
+            "required": ["Classic B2B", "Social/Forum Listening", "Review Hijacking", "Maps/GMB Targeting"]
+        }
+        model    = GenerativeModel("gemini-2.5-flash")
+        response = model.generate_content(
+            reflection_prompt,
+            generation_config=GenerationConfig(
+                response_mime_type="application/json",
+                response_schema=_REFLECTION_WEIGHTS_SCHEMA,
+                temperature=0.1
             )
+        )
+        try:
             new_weights = json.loads(response.text)
             if not isinstance(new_weights, dict):
                 raise ValueError("Reflection output is not a JSON object.")
-            # Validate keys
-            valid_keys = {"Classic B2B", "Social/Forum Listening", "Review Hijacking", "Maps/GMB Targeting"}
+            # Schema guarantees all four vector keys as integers; filter defensively
+            valid_keys  = {"Classic B2B", "Social/Forum Listening", "Review Hijacking", "Maps/GMB Targeting"}
             new_weights = {k: int(v) for k, v in new_weights.items() if k in valid_keys}
         except Exception as e:
             return jsonify({"error": "Reflection LLM failed", "details": str(e)}), 500

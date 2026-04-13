@@ -324,14 +324,15 @@ def _httpx_meta_fallback(root_domain: str) -> str:
 
 
 # =============================================================================
-# LAYER 4: GEMINI 2.5 FLASH — STRICT JSON SYNTHESIS
-# Uses GenerationConfig(response_mime_type="application/json",
-#                        response_schema=...) to guarantee schema compliance.
-# Retries on ResourceExhausted (quota spikes) with exponential backoff.
+# LAYER 4: GEMINI 2.5 FLASH — V20 UNIFIED SCHEMA SYNTHESIS
+# Merges P6 (company bio + personas) with P7+P8 (product names + market trends)
+# into a single generate_content() call.
+# The safe_blob is submitted once (≤6000 chars), returning a comprehensive object.
+# Post-call: RLHF market_trend_cache lookup overrides LLM-generated trends in Python.
 # =============================================================================
 
-# Strict JSON schema for the Digital Twin persona response
-_DT_RESPONSE_SCHEMA = {
+# Unified schema: company DNA + predictive campaign trends in one response object
+_DT_UNIFIED_SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "company_bio": {
@@ -349,33 +350,35 @@ _DT_RESPONSE_SCHEMA = {
                 "properties": {
                     "name": {
                         "type": "STRING",
-                        "description": (
-                            "Short label for this persona type. "
-                            "E.g. 'E-commerce Brands < 50 employees', "
-                            "'SaaS Founders seeking GTM help'."
-                        )
+                        "description": "Short label. E.g. 'E-commerce Brands < 50 employees'."
                     },
                     "description": {
                         "type": "STRING",
-                        "description": (
-                            "1-2 sentences: their pain point and why this company "
-                            "is the right fit. Be concrete."
-                        )
+                        "description": "1-2 sentences: their pain point and why this company is the right fit."
                     },
                     "location_hint": {
                         "type": "STRING",
-                        "description": (
-                            "Best-guess country/region for this persona based on "
-                            "the site's content. E.g. 'India', 'USA', 'Global'. "
-                            "Use 'Global' if uncertain."
-                        )
+                        "description": "Best-guess country/region. Use 'Global' if uncertain."
                     }
                 },
                 "required": ["name", "description", "location_hint"]
             }
+        },
+        "products_with_trends": {
+            "type": "ARRAY",
+            "description": "Up to 3 products/services this company offers, each with a current market trend hook and their unfair advantage.",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "product_name":      {"type": "STRING", "description": "Distinct product or service name."},
+                    "market_trend_hook": {"type": "STRING", "description": "Current macro-economic trend, pain point, or market shift making this product highly relevant right now."},
+                    "unfair_advantage":  {"type": "STRING", "description": "Why this company specifically wins against alternatives for this product."}
+                },
+                "required": ["product_name", "market_trend_hook", "unfair_advantage"]
+            }
         }
     },
-    "required": ["company_bio", "target_personas"]
+    "required": ["company_bio", "target_personas", "products_with_trends"]
 }
 
 
@@ -384,25 +387,47 @@ _DT_RESPONSE_SCHEMA = {
     stop=stop_after_attempt(3),
     retry=retry_if_exception_type(ResourceExhausted),
 )
-def _call_gemini(prompt: str) -> dict:
+def _call_gemini_unified(root_domain: str, text_blob: str) -> dict:
     """
-    Calls Gemini 2.5 Flash with strict JSON mode.
-    Retries up to 3× on quota exhaustion.
-    Hard timeout: 7 s via ThreadPoolExecutor — never blocks gunicorn threads.
+    V20: Single Gemini 2.5 Flash call replacing the old P6+P7+P8 chain.
+    Accepts safe_blob once; returns company_bio, target_personas, and
+    products_with_trends in a single schema-enforced JSON object.
+    Hard timeout: 7 s wall-clock via ThreadPoolExecutor.
     """
+    safe_blob = text_blob[:6_000]   # ~1500 tokens — well within Flash's context
+    prompt = f"""You are a Business Intelligence engine analysing the company at domain: {root_domain}
+
+The following text was collected from their website and search index:
+---
+{safe_blob}
+---
+
+Complete ALL THREE tasks in a single JSON response:
+
+TASK 1 — COMPANY BIO:
+Write a company_bio: 1-2 precise sentences describing what they sell/do. Be specific. No filler.
+
+TASK 2 — TARGET PERSONAS:
+Identify exactly 3 ideal target_personas — the types of clients this company would pitch to.
+For each include: name (short label), description (pain point + why this company solves it), location_hint (country/region; use 'Global' if uncertain).
+
+TASK 3 — PRODUCTS WITH TRENDS:
+Identify up to 3 distinct products or services this company offers.
+For each, act as a Head of Growth: identify the current macro-economic trend or market shift driving demand (market_trend_hook) and why this company specifically wins against alternatives (unfair_advantage).
+
+Return ONLY valid JSON matching the schema. No markdown, no explanation. Never hallucinate. If text is insufficient, make best inference and flag ambiguity in description fields."""
+
     model  = GenerativeModel(
         "gemini-2.5-flash",
         system_instruction=(
             "You are a Business Intelligence engine. "
-            "Analyse the provided company text and return a precise, "
-            "factual JSON object. Never hallucinate. "
-            "If the text is insufficient, make your best inference "
-            "but flag ambiguity in the description fields."
+            "Return a precise, factual JSON object. Never hallucinate."
         )
     )
     config = GenerationConfig(
         response_mime_type="application/json",
-        response_schema=_DT_RESPONSE_SCHEMA,
+        response_schema=_DT_UNIFIED_SCHEMA,
+        temperature=0.1,
     )
 
     def _invoke():
@@ -413,131 +438,10 @@ def _call_gemini(prompt: str) -> dict:
         try:
             response = future.result(timeout=7.0)
         except concurrent.futures.TimeoutError:
-            raise TimeoutError("Gemini 2.5 Flash timed out (7 s hard cap)")
+            raise TimeoutError("Gemini 2.5 Flash unified call timed out (7 s hard cap)")
 
     return json.loads(response.text)
 
-
-def _build_gemini_prompt(root_domain: str, text_blob: str) -> str:
-    safe_blob = text_blob[:6_000]   # ~1500 tokens — well within Flash's context
-    return f"""You are analysing the company at domain: {root_domain}
-
-The following text was collected from their website and search index:
----
-{safe_blob}
----
-
-Your task:
-1. Write a company_bio: 1-2 precise sentences describing what they sell/do.
-2. Identify exactly 3 ideal target_personas — the types of clients this company
-   would pitch to. For each persona include:
-   - name: a short label
-   - description: their specific pain point and why this company solves it
-   - location_hint: the country/region most relevant for this persona
-
-Return ONLY valid JSON matching the schema. No markdown, no explanation."""
-
-
-_PRODUCTS_SCHEMA = {
-    "type": "ARRAY",
-    "description": "JSON array of up to 3 distinct product/service names.",
-    "items": {"type": "STRING"}
-}
-
-_TRENDS_SCHEMA = {
-    "type": "ARRAY",
-    "description": "Market trends for the requested products.",
-    "items": {
-        "type": "OBJECT",
-        "properties": {
-            "product_name": {"type": "STRING"},
-            "market_trend_hook": {"type": "STRING"},
-            "unfair_advantage": {"type": "STRING"}
-        },
-        "required": ["product_name", "market_trend_hook", "unfair_advantage"]
-    }
-}
-
-@retry(wait=wait_exponential(multiplier=1, min=2, max=8), stop=stop_after_attempt(3), retry=retry_if_exception_type(ResourceExhausted))
-def _run_predictive_chain(root_domain: str, text_blob: str) -> list[dict]:
-    safe_blob = text_blob[:6_000]
-    prompt_prod = f"Analyze domain {root_domain}: \n{safe_blob}\nReturn a JSON array of up to 3 distinct product/service names offered by this company."
-    
-    model = GenerativeModel("gemini-2.5-flash", system_instruction="You are a B2B analyst. Return strictly JSON.")
-    conf_prod = GenerationConfig(response_mime_type="application/json", response_schema=_PRODUCTS_SCHEMA)
-    
-    def _invoke_prod():
-        return model.generate_content(prompt_prod, generation_config=conf_prod)
-        
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(_invoke_prod)
-        try:
-            resp_prod = future.result(timeout=4.0)
-        except concurrent.futures.TimeoutError:
-            print("[DT] Products chain timed out")
-            return []
-
-    try:
-        product_names = json.loads(resp_prod.text)
-    except Exception as e:
-        print(f"[DT] JSON decode error: {e}")
-        return []
-
-    if not isinstance(product_names, list):
-        return []
-
-    final_campaigns = []
-    missing_products = []
-    
-    try:
-        from firebase_admin import firestore
-        db = firestore.client()
-        for p in product_names:
-            p_str = str(p).strip()
-            if not p_str: continue
-            
-            doc_id = "".join(c for c in p_str.lower() if c.isalnum() or c in ['-', '_'])[:100]
-            if not doc_id:
-                missing_products.append(p_str)
-                continue
-                
-            doc = db.collection("market_trend_cache").document(doc_id).get()
-            if doc.exists:
-                data = doc.to_dict()
-                final_campaigns.append({
-                    "product_name": p_str,
-                    "market_trend_hook": data.get("market_trend_hook", ""),
-                    "unfair_advantage": data.get("unfair_advantage", "")
-                })
-                print(f"[RLHF] Cache hit for {p_str}: {doc_id}")
-            else:
-                missing_products.append(p_str)
-    except Exception as e:
-        print(f"[RLHF] Cache access error: {e}")
-        missing_products = [str(p).strip() for p in product_names if str(p).strip()]
-
-    if missing_products:
-        prompt_miss = f"""For the following products offered by {root_domain}: {missing_products}
-Based on this context: {safe_blob}
-Act as a Head of Growth. For each product, identify a current macro-economic trend, pain point, or market shift that makes it highly relevant right now. Also identify the unfair advantage.
-Return a JSON array matching the schema."""
-        conf_trends = GenerationConfig(response_mime_type="application/json", response_schema=_TRENDS_SCHEMA)
-        
-        def _invoke_miss():
-            return model.generate_content(prompt_miss, generation_config=conf_trends)
-            
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_invoke_miss)
-            try:
-                resp_miss = future.result(timeout=4.0)
-                gen_trends = json.loads(resp_miss.text)
-                if isinstance(gen_trends, list):
-                    final_campaigns.extend(gen_trends)
-                    print(f"[RLHF] Generated trends for {len(missing_products)} products")
-            except Exception as e:
-                print(f"[DT] Trends generation failed: {e}")
-
-    return final_campaigns
 
 
 # =============================================================================
@@ -615,56 +519,30 @@ def analyze_website():
             "code": "insufficient_data"
         }), 422
 
-    # ── Phase 4: Gemini Synthesis & Predictive Chain (FIX 4a) ─────────────────
-    # PROBLEM (original): two sequential .result(timeout=7) calls stack timeouts
-    #   → worst-case wall clock: 7s (f_core) + 7s (f_pred) = 14s+
-    # FIX: single concurrent.futures.wait(timeout=BUDGET) gives BOTH futures
-    #   the same shared 7s wall-clock budget, then we inspect done/not_done.
-    #   f_core is mandatory; f_pred degrades gracefully if not completed in time.
+    # ── Phase 4: V20 Unified Gemini call (replaces P6+P7+P8 two-future chain) ─────
+    # Single call submits safe_blob once; returns company_bio + target_personas +
+    # products_with_trends in one schema-enforced object.
+    # Post-call: RLHF market_trend_cache lookup overrides LLM trends in Python.
     import time as _time
     PHASE4_BUDGET_S = 7.0
     _phase4_start   = _time.monotonic()
     try:
-        prompt = _build_gemini_prompt(root_domain, combined_text)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            f_core = pool.submit(_call_gemini, prompt)
-            f_pred = pool.submit(_run_predictive_chain, root_domain, combined_text)
-
-            # Single wait: both futures share PHASE4_BUDGET_S wall-clock cap.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            f_unified = pool.submit(_call_gemini_unified, root_domain, combined_text)
             done, not_done = concurrent.futures.wait(
-                {f_core, f_pred},
+                {f_unified},
                 timeout=PHASE4_BUDGET_S,
                 return_when=concurrent.futures.ALL_COMPLETED,
             )
-
             _elapsed = _time.monotonic() - _phase4_start
-            print(f"[DT] Phase 4 wait: {_elapsed:.2f}s | "
-                  f"done={len(done)} | timed_out={len(not_done)}")
+            print(f"[DT] Phase 4 unified wait: {_elapsed:.2f}s | done={len(done)} | timed_out={len(not_done)}")
 
-            # f_core is mandatory — persona extraction must succeed
-            if f_core not in done:
-                f_pred.cancel()
+            if f_unified not in done:
                 raise TimeoutError(
-                    f"Core Gemini synthesis did not complete within "
+                    f"Unified Gemini synthesis did not complete within "
                     f"{PHASE4_BUDGET_S}s (elapsed={_elapsed:.2f}s)"
                 )
-
-            # f_core completed — retrieve result (non-blocking, already computed)
-            gemini_result = f_core.result()
-
-            # f_pred is optional — degrade gracefully if not done in budget
-            predictive_campaigns = []
-            if f_pred in done:
-                try:
-                    predictive_campaigns = f_pred.result()
-                    print(f"[DT] Predictive chain OK: {len(predictive_campaigns)} campaigns.")
-                except Exception as pe:
-                    print(f"[DT] Predictive chain error (non-fatal): {pe}")
-            else:
-                f_pred.cancel()
-                print(f"[DT] Predictive chain did not complete within budget "
-                      f"({_elapsed:.2f}s). Degrading gracefully.")
+            gemini_result = f_unified.result()
 
     except (TimeoutError, concurrent.futures.TimeoutError):
         return jsonify({
@@ -685,6 +563,39 @@ def analyze_website():
             "error": "AI synthesis failed. Please try again.",
             "code": "gemini_error"
         }), 500
+
+    # ── Phase 4b: RLHF market_trend_cache override (pure Python, zero Gemini) ─
+    # For each product returned by the unified call, check the RLHF cache.
+    # Cache hits override the LLM-generated trend with the human-vetted version.
+    raw_products = gemini_result.get("products_with_trends", [])
+    predictive_campaigns: list = []
+    try:
+        from firebase_admin import firestore as _fs
+        _db = _fs.client()
+        for prod in raw_products:
+            p_str = str(prod.get("product_name", "")).strip()
+            if not p_str:
+                continue
+            doc_id = "".join(c for c in p_str.lower() if c.isalnum() or c in ["-", "_"])[:100]
+            if doc_id:
+                cached = _db.collection("market_trend_cache").document(doc_id).get()
+                if cached.exists:
+                    c_data = cached.to_dict()
+                    predictive_campaigns.append({
+                        "product_name":      p_str,
+                        "market_trend_hook": c_data.get("market_trend_hook", prod.get("market_trend_hook", "")),
+                        "unfair_advantage":  c_data.get("unfair_advantage",  prod.get("unfair_advantage",  "")),
+                    })
+                    print(f"[RLHF] Cache override applied for '{p_str}': {doc_id}")
+                    continue
+            # No cache hit — use LLM-generated trend as-is
+            predictive_campaigns.append(prod)
+        print(f"[DT] Predictive campaigns resolved: {len(predictive_campaigns)} (after RLHF override)")
+    except Exception as ce:
+        print(f"[DT] RLHF cache override failed (non-fatal): {ce}")
+        predictive_campaigns = raw_products  # fallback: use raw LLM output
+
+
 
     # ── Phase 5: Shape response for frontend (View C) ─────────────────────────
     company_bio = gemini_result.get("company_bio", "")

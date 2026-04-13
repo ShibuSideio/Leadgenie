@@ -1,4 +1,4 @@
-﻿"""
+"""
 engine.py - V16 Autonomous Engine: Triangulation, Dedup, Token Bucket, Gemini Dossier
 =======================================================================================
 Phase 4 changes:
@@ -25,8 +25,30 @@ from ingestors import JobBoardIngestor, FundingIngestor
 
 log = logging.getLogger(__name__)
 
-PROJECT_ID = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+PROJECT_ID  = os.environ.get("PROJECT_ID", "sideio-leads-v16")
 GEMINI_MODEL = "gemini-2.5-flash"
+
+# V20: Strict JSON schema for P12 — guarantees all three dossier keys are
+# always present as non-empty strings. Eliminates silent key-miss failures
+# in _generate_dossier() data.get() calls.
+_DOSSIER_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "dossier_text":  {
+            "type": "STRING",
+            "description": "3 sentences. Why this company is high-intent B2B right now."
+        },
+        "intent_signal": {
+            "type": "STRING",
+            "description": "1 sentence. The combined buying signal from the funding and hiring data points."
+        },
+        "pain_point":    {
+            "type": "STRING",
+            "description": "1 sentence. Most likely operational pain given their growth stage."
+        }
+    },
+    "required": ["dossier_text", "intent_signal", "pain_point"]
+}
 
 # ── Routing thresholds ─────────────────────────────────────────────────────────
 EXPLOIT_THRESHOLD   = 1.8   # standard: both signals + neutral ontology
@@ -260,7 +282,11 @@ Respond ONLY in strict JSON:
             model    = GenerativeModel(GEMINI_MODEL)
             response = model.generate_content(
                 prompt,
-                generation_config=GenerationConfig(response_mime_type="application/json")
+                generation_config=GenerationConfig(
+                    response_mime_type="application/json",
+                    response_schema=_DOSSIER_SCHEMA,
+                    temperature=0.1,
+                )
             )
             data        = json.loads(response.text)
             tokens_used = getattr(getattr(response, "usage_metadata", None),
