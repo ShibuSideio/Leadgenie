@@ -1,4 +1,4 @@
-// Firebase configuration (Placeholder)
+﻿// Firebase configuration (Placeholder)
 const firebaseConfig = {
     apiKey: "AIzaSyCxqimZJ7kspuJJ8qXF34zguLkNXi6MWd4",
     authDomain: "lead-sniper-prod.firebaseapp.com",
@@ -2035,7 +2035,7 @@ window.toggleUserDropdown = function() {
         dropdown.classList.remove('open');
         if (pill) pill.classList.remove('open');
     } else {
-        dropdown.style.display = 'flex';
+        dropdown.style.display = 'block'; // FIX T4: absolute dropdown must be block
         dropdown.classList.add('open');
         if (pill) pill.classList.add('open');
         // Auto-close on outside click
@@ -2440,7 +2440,7 @@ window.openChildCampaignModal = async function() {
     if (modal) {
         showModal('child-campaign-modal');
         const fallbackCont = document.getElementById('cc-custom-fallback-container');
-        if(fallbackCont) fallbackCont.classList.add('hidden');
+        if (fallbackCont) fallbackCont.style.display = 'none'; // FIX T2: no .hidden CSS rule
         const cardsEl = document.getElementById('cc-recommendation-cards');
         if(cardsEl) {
             cardsEl.innerHTML = '<p style="text-align:center; color:#6b7280;">Loading market intelligence...</p>';
@@ -2481,7 +2481,28 @@ window.openChildCampaignModal = async function() {
                 `;
             });
         } else {
-            html = '<p style="text-align:center; color:#6b7280;">No predictive campaigns available. Use the custom fallback.</p>';
+            // == FIX T1: Manual Profile Fallback ==
+            // When no recommended_campaigns (user has no website yet), check if
+            // an admin manually pushed a tenant_profile with company_bio or KB.
+            // Surface a single editable "Manual Twin" card so the user can
+            // immediately launch a campaign without scanning a website URL.
+            const manualBio = (rawProfile && (
+                rawProfile.company_bio        ||
+                rawProfile.company_description ||
+                rawProfile.bio                ||
+                (rawProfile.knowledge_base_text && rawProfile.knowledge_base_text[0])
+            )) || '';
+
+            if (manualBio) {
+                const productHint  = (rawProfile && (rawProfile.company_name || rawProfile.name)) || 'Your Core Service';
+                const locationHint = (rawProfile && rawProfile.detected_gl) || '';
+                const bProd = btoa(productHint.replace(/['"]/g, ''));
+                const bHook = btoa(manualBio.slice(0, 120).replace(/['"]/g, ''));
+                const bAdv  = btoa('');
+                html = <div style="background:linear-gradient(135deg,rgba(79,70,229,0.05),rgba(124,58,237,0.05));border:1px dashed rgba(79,70,229,0.3);border-radius:12px;padding:14px;margin-bottom:16px;text-align:left;"><div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--primary);margin-bottom:6px;">&#10022; Profile Detected (Manual Twin)</div><p style="font-size:0.88rem;color:var(--text-muted);margin-bottom:14px;line-height:1.5;"></p><button class="primary-btn" style="width:100%;font-size:0.9rem;padding:8px;" onclick="window.editPredictiveCard(0)">Customise &amp; Launch &#8594;</button></div><div id="c-card-0"><div id="c-card-view-0" class="hidden"></div><div id="c-card-edit-0"><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Product / Service Focus</label><input type="text" id="c-prod-0" class="fc-intent-input" style="height:36px;padding:8px;margin-bottom:8px;width:100%;border:1px solid #d1d5db;border-radius:8px;" value=""><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Market Opportunity / Pain Point</label><textarea id="c-hook-0" class="fc-intent-input" style="min-height:60px;padding:8px;margin-bottom:8px;width:100%;border:1px solid #d1d5db;border-radius:8px;"></textarea><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Unfair Advantage</label><textarea id="c-adv-0" class="fc-intent-input" style="min-height:60px;padding:8px;margin-bottom:12px;width:100%;border:1px solid #d1d5db;border-radius:8px;"></textarea><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Target Location</label><input type="text" id="c-loc-0" class="fc-intent-input" style="height:36px;padding:8px;margin-bottom:12px;width:100%;border:1px solid #d1d5db;border-radius:8px;" placeholder="e.g. Kerala, India, Worldwide" value=""><button class="primary-btn" style="width:100%;font-size:0.9rem;padding:8px;background:#10b981;border:none;border-radius:20px;color:white;font-weight:600;cursor:pointer;" onclick="window.deployPredictiveCard(0,'','','')">Deploy Campaign</button></div></div>;
+            } else {
+                html = '<p style="text-align:center; color:#6b7280;">No predictive campaigns available. Use the custom fallback.</p>';
+            }
         }
         if(cardsEl) cardsEl.innerHTML = html;
         if(document.getElementById('cc-name')) document.getElementById('cc-name').value = '';
@@ -2531,10 +2552,15 @@ window.deployPredictiveCard = function(idx, origProd, origHook, origAdv) {
 };
 
 window.showCcCustomFallback = function() {
+    // FIX T2: hide cards, show manual form; pre-fill location from DT state
     const r = document.getElementById('cc-recommendation-cards');
     if (r) r.style.display = 'none';
     const f = document.getElementById('cc-custom-fallback-container');
     if (f) f.style.display = 'block';
+    const locEl = document.getElementById('cc-location');
+    if (locEl && !locEl.value && window._dtState && window._dtState.extractedGl) {
+        locEl.value = window._dtState.extractedGl;
+    }
 };
 
 window.saveChildCampaign = function() {

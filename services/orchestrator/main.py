@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import urllib.request
 import urllib.parse
@@ -1050,21 +1050,48 @@ Rules:
                     
                 # Schema Map: Location -> GL Logic
                 loc_raw = (data.get('location') or '').strip().lower()
+                # FIX T3: expanded gl_map — Indian states, cities, and major geographies
                 gl_map = {
-                    "usa": "us", "united states": "us", "uk": "uk", 
-                    "united kingdom": "uk", "canada": "ca", "australia": "au",
-                    "germany": "de", "singapore": "sg", "uae": "ae", 
-                    "dubai": "ae", "india": "in"
+                    # Global
+                    "usa": "us", "united states": "us",
+                    "uk": "uk", "united kingdom": "uk", "england": "uk", "scotland": "uk",
+                    "canada": "ca", "australia": "au", "germany": "de",
+                    "singapore": "sg", "uae": "ae", "dubai": "ae", "abu dhabi": "ae",
+                    # India — root
+                    "india": "in",
+                    # Indian states & UTs
+                    "kerala": "in", "karnataka": "in", "maharashtra": "in",
+                    "gujarat": "in", "rajasthan": "in", "tamil nadu": "in",
+                    "andhra pradesh": "in", "telangana": "in", "uttar pradesh": "in",
+                    "west bengal": "in", "punjab": "in", "haryana": "in",
+                    "madhya pradesh": "in", "bihar": "in", "odisha": "in",
+                    "assam": "in", "goa": "in", "jharkhand": "in",
+                    # Indian cities
+                    "mumbai": "in", "delhi": "in", "new delhi": "in",
+                    "bangalore": "in", "bengaluru": "in", "hyderabad": "in",
+                    "chennai": "in", "kolkata": "in", "pune": "in",
+                    "ahmedabad": "in", "jaipur": "in", "kochi": "in",
+                    "thiruvananthapuram": "in", "surat": "in", "lucknow": "in",
+                    "coimbatore": "in", "indore": "in", "bhopal": "in",
+                    "visakhapatnam": "in", "nagpur": "in", "chandigarh": "in",
                 }
-                
-                # If explicit match, set GL. If not, Serper defaults to 'us' but 
-                # loc_raw remains in 'location' string to be appended to Vertex Search Context.
-                if loc_raw in gl_map:
-                    data['gl'] = gl_map[loc_raw]
-                elif loc_raw == "worldwide" or not loc_raw:
-                    data['gl'] = "us" # default fallback
+
+                # FIX T3: also match prefix/substring so "kerala, india" maps correctly
+                derived_gl = gl_map.get(loc_raw)
+                if not derived_gl:
+                    for key, val in gl_map.items():
+                        if loc_raw.startswith(key) or key in loc_raw:
+                            derived_gl = val
+                            break
+
+                if derived_gl:
+                    data['gl'] = derived_gl
+                elif loc_raw in ("worldwide", "global", ""):
+                    data['gl'] = ""   # truly global — no gl restriction
                 else:
-                    data['gl'] = "us" # custom cities fallback to US GL, append loc string elsewhere
+                    # Unknown city/region: preserve in location for Vertex AI context.
+                    # Do NOT force gl='us' — empty string = no geo filter (broader results).
+                    data['gl'] = ""
 
                 # Hard limit N active product/service campaigns per tenant
                 active_campaigns_count = len(list(db.collection("campaigns")

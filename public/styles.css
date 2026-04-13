@@ -1,4 +1,4 @@
-:root {
+﻿:root {
     --bg-dark: #f1f5f9;
     --glass-bg: rgba(255, 255, 255, 0.7);
     --glass-border: rgba(255, 255, 255, 0.5);
@@ -49,6 +49,7 @@ body {
     position: sticky;
     top: 0;
     z-index: 100;
+    overflow: visible; /* FIX T4: allow absolute dropdown to escape nav bounds */
     box-shadow: 0 1px 3px rgba(0,0,0,0.02);
 }
 
@@ -935,7 +936,7 @@ body {
     border-radius: 16px;
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.14);
     padding: 12px 0;
-    z-index: 300;
+    z-index: 9999; /* FIX T4: above Pipeline Credits pill and all overlapping elements */
     animation: fcSlideUp 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
