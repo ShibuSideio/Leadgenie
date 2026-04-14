@@ -14,7 +14,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=39">
+    <link rel="stylesheet" href="styles.css?v=40">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -278,42 +278,140 @@
             </div>
         </section>
 
-        <!-- L0 ADMIN VIEW -->
+        <!-- L0 ADMIN VIEW — Tabbed Dashboard -->
         <section id="view-l0-admin" class="main-feed" style="display:none;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h2>L0 Enterprise Governance</h2>
-                <button class="primary-btn" onclick="fetchL0Telemetry()" style="background:#dc2626;">Refresh Telemetry</button>
-            </div>
-            <div style="display:flex; gap:16px; margin-top:16px;">
-                <div class="stats-box" style="flex:1; background:#ffffff;">
-                    <h4 style="color:var(--text-muted); font-size:0.8rem;">Total Platform Leads</h4>
-                    <div id="l0-stat-total-leads" style="font-size:1.5rem; font-weight:600;">0</div>
+
+            <!-- Header -->
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+                <div>
+                    <h2 style="margin:0; font-size:1.4rem; font-weight:700;">&#9881;&#65039; L0 Enterprise Control Plane</h2>
+                    <p style="margin:4px 0 0; font-size:0.82rem; color:var(--text-muted);">Super Admin access only &mdash; all actions are audit-logged.</p>
                 </div>
-                <div class="stats-box" style="flex:1; background:#ffffff;">
-                    <h4 style="color:var(--text-muted); font-size:0.8rem;">Global Actionable Pulse</h4>
-                    <div id="l0-stat-conversion" style="font-size:1.5rem; font-weight:600;">0%</div>
+                <button class="primary-btn" id="l0-refresh-btn" onclick="l0RefreshCurrentTab()" style="background:#dc2626; min-height:40px;">&#8635; Refresh</button>
+            </div>
+
+            <!-- KPI tiles -->
+            <div style="display:flex; gap:14px; margin-bottom:20px; flex-wrap:wrap;">
+                <div class="stats-box" style="flex:1; background:#fff; min-width:120px;">
+                    <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:6px;">Total Platform Leads</div>
+                    <div id="l0-stat-total-leads" style="font-size:1.6rem; font-weight:700; color:var(--primary);">&#8212;</div>
                 </div>
-                <div class="stats-box" style="flex:1; background:#ffffff;">
-                    <h4 style="color:var(--text-muted); font-size:0.8rem;">Active Tenants</h4>
-                    <div id="l0-stat-tenants" style="font-size:1.5rem; font-weight:600;">0</div>
+                <div class="stats-box" style="flex:1; background:#fff; min-width:120px;">
+                    <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:6px;">Global Actionable Pulse</div>
+                    <div id="l0-stat-conversion" style="font-size:1.6rem; font-weight:700; color:#10b981;">&#8212;</div>
+                </div>
+                <div class="stats-box" style="flex:1; background:#fff; min-width:120px;">
+                    <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:6px;">Active Tenants</div>
+                    <div id="l0-stat-tenants" style="font-size:1.6rem; font-weight:700;">&#8212;</div>
+                </div>
+                <div class="stats-box" style="flex:1; background:#fff; min-width:120px;">
+                    <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:6px;">Rejected Leads</div>
+                    <div id="l0-stat-rejected" style="font-size:1.6rem; font-weight:700; color:#ef4444;">&#8212;</div>
                 </div>
             </div>
-            <div class="stats-box mt-3" style="background:#ffffff; padding:0; overflow:hidden;">
-                <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.9rem;">
-                    <thead style="background:rgba(220,38,38,0.05); border-bottom:1px solid var(--glass-border);">
-                        <tr>
-                            <th style="padding:12px; cursor:pointer;" onclick="sortL0Table('email')">User Email &#8597;</th>
-                            <th style="padding:12px;">Status</th>
-                            <th style="padding:12px; cursor:pointer;" onclick="sortL0Table('wallet')">Credits &#8597;</th>
-                            <th style="padding:12px; text-align:right; cursor:pointer;" onclick="sortL0Table('leads')">Leads &#8597;</th>
-                            <th style="padding:12px; text-align:right;">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="l0-telemetry-table">
-                        <tr><td colspan="5" style="padding:16px; text-align:center;">Awaiting L0 Telemetry...</td></tr>
-                    </tbody>
-                </table>
+
+            <!-- Tab bar -->
+            <div class="l0-tab-bar">
+                <button class="l0-tab active" id="l0-tab-tenants"     onclick="l0SwitchTab('tenants')">&#128100; Tenants</button>
+                <button class="l0-tab"        id="l0-tab-operations"  onclick="l0SwitchTab('operations')">&#127758; Global Operations</button>
+                <button class="l0-tab"        id="l0-tab-ledger"      onclick="l0SwitchTab('ledger')">&#128203; Shadow Ledger</button>
+                <button class="l0-tab"        id="l0-tab-health"      onclick="l0SwitchTab('health')">&#128200; System Health</button>
             </div>
+
+            <!-- Tab: Tenants (existing content) -->
+            <div id="l0-panel-tenants" class="l0-panel active">
+                <div class="stats-box mt-3" style="background:#fff; padding:0; overflow:hidden;">
+                    <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.9rem;">
+                        <thead style="background:rgba(220,38,38,0.05); border-bottom:1px solid var(--glass-border);">
+                            <tr>
+                                <th style="padding:12px; cursor:pointer;" onclick="sortL0Table('email')">User Email &#8597;</th>
+                                <th style="padding:12px;">Status</th>
+                                <th style="padding:12px; cursor:pointer;" onclick="sortL0Table('wallet')">Credits &#8597;</th>
+                                <th style="padding:12px; text-align:right; cursor:pointer;" onclick="sortL0Table('leads')">Leads &#8597;</th>
+                                <th style="padding:12px; text-align:right;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="l0-telemetry-table">
+                            <tr><td colspan="5" style="padding:16px; text-align:center;">Awaiting L0 Telemetry...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Tab: Global Operations -->
+            <div id="l0-panel-operations" class="l0-panel">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:16px;">
+
+                    <!-- Geo Heatmap -->
+                    <div class="stats-box" style="background:#fff; padding:20px;">
+                        <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:14px;">&#127758; Geographic Campaign Heatmap</div>
+                        <div id="l0-geo-loading" style="text-align:center; padding:32px 0; color:var(--text-muted); font-size:0.9rem;">&#8987; Loading BQ telemetry&hellip;</div>
+                        <div id="l0-geo-bars" style="display:none;"></div>
+                    </div>
+
+                    <!-- Domain Affinity Matrix -->
+                    <div class="stats-box" style="background:#fff; padding:20px;">
+                        <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:14px;">&#129504; RLHF Domain Affinity Matrix <span id="l0-matrix-cache-badge" style="display:none; font-size:0.65rem; background:#dcfce7; color:#15803d; padding:2px 8px; border-radius:20px; font-weight:600; margin-left:8px;">CACHED</span></div>
+                        <div id="l0-matrix-loading" style="text-align:center; padding:32px 0; color:var(--text-muted); font-size:0.9rem;">&#8987; Loading domain data&hellip;</div>
+                        <div id="l0-domain-list" style="display:none;"></div>
+                    </div>
+                </div>
+                <div id="l0-ops-error" style="display:none; background:#fef2f2; border:1px solid #fecaca; border-radius:10px; padding:12px 16px; color:#dc2626; font-size:0.85rem; margin-top:16px;"></div>
+            </div>
+
+            <!-- Tab: Shadow Ledger -->
+            <div id="l0-panel-ledger" class="l0-panel">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:16px; margin-bottom:12px;">
+                    <div style="font-size:0.85rem; color:var(--text-muted);">Rejected leads with human-labeled RLHF categories. Recycle re-queues for processing.</div>
+                    <button class="secondary-btn" onclick="fetchShadowLedger()" style="font-size:0.8rem;">&#8635; Refresh</button>
+                </div>
+                <div class="stats-box" style="background:#fff; padding:0; overflow:hidden;">
+                    <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.85rem;">
+                        <thead style="background:rgba(239,68,68,0.05); border-bottom:1px solid var(--glass-border);">
+                            <tr>
+                                <th style="padding:10px 12px;">Target Domain</th>
+                                <th style="padding:10px 12px; text-align:center;">AI Score</th>
+                                <th style="padding:10px 12px;">User Rejection Reason</th>
+                                <th style="padding:10px 12px;">AI Rejection Reason</th>
+                                <th style="padding:10px 12px; text-align:right;">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="l0-shadow-ledger-table">
+                            <tr><td colspan="5" style="padding:20px; text-align:center; color:var(--text-muted);">Click Refresh to load data.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Tab: System Health -->
+            <div id="l0-panel-health" class="l0-panel">
+                <div style="margin-top:20px; display:grid; grid-template-columns:repeat(auto-fit, minmax(200px,1fr)); gap:14px;">
+                    <div class="stats-box" style="background:#fff; text-align:center;">
+                        <div style="font-size:2rem;">&#9889;</div>
+                        <div style="font-weight:700; color:var(--primary);">Circuit Breaker</div>
+                        <div id="l0-health-breaker" style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;">Loading&hellip;</div>
+                    </div>
+                    <div class="stats-box" style="background:#fff; text-align:center;">
+                        <div style="font-size:2rem;">&#127760;</div>
+                        <div style="font-weight:700;">Serper 429 Rate</div>
+                        <div id="l0-health-serper" style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;">Loading&hellip;</div>
+                    </div>
+                    <div class="stats-box" style="background:#fff; text-align:center;">
+                        <div style="font-size:2rem;">&#128736;</div>
+                        <div style="font-weight:700;">Scraper OOM Rate</div>
+                        <div id="l0-health-oom" style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;">Loading&hellip;</div>
+                    </div>
+                    <div class="stats-box" style="background:#fff; text-align:center;">
+                        <div style="font-size:2rem;">&#128202;</div>
+                        <div style="font-weight:700;">BQ Last Sync</div>
+                        <div id="l0-health-bq" style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;">Loading&hellip;</div>
+                    </div>
+                </div>
+                <div style="text-align:center; margin-top:24px;">
+                    <button class="primary-btn" onclick="fetchSystemHealth()" style="min-height:44px;">&#8635; Load System Telemetry</button>
+                </div>
+            </div>
+
         </section>
 
         <!-- CRM VIEW -->
@@ -590,6 +688,47 @@
     </div>
 </div>
 
+<!-- ════════════════════════════════════════════
+     REJECTION REASON MODAL (Tenant PWA)
+     Categorical RLHF — user selects one of 5 reasons
+════════════════════════════════════════════ -->
+<div id="rejection-modal" class="sio-modal-overlay" onclick="if(event.target===this)closeModal('rejection-modal')">
+    <div class="sio-modal-box" style="max-width:420px; text-align:center;">
+        <button class="sio-modal-close" onclick="closeModal('rejection-modal')">&#10005;</button>
+        <div style="font-size:2rem; margin-bottom:8px;">&#128683;</div>
+        <h2 style="font-size:1.3rem; font-weight:700; margin-bottom:6px; color:#111827;">Why is this lead not a fit?</h2>
+        <p style="font-size:0.88rem; color:#6b7280; margin-bottom:20px; line-height:1.5;">Your answer trains the AI so it never shows you leads like this again.</p>
+        <input type="hidden" id="rejection-lead-id">
+        <div class="rejection-options">
+            <button class="rejection-opt" data-reason="not_b2b" onclick="submitRejection('not_b2b')">
+                <span class="rej-icon">&#128683;</span>
+                <span class="rej-label">Not B2B</span>
+                <span class="rej-desc">Consumer or non-business account</span>
+            </button>
+            <button class="rejection-opt" data-reason="wrong_industry" onclick="submitRejection('wrong_industry')">
+                <span class="rej-icon">&#127981;</span>
+                <span class="rej-label">Wrong Industry</span>
+                <span class="rej-desc">Outside our target vertical</span>
+            </button>
+            <button class="rejection-opt" data-reason="too_small" onclick="submitRejection('too_small')">
+                <span class="rej-icon">&#128204;</span>
+                <span class="rej-label">Too Small</span>
+                <span class="rej-desc">Company size below our threshold</span>
+            </button>
+            <button class="rejection-opt" data-reason="competitor" onclick="submitRejection('competitor')">
+                <span class="rej-icon">&#9876;&#65039;</span>
+                <span class="rej-label">Competitor</span>
+                <span class="rej-desc">Direct competitor — do not contact</span>
+            </button>
+            <button class="rejection-opt" data-reason="bad_data" onclick="submitRejection('bad_data')">
+                <span class="rej-icon">&#128465;&#65039;</span>
+                <span class="rej-label">Bad Data</span>
+                <span class="rej-desc">Scraped data is wrong or outdated</span>
+            </button>
+        </div>
+    </div>
+</div>
+
 <!-- Toast System -->
 <div id="toast-container" class="toast-container"></div>
 
@@ -600,6 +739,6 @@
         });
     }
 </script>
-<script src="app.js?v=57"></script>
+<script src="app.js?v=58"></script>
 </body>
 </html>

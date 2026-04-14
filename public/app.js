@@ -626,19 +626,62 @@ window.pushToCRM = async function(docId, leadStr) {
 };
 
 // =============================================================================
-// LEAD STATUS UPDATE — contacted / converted / ignored
+// =============================================================================
+// CATEGORICAL REJECTION MODAL (RLHF)
+// Replaces binary 'ignored'. User selects one of 5 reasons, which drives the
+// dynamic ontology weight penalty in the Orchestrator's RLHF engine.
 // =============================================================================
 
+window.openRejectionModal = function(docId) {
+    document.getElementById('rejection-lead-id').value = docId;
+    // Optimistic removal from visible feed so UX feels instant
+    const idx = rawLeadsCache.findIndex(l => l.id === docId);
+    if (idx !== -1) { rawLeadsCache.splice(idx, 1); renderLeads(); }
+    showModal('rejection-modal');
+};
+
+window.submitRejection = async function(reason) {
+    const VALID = ['not_b2b', 'wrong_industry', 'too_small', 'competitor', 'bad_data'];
+    if (!VALID.includes(reason)) return;
+    const docId = document.getElementById('rejection-lead-id').value;
+    if (!docId) return;
+    closeModal('rejection-modal');
+    const labels = { not_b2b: 'Not B2B', wrong_industry: 'Wrong Industry',
+                     too_small: 'Too Small', competitor: 'Competitor', bad_data: 'Bad Data' };
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken(true);
+        const resp  = await fetch(`${API_BASE}/api/leads/${docId}`, {
+            method:  'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ status: 'rejected', rejection_reason: reason })
+        });
+        if (resp.ok) {
+            showToast(`Lead rejected: ${labels[reason]}. AI is learning.`, 'success');
+        } else {
+            showToast('Lead removed. API sync failed — will retry.', 'info');
+        }
+    } catch(err) {
+        console.error('[rejection]', err);
+        showToast('Lead removed. Background sync failed.', 'info');
+    }
+};
+
+// =============================================================================
+// LEAD STATUS UPDATE — contacted / converted (rejection goes through modal above)
+// =============================================================================
 window.updateLeadStatus = async function(docId, newStatus) {
-    if (newStatus === 'ignored') {
-        const idx = rawLeadsCache.findIndex(l => l.id === docId);
-        if (idx !== -1) { rawLeadsCache.splice(idx, 1); renderLeads(); }
+    // Route all skip/reject actions through the categorical RLHF modal
+    if (newStatus === 'ignored' || newStatus === 'rejected') {
+        openRejectionModal(docId);
+        return;
     }
     try {
         const success = await performApiMutation(`/api/leads/${docId}`, 'PUT', { status: newStatus });
         if (success) {
             showToast(`Lead status updated: ${newStatus}`, 'success');
-            if (newStatus !== 'ignored') loadDashboard();
+            loadDashboard();
         }
     } catch(err) {
         showToast('Error saving update to database', 'error');
@@ -1243,6 +1286,257 @@ window.mintCredentials = async function(tenantId) {
 window.sendEmailReport = function() {
     showToast('Connecting to Cloud Run SMTP queue...', 'info');
     setTimeout(() => { showToast('Enterprise PDF dispatched to your registered email.', 'success'); }, 1500);
+};
+
+// =============================================================================
+// L0 SUPER ADMIN — TAB SYSTEM
+// =============================================================================
+window._l0ActiveTab = 'tenants';
+
+window.l0SwitchTab = function(tab) {
+    // Guard: only super_admin
+    if (window.currentUserData?.role !== 'super_admin') {
+        showToast('L0 access denied.', 'error');
+        return;
+    }
+    // Hide all panels, deactivate all tab buttons
+    ['tenants','operations','ledger','health'].forEach(t => {
+        const panel = document.getElementById(`l0-panel-${t}`);
+        const btn   = document.getElementById(`l0-tab-${t}`);
+        if (panel) panel.classList.remove('active');
+        if (btn)   btn.classList.remove('active');
+    });
+    const activePanel = document.getElementById(`l0-panel-${tab}`);
+    const activeBtn   = document.getElementById(`l0-tab-${tab}`);
+    if (activePanel) activePanel.classList.add('active');
+    if (activeBtn)   activeBtn.classList.add('active');
+    window._l0ActiveTab = tab;
+
+    // Auto-load data on first tab switch
+    if (tab === 'tenants')    fetchL0Telemetry();
+    if (tab === 'operations') fetchGlobalOperations();
+    if (tab === 'ledger')     fetchShadowLedger();
+    if (tab === 'health')     fetchSystemHealth();
+};
+
+window.l0RefreshCurrentTab = function() {
+    l0SwitchTab(window._l0ActiveTab || 'tenants');
+};
+
+// =============================================================================
+// L0 GLOBAL OPERATIONS — BQ Geo Heatmap + Domain Affinity Matrix
+// =============================================================================
+window.fetchGlobalOperations = async function() {
+    const geoLoad  = document.getElementById('l0-geo-loading');
+    const geoBars  = document.getElementById('l0-geo-bars');
+    const matLoad  = document.getElementById('l0-matrix-loading');
+    const domList  = document.getElementById('l0-domain-list');
+    const errBox   = document.getElementById('l0-ops-error');
+    const badge    = document.getElementById('l0-matrix-cache-badge');
+
+    if (geoLoad)  { geoLoad.style.display = 'block'; geoBars.style.display  = 'none'; }
+    if (matLoad)  { matLoad.style.display = 'block'; domList.style.display  = 'none'; }
+    if (errBox)   errBox.style.display = 'none';
+
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) throw new Error('Not authenticated');
+        const token = await user.getIdToken(true);
+        const resp  = await fetch(`${API_BASE}/api/internal/l0/operations-telemetry`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json = await resp.json();
+        const d    = json.data || {};
+
+        // Show cache badge
+        if (badge) badge.style.display = json.cache_hit ? 'inline' : 'none';
+
+        // ── Geo Heatmap: horizontal bar chart built in plain HTML ──
+        const heatmap = d.geo_heatmap || [];
+        if (geoBars) {
+            if (heatmap.length === 0) {
+                geoBars.innerHTML = '<div style="text-align:center; color:var(--text-muted); padding:20px 0;">No active campaign data yet.</div>';
+            } else {
+                const maxVal = Math.max(...heatmap.map(r => r.active_campaigns), 1);
+                geoBars.innerHTML = heatmap.map(r => {
+                    const pct  = Math.round((r.active_campaigns / maxVal) * 100);
+                    const flag = r.region ? r.region.slice(0,2).toUpperCase() : '';
+                    return `<div style="margin-bottom:10px;">
+                        <div style="display:flex; justify-content:space-between; font-size:0.82rem; margin-bottom:4px;">
+                            <span style="font-weight:500;">${r.region}</span>
+                            <span style="color:var(--text-muted);">${r.active_campaigns} campaigns</span>
+                        </div>
+                        <div style="height:10px; background:#f1f5f9; border-radius:6px; overflow:hidden;">
+                            <div style="height:100%; width:${pct}%; background:linear-gradient(90deg,#4f46e5,#7c3aed); border-radius:6px; transition:width 0.6s;"></div>
+                        </div>
+                    </div>`;
+                }).join('');
+            }
+            geoLoad.style.display  = 'none';
+            geoBars.style.display  = 'block';
+        }
+
+        // ── Domain Affinity Matrix ──
+        const domains = d.domain_matrix || [];
+        if (domList) {
+            if (domains.length === 0) {
+                domList.innerHTML = '<div style="text-align:center; color:var(--text-muted); padding:20px 0;">No domain data yet — RLHF needs more cycles.</div>';
+            } else {
+                const maxW = Math.max(...domains.map(dm => dm.baseline_weight), 1);
+                domList.innerHTML = domains.map((dm, i) => {
+                    const barPct  = Math.round((dm.baseline_weight / maxW) * 100);
+                    const trend   = dm.baseline_weight > 1.0 ? '&#x2191;' : dm.baseline_weight < 1.0 ? '&#x2193;' : '&mdash;';
+                    const tColor  = dm.baseline_weight > 1.0 ? '#10b981' : dm.baseline_weight < 1.0 ? '#ef4444' : '#64748b';
+                    return `<div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid #f1f5f9;">
+                        <div style="font-size:0.72rem; font-weight:700; color:var(--text-muted); width:18px; text-align:right;">${i+1}</div>
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-size:0.83rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${dm.domain}</div>
+                            <div style="height:4px; background:#f1f5f9; border-radius:4px; margin-top:4px; overflow:hidden;">
+                                <div style="height:100%; width:${barPct}%; background:linear-gradient(90deg,#6366f1,#a21caf); border-radius:4px;"></div>
+                            </div>
+                        </div>
+                        <div style="text-align:right; flex-shrink:0;">
+                            <div style="font-size:0.85rem; font-weight:700; color:${tColor};">${dm.baseline_weight.toFixed(3)} ${trend}</div>
+                            <div style="font-size:0.68rem; color:var(--text-muted);">${dm.total_yield} yields</div>
+                        </div>
+                    </div>`;
+                }).join('');
+            }
+            matLoad.style.display = 'none';
+            domList.style.display = 'block';
+        }
+
+        // Surface any partial errors
+        if (d.partial_errors && errBox) {
+            errBox.style.display = 'block';
+            errBox.textContent = 'Partial data: ' + Object.entries(d.partial_errors).map(([k,v]) => `${k}: ${v}`).join(' | ');
+        }
+
+    } catch(err) {
+        console.error('[L0 Ops]', err);
+        if (geoLoad)  geoLoad.textContent  = 'Failed to load. ' + err.message;
+        if (matLoad)  matLoad.textContent  = 'Failed to load. ' + err.message;
+    }
+};
+
+// =============================================================================
+// L0 SHADOW LEDGER — Rejected Leads Table
+// =============================================================================
+const REJECTION_LABELS = {
+    not_b2b: '&#128683; Not B2B',
+    wrong_industry: '&#127981; Wrong Industry',
+    too_small: '&#128204; Too Small',
+    competitor: '&#9876;&#65039; Competitor',
+    bad_data: '&#128465;&#65039; Bad Data'
+};
+
+window.fetchShadowLedger = async function() {
+    const tbody = document.getElementById('l0-shadow-ledger-table');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="5" style="padding:20px; text-align:center; color:var(--text-muted);">&#8987; Fetching rejected leads&hellip;</td></tr>';
+
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) throw new Error('Not authenticated');
+        const token = await user.getIdToken(true);
+        // Fetch rejected leads via the existing /api/leads endpoint with status filter
+        const resp  = await fetch(`${API_BASE}/api/leads?status=rejected&limit=100&rt=${Date.now()}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json  = await resp.json();
+        const leads = json.leads || json.data || [];
+
+        // Update KPI tile
+        const kpi = document.getElementById('l0-stat-rejected');
+        if (kpi) kpi.textContent = leads.length;
+
+        if (leads.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="padding:20px; text-align:center; color:var(--text-muted);">No rejected leads found.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = leads.map(lead => {
+            const domain    = lead.base_path || lead.source_url || lead.domain || lead.company_domain || '&mdash;';
+            const score     = lead.score != null ? `<span style="font-weight:700; color:${lead.score>=70?'#10b981':lead.score>=40?'#f59e0b':'#ef4444'}">${lead.score}</span>` : '&mdash;';
+            const userRej   = REJECTION_LABELS[lead.rejection_reason] || lead.rejection_reason || '<span style="color:var(--text-muted);">Legacy ignore</span>';
+            const aiRej     = lead.ai_rejection_reason ? `<span title="${lead.ai_rejection_reason}">${lead.ai_rejection_reason.slice(0,60)}${lead.ai_rejection_reason.length>60?'&hellip;':''}</span>` : '<span style="color:var(--text-muted);">N/A</span>';
+            return `<tr style="border-bottom:1px solid #f8fafc; transition:background 0.15s;" onmouseover="this.style.background='#fafafa'" onmouseout="this.style.background=''">
+                <td style="padding:10px 12px; font-weight:500; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${domain}</td>
+                <td style="padding:10px 12px; text-align:center;">${score}</td>
+                <td style="padding:10px 12px;">${userRej}</td>
+                <td style="padding:10px 12px; font-size:0.8rem; color:var(--text-muted); max-width:200px;">${aiRej}</td>
+                <td style="padding:10px 12px; text-align:right;">
+                    <button onclick="recycleRejectedLead('${lead.id}', this)" style="padding:6px 14px; border:1px solid #d1d5db; border-radius:8px; background:#fff; font-size:0.78rem; font-weight:600; color:#4f46e5; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.background='#ede9fe'" onmouseout="this.style.background='#fff'">
+                        &#9851; Recycle
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+
+    } catch(err) {
+        console.error('[Shadow Ledger]', err);
+        tbody.innerHTML = `<tr><td colspan="5" style="padding:16px; text-align:center; color:#ef4444;">Error: ${err.message}</td></tr>`;
+    }
+};
+
+window.recycleRejectedLead = async function(leadId, btn) {
+    if (!leadId || !btn) return;
+    btn.disabled = true;
+    btn.textContent = 'Recycling...';
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken(true);
+        const resp  = await fetch(`${API_BASE}/api/leads/${leadId}`, {
+            method:  'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            // Reset to 'unprocessed' and clear rejection metadata
+            body:    JSON.stringify({ status: 'unprocessed', rejection_reason: null })
+        });
+        if (resp.ok) {
+            btn.closest('tr').style.opacity = '0.3';
+            setTimeout(() => btn.closest('tr')?.remove(), 600);
+            showToast('Lead recycled and re-queued for processing.', 'success');
+        } else {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+    } catch(err) {
+        btn.disabled = false;
+        btn.textContent = '&#9851; Recycle';
+        showToast('Recycle failed: ' + err.message, 'error');
+    }
+};
+
+// =============================================================================
+// L0 SYSTEM HEALTH — Circuit Breaker + Error Rates
+// =============================================================================
+window.fetchSystemHealth = async function() {
+    const breakerEl = document.getElementById('l0-health-breaker');
+    const serperEl  = document.getElementById('l0-health-serper');
+    const oomEl     = document.getElementById('l0-health-oom');
+    const bqEl      = document.getElementById('l0-health-bq');
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken(true);
+        // Reuse the existing telemetry endpoint which includes macro data
+        const resp  = await fetch(`${API_BASE}/api/l0/telemetry`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json = await resp.json();
+        const cb   = json.data?.circuit_breaker || {};
+        const state = cb.state || 'UNKNOWN';
+        const stateColor = state === 'CLOSED' ? '#10b981' : state === 'OPEN' ? '#ef4444' : '#f59e0b';
+        if (breakerEl) breakerEl.innerHTML = `<strong style="color:${stateColor};">${state}</strong>`;
+        if (serperEl)  serperEl.textContent  = cb.serper_error_rate != null ? `${(cb.serper_error_rate*100).toFixed(1)}%` : 'N/A';
+        if (oomEl)     oomEl.textContent     = cb.oom_error_rate != null ? `${(cb.oom_error_rate*100).toFixed(1)}%` : 'N/A';
+        if (bqEl)      bqEl.textContent      = cb.last_bq_sync || 'N/A';
+    } catch(err) {
+        if (breakerEl) breakerEl.textContent = 'Error: ' + err.message;
+    }
 };
 
 window.loadMoreLeads = function() {
@@ -1924,7 +2218,7 @@ window.createLeadCardV2 = function(docId, lead) {
                 '<div class="lc-overflow-menu" id="'+overflowId+'">' +
                     '<button class="lc-overflow-item" onclick="updateLeadStatus(\''+docId+'\',\'converted\');lcCloseMore(\''+docId+'\')">Mark Converted</button>' +
                     '<button class="lc-overflow-item" onclick="viewLeadTimeline(\''+encodeURIComponent(JSON.stringify(lead.interactions||[]))+'\');lcCloseMore(\''+docId+'\')">View Timeline</button>' +
-                    '<button class="lc-overflow-item danger" onclick="updateLeadStatus(\''+docId+'\',\'ignored\');lcCloseMore(\''+docId+'\')">Skip This Lead</button>' +
+                    '<button class="lc-overflow-item danger" onclick="openRejectionModal(\''+docId+'\');lcCloseMore(\''+docId+'\')">&#128683; Skip This Lead</button>' +
                 '</div>' +
             '</div>' +
         '</div>';

@@ -1810,7 +1810,7 @@ Rules:
                             except Exception as e:
                                 print(f"RLHF Backprop Native Error: {e}")
 
-                    # ── Phase 1: Ontology Map RLHF Hooks ───────────────────────────
+                    # ── Phase 1: Ontology Map RLHF Hooks (CRM signals) ────────
                     # Reward: Won / Negotiating  → +0.15 to baseline_weight
                     # Penalty: Lost             → -0.05 to baseline_weight
                     # Burn-in guard: only apply math if total_yield >= 50
@@ -1846,7 +1846,67 @@ Rules:
                             except Exception as re:
                                 print(f"[ONTOLOGY RLHF] Write failed for {base_path_key}: {re}")
 
+                    # ── Phase 2: Categorical RLHF Rejection Engine ────────────────
+                    # When a user rejects a lead with a categorical reason, apply a
+                    # dynamic penalty to the domain's baseline_weight in ontology_map.
+                    #
+                    # Penalty schedule (calibrated to signal severity):
+                    #   not_b2b        → -0.25  (domain is categorically wrong)
+                    #   bad_data       → -0.20  (domain produces junk intel)
+                    #   wrong_industry → -0.15  (domain is valid but misaligned)
+                    #   too_small      → -0.05  (domain valid, segment filter only)
+                    #   competitor     →  0.00  (domain valid — protect, not penalise)
+                    # ──────────────────────────────────────────────────────────────
+                    REJECTION_PENALTY_MAP = {
+                        "not_b2b":        -0.25,
+                        "bad_data":       -0.20,
+                        "wrong_industry": -0.15,
+                        "too_small":      -0.05,
+                        "competitor":      0.00,
+                    }
+                    rejection_reason = data.get("rejection_reason")
+                    if status == "rejected" and rejection_reason:
+                        # Strict enum validation — never accept arbitrary client strings
+                        if rejection_reason not in REJECTION_PENALTY_MAP:
+                            print(f"[REJECTION RLHF] Invalid reason '{rejection_reason}' — ignoring delta.")
+                        else:
+                            penalty = REJECTION_PENALTY_MAP[rejection_reason]
+                            # Persist rejection_reason on the lead document
+                            try:
+                                doc_ref.update({
+                                    "rejection_reason": rejection_reason,
+                                    "status":           "rejected",
+                                    "updatedAt":        firestore.SERVER_TIMESTAMP
+                                })
+                            except Exception as rej_e:
+                                print(f"[REJECTION RLHF] Lead update failed: {rej_e}")
+
+                            if penalty != 0.0:
+                                try:
+                                    lead_d        = doc_data.to_dict()
+                                    src_url       = lead_d.get("source_url", lead_d.get("url", ""))
+                                    bpk           = parse_base_path(src_url)
+                                    if bpk and bpk != "unknown":
+                                        ont_ref  = db.collection("ontology_map").document(bpk)
+                                        ont_snap = ont_ref.get()
+                                        if ont_snap.exists:
+                                            ont_ref.update({
+                                                "baseline_weight": firestore.Increment(penalty),
+                                                "last_seen":       firestore.SERVER_TIMESTAMP,
+                                                # Track rejection counts per category for audit
+                                                f"rejection_counts.{rejection_reason}": firestore.Increment(1)
+                                            })
+                                            print(f"[REJECTION RLHF] {rejection_reason} → "
+                                                  f"penalty {penalty} applied to {bpk}")
+                                        else:
+                                            print(f"[REJECTION RLHF] No ontology doc for {bpk} yet.")
+                                except Exception as rlhf_e:
+                                    print(f"[REJECTION RLHF] Write failed: {rlhf_e}")
+                            else:
+                                print(f"[REJECTION RLHF] {rejection_reason} → zero penalty (protected domain).")
+
                     # V14: Headless CRM Egress — stripped payload, no raw DOM
+
                     if status == "converted":
                         try:
                             user_crm_doc = db.collection("users").document(tenant_id).get().to_dict() or {}
