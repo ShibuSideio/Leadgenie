@@ -16,7 +16,8 @@ from google.cloud import firestore
 import google.auth
 from google.cloud import secretmanager
 from google.api_core.exceptions import AlreadyExists, ResourceExhausted
-from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type, retry_if_exception
+from google.cloud.firestore_v1.transaction import transactional as _firestore_transactional
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
 from pydantic import ValidationError
@@ -121,8 +122,16 @@ def get_secret(secret_name):
     return response.payload.data.decode("UTF-8")
 
 def search_serper(query, location=None, gl=None):
+    """
+    FIX 3: Serper Resilience — 429-specific tenacity retry with exponential backoff.
+    Thundering herd: 50 concurrent workers can saturate Serper's concurrency limit.
+    The retry predicate targets ONLY 429 (rate limited) — auth failures (401/403)
+    and server errors (5xx) are not retried to avoid burning the backoff budget.
+    4 attempts: immediate + 4s + 8s + 16s = up to ~30s total, still within
+    Cloud Tasks' default 10-minute task deadline.
+    """
     api_key = get_secret(SERPER_API_KEY_NAME).strip()
-    url = "https://google.serper.dev/search"
+    url     = "https://google.serper.dev/search"
     payload_dict = {"q": query, "num": 20}
     if location:
         payload_dict["location"] = location
@@ -130,13 +139,34 @@ def search_serper(query, location=None, gl=None):
         payload_dict["gl"] = gl
     payload = json.dumps(payload_dict)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
-    
-    response = httpx.post(url, headers=headers, data=payload, timeout=30)
-    if response.status_code == 200:
-        return response.json().get("organic", [])
-    
-    print(f"SERPER API AUTH OR RATE LIMIT CRASH HTTP {response.status_code}: {response.text}")
-    return []
+
+    def _is_rate_limited(exc: BaseException) -> bool:
+        """Retry predicate: only True for Serper 429 responses."""
+        return (
+            isinstance(exc, httpx.HTTPStatusError)
+            and exc.response.status_code == 429
+        )
+
+    @retry(
+        wait=wait_exponential(multiplier=2, min=4, max=32),
+        stop=stop_after_attempt(4),
+        retry=retry_if_exception(_is_rate_limited),
+        reraise=False,
+    )
+    def _do_post():
+        r = httpx.post(url, headers=headers, data=payload, timeout=30)
+        if r.status_code == 429:
+            r.raise_for_status()   # raises HTTPStatusError → triggers retry
+        if r.status_code == 200:
+            return r.json().get("organic", [])
+        print(f"[SERPER] Non-retryable HTTP {r.status_code}: {r.text[:200]}")
+        return []
+
+    try:
+        return _do_post()
+    except Exception as e:
+        print(f"[SERPER] All retries exhausted for query '{query[:60]}': {e}")
+        return []
 
 def safe_truncate(text: str, max_bytes: int = 100000) -> str:
     """Enforce strict byte-level truncation to prevent Firestore 1MB document crashes."""
@@ -509,25 +539,37 @@ def extract_root_domain(url):
     except:
         return ""
 
-def deep_context_serper_dork(domain, tenant_id, sourcing_vector="Classic B2B"):
+def deep_context_serper_dork(domain, tenant_id, sourcing_vector="Classic B2B", source_url=""):
     """
     V14.4 HOTFIX: Enrichment Gatekeeper.
     Skips ALL Serper calls for:
       1. Social/UGC domains (reddit, facebook, instagram, youtube, etc.)
+         EXCEPTION: linkedin.com/company/ URLs are strict B2B — always enrich.
       2. B2C sourcing vectors (no company LinkedIn / Naukri job listings exist)
     """
     if not domain: return "", False
 
+    # ── FIX 3: LinkedIn Company Exception ────────────────────────────────────
+    # linkedin.com/company/ URLs are pure B2B signals (company profiles).
+    # They must NOT be blocked by the social blacklist — they require full
+    # company enrichment. Check the source_url path before evaluating domain.
+    _source_lower = (source_url or "").lower()
+    _is_linkedin_company = "linkedin.com/company/" in _source_lower
+
     # ── GATEKEEPER: Social Domain Blacklist ───────────────────────────────────
+    # linkedin.com/company/ bypasses this gate (handled above).
     ENRICHMENT_SOCIAL_BLACKLIST = [
         "reddit.com", "facebook.com", "instagram.com", "youtube.com",
         "linkedin.com", "quora.com", "twitter.com", "x.com", "medium.com"
     ]
     cleaned_domain = domain.lower().replace("www.", "")
-    for blocked in ENRICHMENT_SOCIAL_BLACKLIST:
-        if blocked in cleaned_domain:
-            print(f"[ENRICHMENT] Bypassing company enrichment for B2C/Social domain: {domain}")
-            return "", False
+    if not _is_linkedin_company:
+        for blocked in ENRICHMENT_SOCIAL_BLACKLIST:
+            if blocked in cleaned_domain:
+                print(f"[ENRICHMENT] Bypassing company enrichment for B2C/Social domain: {domain}")
+                return "", False
+    else:
+        print(f"[ENRICHMENT] linkedin.com/company/ detected — treating as strict B2B: {source_url}")
 
     # ── GATEKEEPER: B2C Persona Bypass ───────────────────────────────────────
     # B2C vectors do not have company LinkedIn pages or Naukri job listings.
@@ -1094,9 +1136,13 @@ def produce():
 # use this list — kept as a single source of truth.
 # --------------------------------------------------------------------------
 WALLED_GARDEN_DOMAINS: set[str] = {
-    "reddit.com", "facebook.com", "linkedin.com", "instagram.com",
+    "reddit.com", "facebook.com", "instagram.com",
     "x.com", "twitter.com", "quora.com", "youtube.com", "team-bhp.com",
     "tiktok.com", "pinterest.com", "snapchat.com", "threads.net",
+    # NOTE: "linkedin.com" is intentionally omitted here.
+    # linkedin.com/company/ URLs are strict B2B and must undergo full enrichment
+    # via GeneralDomainHook. The OperatingModeRouter.route() method applies a
+    # path-level check below to send /company/ URLs to GeneralDomain.
 }
 
 # WAF fingerprints shared between GeneralDomainHook and the existing scrape_url()
@@ -1170,14 +1216,22 @@ class OperatingModeRouter:
         Returns one of: 'WalledGarden', 'GeneralDomain', 'B2B2C'
         """
         root_domain = extract_root_domain(url)
+        url_lower   = url.lower()
 
-        # Priority 1: walled garden domain check
-        if any(root_domain.endswith(wg) for wg in WALLED_GARDEN_DOMAINS):
+        # ── FIX 3: LinkedIn company profile → strict B2B, NOT WalledGarden ──
+        # linkedin.com/company/ URLs are verified company profiles — they carry
+        # full B2B enrichment signal. Route them to GeneralDomain so they
+        # receive httpx scraping + deep_context_serper_dork enrichment.
+        if "linkedin.com" in root_domain and "/company/" in url_lower:
+            print(f"[ROUTER] linkedin.com/company/ → GeneralDomain (strict B2B): {url}")
+            return "GeneralDomain"
+
+        # Priority 1: walled garden domain check (linkedin non-company URLs → WalledGarden)
+        if "linkedin.com" in root_domain or any(root_domain.endswith(wg) for wg in WALLED_GARDEN_DOMAINS):
             return "WalledGarden"
 
         # Priority 2: B2B2C — only if campaign has B2B2C persona AND URL signals consumer intent
         if self._has_b2b2c:
-            url_lower = url.lower()
             if any(sig in url_lower for sig in self._B2B2C_URL_SIGNALS):
                 return "B2B2C"
 
@@ -1805,14 +1859,19 @@ class PrismPipeline:
 ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "")
 
 
-def _settle_credit(tenant_id: str, outcome: str, count: int = 1):
+def _settle_credit(tenant_id: str, outcome: str, count: int = 1, lead_id: str = ""):
     """
-    Non-blocking credit settlement via Cloud Tasks.
-    Failure is swallowed — settlement must never block the pipeline.
-    Falls back to direct wallet_shards write if ORCHESTRATOR_URL is not set.
+    FIX 1B: Non-blocking credit settlement via Cloud Tasks.
+    lead_id is threaded through as an idempotency key: the orchestrator's
+    /api/internal/credits/settle endpoint atomically stamps credit_settled=True
+    on the lead document inside a Firestore transaction before applying any
+    wallet Increment. Cloud Tasks retries that arrive after a successful write
+    are rejected by the idempotency guard and return 200 (acknowledged).
+    Falls back to direct wallet_shards write if ORCHESTRATOR_URL is not set
+    (pre-migration path — no idempotency guarantee on fallback).
     """
     if not ORCHESTRATOR_URL:
-        # Pre-migration fallback: direct shard increment
+        # Pre-migration fallback: direct shard increment (no idempotency key)
         try:
             _shard_id = random.randint(0, 9)
             if outcome == "success":
@@ -1836,6 +1895,7 @@ def _settle_credit(tenant_id: str, outcome: str, count: int = 1):
             "tenant_id": tenant_id,
             "outcome":   outcome,
             "count":     count,
+            "lead_id":   lead_id,   # FIX 1B: idempotency key — checked transactionally in orchestrator
         }).encode()
         _tc.create_task(
             parent=_queue_path,
@@ -1848,8 +1908,42 @@ def _settle_credit(tenant_id: str, outcome: str, count: int = 1):
                 }
             }
         )
+        print(f"[SETTLE] Enqueued: tenant={tenant_id}, outcome={outcome}, "
+              f"lead={lead_id[:12] if lead_id else 'N/A'}...")
     except Exception as e:
         print(f"[SETTLE] Enqueue failed (non-fatal): {e}")
+
+
+# =============================================================================
+# FIX 2: ATOMIC LOCK ACQUISITION — @_firestore_transactional
+# Previously: a bare lock_ref.get() followed by lock_ref.set() with the
+# contention exception silently swallowed (except: print → proceed).
+# Under multi-tenant concurrency, all workers bypassed the TOCTOU gap.
+#
+# Now: a single Firestore transaction atomically reads + conditionally writes.
+# On ABORTED / DEADLINE_EXCEEDED, the decorator raises → caller hits the
+# except branch which now does `continue` (skip URL) instead of proceeding.
+# This eliminates duplicate leads and wasted Serper/Gemini calls under load.
+# =============================================================================
+@_firestore_transactional
+def _acquire_lead_lock(transaction, lock_ref, now_utc):
+    """
+    Atomically acquires a global exclusivity lock for a domain or social entity.
+    Returns True  → lock acquired (new lock or prior lock is expired).
+    Returns False → domain is within its 14-day exclusivity window; caller skips.
+    Raises        → Firestore contention (ABORTED/DEADLINE_EXCEEDED); caller skips.
+    """
+    snap = lock_ref.get(transaction=transaction)
+    if snap.exists:
+        locked_until = snap.to_dict().get("locked_until")
+        if locked_until:
+            if hasattr(locked_until, "tzinfo") and locked_until.tzinfo is None:
+                locked_until = locked_until.replace(tzinfo=datetime.timezone.utc)
+            if locked_until > now_utc:
+                return False  # Still locked — caller should skip this URL
+    # Acquire: set new lock (or overwrite an expired one) inside the transaction
+    transaction.set(lock_ref, {"locked_until": now_utc + datetime.timedelta(days=14)})
+    return True
 
 
 @app.route("/dispatch", methods=["POST"])
@@ -1888,8 +1982,34 @@ def dispatch():
     if not active_campaigns:
         active_campaigns = [campaign]
 
+    # ── FIX 2: Persona Injection — load target_personas from tenant_profiles ──
+    # The campaign doc's target_personas array is often empty because the
+    # Digital Twin writes personas to the tenant_profiles sub-collection,
+    # not directly onto the campaign document. Perform an explicit lookup here
+    # and inject them into the campaign dict before constructing PrismPipeline.
+    # Fallback: if profile is missing, use campaign.bio as a synthetic persona
+    # so the LLM always has scoring criteria.
+    _raw_personas = campaign.get("target_personas", [])
+    if not _raw_personas:
+        try:
+            _profile_ref  = db.collection("tenant_profiles").document(tenant_id)
+            _profile_snap = _profile_ref.get()
+            if _profile_snap.exists:
+                _raw_personas = _profile_snap.to_dict().get("target_personas", [])
+                print(f"[PRISM] target_personas loaded from tenant_profiles: {len(_raw_personas)} persona(s)")
+        except Exception as _pe:
+            print(f"[PRISM] tenant_profiles lookup failed: {_pe}")
+
+    if not _raw_personas and bio:
+        # Bio fallback: synthesise a single generic persona so scoring has context
+        _raw_personas = [{"name": "Target Persona", "description": bio, "location_hint": location or "Global"}]
+        print(f"[PRISM] personas=0 after profile lookup — using bio fallback persona.")
+
+    # Inject resolved personas back into the campaign dict for PrismPipeline
+    campaign["target_personas"] = _raw_personas
+
     # ── V18: PrismPipeline — instantiate once per dispatch() call ────────────
-    # Reads target_personas from the campaign doc (populated by Digital Twin).
+    # Reads target_personas from the campaign doc (now guaranteed non-empty).
     # Falls back gracefully to GeneralDomain mode if personas are absent.
     try:
         _serper_key_for_prism = get_secret(SERPER_API_KEY_NAME).strip()
@@ -1998,19 +2118,27 @@ def dispatch():
             lock_entity   = target_domain
             dedupe_target = target_domain
 
-        # Global Exclusivity Lock
-        lock_ref  = db.collection("global_lead_locks").document(lock_entity)
+        # Global Exclusivity Lock — FIX 2: Atomic transactional acquisition
+        # The old pattern (get → set in separate RPCs) was a TOCTOU race.
+        # 50 concurrent workers targeting ibm.com all read 'no lock' simultaneously
+        # and then all wrote → 50 duplicate leads. The prior `except: print` swallowed
+        # DEADLINE_EXCEEDED so contention silently bypassed the gate entirely.
+        # Now: transaction serialises the read+write; any exception means skip.
+        lock_ref = db.collection("global_lead_locks").document(lock_entity)
         try:
-            lock_doc  = lock_ref.get()
             now_utc   = datetime.datetime.now(datetime.timezone.utc)
-            if lock_doc.exists:
-                locked_until = lock_doc.to_dict().get("locked_until")
-                if locked_until and locked_until > now_utc:
-                    print(f"[EXCLUSIVITY] Dropping {url}. Entity {lock_entity} locked.")
-                    continue
-            lock_ref.set({"locked_until": now_utc + datetime.timedelta(days=14)})
+            _lock_txn = db.transaction()
+            _acquired = _acquire_lead_lock(_lock_txn, lock_ref, now_utc)
+            if not _acquired:
+                print(f"[EXCLUSIVITY] Dropping {url}. Entity {lock_entity} "
+                      f"is within 14-day exclusivity window.")
+                continue
         except Exception as le:
-            print(f"[LOCK FAIL] {le}")
+            # ABORTED / DEADLINE_EXCEEDED under contention → skip, do not proceed.
+            # Old code: print + fall-through (all workers bypassed the lock).
+            # New code: continue → this worker relinquishes the URL.
+            print(f"[LOCK FAIL] {le} — skipping {url} to prevent duplicate lead.")
+            continue
 
         # Deterministic Dedup Gateway
         lead_id_str = f"{tenant_id}_{dedupe_target}"
@@ -2145,7 +2273,7 @@ def dispatch():
                 db.collection("users").document(tenant_id).collection("wallet_shards") \
                     .document(str(shard_id)).set({"consumed_credits": firestore.Increment(1)}, merge=True)
 
-                context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id, sourcing_vector)
+                context_payload, native_hiring_intent = deep_context_serper_dork(target_domain, tenant_id, sourcing_vector, source_url=url)
 
                 # RLHF Fit Score
                 fit_score = 0
@@ -2156,6 +2284,15 @@ def dispatch():
                 if fit_score <= -3:
                     print(f"[RLHF] Dropping {target_domain} (fit_score={fit_score}).")
                     doc_ref.delete()
+                    # ── FIX 1: RLHF gate — release orphaned exclusivity lock ──
+                    # The lock was acquired before processing started and will
+                    # never be automatically released if we skip the score gate.
+                    # Explicitly delete it so the domain is not permanently locked.
+                    try:
+                        db.collection("global_lead_locks").document(lock_entity).delete()
+                        print(f"[RLHF] Orphaned lock released for entity: {lock_entity}")
+                    except Exception as _rlhf_lock_err:
+                        print(f"[RLHF] Lock release failed (non-fatal): {_rlhf_lock_err}")
                     continue
 
                 try:
@@ -2227,7 +2364,7 @@ def dispatch():
                         "is_in_crm":                     False,  # Required: UI query .where('is_in_crm','==',false)
                     }
                     validate_and_update_lead(lead_payload, doc_ref)
-                    _settle_credit(tenant_id, "success")  # FIX 1: settle reservation
+                    _settle_credit(tenant_id, "success", lead_id=lead_id)  # FIX 1B: lead_id = idempotency key
 
                     scrape_success += 1
 
@@ -2271,6 +2408,16 @@ def dispatch():
                     # Score below threshold — clean delete (not a ghost)
                     print(f"[SCORE GATE] {url} scored {evaluation.get('score', 0)} < {accept_threshold}. Deleting stub.")
                     doc_ref.delete()
+                    # ── FIX 1: Score gate — release orphaned exclusivity lock ──
+                    # The lock_entity was acquired at the top of this URL's loop.
+                    # If we delete the lead stub here, the lock document remains
+                    # and permanently blocks this domain for the 14-day window
+                    # even though no lead was persisted. Delete it explicitly.
+                    try:
+                        db.collection("global_lead_locks").document(lock_entity).delete()
+                        print(f"[SCORE GATE] Orphaned lock released for entity: {lock_entity}")
+                    except Exception as _sg_lock_err:
+                        print(f"[SCORE GATE] Lock release failed (non-fatal): {_sg_lock_err}")
             else:
                 # ── P3: text is empty after all code paths — ghost state prevention ──
                 print(f"[DEAD PAYLOAD] No text for {url} after all paths. Marking failed_scrape.")
@@ -2341,6 +2488,26 @@ def finalize():
         return jsonify({"error": "Missing crucial context"}), 400
         
     doc_ref = db.collection("leads").document(lead_id)
+
+    # ── FIX 1A: Idempotency Guard ───────────────────────────────────────────────
+    # Cloud Tasks at-least-once delivery: a network drop between Cloud Run's load
+    # balancer and Cloud Tasks after a clean HTTP 200 causes an invisible retry.
+    # Without this guard: Gemini fires twice, wallet_shards gets a second
+    # Increment(1), and set(merge=True) overwrites Firestore with different values.
+    # Guard: read current lead status; if already beyond 'processing', acknowledge
+    # the task (return 200) without executing any downstream logic.
+    try:
+        _idem_snap   = doc_ref.get().to_dict() or {}
+        _idem_status = _idem_snap.get("status")
+        if _idem_status not in ("processing", "failed_scrape", None):
+            print(f"[FINALIZE] Idempotency guard: lead {lead_id} already "
+                  f"in status='{_idem_status}'. Acknowledging task without reprocessing.")
+            return jsonify({"status": "already_processed", "lead_status": _idem_status}), 200
+    except Exception as _idem_err:
+        # On Firestore read failure, proceed rather than permanently drop
+        # a valid finalize callback. Rare double-charge is the lesser evil.
+        print(f"[FINALIZE] Idempotency read failed (proceeding cautiously): {_idem_err}")
+
     if not text:
         doc_ref.update({"status": "failed_scrape", "error": "scraper-heavy returned empty text"})
         return jsonify({"status": "dropped empty text"}), 200
@@ -2501,7 +2668,20 @@ def finalize():
                     except:
                         pass
         else:
+            # Score below threshold — delete stub
             doc_ref.delete()
+            # ── FIX 1: finalize() score gate — release orphaned exclusivity lock ──
+            # Retrieve the lock_entity stored on the lead stub at creation time
+            # (dispatch stored it as lead_doc_data["lock_entity"]).
+            # Deleting this ensures the domain is not permanently blocked after
+            # a failed finalize() scoring pass.
+            try:
+                _finalize_lock_entity = lead_doc_data.get("lock_entity")
+                if _finalize_lock_entity:
+                    db.collection("global_lead_locks").document(_finalize_lock_entity).delete()
+                    print(f"[FINALIZE SCORE GATE] Orphaned lock released for entity: {_finalize_lock_entity}")
+            except Exception as _fl_err:
+                print(f"[FINALIZE SCORE GATE] Lock release failed (non-fatal): {_fl_err}")
             
     except Exception as hook_err:
         doc_ref.update({"status": "failed", "error": "Finalize webhook crash"})

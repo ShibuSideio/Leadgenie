@@ -396,6 +396,47 @@ def release_reservation(tenant_id: str, count: int = 1):
 
 
 # =============================================================================
+# FIX 1B: IDEMPOTENCY-SAFE CREDIT SETTLEMENT TRANSACTION
+# Cloud Tasks at-least-once delivery can replay a settle task if the 200 ACK
+# is dropped. Without this guard, wallet.total_consumed gets Increment(1) twice.
+#
+# Pattern: the lead document is used as the idempotency token.
+#   - First settle: writes credit_settled=True on the lead doc + wallet Increment
+#     in a single atomic Firestore transaction.
+#   - Retry settle: reads credit_settled=True → raises ValueError("already_settled")
+#     → endpoint returns HTTP 200 to Cloud Tasks (task acknowledged, no retry).
+#
+# Fallback: if lead_id is absent (legacy callers), skips the idempotency check
+# and falls through to the direct update (preserves backward-compatibility).
+# =============================================================================
+@_firestore_transactional
+def _atomic_settle_txn(transaction, user_ref, lead_ref, outcome, count):
+    """
+    Reads credit_settled flag from lead_ref inside the transaction.
+    If already settled: raises ValueError("already_settled") — caller returns 200.
+    If not settled: stamps credit_settled=True and applies the wallet Increment
+    atomically. Guarantees exactly-once even under Cloud Tasks retry storms.
+    """
+    if lead_ref is not None:
+        lead_snap = lead_ref.get(transaction=transaction)
+        lead_data = lead_snap.to_dict() if lead_snap.exists else {}
+        if lead_data.get("credit_settled"):
+            raise ValueError("already_settled")
+        # Atomically stamp the idempotency flag on the lead document
+        transaction.update(lead_ref, {"credit_settled": True})
+
+    if outcome == "success":
+        transaction.update(user_ref, {
+            "wallet.total_consumed":   firestore.Increment(count),
+            "wallet.reserved_credits": firestore.Increment(-count),
+        })
+    else:
+        transaction.update(user_ref, {
+            "wallet.reserved_credits": firestore.Increment(-count),
+        })
+
+
+# =============================================================================
 # FIX 4b: BOUNDED GEMINI WRAPPER
 # Enforces a 15s hard wall-clock cap — prevents gunicorn thread starvation
 # when Vertex API is under scheduling pressure.
@@ -1720,10 +1761,15 @@ Rules:
         status_code = 200 if success else 500
         return jsonify({"ok": success}), status_code
 
-    # ── FIX 1: Credit Settlement Endpoint ────────────────────────────────────
+    # ── FIX 1B: Credit Settlement Endpoint (Idempotency-Safe) ────────────────
     # Called by pipeline-main via Cloud Tasks after each URL processes.
     # outcome="success": total_consumed += 1, reserved -= 1 (settled)
     # outcome="failure": reserved -= 1 only (refund, no credit consumed)
+    # Idempotency: pipeline-main now passes lead_id in the payload. The
+    # _atomic_settle_txn function stamps credit_settled=True on the lead doc
+    # atomically inside a Firestore transaction before any wallet Increment.
+    # A Cloud Tasks retry sees credit_settled=True → raises ValueError →
+    # we return HTTP 200 (acknowledged) so Cloud Tasks stops retrying.
     if request.path == "/api/internal/credits/settle" and request.method == "POST":
         if not request.headers.get("X-CloudTasks-QueueName"):
             return jsonify({"error": "Forbidden"}), 403
@@ -1731,23 +1777,26 @@ Rules:
         tenant_id = payload.get("tenant_id")
         outcome   = payload.get("outcome")
         count     = int(payload.get("count", 1))
+        lead_id   = payload.get("lead_id", "")   # FIX 1B: idempotency key from pipeline-main
         if not tenant_id or outcome not in ("success", "failure") or count <= 0:
             return jsonify({"error": "Invalid settlement payload"}), 400
         user_ref = db.collection("users").document(tenant_id)
+        lead_ref = db.collection("leads").document(lead_id) if lead_id else None
         try:
-            if outcome == "success":
-                user_ref.update({
-                    "wallet.total_consumed":   firestore.Increment(count),
-                    "wallet.reserved_credits": firestore.Increment(-count),
-                })
-                print(f"[SETTLE] {tenant_id}: +{count} consumed, -{count} reserved.")
-            else:
-                user_ref.update({
-                    "wallet.reserved_credits": firestore.Increment(-count),
-                })
-                print(f"[SETTLE] {tenant_id}: REFUND {count} credits (failure).")
+            txn = db.transaction()
+            _atomic_settle_txn(txn, user_ref, lead_ref, outcome, count)
+            print(f"[SETTLE] {tenant_id}: outcome={outcome}, count={count}, "
+                  f"lead={lead_id[:12] if lead_id else 'N/A'}...")
+        except ValueError as ve:
+            if "already_settled" in str(ve):
+                # Cloud Tasks retried after a successful write — acknowledge without charging.
+                print(f"[SETTLE] Idempotency guard: lead {lead_id} already settled. "
+                      f"Acknowledging duplicate task.")
+                return jsonify({"ok": True, "outcome": "already_settled"}), 200
+            print(f"[SETTLE] ValueError for {tenant_id}: {ve}")
+            return jsonify({"ok": False, "error": str(ve)}), 500
         except Exception as se:
-            print(f"[SETTLE] Write failed for {tenant_id}: {se}")
+            print(f"[SETTLE] Transaction failed for {tenant_id}: {se}")
             return jsonify({"ok": False, "error": str(se)}), 500
         return jsonify({"ok": True, "outcome": outcome, "count": count}), 200
 
