@@ -81,6 +81,33 @@ steps:
     echo "[GATE] All checks passed — build proceeding."
 
 # =============================================================================
+# PHASE 0b: IAM GRANTS (idempotent)
+# Ensures lead-pipeline-sa has the roles it needs for the L0 operations
+# endpoint. Runs in parallel with Phase 1 builds — zero extra pipeline time.
+#
+# roles/bigquery.jobUser  → required by: GET /api/internal/l0/operations-telemetry
+#   (bigquery.jobs.create is inside this role)
+# --condition=None prevents duplicate binding accumulation on re-runs.
+# =============================================================================
+
+- id: 'iam-grants'
+  waitFor: ['-']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+  entrypoint: bash
+  args:
+  - '-c'
+  - |
+    set -eo pipefail
+    SA="lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com"
+    echo "[IAM] Granting BigQuery Job User to $$SA"
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+      --member="serviceAccount:$$SA" \
+      --role="roles/bigquery.jobUser" \
+      --condition=None \
+      --quiet
+    echo "[IAM] Grant complete."
+
+# =============================================================================
 # PHASE 1: PARALLEL IMAGE BUILDS
 # All 6 services build simultaneously. Playwright/Chromium (~8 min) no longer
 # blocks the other 5 lightweight Python services.

@@ -950,9 +950,48 @@ def trigger_daily_sweep(path):
                 return jsonify({"status": "success", "message": f"Approved identity with {amount} credits for {days} days."}), 200
 
             # =================================================================
+            # GET /api/l0/shadow-ledger
+            # L0-only. Returns ALL rejected leads across ALL tenants.
+            # The standard /api/leads endpoint is tenant-scoped — this is the
+            # only cross-tenant rejected leads query in the system.
+            # =================================================================
+            elif request.path == "/api/l0/shadow-ledger" and request.method == "GET":
+                limit = min(int(request.args.get("limit", 200)), 500)
+                try:
+                    rej_docs = (
+                        db.collection("leads")
+                          .where(field_path="status", op_string="==", value="rejected")
+                          .order_by("updatedAt", direction=firestore.Query.DESCENDING)
+                          .limit(limit)
+                          .stream()
+                    )
+                    leads_out = []
+                    for doc in rej_docs:
+                        d = doc.to_dict() or {}
+                        leads_out.append({
+                            "id":                  doc.id,
+                            "source_url":          d.get("source_url", d.get("url", "")),
+                            "base_path":           d.get("base_path", ""),
+                            "company_domain":      d.get("company_domain", ""),
+                            "domain":              d.get("domain", ""),
+                            "score":               d.get("score"),
+                            "tenant_id":           d.get("tenant_id", ""),
+                            "rejection_reason":    d.get("rejection_reason"),
+                            "ai_rejection_reason": d.get("ai_rejection_reason", d.get("rejection_signal", "")),
+                            "status":              d.get("status"),
+                            "updatedAt":           d["updatedAt"].isoformat() if d.get("updatedAt") and hasattr(d["updatedAt"], "isoformat") else None,
+                        })
+                    print(f"[L0 SHADOW] Returned {len(leads_out)} rejected leads cross-tenant")
+                    return jsonify({"status": "success", "leads": leads_out, "count": len(leads_out)}), 200
+                except Exception as sl_err:
+                    print(f"[L0 SHADOW] Error: {sl_err}")
+                    return jsonify({"error": "Shadow Ledger query failed", "message": str(sl_err)}), 500
+
+            # =================================================================
             # GET /api/internal/l0/operations-telemetry
             # L0-only endpoint. Returns:
             #   geo_heatmap   — BigQuery aggregation of active campaigns by GL
+            #                   Falls back to Firestore if BQ IAM unavailable
             #   domain_matrix — Firestore top-10 domains by baseline_weight
             #
             # COST PROTECTION: Results cached in TTLCache for 5 minutes.
@@ -1029,6 +1068,37 @@ def trigger_daily_sweep(path):
                     # attempt the Firestore domain matrix below.
                     bq_error = str(bq_err)
                     print(f"[L0 OPS] BigQuery geo-heatmap FAILED: {bq_err}")
+
+                # ── 1b. Geo Heatmap Firestore fallback ───────────────────────
+                # Triggered automatically if BQ returned a 403 / any error.
+                # Reads the campaigns collection directly and aggregates by gl.
+                # Less efficient than BQ for large datasets but always works
+                # without additional IAM configuration.
+                # ─────────────────────────────────────────────────────────────
+                if bq_error and not geo_heatmap:
+                    print(f"[L0 OPS] Activating Firestore geo fallback...")
+                    try:
+                        fs_geo_counts = {}
+                        camp_docs = (
+                            db.collection("campaigns")
+                              .where(field_path="status", op_string="==", value="active")
+                              .limit(500)
+                              .stream()
+                        )
+                        for cdoc in camp_docs:
+                            cd = cdoc.to_dict() or {}
+                            region = cd.get("gl") or cd.get("location") or "Unknown"
+                            region = region.strip() or "Unknown"
+                            fs_geo_counts[region] = fs_geo_counts.get(region, 0) + 1
+                        geo_heatmap = [
+                            {"region": k, "active_campaigns": v}
+                            for k, v in sorted(fs_geo_counts.items(), key=lambda x: -x[1])
+                        ]
+                        # BQ error surfaced, but fallback succeeded — clear partial error tag
+                        bq_error = f"BQ unavailable (IAM) — showing Firestore fallback: {bq_error[:80]}"
+                        print(f"[L0 OPS] Firestore geo fallback OK: {len(geo_heatmap)} regions")
+                    except Exception as fs_geo_err:
+                        print(f"[L0 OPS] Firestore geo fallback ALSO failed: {fs_geo_err}")
 
                 # ── 2. Domain Affinity Matrix — Firestore ontology_map ────────
                 # Top 10 domains by RLHF-trained baseline_weight.

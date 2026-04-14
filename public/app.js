@@ -1440,8 +1440,9 @@ window.fetchShadowLedger = async function() {
         const user = firebase.auth().currentUser;
         if (!user) throw new Error('Not authenticated');
         const token = await user.getIdToken(true);
-        // Fetch rejected leads via the existing /api/leads endpoint with status filter
-        const resp  = await fetch(`${API_BASE}/api/leads?status=rejected&limit=100&rt=${Date.now()}`, {
+        // Dedicated L0 cross-tenant endpoint — standard /api/leads is tenant-scoped
+        // and would only return the admin's own leads (usually 0 rejected).
+        const resp  = await fetch(`${API_BASE}/api/l0/shadow-ledger?limit=200&rt=${Date.now()}`, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
