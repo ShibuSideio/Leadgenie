@@ -950,6 +950,96 @@ def trigger_daily_sweep(path):
                 return jsonify({"status": "success", "message": f"Approved identity with {amount} credits for {days} days."}), 200
 
             # =================================================================
+            # GET /api/l0/system-health
+            # L0-only. Returns real operational metrics:
+            #   - Circuit breaker state from system_telemetry/circuit_breaker_state
+            #   - Serper 429 rate & scraper OOM rate from the same document
+            #   - Pipeline velocity: leads created in the last 24h
+            #   - Active campaign count
+            #   - Total rejection count
+            # =================================================================
+            elif request.path == "/api/l0/system-health" and request.method == "GET":
+                import datetime as _dt
+                now_h = _dt.datetime.now(_dt.timezone.utc)
+                health = {}
+
+                # -- Circuit Breaker state (same doc the sweep reads) ----------
+                try:
+                    cb_doc  = db.collection("system_telemetry").document("circuit_breaker_state").get()
+                    cb_data = cb_doc.to_dict() if cb_doc.exists else {}
+                    serper_total  = int(cb_data.get("serper_calls_window",  0))
+                    serper_429s   = int(cb_data.get("serper_429s_window",   0))
+                    scraper_total = int(cb_data.get("scraper_calls_window", 0))
+                    scraper_ooms  = int(cb_data.get("scraper_ooms_window",  0))
+                    serper_rate   = round((serper_429s  / serper_total)  if serper_total  > 10 else 0.0, 4)
+                    scraper_rate  = round((scraper_ooms / scraper_total) if scraper_total > 10 else 0.0, 4)
+                    # Derive state the same way the sweep does
+                    cb_open = (serper_rate > 0.15) or (scraper_rate > 0.05)
+                    last_open_at = cb_data.get("last_open_at")
+                    health["circuit_breaker"] = {
+                        "state":          "OPEN" if cb_open else "CLOSED",
+                        "serper_429_rate": serper_rate,
+                        "scraper_oom_rate": scraper_rate,
+                        "serper_calls":    serper_total,
+                        "serper_429s":     serper_429s,
+                        "scraper_calls":   scraper_total,
+                        "scraper_ooms":    scraper_ooms,
+                        "last_open_at":    last_open_at.isoformat() if last_open_at and hasattr(last_open_at, "isoformat") else None,
+                        "last_open_reason": cb_data.get("last_open_reason", ""),
+                    }
+                    print(f"[L0 HEALTH] CB={'OPEN' if cb_open else 'CLOSED'} "
+                          f"serper={serper_rate*100:.1f}% scraper={scraper_rate*100:.1f}%")
+                except Exception as cb_e:
+                    health["circuit_breaker"] = {"state": "UNKNOWN", "error": str(cb_e)}
+
+                # -- Pipeline velocity: leads added in last 24h ----------------
+                try:
+                    cutoff = now_h - _dt.timedelta(hours=24)
+                    recent_leads = list(
+                        db.collection("leads")
+                          .where(field_path="createdAt", op_string=">=", value=cutoff)
+                          .limit(500)
+                          .stream()
+                    )
+                    health["leads_last_24h"] = len(recent_leads)
+                except Exception:
+                    health["leads_last_24h"] = None
+
+                # -- Active campaign count (cross-tenant) ----------------------
+                try:
+                    active_camps = list(
+                        db.collection("campaigns")
+                          .where(field_path="status", op_string="==", value="active")
+                          .limit(500)
+                          .stream()
+                    )
+                    health["active_campaigns"] = len(active_camps)
+                except Exception:
+                    health["active_campaigns"] = None
+
+                # -- Total rejection count -------------------------------------
+                try:
+                    rej_count = len(list(
+                        db.collection("leads")
+                          .where(field_path="status", op_string="==", value="rejected")
+                          .limit(500)
+                          .stream()
+                    ))
+                    health["total_rejected"] = rej_count
+                except Exception:
+                    health["total_rejected"] = None
+
+                # -- Ontology map entries (RLHF coverage) ----------------------
+                try:
+                    ont_count = len(list(db.collection("ontology_map").limit(200).stream()))
+                    health["ontology_domains"] = ont_count
+                except Exception:
+                    health["ontology_domains"] = None
+
+                health["generated_at"] = now_h.isoformat()
+                return jsonify({"status": "success", "data": health}), 200
+
+            # =================================================================
             # GET /api/l0/shadow-ledger
             # L0-only. Returns ALL rejected leads across ALL tenants.
             # The standard /api/leads endpoint is tenant-scoped — this is the
@@ -1025,11 +1115,45 @@ def trigger_daily_sweep(path):
                 # ────────────────────────────────────────────────────────────────
                 geo_heatmap = []
                 bq_error    = None
+                bq_used     = False
+
+                # ── 1a. Geo Heatmap — Firestore PRIMARY (always available) ───────
+                # Reads the campaigns collection directly and aggregates by gl.
+                # This path requires ZERO extra IAM and always returns live data.
+                # BQ is attempted afterward as an enrichment — if it works, its
+                # data replaces the Firestore aggregate for higher accuracy.
+                # ─────────────────────────────────────────────────────────────────
+                try:
+                    fs_geo_counts = {}
+                    camp_docs = (
+                        db.collection("campaigns")
+                          .limit(500)
+                          .stream()
+                    )
+                    for cdoc in camp_docs:
+                        cd = cdoc.to_dict() or {}
+                        # Only count active campaigns (paused/archived excluded)
+                        if cd.get("status", "active") not in ("active",):
+                            continue
+                        region = cd.get("gl") or cd.get("location") or "Unknown"
+                        region = (region or "Unknown").strip() or "Unknown"
+                        fs_geo_counts[region] = fs_geo_counts.get(region, 0) + 1
+                    geo_heatmap = [
+                        {"region": k, "active_campaigns": v}
+                        for k, v in sorted(fs_geo_counts.items(), key=lambda x: -x[1])
+                    ]
+                    print(f"[L0 OPS] Firestore geo PRIMARY OK: {len(geo_heatmap)} regions")
+                except Exception as fs_primary_err:
+                    print(f"[L0 OPS] Firestore geo PRIMARY failed: {fs_primary_err}")
+
+                # ── 1b. Geo Heatmap — BigQuery ENRICHMENT (optional) ─────────────
+                # Only attempted if the service account has bigquery.jobs.create.
+                # If successful, replaces the Firestore aggregate with BQ data
+                # (more accurate, reads from the immutable events export).
+                # On ANY BQ error: silently falls back to Firestore data above.
+                # ─────────────────────────────────────────────────────────────────
                 try:
                     bq = bigquery.Client(project=PROJECT_ID)
-
-                    # Parameterised to prevent SQL injection (project id is
-                    # server-controlled, not user-supplied, but defence-in-depth).
                     bq_sql = """
                         SELECT
                             COALESCE(
@@ -1050,55 +1174,25 @@ def trigger_daily_sweep(path):
                     """.format(project=PROJECT_ID)
 
                     bq_job  = bq.query(bq_sql)
-                    bq_rows = bq_job.result()   # blocks until query completes
-
+                    bq_rows = bq_job.result()
+                    bq_heatmap = []
                     for row in bq_rows:
                         region = (row.region or 'Unknown').strip()
                         if region:
-                            geo_heatmap.append({
+                            bq_heatmap.append({
                                 "region":           region,
                                 "active_campaigns": int(row.active_campaigns)
                             })
 
-                    print(f"[L0 OPS] BigQuery geo-heatmap OK: {len(geo_heatmap)} regions, "
-                          f"bytes_processed={bq_job.total_bytes_processed}")
+                    if bq_heatmap:
+                        geo_heatmap = bq_heatmap  # Prefer BQ when available
+                        bq_used = True
+                        print(f"[L0 OPS] BigQuery geo enrichment OK: {len(geo_heatmap)} regions, "
+                              f"bytes={bq_job.total_bytes_processed}")
 
                 except Exception as bq_err:
-                    # Fail partial: surface BQ error in response but still
-                    # attempt the Firestore domain matrix below.
-                    bq_error = str(bq_err)
-                    print(f"[L0 OPS] BigQuery geo-heatmap FAILED: {bq_err}")
-
-                # ── 1b. Geo Heatmap Firestore fallback ───────────────────────
-                # Triggered automatically if BQ returned a 403 / any error.
-                # Reads the campaigns collection directly and aggregates by gl.
-                # Less efficient than BQ for large datasets but always works
-                # without additional IAM configuration.
-                # ─────────────────────────────────────────────────────────────
-                if bq_error and not geo_heatmap:
-                    print(f"[L0 OPS] Activating Firestore geo fallback...")
-                    try:
-                        fs_geo_counts = {}
-                        camp_docs = (
-                            db.collection("campaigns")
-                              .where(field_path="status", op_string="==", value="active")
-                              .limit(500)
-                              .stream()
-                        )
-                        for cdoc in camp_docs:
-                            cd = cdoc.to_dict() or {}
-                            region = cd.get("gl") or cd.get("location") or "Unknown"
-                            region = region.strip() or "Unknown"
-                            fs_geo_counts[region] = fs_geo_counts.get(region, 0) + 1
-                        geo_heatmap = [
-                            {"region": k, "active_campaigns": v}
-                            for k, v in sorted(fs_geo_counts.items(), key=lambda x: -x[1])
-                        ]
-                        # BQ error surfaced, but fallback succeeded — clear partial error tag
-                        bq_error = f"BQ unavailable (IAM) — showing Firestore fallback: {bq_error[:80]}"
-                        print(f"[L0 OPS] Firestore geo fallback OK: {len(geo_heatmap)} regions")
-                    except Exception as fs_geo_err:
-                        print(f"[L0 OPS] Firestore geo fallback ALSO failed: {fs_geo_err}")
+                    # Silent fallback — Firestore data already loaded above
+                    print(f"[L0 OPS] BigQuery geo enrichment skipped: {bq_err}")
 
                 # ── 2. Domain Affinity Matrix — Firestore ontology_map ────────
                 # Top 10 domains by RLHF-trained baseline_weight.
@@ -1138,15 +1232,17 @@ def trigger_daily_sweep(path):
                     "domain_matrix":  domain_matrix,
                     "generated_at":   now.isoformat(),
                     "ttl_seconds":    _OPS_CACHE_TTL_SECONDS,
+                    "geo_source":     "bigquery" if bq_used else "firestore",
                 }
+                # Only surface errors for critical failures (Firestore domain-matrix)
+                # BQ enrichment errors are silent — Firestore is the primary source.
                 errors = {}
-                if bq_error: errors["bigquery"] = bq_error
                 if fs_error: errors["firestore"] = fs_error
                 if errors:   payload["partial_errors"] = errors
 
-                # Only prime the cache if both sources returned data
-                # (avoids caching a degraded response for 5 minutes).
-                if not bq_error and not fs_error:
+                # Prime cache whenever we have geo data from the primary source.
+                # Do not require BQ success — Firestore data is sufficient.
+                if geo_heatmap and not fs_error:
                     _ops_telemetry_cache[CACHE_KEY] = {
                         "data":      payload,
                         "cached_at": now

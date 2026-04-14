@@ -1518,25 +1518,70 @@ window.fetchSystemHealth = async function() {
     const serperEl  = document.getElementById('l0-health-serper');
     const oomEl     = document.getElementById('l0-health-oom');
     const bqEl      = document.getElementById('l0-health-bq');
+    const velocEl   = document.getElementById('l0-health-velocity');
+    const campEl    = document.getElementById('l0-health-camps');
     try {
         const user = firebase.auth().currentUser;
         if (!user) return;
         const token = await user.getIdToken(true);
-        // Reuse the existing telemetry endpoint which includes macro data
-        const resp  = await fetch(`${API_BASE}/api/l0/telemetry`, {
+        const resp  = await fetch(`${API_BASE}/api/l0/system-health`, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const json = await resp.json();
-        const cb   = json.data?.circuit_breaker || {};
-        const state = cb.state || 'UNKNOWN';
+        const d    = json.data || {};
+        const cb   = d.circuit_breaker || {};
+
+        // Circuit Breaker
+        const state      = cb.state || 'UNKNOWN';
         const stateColor = state === 'CLOSED' ? '#10b981' : state === 'OPEN' ? '#ef4444' : '#f59e0b';
-        if (breakerEl) breakerEl.innerHTML = `<strong style="color:${stateColor};">${state}</strong>`;
-        if (serperEl)  serperEl.textContent  = cb.serper_error_rate != null ? `${(cb.serper_error_rate*100).toFixed(1)}%` : 'N/A';
-        if (oomEl)     oomEl.textContent     = cb.oom_error_rate != null ? `${(cb.oom_error_rate*100).toFixed(1)}%` : 'N/A';
-        if (bqEl)      bqEl.textContent      = cb.last_bq_sync || 'N/A';
+        if (breakerEl) {
+            const reason = cb.last_open_reason ? `<div style="font-size:0.68rem;color:#6b7280;margin-top:4px;max-width:200px;white-space:normal;">${cb.last_open_reason.slice(0,80)}${cb.last_open_reason.length>80?'…':''}</div>` : '';
+            breakerEl.innerHTML = `<strong style="color:${stateColor};">${state}</strong>${reason}`;
+        }
+
+        // Serper 429 Rate
+        if (serperEl) {
+            const rate = cb.serper_429_rate != null ? (cb.serper_429_rate * 100).toFixed(1) + '%' : 'N/A';
+            const calls = cb.serper_calls != null ? ` <span style="font-size:0.68rem;color:#6b7280;">(${cb.serper_429s||0}/${cb.serper_calls||0} calls)</span>` : '';
+            const color = (cb.serper_429_rate||0) > 0.10 ? '#ef4444' : (cb.serper_429_rate||0) > 0.05 ? '#f59e0b' : '#10b981';
+            serperEl.innerHTML = `<strong style="color:${color};">${rate}</strong>${calls}`;
+        }
+
+        // Scraper OOM Rate
+        if (oomEl) {
+            const rate = cb.scraper_oom_rate != null ? (cb.scraper_oom_rate * 100).toFixed(1) + '%' : 'N/A';
+            const color = (cb.scraper_oom_rate||0) > 0.03 ? '#ef4444' : '#10b981';
+            oomEl.innerHTML = `<strong style="color:${color};">${rate}</strong>`;
+        }
+
+        // Pipeline Velocity (leads last 24h)
+        if (velocEl) {
+            velocEl.innerHTML = d.leads_last_24h != null
+                ? `<strong style="color:var(--primary);">${d.leads_last_24h}</strong> <span style="font-size:0.72rem;color:#6b7280;">new leads (24h)</span>`
+                : 'N/A';
+        }
+
+        // Active Campaigns
+        if (campEl) {
+            const ont = d.ontology_domains != null ? ` &nbsp;·&nbsp; <span style="font-size:0.72rem;color:#6b7280;">${d.ontology_domains} RLHF domains</span>` : '';
+            campEl.innerHTML = d.active_campaigns != null
+                ? `<strong style="color:#7c3aed;">${d.active_campaigns}</strong> active${ont}`
+                : 'N/A';
+        }
+
+        // BQ Last Sync tile — repurpose for rejection count
+        if (bqEl) {
+            bqEl.innerHTML = d.total_rejected != null
+                ? `<strong style="color:#ef4444;">${d.total_rejected}</strong> <span style="font-size:0.72rem;color:#6b7280;">total rejections</span>`
+                : 'N/A';
+        }
+
+        showToast('System health loaded.', 'success');
     } catch(err) {
+        console.error('[System Health]', err);
         if (breakerEl) breakerEl.textContent = 'Error: ' + err.message;
+        showToast('System health load failed: ' + err.message, 'error');
     }
 };
 
