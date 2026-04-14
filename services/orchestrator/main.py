@@ -825,7 +825,7 @@ def trigger_daily_sweep(path):
     # -----------------------------------------------------------------------------------------
     # REST L0 Governance API Protocol 
     # -----------------------------------------------------------------------------------------
-    if request.path.startswith("/api/l0/"):
+    if request.path.startswith("/api/l0/") or request.path.startswith("/api/internal/l0/"):
         try:
             uid, tenant_id, user_role = authenticate_request(request)
             if user_role != "super_admin":
