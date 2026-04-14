@@ -166,7 +166,75 @@ def search_serper(query, location=None, gl=None):
         return _do_post()
     except Exception as e:
         print(f"[SERPER] All retries exhausted for query '{query[:60]}': {e}")
+        _update_circuit_telemetry("serper_429")   # Signal circuit breaker: all retries exhausted
         return []
+
+
+# =============================================================================
+# CIRCUIT BREAKER TELEMETRY WRITER
+# Maintains a 15-minute sliding window of error rates in Firestore.
+# Called by search_serper (429 events) and scraper-heavy webhook (OOM events).
+# The orchestrator's cron sweep reads these counters before dispatching tasks.
+#
+# Firestore document: system_telemetry/circuit_breaker_state
+# Fields incremented atomically (Increment, never set):
+#   serper_calls_window  — total Serper calls in the current window
+#   serper_429s_window   — 429 responses in the current window
+#   scraper_calls_window — total scrape triggers in the current window
+#   scraper_ooms_window  — OOM/timeout failures in the current window
+#   window_reset_at      — timestamp marking the start of the current window
+# =============================================================================
+def _update_circuit_telemetry(event_type: str):
+    """
+    Non-blocking circuit breaker telemetry update.
+    event_type: "serper_call" | "serper_429" | "scraper_call" | "scraper_oom"
+    Failure is swallowed — telemetry must never block the pipeline.
+    """
+    CB_WINDOW_MINUTES = int(os.environ.get("CB_WINDOW_MINUTES", "15"))
+    cb_ref = db.collection("system_telemetry").document("circuit_breaker_state")
+
+    increment_map = {
+        "serper_call":  {"serper_calls_window":  firestore.Increment(1)},
+        "serper_429":   {"serper_calls_window":  firestore.Increment(1),
+                         "serper_429s_window":   firestore.Increment(1)},
+        "scraper_call": {"scraper_calls_window": firestore.Increment(1)},
+        "scraper_oom":  {"scraper_calls_window": firestore.Increment(1),
+                         "scraper_ooms_window":  firestore.Increment(1)},
+    }
+    updates = increment_map.get(event_type)
+    if not updates:
+        return
+
+    try:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        # Reset the window if it has expired (done inside a best-effort update)
+        cb_snap = cb_ref.get()
+        cb_data = cb_snap.to_dict() if cb_snap.exists else {}
+        window_reset = cb_data.get("window_reset_at")
+        if window_reset:
+            if hasattr(window_reset, "tzinfo") and window_reset.tzinfo is None:
+                window_reset = window_reset.replace(tzinfo=datetime.timezone.utc)
+            elapsed = (now_utc - window_reset).total_seconds()
+            if elapsed > CB_WINDOW_MINUTES * 60:
+                # Window expired — reset all counters
+                cb_ref.set({
+                    "serper_calls_window":  0,
+                    "serper_429s_window":   0,
+                    "scraper_calls_window": 0,
+                    "scraper_ooms_window":  0,
+                    "window_reset_at":      now_utc,
+                }, merge=False)
+                # Re-apply the current event as the first count in the new window
+                cb_ref.set(updates, merge=True)
+                return
+        else:
+            # First write ever — set window start
+            updates["window_reset_at"] = now_utc
+
+        cb_ref.set(updates, merge=True)
+    except Exception as tel_err:
+        print(f"[CB TELEMETRY] Non-fatal write failure ({event_type}): {tel_err}")
+
 
 def safe_truncate(text: str, max_bytes: int = 100000) -> str:
     """Enforce strict byte-level truncation to prevent Firestore 1MB document crashes."""

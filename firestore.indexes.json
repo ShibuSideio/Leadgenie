@@ -73,7 +73,6 @@
         { "fieldPath": "score",     "order": "DESCENDING" }
       ]
     },
-
     {
       "collectionGroup": "autonomous_dedup",
       "queryScope": "COLLECTION",

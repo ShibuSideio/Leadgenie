@@ -1810,7 +1810,7 @@ Rules:
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
             return jsonify({"error": "Missing OIDC token"}), 401
-            
+
         token = auth_header.split("Bearer ")[1]
         try:
             from google.oauth2 import id_token
@@ -1818,8 +1818,102 @@ Rules:
             claim = id_token.verify_oauth2_token(token, google_requests.Request())
         except Exception as e:
             return jsonify({"error": "Invalid OIDC token", "details": str(e)}), 403
-            
+
         now_utc = datetime.datetime.now(datetime.timezone.utc)
+
+        # ── CIRCUIT BREAKER ───────────────────────────────────────────────────
+        # Reads error-rate telemetry from system_telemetry/circuit_breaker_state.
+        # This document is updated by pipeline-main (_update_circuit_telemetry)
+        # on every Serper 429 and scraper-heavy OOM event.
+        #
+        # Thresholds (documented in architecture.md Section 24):
+        #   serper_429_rate  > 15% over the last 15 min → OPEN (avoid credit burn)
+        #   scraper_oom_rate >  5% over the last 15 min → OPEN (avoid OOM death loops)
+        #
+        # On OPEN: returns 503 immediately. Cloud Scheduler will retry on its
+        # next tick (every 5 minutes). The circuit self-heals once error rates
+        # drop below threshold on a subsequent tick.
+        #
+        # On read failure (Firestore unavailable): fail-open (allows sweep) to
+        # avoid a Firestore outage causing a complete pipeline flatline.
+        # ─────────────────────────────────────────────────────────────────────
+        SERPER_429_THRESHOLD  = float(os.environ.get("CB_SERPER_THRESHOLD",  "0.15"))
+        SCRAPER_OOM_THRESHOLD = float(os.environ.get("CB_SCRAPER_THRESHOLD", "0.05"))
+        CB_WINDOW_MINUTES     = int(os.environ.get("CB_WINDOW_MINUTES", "15"))
+
+        try:
+            cb_doc  = db.collection("system_telemetry").document("circuit_breaker_state").get()
+            cb_data = cb_doc.to_dict() if cb_doc.exists else {}
+
+            window_start = now_utc - datetime.timedelta(minutes=CB_WINDOW_MINUTES)
+
+            # Fields written by pipeline-main on each Serper attempt / 429
+            serper_total   = int(cb_data.get("serper_calls_window",    0))
+            serper_429s    = int(cb_data.get("serper_429s_window",     0))
+            # Fields written by scraper-heavy on each scrape attempt / OOM
+            scraper_total  = int(cb_data.get("scraper_calls_window",   0))
+            scraper_ooms   = int(cb_data.get("scraper_ooms_window",    0))
+            window_reset   = cb_data.get("window_reset_at")
+
+            # Reset counters if the window has expired
+            if window_reset:
+                if hasattr(window_reset, "tzinfo") and window_reset.tzinfo is None:
+                    window_reset = window_reset.replace(tzinfo=datetime.timezone.utc)
+                if window_reset < window_start:
+                    # Window stale — counters predate our observation window; treat as 0
+                    serper_total = serper_429s = scraper_total = scraper_ooms = 0
+
+            serper_rate  = (serper_429s  / serper_total)  if serper_total  > 10 else 0.0
+            scraper_rate = (scraper_ooms / scraper_total) if scraper_total > 10 else 0.0
+
+            cb_open   = False
+            cb_reason = ""
+
+            if serper_rate > SERPER_429_THRESHOLD:
+                cb_open   = True
+                cb_reason = (
+                    f"Serper 429 rate={serper_rate*100:.1f}% "
+                    f"exceeds threshold={SERPER_429_THRESHOLD*100:.0f}% "
+                    f"over last {CB_WINDOW_MINUTES}m "
+                    f"({serper_429s}/{serper_total} calls)"
+                )
+
+            if scraper_rate > SCRAPER_OOM_THRESHOLD:
+                cb_open   = True
+                cb_reason += (
+                    f" | Scraper OOM rate={scraper_rate*100:.1f}% "
+                    f"exceeds threshold={SCRAPER_OOM_THRESHOLD*100:.0f}% "
+                    f"({scraper_ooms}/{scraper_total} calls)"
+                )
+
+            if cb_open:
+                print(f"[CIRCUIT BREAKER] OPEN — sweep aborted. Reason: {cb_reason}")
+                # Stamp the open event for alerting / dashboard visibility
+                try:
+                    db.collection("system_telemetry").document("circuit_breaker_state").set(
+                        {"last_open_at": firestore.SERVER_TIMESTAMP, "last_open_reason": cb_reason},
+                        merge=True,
+                    )
+                except Exception:
+                    pass  # Non-fatal — breaker still fires even if stamp fails
+                return jsonify({
+                    "circuit_breaker": "open",
+                    "reason":          cb_reason,
+                    "serper_rate":     round(serper_rate,  4),
+                    "scraper_rate":    round(scraper_rate, 4),
+                    "threshold_serper":  SERPER_429_THRESHOLD,
+                    "threshold_scraper": SCRAPER_OOM_THRESHOLD,
+                }), 503
+
+            print(
+                f"[CIRCUIT BREAKER] CLOSED — continuing sweep. "
+                f"serper_rate={serper_rate*100:.1f}%, scraper_rate={scraper_rate*100:.1f}%"
+            )
+
+        except Exception as cb_err:
+            # Fail-open: if telemetry read fails, allow the sweep to proceed.
+            # A Firestore outage should not cause a complete pipeline flatline.
+            print(f"[CIRCUIT BREAKER] Telemetry read failed (fail-open): {cb_err}")
 
         # Pull active campaigns with an aggressive limit of 500
         campaigns = list(db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(500).stream())
