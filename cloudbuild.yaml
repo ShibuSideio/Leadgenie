@@ -1,5 +1,7 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V16 Enterprise Build Pipeline
+# cloudbuild.yaml — Sideio Leads V19 Enterprise Build Pipeline
+# Deploy trigger: 2026-04-14 | Includes: circuit breaker, ontology crash fix,
+#   Velocity index IaC, state migration, load test harness
 # =============================================================================
 # Architecture:
 #   Phase 1: All 6 Docker images built IN PARALLEL (waitFor: ['syntax-check-appjs'])
