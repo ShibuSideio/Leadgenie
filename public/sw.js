@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sideio-v10-3';
+const CACHE_NAME = 'sideio-v11'; // Bumped: forces SW update on all PWA clients (iOS Safari NetworkOnly fix)
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
@@ -31,12 +31,37 @@ self.addEventListener('activate', event => {
 
 // Network-First Strategy (Guarantees fresh UI code deployed via Firebase Hosting)
 self.addEventListener('fetch', event => {
+    const url = new URL(event.request.url);
+    const method = event.request.method;
+
+    // ── CRITICAL: NetworkOnly for all /api/* state-mutating requests ──────────
+    // POST, PUT, DELETE to /api/* MUST go straight to the network, bypassing
+    // the cache entirely. A cached response for a campaign launch, onboarding
+    // write, or credit settle is a data-integrity and financial bug.
+    //
+    // This fix resolves the "Digital Twin created" optimistic silent-drop:
+    //   iOS Safari PWA in standalone mode re-uses a cached 200 response from
+    //   the SW cache for repeat POST requests, making the frontend think the
+    //   write succeeded while the backend never received it.
+    if (url.pathname.startsWith('/api/') && (method === 'POST' || method === 'PUT' || method === 'DELETE' || method === 'PATCH')) {
+        event.respondWith(
+            fetch(event.request).catch(err => {
+                // Surface network failures as a proper 503 so the frontend
+                // catch() block shows an error toast instead of silently succeeding.
+                return new Response(JSON.stringify({ error: 'Network unavailable', offline: true }), {
+                    status: 503,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            })
+        );
+        return;
+    }
+
     // ── CRITICAL: Bypass cache for all Firebase / Google API traffic ──────────
     // Firestore WebChannel streams (long-poll XHR / WebSocket upgrades) cannot
     // be cloned into a Response object. Intercepting them causes:
     //   "Failed to convert value to 'Response'" + 30-second disconnect loops.
     // Pass these requests straight to the network — never touch the cache.
-    const url = new URL(event.request.url);
     if (
         url.hostname.includes('googleapis.com') ||
         url.hostname.includes('google.com')     ||
@@ -53,3 +78,4 @@ self.addEventListener('fetch', event => {
         })
     );
 });
+

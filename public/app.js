@@ -1,4 +1,4 @@
-﻿// Firebase configuration (Placeholder)
+// Firebase configuration (Placeholder)
 const firebaseConfig = {
     apiKey: "AIzaSyCxqimZJ7kspuJJ8qXF34zguLkNXi6MWd4",
     authDomain: "lead-sniper-prod.firebaseapp.com",
@@ -580,7 +580,9 @@ window.viewLeadTimeline = function(eventsJson) {
 async function performApiMutation(url, method, payload) {
     const user = auth.currentUser;
     if (!user) return false;
-    const token = await user.getIdToken();
+    // iOS Safari fix: force=true guarantees a fresh token even when the
+    // Safari background throttling has invalidated the in-memory cached token.
+    const token = await user.getIdToken(true);
     const response = await fetch(`${API_BASE}${url}`, {
         method: method,
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -863,11 +865,21 @@ window.saveCampaignAction = async function(payload) {
         }
     }
 
+    // ── Loading state: disable the active CTA button to prevent double-submit
+    // on slow mobile connections (3G tap → spinner → no duplicate POSTs).
+    const _launchBtns = document.querySelectorAll(
+        '#fc-step2-submit, .dt-launch-btn, [onclick*="saveCampaignAction"], [onclick*="deployPredictiveCard"], [onclick*="saveChildCampaign"]'
+    );
+    _launchBtns.forEach(b => { b.disabled = true; b._origText = b.textContent; b.textContent = '⏳ Launching...'; });
+    const _restoreLaunch = () => _launchBtns.forEach(b => { b.disabled = false; b.textContent = b._origText || 'Launch'; });
+
     showToast('Setting up your search...', 'info');
     try {
         const user = firebase.auth().currentUser;
-        if (!user) return;
-        const token = await user.getIdToken();
+        if (!user) { _restoreLaunch(); showToast('Session expired. Please sign in again.', 'error'); return; }
+        // force=true: iOS Safari aggressively caches tokens — always fetch a
+        // fresh token immediately before any state-mutating API call.
+        const token = await user.getIdToken(true);
 
         const createResp = await fetch(`${API_BASE}/api/campaigns`, {
             method: 'POST',
@@ -914,11 +926,13 @@ window.saveCampaignAction = async function(payload) {
         const targetUrlsInput = document.getElementById('camp-target-urls');
         if (targetUrlsInput) targetUrlsInput.value = '';
 
+        _restoreLaunch();
         loadDashboard();
         showToast(igniteMsg, 'success');
     } catch(err) {
         console.error('[saveCampaignAction]', err);
-        showToast('Failed to save campaign. Check API permissions.', 'error');
+        _restoreLaunch();
+        showToast('Failed to save campaign. Please check your connection and try again.', 'error');
     }
 };
 
@@ -2368,24 +2382,55 @@ window.dtPrefillAndLaunch = function() {
 };
 
 window.saveTenantProfileAction = async function(payload) {
+    // ── STRICT LOADING STATE (abolish optimistic UI) ─────────────────────────
+    // The UI must NOT show "Digital Twin created" until we receive a verified
+    // 200/201 from the backend. Disable all onboarding CTAs and show a spinner.
+    const _twBtns = document.querySelectorAll(
+        '.dt-launch-btn, #dt-launch-btn, [onclick*="dtPrefillAndLaunch"], [onclick*="dtLaunchFallback"]'
+    );
+    _twBtns.forEach(b => { b.disabled = true; b._orig = b.innerHTML; b.innerHTML = '⏳ Creating Twin...'; });
+    const _restoreTwin = () => _twBtns.forEach(b => { b.disabled = false; b.innerHTML = b._orig || 'Launch'; });
+
     showToast('Setting up Master Twin Profile...', 'info');
     try {
         const user = firebase.auth().currentUser;
-        if (!user) return;
-        const token = await user.getIdToken();
+        if (!user) {
+            _restoreTwin();
+            showToast('Session expired — please sign in again.', 'error');
+            return;
+        }
+
+        // force=true: mandatory on iOS Safari — background tab throttling
+        // silently expires Firebase tokens without triggering onIdTokenChanged.
+        // Without force=true, the Orchestrator returns 401 and the Firestore
+        // write is silently dropped with no error shown to the user.
+        const token = await user.getIdToken(true);
 
         const createResp = await fetch(`${API_BASE}/api/tenant_profiles`, {
-            method: 'POST',
+            method:  'POST',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body:    JSON.stringify(payload)
         });
-        if (!createResp.ok) throw new Error('Master profile creation failed');
-        
+
+        // STRICT CHECK: only proceed on verified 200/201. Any other status
+        // (including 204, 400, 403, 500) is treated as a failure. Never
+        // show success on assumption.
+        if (!createResp.ok) {
+            let errDetail = '';
+            try { const errBody = await createResp.json(); errDetail = errBody.message || errBody.error || ''; } catch(_) {}
+            throw new Error(`HTTP ${createResp.status}${errDetail ? ': ' + errDetail : ''}`);
+        }
+
+        // ── Verified success ────────────────────────────────────────────────
+        _restoreTwin();
         loadDashboard();
-        showToast('Master Twin active! You can now add child campaigns.', 'success');
+        showToast('✅ Master Twin active! You can now add child campaigns.', 'success');
+
     } catch(err) {
         console.error('[saveTenantProfileAction]', err);
-        showToast('Failed to save Master Twin. Check API permissions.', 'error');
+        _restoreTwin();
+        // Surface a visible, actionable error — never silently fail.
+        showToast(`Failed to create Digital Twin: ${err.message || 'Network error'}. Please try again.`, 'error');
     }
 };
 

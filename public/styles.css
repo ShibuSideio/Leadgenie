@@ -1,4 +1,4 @@
-﻿:root {
+:root {
     --bg-dark: #f1f5f9;
     --glass-bg: rgba(255, 255, 255, 0.7);
     --glass-border: rgba(255, 255, 255, 0.5);
@@ -1079,8 +1079,11 @@ body {
     border: 1px solid rgba(255,255,255,0.8);
     border-radius: 999px;
     padding: 8px 16px;
+    /* iOS safe-area: lift dock above home indicator bar */
+    padding-bottom: max(8px, env(safe-area-inset-bottom, 8px));
+    bottom: max(20px, calc(env(safe-area-inset-bottom, 0px) + 8px));
     box-shadow: 0 8px 32px rgba(0,0,0,0.14), 0 2px 8px rgba(79,70,229,0.1);
-    z-index: 200;
+    z-index: 200;   /* below modals (998+) — never covers campaign launch buttons */
     gap: 4px;
     align-items: center;
 }
@@ -1129,6 +1132,8 @@ body {
     border-radius: 28px;
     box-shadow: 0 32px 80px rgba(0,0,0,0.20);
     animation: fcSlideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    /* iOS safe-area: prevents modal buttons being hidden behind home bar */
+    padding-bottom: max(36px, env(safe-area-inset-bottom, 36px));
 }
 
 /* View A */
@@ -1292,7 +1297,48 @@ body {
     transition: background 0.12s, border-color 0.12s;
 }
 .dt-persona-edit-btn:hover { background: #ede9fe; border-color: #c4b5fd; }
-.dt-launch-btn { margin-top: 4px !important; }
+
+/* ── Primary CTA touch targets (mobile 44×44px minimum — Apple HIG / WCAG 2.5.5) ── */
+.dt-launch-btn {
+    margin-top: 4px !important;
+    min-height: 44px !important;      /* iOS tap target */
+    cursor: pointer !important;
+    touch-action: manipulation;        /* disable double-tap zoom delay on iOS */
+    -webkit-tap-highlight-color: rgba(79,70,229,0.15);
+}
+
+/* fc-next-btn (campaign launch CTA in step 2) */
+.fc-next-btn {
+    min-height: 44px;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: rgba(79,70,229,0.15);
+}
+
+/* primary-btn (used inline for Deploy Campaign / Review & Launch) */
+.primary-btn {
+    min-height: 44px;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: rgba(16,185,129,0.15);
+}
+.primary-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+/* lc-contact-btn (Copilot action button in lead cards) */
+.lc-contact-btn {
+    min-height: 44px;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: rgba(79,70,229,0.15);
+}
+
+/* lc-crm-btn, lc-more-btn — secondary card actions */
+.lc-crm-btn, .lc-more-btn {
+    min-height: 44px;
+    min-width: 44px;
+    touch-action: manipulation;
+}
 
 /* ── Settings Modal ──────────────────────────────────────────────────── */
 .settings-modal-panel {

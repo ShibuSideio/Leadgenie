@@ -22,7 +22,12 @@ import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
 
 app = Flask(__name__)
-ALLOWED_ORIGINS = ["https://lead-sniper-prod.web.app", "https://lead-sniper-prod.firebaseapp.com"]
+ALLOWED_ORIGINS = [
+    "https://lead-sniper-prod.web.app",
+    "https://lead-sniper-prod.firebaseapp.com",
+    # PWA installed on iOS/Android home screen uses the firebase hosting domain.
+    # Both variants must be listed; iOS Safari strict-matches the Origin header.
+]
 
 vertexai.init(location="us-central1")
 
@@ -32,20 +37,27 @@ def handle_preflight():
         res = make_response()
         origin = request.headers.get("Origin")
         if origin in ALLOWED_ORIGINS:
-            # STRICT OVERWRITE - DO NOT USE .add()
-            res.headers['Access-Control-Allow-Origin'] = origin
-            res.headers['Access-Control-Allow-Headers'] = "Content-Type, Authorization"
-            res.headers['Access-Control-Allow-Methods'] = "GET, POST, PUT, DELETE, OPTIONS"
+            # STRICT OVERWRITE — do NOT use .add() (appends duplicates on retries)
+            res.headers['Access-Control-Allow-Origin']   = origin
+            res.headers['Access-Control-Allow-Headers']  = "Content-Type, Authorization"
+            res.headers['Access-Control-Allow-Methods']  = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
+            # iOS Safari fires a fresh OPTIONS before every fetch call in PWA standalone
+            # mode. Max-Age=600 caches the preflight for 10 minutes, eliminating the
+            # 200–400ms round-trip that was making the Authorization header arrive stale.
+            res.headers['Access-Control-Max-Age']        = "600"
+            res.headers['Access-Control-Expose-Headers'] = "Content-Type, X-Request-Id"
         return res, 204
 
 @app.after_request
 def add_cors_headers(response):
     origin = request.headers.get("Origin")
     if origin in ALLOWED_ORIGINS:
-        # STRICT OVERWRITE - DO NOT USE .add()
-        response.headers['Access-Control-Allow-Origin'] = origin
-        response.headers['Access-Control-Allow-Headers'] = "Content-Type, Authorization"
-        response.headers['Access-Control-Allow-Methods'] = "GET, POST, PUT, DELETE, OPTIONS"
+        # STRICT OVERWRITE — do NOT use .add()
+        response.headers['Access-Control-Allow-Origin']   = origin
+        response.headers['Access-Control-Allow-Headers']  = "Content-Type, Authorization"
+        response.headers['Access-Control-Allow-Methods']  = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
+        response.headers['Access-Control-Max-Age']        = "600"
+        response.headers['Access-Control-Expose-Headers'] = "Content-Type, X-Request-Id"
     return response
 
 
