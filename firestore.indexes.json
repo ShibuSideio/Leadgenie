@@ -73,14 +73,7 @@
         { "fieldPath": "score",     "order": "DESCENDING" }
       ]
     },
-    {
-      "collectionGroup": "ontology_map",
-      "queryScope": "COLLECTION",
-      "fields": [
-        { "fieldPath": "baseline_weight", "order": "ASCENDING" },
-        { "fieldPath": "total_yield",     "order": "ASCENDING" }
-      ]
-    },
+
     {
       "collectionGroup": "autonomous_dedup",
       "queryScope": "COLLECTION",

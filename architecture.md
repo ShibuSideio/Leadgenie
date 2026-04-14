@@ -1890,3 +1890,146 @@ Replacing the deprecated legacy keyword block method, `saveCampaignAction` struc
 Firebase Hosted reverse proxies mapped to absolute backend routes triggered `503` / `500` server errors due to frontend explicit `.ok` handling issues and the absence of `request.method == 'OPTIONS'` in the Python dispatcher. 
 - Python endpoints now proactively serve `('', 204)` explicitly before performing Bearer token `Authorization` verification to circumvent silent pre-flight Auth failures. 
 - `public/app.js` relies strictly on relative API routes parsed securely by `firebase.json`'s generalized `{"source": "/api/**"}` routing table mapped to the `orchestrator` Cloud Run service instance.
+
+---
+
+## 24. `ontology_map` COLLECTION — DOMAIN AFFINITY LEDGER
+
+*Reverse-engineered: 2026-04-14 | Status: Production-active since V16 | Previously undocumented*
+
+### 24.1 Purpose
+
+`ontology_map` is the **global domain intelligence repository** for the Sideio platform. It is a persistent, self-updating weight table that records the historical signal quality of every URL domain and social sub-path that has ever produced a cached lead. It is the physical substrate of the **Ontology RLHF feedback loop** — a closed-loop learning system that reinforces high-converting domains and penalises low-converting ones over time.
+
+**Primary function:** Provide the `autonomous-engine` with a prior probability score (`baseline_weight`) before any Gemini call is made, enabling intelligent routing between **exploit** (proven domains) and **explore** (undiscovered domains) buckets.
+
+### 24.2 Document ID — Key Derivation
+
+Document IDs are **not UUIDs**. They are deterministically derived from the source URL by the `parse_base_path()` function, which is duplicated identically in `autonomous-engine/engine.py` (L75) and `orchestrator/main.py` (L94):
+
+| URL Type | Example URL | Document ID |
+|---|---|---|
+| Standard B2B domain | `https://www.techcrunch.com/article` | `techcrunch.com` |
+| Social — Reddit | `https://reddit.com/r/Entrepreneur/...` | `reddit.com/r/Entrepreneur` |
+| Social — LinkedIn | `https://linkedin.com/company/openai` | `linkedin.com/company/openai` |
+| Social — Facebook | `https://facebook.com/groups/saas` | `facebook.com/groups/saas` |
+| Malformed / unknown | `javascript:void(0)` | `unknown` — **never written** |
+
+**Rule:** Social domains (`reddit.com`, `facebook.com`, `linkedin.com`, `quora.com`, `kaggle.com`, `instagram.com`, `twitter.com`, `x.com`, `youtube.com`) use **domain + up to 2 path segments** to distinguish communities on the same platform. All other domains use root domain only.
+
+### 24.3 Document Schema
+
+```json
+{
+  "base_path":       "techcrunch.com",
+  "baseline_weight": 1.15,
+  "total_yield":     73,
+  "last_seen":       "<SERVER_TIMESTAMP>",
+  "last_decayed":    "<SERVER_TIMESTAMP>"
+}
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `base_path` | `string` | (equals doc ID) | Redundant self-reference for Firestore Console readability. |
+| `baseline_weight` | `float` | `1.0` | Exploit routing multiplier. `> 1.0` → exploit bucket. `< 1.0` → explore bucket. Modified by RLHF and decay cron. |
+| `total_yield` | `integer` | `1` (on creation) | Running count of validated leads ever written to `predictive_cache` sourced from this domain. Burn-in guard: RLHF weight adjustments only apply when `total_yield >= 50`. |
+| `last_seen` | `Timestamp` | `SERVER_TIMESTAMP` | Last time this domain produced a validated lead. Informational only — not queried. |
+| `last_decayed` | `Timestamp` | absent until first decay | Written exclusively by the monthly decay cron. |
+
+### 24.4 Service Dependency Map
+
+#### Writers
+
+| Service | Operation | Trigger |
+|---|---|---|
+| `autonomous-engine` | **Upsert** — `set()` (new) or `update(total_yield++, last_seen)` (existing) | Every successful `predictive_cache` write in `_validate_and_cache()` |
+| `orchestrator` | **Partial update** — `update(baseline_weight += delta)` | CRM RLHF hook: `PUT /api/leads/{id}` with `crm_status = won / negotiating / lost`, gated on `total_yield >= 50` |
+| `orchestrator` | **Partial update** — decay math on `baseline_weight`, writes `last_decayed` | Monthly decay cron: `POST /api/internal/cron/ontology-decay` |
+
+#### Readers
+
+| Service | Operation | Purpose |
+|---|---|---|
+| `autonomous-engine` | `db.collection("ontology_map").document(domain).get()` | Reads `baseline_weight` and `total_yield` to route domain into exploit or explore bucket |
+| `orchestrator` | `db.collection('ontology_map').document(base_path_key).get()` | Reads `total_yield` inside RLHF hook to check burn-in threshold before applying weight delta |
+| `orchestrator` | `db.collection('ontology_map').stream()` | Full-collection scan in monthly decay cron |
+
+> `pipeline-main`, `scraper-heavy`, `digital-twin-engine`, `shadow-learner-aggregator`, `whatsapp-webhook`, and `email-summary` have **no interaction** with this collection.
+
+### 24.5 RLHF Feedback Loop
+
+#### Write 1 — Autonomous Engine Upsert (Primary)
+
+Fires after every successful `LeadPayload` schema validation and `predictive_cache` write:
+
+```python
+# autonomous-engine/engine.py — _validate_and_cache(), lines 351-365
+if ont_snap.exists:
+    ont_ref.update({"total_yield": firestore.Increment(1), "last_seen": SERVER_TIMESTAMP})
+else:
+    ont_ref.set({"base_path": base_path, "total_yield": 1,
+                 "baseline_weight": 1.0, "last_seen": SERVER_TIMESTAMP})
+```
+
+#### Write 2 — RLHF Reward / Penalty (orchestrator)
+
+Fires when a CRM outcome is recorded on a lead that has passed the burn-in guard:
+
+```python
+# orchestrator/main.py — PUT /api/leads/{id}, lines 1646-1680
+if crm_status in ["won", "negotiating"]: delta_weight = +0.15
+elif crm_status == "lost":               delta_weight = -0.05
+
+# Burn-in guard: sparse data domain — skip math, log only
+if total_yield >= 50:
+    ontology_ref.update({"baseline_weight": firestore.Increment(delta_weight)})
+```
+
+**Asymmetry:** Rewards (`+0.15`) are deliberately 3× the magnitude of penalties (`-0.05`). This biases the system toward continued exploration of weakly-performing domains rather than premature exclusion.
+
+#### Write 3 — Monthly Decay Cron (orchestrator)
+
+Applies regression-to-mean on `baseline_weight` across every document:
+
+```
+new_weight = weight - (weight - 1.0) * 0.10
+```
+
+| Before | After |
+|---|---|
+| `2.0` | `1.900` |
+| `1.5` | `1.450` |
+| `0.8` | `0.820` |
+| `1.0` | skipped (no write) |
+
+Documents at `baseline_weight ≈ 1.0` (`|diff| < 0.001`) are skipped to avoid unnecessary Firestore write costs.
+
+### 24.6 Routing Logic (autonomous-engine)
+
+```python
+# final_score drives Gemini call gating
+final_score = 2.0 * baseline_weight
+
+if baseline_weight < 1.0 or total_yield == 0:
+    → explore_domains  (threshold: final_score >= 1.4, token-budgeted at 15%)
+else:
+    → exploit_domains  (threshold: final_score >= 1.8, unlimited)
+```
+
+### 24.7 Criticality & Fallback Behaviour
+
+| Failure | Behaviour |
+|---|---|
+| Document does not exist for a domain | `baseline_weight` defaults to `1.0`, `total_yield` defaults to `0` → domain routed to explore bucket. **Pipeline does not crash.** |
+| Firestore read raises an exception | **Phase 7 Fix (2026-04-14):** Caught by `try/except` in `engine.py`. Warning logged (`[ONTOLOGY] Firestore read failed`). Defaults applied. Tenant run cycle continues. |
+| RLHF write fails (`orchestrator`) | Caught by `except Exception as re: print(...)`. CRM status update still applied to lead. Only the weight adjustment is silently lost. |
+| Decay cron stream fails | Returns HTTP 500 to Cloud Scheduler. Cloud Scheduler retries per configured policy. |
+
+### 24.8 Key Design Invariants
+
+1. **No TTL on `ontology_map` documents.** They are permanent. Documents accumulate over time — one per unique domain ever seen. The decay cron prevents `baseline_weight` from drifting unboundedly, but never deletes documents.
+2. **`parse_base_path()` must remain identical in both `autonomous-engine` and `orchestrator`.** If the two implementations drift, RLHF writes will target different document IDs than the routing reads — breaking the feedback loop silently.
+3. **Burn-in guard is hardcoded at `total_yield >= 50`.** It is not configurable via `system_config`. For low-volume tenants, this threshold may never be reached, permanently locking them out of RLHF adjustments.
+4. **No composite index is required or deployed.** All reads are direct lookups or full-collection streams. The `(baseline_weight, total_yield)` composite index was removed on 2026-04-14 as it was declared but never queried.
+

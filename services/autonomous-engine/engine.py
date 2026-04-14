@@ -125,10 +125,28 @@ class TriangulationEngine:
         explore_domains: List[str] = []
 
         for domain in matched:
-            ontology_doc  = self.db.collection("ontology_map").document(domain).get()
-            ontology_data = ontology_doc.to_dict() if ontology_doc.exists else {}
-            baseline_weight = ontology_data.get("baseline_weight", 1.0)
-            total_yield     = ontology_data.get("total_yield", 0)
+            # ── FIX: Defensive ontology read ────────────────────────────────
+            # Previously: an uncaught Firestore exception here (DEADLINE_EXCEEDED,
+            # network timeout, etc.) would propagate out of this loop and abort
+            # the entire TriangulationEngine.run() cycle for the tenant —
+            # silently killing all downstream lead caching with no error surfaced.
+            # Now: exceptions are caught and warning-logged. The domain is
+            # defaulted to neutral weight (1.0) and zero yield, routing it into
+            # the explore bucket. This is the safest failure mode: uncertain
+            # domains get a discovery pass rather than being silently excluded.
+            try:
+                ontology_doc    = self.db.collection("ontology_map").document(domain).get()
+                ontology_data   = ontology_doc.to_dict() if ontology_doc.exists else {}
+                baseline_weight = ontology_data.get("baseline_weight", 1.0)
+                total_yield     = ontology_data.get("total_yield", 0)
+            except Exception as ont_err:
+                log.warning(
+                    f"[{self.tenant_id}] [ONTOLOGY] Firestore read failed for '{domain}': "
+                    f"{ont_err}. Defaulting baseline_weight=1.0, total_yield=0 "
+                    f"(explore bucket). Run cycle continues."
+                )
+                baseline_weight = 1.0
+                total_yield     = 0
 
             # Store metadata on domain for downstream use
             if baseline_weight < 1.0 or total_yield == 0:
