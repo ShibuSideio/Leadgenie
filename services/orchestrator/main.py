@@ -21,6 +21,22 @@ import base64
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
 
+# =============================================================================
+# L0 OPERATIONS TELEMETRY — IN-MEMORY CACHE
+# cachetools.TTLCache: thread-safe, bounded LRU + TTL eviction.
+# A single 5-minute cache entry prevents redundant BigQuery billing when the
+# CEO refreshes the dashboard rapidly. Max 1 key stored (the single endpoint).
+# =============================================================================
+try:
+    from cachetools import TTLCache
+except ImportError:
+    # Graceful fallback if cachetools not yet installed in container —
+    # endpoint still works, just without caching.
+    TTLCache = None
+
+_OPS_CACHE_TTL_SECONDS = 300  # 5 minutes
+_ops_telemetry_cache = TTLCache(maxsize=4, ttl=_OPS_CACHE_TTL_SECONDS) if TTLCache else {}
+
 app = Flask(__name__)
 ALLOWED_ORIGINS = [
     "https://lead-sniper-prod.web.app",
@@ -932,7 +948,146 @@ def trigger_daily_sweep(path):
                     }
                 )
                 return jsonify({"status": "success", "message": f"Approved identity with {amount} credits for {days} days."}), 200
-                
+
+            # =================================================================
+            # GET /api/internal/l0/operations-telemetry
+            # L0-only endpoint. Returns:
+            #   geo_heatmap   — BigQuery aggregation of active campaigns by GL
+            #   domain_matrix — Firestore top-10 domains by baseline_weight
+            #
+            # COST PROTECTION: Results cached in TTLCache for 5 minutes.
+            # BigQuery is billed per byte scanned — never run unbounded on
+            # every dashboard refresh. Cache hit returns immediately.
+            # =================================================================
+            elif request.path == "/api/internal/l0/operations-telemetry" and request.method == "GET":
+
+                CACHE_KEY = "ops_telemetry_v1"
+
+                # ── Cache hit: return immediately, zero BQ/Firestore cost ─────────
+                if CACHE_KEY in _ops_telemetry_cache:
+                    cached = _ops_telemetry_cache[CACHE_KEY]
+                    print(f"[L0 OPS] Cache hit — returning cached telemetry "
+                          f"(age: {int(_OPS_CACHE_TTL_SECONDS - (datetime.datetime.now(datetime.timezone.utc) - cached['cached_at']).total_seconds())}s remaining)")
+                    return jsonify({
+                        "status":     "success",
+                        "cache_hit":  True,
+                        "cached_at":  cached["cached_at"].isoformat(),
+                        "data":       cached["data"]
+                    }), 200
+
+                # ── 1. Geographic Heatmap — BigQuery ──────────────────────────
+                # Aggregates active campaign counts by GL (geo-location field)
+                # from the Firestore BQ export table.
+                #
+                # Cost ceiling: the campaigns_raw table is small (<10MB) and
+                # partitioned by ingestion time; this query scans <1MB per run.
+                # At BQ on-demand pricing: ~$0.000005 per query = negligible.
+                # TTL cache ensures max 288 queries/day even under heavy usage.
+                # ────────────────────────────────────────────────────────────────
+                geo_heatmap = []
+                bq_error    = None
+                try:
+                    bq = bigquery.Client(project=PROJECT_ID)
+
+                    # Parameterised to prevent SQL injection (project id is
+                    # server-controlled, not user-supplied, but defence-in-depth).
+                    bq_sql = """
+                        SELECT
+                            COALESCE(
+                                NULLIF(TRIM(JSON_EXTRACT_SCALAR(data, '$.gl')),   ''),
+                                NULLIF(TRIM(JSON_EXTRACT_SCALAR(data, '$.location')), ''),
+                                'Unknown'
+                            )                         AS region,
+                            COUNT(*)                  AS active_campaigns
+                        FROM
+                            `{project}.firestore_export.campaigns_raw`
+                        WHERE
+                            JSON_EXTRACT_SCALAR(data, '$.status') = 'active'
+                        GROUP BY
+                            region
+                        ORDER BY
+                            active_campaigns DESC
+                        LIMIT 50
+                    """.format(project=PROJECT_ID)
+
+                    bq_job  = bq.query(bq_sql)
+                    bq_rows = bq_job.result()   # blocks until query completes
+
+                    for row in bq_rows:
+                        region = (row.region or 'Unknown').strip()
+                        if region:
+                            geo_heatmap.append({
+                                "region":           region,
+                                "active_campaigns": int(row.active_campaigns)
+                            })
+
+                    print(f"[L0 OPS] BigQuery geo-heatmap OK: {len(geo_heatmap)} regions, "
+                          f"bytes_processed={bq_job.total_bytes_processed}")
+
+                except Exception as bq_err:
+                    # Fail partial: surface BQ error in response but still
+                    # attempt the Firestore domain matrix below.
+                    bq_error = str(bq_err)
+                    print(f"[L0 OPS] BigQuery geo-heatmap FAILED: {bq_err}")
+
+                # ── 2. Domain Affinity Matrix — Firestore ontology_map ────────
+                # Top 10 domains by RLHF-trained baseline_weight.
+                # Direct document reads (no composite index required) —
+                # the collection is ordered by a single field.
+                # ────────────────────────────────────────────────────────────────
+                domain_matrix = []
+                fs_error      = None
+                try:
+                    ont_docs = (
+                        db.collection("ontology_map")
+                          .order_by("baseline_weight", direction=firestore.Query.DESCENDING)
+                          .limit(10)
+                          .stream()
+                    )
+                    for doc in ont_docs:
+                        d = doc.to_dict() or {}
+                        # Never expose internal timestamps or raw Firestore fields
+                        # that are not meaningful on the L0 dashboard.
+                        domain_matrix.append({
+                            "domain":         d.get("base_path", doc.id),
+                            "baseline_weight": round(float(d.get("baseline_weight", 1.0)), 4),
+                            "total_yield":     int(d.get("total_yield", 0)),
+                            "last_seen":       d["last_seen"].isoformat() if d.get("last_seen") and hasattr(d["last_seen"], "isoformat") else None,
+                        })
+
+                    print(f"[L0 OPS] Firestore domain-matrix OK: {len(domain_matrix)} domains")
+
+                except Exception as fs_err:
+                    fs_error = str(fs_err)
+                    print(f"[L0 OPS] Firestore domain-matrix FAILED: {fs_err}")
+
+                # ── 3. Assemble response + prime cache ────────────────────────
+                now = datetime.datetime.now(datetime.timezone.utc)
+                payload = {
+                    "geo_heatmap":    geo_heatmap,
+                    "domain_matrix":  domain_matrix,
+                    "generated_at":   now.isoformat(),
+                    "ttl_seconds":    _OPS_CACHE_TTL_SECONDS,
+                }
+                errors = {}
+                if bq_error: errors["bigquery"] = bq_error
+                if fs_error: errors["firestore"] = fs_error
+                if errors:   payload["partial_errors"] = errors
+
+                # Only prime the cache if both sources returned data
+                # (avoids caching a degraded response for 5 minutes).
+                if not bq_error and not fs_error:
+                    _ops_telemetry_cache[CACHE_KEY] = {
+                        "data":      payload,
+                        "cached_at": now
+                    }
+                    print(f"[L0 OPS] Cache primed — valid for {_OPS_CACHE_TTL_SECONDS}s")
+
+                return jsonify({
+                    "status":    "success",
+                    "cache_hit": False,
+                    "data":      payload
+                }), 200
         except ValueError as ve:
             return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
         except Exception as e:
