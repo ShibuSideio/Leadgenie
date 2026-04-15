@@ -1260,9 +1260,132 @@ def trigger_daily_sweep(path):
             return jsonify({"error": "Internal Error", "message": str(e)}), 500
 
     # -----------------------------------------------------------------------------------------
+    # PERSONA VAULT ROUTER — GET / POST / PUT / DELETE for /api/personas
+    # Must be BEFORE the generic POST/PUT gate (which excludes GET and DELETE).
+    # -----------------------------------------------------------------------------------------
+    if request.path == "/api/personas" or request.path.startswith("/api/personas/"):
+        try:
+            uid, tenant_id, user_role = authenticate_request(request)
+        except ValueError as ve:
+            return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
+
+        data = request.json or {} if request.method in ("POST", "PUT") else {}
+
+        if request.path == "/api/personas" and request.method == "GET":
+            try:
+                p_docs = (
+                    db.collection("tenant_profiles")
+                      .document(tenant_id)
+                      .collection("personas")
+                      .order_by("createdAt", direction=firestore.Query.DESCENDING)
+                      .stream()
+                )
+                personas_out = []
+                for doc in p_docs:
+                    d = doc.to_dict() or {}
+                    personas_out.append({
+                        "id":        doc.id,
+                        "name":      d.get("name", ""),
+                        "bio":       d.get("bio", ""),
+                        "keywords":  d.get("keywords", ""),
+                        "createdAt": d["createdAt"].isoformat() if d.get("createdAt") and hasattr(d["createdAt"], "isoformat") else None,
+                        "updatedAt": d["updatedAt"].isoformat() if d.get("updatedAt") and hasattr(d["updatedAt"], "isoformat") else None,
+                    })
+                return jsonify({"status": "success", "data": personas_out}), 200
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+
+        elif request.path == "/api/personas" and request.method == "POST":
+            p_name = (data.get("name") or "").strip()
+            p_bio  = (data.get("bio")  or "").strip()
+            p_keys = (data.get("keywords") or "").strip()
+            if not p_name or not p_bio:
+                return jsonify({"error": "name and bio are required"}), 400
+            _, p_ref = db.collection("tenant_profiles") \
+                         .document(tenant_id) \
+                         .collection("personas") \
+                         .add({
+                             "name": p_name, "bio": p_bio, "keywords": p_keys,
+                             "tenant_id": tenant_id,
+                             "createdAt": firestore.SERVER_TIMESTAMP,
+                             "updatedAt": firestore.SERVER_TIMESTAMP,
+                         })
+            print(f"[PERSONA] Created '{p_name}' → {p_ref.id}")
+            return jsonify({"status": "success", "id": p_ref.id}), 201
+
+        elif request.path.startswith("/api/personas/") and request.method == "DELETE":
+            persona_id_part = request.path.split("/api/personas/", 1)[-1].split("/")[0]
+            linked = list(
+                db.collection("campaigns")
+                  .where(filter=FieldFilter("persona_id", "==", persona_id_part))
+                  .where(filter=FieldFilter("status",     "==", "active"))
+                  .limit(5).stream()
+            )
+            if linked:
+                names = [d.to_dict().get("name", d.id) for d in linked]
+                return jsonify({"error": "Persona is in use by active campaigns", "campaigns": names}), 409
+            db.collection("tenant_profiles").document(tenant_id) \
+              .collection("personas").document(persona_id_part).delete()
+            print(f"[PERSONA] Deleted {persona_id_part}")
+            return jsonify({"status": "success"}), 200
+
+        elif request.path.startswith("/api/personas/") and request.method == "PUT":
+            persona_id_part = request.path.split("/api/personas/", 1)[-1].split("/")[0]
+            p_name = (data.get("name") or "").strip()
+            p_bio  = (data.get("bio")  or "").strip()
+            p_keys = (data.get("keywords") or "").strip()
+            if not p_name or not p_bio:
+                return jsonify({"error": "name and bio are required"}), 400
+
+            db.collection("tenant_profiles").document(tenant_id) \
+              .collection("personas").document(persona_id_part) \
+              .set({"name": p_name, "bio": p_bio, "keywords": p_keys,
+                    "tenant_id": tenant_id, "updatedAt": firestore.SERVER_TIMESTAMP}, merge=True)
+            print(f"[PERSONA] Updated {persona_id_part} → '{p_name}'")
+
+            # Surgical cache invalidation
+            try:
+                linked_camps = list(
+                    db.collection("campaigns")
+                      .where(filter=FieldFilter("tenant_id",  "==", tenant_id))
+                      .where(filter=FieldFilter("persona_id", "==", persona_id_part))
+                      .where(filter=FieldFilter("status",     "==", "active"))
+                      .stream()
+                )
+                wiped = 0
+                for camp_doc in linked_camps:
+                    cache_docs = list(
+                        db.collection("predictive_cache")
+                          .where(filter=FieldFilter("campaign_id", "==", camp_doc.id))
+                          .limit(200).stream()
+                    )
+                    if cache_docs:
+                        batch = db.batch()
+                        for cdoc in cache_docs:
+                            batch.delete(cdoc.reference)
+                        batch.commit()
+                    wiped += len(cache_docs)
+                    camp_doc.reference.update({
+                        "persona_bio": p_bio, "persona_keywords": p_keys,
+                        "updatedAt": firestore.SERVER_TIMESTAMP,
+                    })
+                    print(f"[PERSONA INVALIDATE] Wiped {len(cache_docs)} cache docs for campaign {camp_doc.id}")
+            except Exception as inv_err:
+                linked_camps = []
+                print(f"[PERSONA INVALIDATE] Error (non-fatal): {inv_err}")
+
+            return jsonify({
+                "status": "success", "id": persona_id_part,
+                "linked_campaigns": len(linked_camps)
+            }), 200
+
+        return jsonify({"error": "Method not allowed"}), 405
+
+    # -----------------------------------------------------------------------------------------
     # REST API Gateway Protocol (Frontend Database Mutations)
     # -----------------------------------------------------------------------------------------
     if request.path.startswith("/api/") and not request.path.startswith("/api/internal/") and request.method in ["POST", "PUT"]:
+
         try:
             uid, tenant_id, user_role = authenticate_request(request)
             data = request.json or {}
