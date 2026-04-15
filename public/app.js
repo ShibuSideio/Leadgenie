@@ -290,6 +290,31 @@ async function loadMe() {
     } catch (error) {
         console.error('Execution failed:', error);
     }
+
+    // ── Silent Persona Vault Migration ─────────────────────────────────────
+    // Fire-and-forget: idempotent on backend. Does NOT block UI.
+    _runPersonaMigration();
+}
+
+async function _runPersonaMigration() {
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken();
+        const resp  = await fetch(`${API_BASE}/api/migrate-personas`, {
+            method:  'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body:    JSON.stringify({})
+        });
+        const json = await resp.json().catch(() => ({}));
+        if (json.migrated) {
+            console.log(`[MIGRATION] Legacy persona created: ${json.name} (${json.persona_id})`);
+            window._personasCache = []; // invalidate so next vault load is fresh
+        }
+    } catch(e) {
+        // Non-fatal — migration will retry on next login
+        console.warn('[MIGRATION] Silent migration failed (non-fatal):', e);
+    }
 }
 
 // ─── CAMPAIGN DATA STORE ────────────────────────────────────────────────────
@@ -2914,40 +2939,77 @@ window.editPredictiveCard = function(idx) {
     document.getElementById('c-card-edit-' + idx).classList.remove('hidden');
 };
 
-window.deployPredictiveCard = function(idx, origProd, origHook, origAdv) {
+window.deployPredictiveCard = async function(idx, origProd, origHook, origAdv) {
     const prod = (document.getElementById('c-prod-' + idx)?.value || '').trim();
     const hook = (document.getElementById('c-hook-' + idx)?.value || '').trim();
     const adv  = (document.getElementById('c-adv-' + idx)?.value || '').trim();
     const loc  = (document.getElementById('c-loc-' + idx)?.value || '').trim();
-    
-    // BUG FIX: Previous logic `!loc && loc.toLowerCase() !== 'worldwide'` was
-    // inverted — it would always fire validation error on empty string.
-    // Correct intent: require a non-empty location value.
+
     if (!loc) {
         showToast('Target Location is required.', 'error');
         return;
     }
 
-    // basic diff via btoa
-    const wasEdited = (btoa(prod.replace(/['"]/g, '')) !== origProd) || 
-                      (btoa(hook.replace(/['"]/g, '')) !== origHook) || 
-                      (btoa(adv.replace(/['"]/g, '')) !== origAdv);
-                      
+    // ── Step 1: Auto-save the AI opportunity as a Persona ──────────────────
+    // Compose a structured directive bio from the AI card fields
+    const personaBio = [
+        `[Who we help]: Businesses struggling with: ${hook || prod}`,
+        `[The problem we solve]: ${hook || prod}`,
+        `[Our unfair advantage / Unique Value]: ${adv || 'Our unique positioning in this market'}`
+    ].join('\n');
+    const personaName = `${prod} Strategy`;
+
+    const deployBtn = document.querySelector(`#c-card-edit-${idx} button.primary-btn`) ||
+                      document.querySelector(`[onclick*="deployPredictiveCard(${idx}"]`);
+    if (deployBtn) { deployBtn.disabled = true; deployBtn.textContent = '⚙️ Saving Agent...'; }
+
+    try {
+        const user  = firebase.auth().currentUser;
+        if (!user) { showToast('Session expired.', 'error'); return; }
+        const token = await user.getIdToken(true);
+
+        const pResp = await fetch(`${API_BASE}/api/personas`, {
+            method:  'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ name: personaName, bio: personaBio, keywords: prod })
+        });
+        if (pResp.ok) {
+            const pJson = await pResp.json();
+            window._selectedPersonaId = pJson.id || '';
+            window._personasCache = []; // invalidate cache
+            console.log(`[DEPLOY] Auto-created persona '${personaName}' → ${pJson.id}`);
+        } else {
+            console.warn('[DEPLOY] Persona auto-save failed:', await pResp.text());
+            // Non-fatal: continue without persona if API fails
+            window._selectedPersonaId = '';
+        }
+    } catch(pErr) {
+        console.warn('[DEPLOY] Persona auto-save error (non-fatal):', pErr);
+        window._selectedPersonaId = '';
+    }
+
+    if (deployBtn) { deployBtn.textContent = '🚀 Launching...'; }
+
+    // ── Step 2: Create the campaign with the new persona_id linked ──────────
+    const wasEdited = (btoa(prod.replace(/['"]/g, '')) !== origProd) ||
+                      (btoa(hook.replace(/['"]/g, '')) !== origHook) ||
+                      (btoa(adv.replace(/['"]/g, ''))  !== origAdv);
+
     closeModal('child-campaign-modal');
 
     saveCampaignAction({
-        name: prod,
-        bio: 'CHILD_CAMPAIGN_OVERRIDE',
-        keywords: '',
-        campaign_focus: prod,
-        pain_point: hook,
-        unfair_advantage: adv,
-        gl: '',
-        location: loc, // Captured here
-        target_urls: [],
-        human_edited: wasEdited,
+        name:              prod,
+        bio:               'CHILD_CAMPAIGN_OVERRIDE',
+        keywords:          '',
+        campaign_focus:    prod,
+        pain_point:        hook,
+        unfair_advantage:  adv,
+        gl:                '',
+        location:          loc,
+        target_urls:       [],
+        human_edited:      wasEdited,
         target_angle_hook: hook,
-        target_angle_adv: adv
+        target_angle_adv:  adv
     });
 };
 
@@ -2961,21 +3023,31 @@ window.showCcCustomFallback = function() {
     if (locEl && !locEl.value && window._dtState && window._dtState.extractedGl) {
         locEl.value = window._dtState.extractedGl;
     }
+    // Populate persona dropdown — always refresh to catch newly created personas
+    populatePersonaDropdown('cc-persona-select');
 };
 
-window.saveChildCampaign = function() {
-    const focusEl = document.getElementById('cc-focus');
-    const locEl = document.getElementById('cc-location');
-    const painEl = document.getElementById('cc-pain');
-    const advEl = document.getElementById('cc-advantage');
-    
-    const focus = focusEl?.value.trim() || 'Custom Campaign';
-    const loc = locEl?.value.trim() || '';
-    const pain = painEl?.value.trim() || '';
-    const adv = advEl?.value.trim() || '';
+window.saveChildCampaign = async function() {
+    const focusEl   = document.getElementById('cc-focus');
+    const locEl     = document.getElementById('cc-location');
+    const painEl    = document.getElementById('cc-pain');
+    const advEl     = document.getElementById('cc-advantage');
+    const personaSel= document.getElementById('cc-persona-select');
 
-    // BUG FIX: Same inverted validation as deployPredictiveCard.
-    // Require any non-empty location string.
+    const focus   = focusEl?.value.trim()    || 'Custom Campaign';
+    const loc     = locEl?.value.trim()      || '';
+    const pain    = painEl?.value.trim()     || '';
+    const adv     = advEl?.value.trim()      || '';
+    const selPid  = personaSel?.value        || '';
+
+    // Persona validation — required
+    if (!selPid) {
+        showToast('Please select an AI Agent / Persona before launching.', 'error');
+        personaSel?.focus();
+        return;
+    }
+    window._selectedPersonaId = selPid;
+
     if (!loc) {
         showToast('Target Geography is required.', 'error');
         return;
@@ -2983,17 +3055,16 @@ window.saveChildCampaign = function() {
 
     closeModal('child-campaign-modal');
 
-    // Guardrail 2: Route distinctly, DO NOT concat into keywords
     saveCampaignAction({
-        name: focus,
-        bio: 'CHILD_CAMPAIGN_OVERRIDE',
-        keywords: '', // Clear legacy keywords reliance
-        campaign_focus: focus,
-        pain_point: pain,
+        name:             focus,
+        bio:              'CHILD_CAMPAIGN_OVERRIDE',
+        keywords:         '',
+        campaign_focus:   focus,
+        pain_point:       pain,
         unfair_advantage: adv,
-        gl: '',
-        location: loc,
-        target_urls: []
+        gl:               '',
+        location:         loc,
+        target_urls:      []
     });
 };
 

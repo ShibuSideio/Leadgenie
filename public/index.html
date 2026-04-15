@@ -14,7 +14,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=43">
+    <link rel="stylesheet" href="styles.css?v=44">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -687,6 +687,14 @@
         </div>
         <div id="cc-recommendation-cards" style="margin-bottom:24px; text-align:left;"></div>
         <div id="cc-custom-fallback-container" style="display:none; text-align:left;">
+            <!-- Persona Selector — required first field -->
+            <div style="margin-bottom:16px; background:linear-gradient(135deg,rgba(79,70,229,0.04),rgba(124,58,237,0.04)); border:1.5px solid rgba(79,70,229,0.18); border-radius:10px; padding:14px;">
+                <label style="font-size:0.78rem; font-weight:700; color:#4338ca; display:block; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.3px;">&#129302; Select AI Agent / Persona <span style="color:#ef4444;">*</span></label>
+                <select id="cc-persona-select" style="width:100%; padding:10px 12px; border:1.5px solid #c7d2fe; border-radius:8px; font-family:'Inter',sans-serif; font-size:0.88rem; color:#111827; background:#fff; cursor:pointer; outline:none;">
+                    <option value="">Loading personas...</option>
+                </select>
+                <p style="margin:6px 0 0; font-size:0.72rem; color:#6b7280;">No persona yet? <a href="#" onclick="closeModal('child-campaign-modal');switchTab('persona-vault');return false;" style="color:#4f46e5; font-weight:600;">Create one in the Persona Vault &#8594;</a></p>
+            </div>
             <div style="margin-bottom:16px;">
                 <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:6px;">1. Product Focus</label>
                 <input type="text" id="cc-focus" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif;" placeholder="e.g. Enterprise SEO Audit">
@@ -873,6 +881,6 @@
         });
     }
 </script>
-<script src="app.js?v=63"></script>
+<script src="app.js?v=64"></script>
 </body>
 </html>

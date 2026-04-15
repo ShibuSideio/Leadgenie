@@ -1260,6 +1260,66 @@ def trigger_daily_sweep(path):
             return jsonify({"error": "Internal Error", "message": str(e)}), 500
 
     # -----------------------------------------------------------------------------------------
+    # PERSONA VAULT: Silent Legacy Migration
+    # POST /api/migrate-personas
+    # Called once per user login from the frontend. Idempotent.
+    # -----------------------------------------------------------------------------------------
+    if request.path == "/api/migrate-personas" and request.method == "POST":
+        try:
+            uid, tenant_id, user_role = authenticate_request(request)
+        except ValueError as ve:
+            return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
+
+        try:
+            # 1. Check if personas subcollection already has any docs
+            personas_ref = (
+                db.collection("tenant_profiles")
+                  .document(tenant_id)
+                  .collection("personas")
+            )
+            existing = list(personas_ref.limit(1).stream())
+            if existing:
+                return jsonify({"migrated": False, "reason": "personas_exist"}), 200
+
+            # 2. Read legacy bio and keywords from tenant_profiles root doc
+            profile_doc = db.collection("tenant_profiles").document(tenant_id).get()
+            if not profile_doc.exists:
+                return jsonify({"migrated": False, "reason": "no_profile"}), 200
+
+            profile = profile_doc.to_dict() or {}
+            legacy_bio      = (profile.get("bio") or "").strip()
+            legacy_keywords = (profile.get("keywords") or "").strip()
+
+            if not legacy_bio:
+                return jsonify({"migrated": False, "reason": "no_bio"}), 200
+
+            # 3. Create the Default Persona (Legacy) document
+            _, p_ref = personas_ref.add({
+                "name":       "Default Persona (Legacy)",
+                "bio":        legacy_bio,
+                "keywords":   legacy_keywords,
+                "tenant_id":  tenant_id,
+                "is_legacy":  True,
+                "createdAt":  firestore.SERVER_TIMESTAMP,
+                "updatedAt":  firestore.SERVER_TIMESTAMP,
+            })
+            print(f"[MIGRATION] Created legacy persona {p_ref.id} for tenant {tenant_id}")
+
+            # 4. NOTE: We intentionally do NOT delete bio/keywords from the root
+            # tenant doc — the pipeline fallback chain still reads them safely.
+            # A future cleanup job can remove them once all campaigns have persona_id.
+
+            return jsonify({
+                "migrated":   True,
+                "persona_id": p_ref.id,
+                "name":       "Default Persona (Legacy)"
+            }), 200
+
+        except Exception as e:
+            print(f"[MIGRATION ERROR] tenant={tenant_id}: {e}")
+            return jsonify({"migrated": False, "error": str(e)}), 500
+
+    # -----------------------------------------------------------------------------------------
     # PERSONA VAULT ROUTER — GET / POST / PUT / DELETE for /api/personas
     # Must be BEFORE the generic POST/PUT gate (which excludes GET and DELETE).
     # -----------------------------------------------------------------------------------------
