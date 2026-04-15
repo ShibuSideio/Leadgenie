@@ -1429,7 +1429,152 @@ Rules:
                 except Exception as e:
                     print(f"[KB] Failed extraction: {e}")
                     return jsonify({"error": f"Extraction failed: {str(e)}"}), 500
-                
+
+            # =================================================================
+            # PERSONA VAULT — CRUD for named AI agent personas
+            # Collection: tenant_profiles/{tenant_id}/personas/{persona_id}
+            # =================================================================
+
+            elif request.path == "/api/personas" and request.method == "GET":
+                # List all personas for this tenant
+                try:
+                    p_docs = (
+                        db.collection("tenant_profiles")
+                          .document(tenant_id)
+                          .collection("personas")
+                          .order_by("createdAt", direction=firestore.Query.DESCENDING)
+                          .stream()
+                    )
+                    personas_out = []
+                    for doc in p_docs:
+                        d = doc.to_dict() or {}
+                        personas_out.append({
+                            "id":        doc.id,
+                            "name":      d.get("name", ""),
+                            "bio":       d.get("bio", ""),
+                            "keywords":  d.get("keywords", ""),
+                            "createdAt": d["createdAt"].isoformat() if d.get("createdAt") and hasattr(d["createdAt"], "isoformat") else None,
+                            "updatedAt": d["updatedAt"].isoformat() if d.get("updatedAt") and hasattr(d["updatedAt"], "isoformat") else None,
+                        })
+                    return jsonify({"status": "success", "data": personas_out}), 200
+                except Exception as e:
+                    return jsonify({"error": str(e)}), 500
+
+            elif request.path == "/api/personas" and request.method == "POST":
+                # Create a new persona
+                p_name = (data.get("name") or "").strip()
+                p_bio  = (data.get("bio")  or "").strip()
+                p_keys = (data.get("keywords") or "").strip()
+                if not p_name or not p_bio:
+                    return jsonify({"error": "name and bio are required"}), 400
+                p_doc = {
+                    "name":      p_name,
+                    "bio":       p_bio,
+                    "keywords":  p_keys,
+                    "tenant_id": tenant_id,
+                    "createdAt": firestore.SERVER_TIMESTAMP,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                }
+                _, p_ref = db.collection("tenant_profiles") \
+                             .document(tenant_id) \
+                             .collection("personas") \
+                             .add(p_doc)
+                print(f"[PERSONA] Created persona '{p_name}' → {p_ref.id}")
+                return jsonify({"status": "success", "id": p_ref.id}), 201
+
+            elif request.path.startswith("/api/personas/") and request.method in ("PUT", "DELETE"):
+                persona_id_part = request.path.split("/api/personas/", 1)[-1].split("/")[0]
+                p_ref = (
+                    db.collection("tenant_profiles")
+                      .document(tenant_id)
+                      .collection("personas")
+                      .document(persona_id_part)
+                )
+
+                if request.method == "DELETE":
+                    # Guard: warn if any active campaign still links to this persona
+                    linked = list(
+                        db.collection("campaigns")
+                          .where(filter=FieldFilter("persona_id", "==", persona_id_part))
+                          .where(filter=FieldFilter("status",     "==", "active"))
+                          .limit(5)
+                          .stream()
+                    )
+                    if linked:
+                        names = [d.to_dict().get("name", d.id) for d in linked]
+                        return jsonify({
+                            "error": "Persona is in use by active campaigns",
+                            "campaigns": names
+                        }), 409
+                    p_ref.delete()
+                    print(f"[PERSONA] Deleted persona {persona_id_part}")
+                    return jsonify({"status": "success"}), 200
+
+                else:  # PUT — update + surgical cache invalidation
+                    p_name = (data.get("name") or "").strip()
+                    p_bio  = (data.get("bio")  or "").strip()
+                    p_keys = (data.get("keywords") or "").strip()
+                    if not p_name or not p_bio:
+                        return jsonify({"error": "name and bio are required"}), 400
+
+                    p_ref.set({
+                        "name":      p_name,
+                        "bio":       p_bio,
+                        "keywords":  p_keys,
+                        "tenant_id": tenant_id,
+                        "updatedAt": firestore.SERVER_TIMESTAMP,
+                    }, merge=True)
+                    print(f"[PERSONA] Updated persona {persona_id_part} → '{p_name}'")
+
+                    # ── Surgical cache invalidation ───────────────────────────
+                    # Find ONLY campaigns using THIS persona_id and wipe their
+                    # predictive_cache. Campaigns on other personas are untouched.
+                    try:
+                        linked_camps = list(
+                            db.collection("campaigns")
+                              .where(filter=FieldFilter("tenant_id",  "==", tenant_id))
+                              .where(filter=FieldFilter("persona_id", "==", persona_id_part))
+                              .where(filter=FieldFilter("status",     "==", "active"))
+                              .stream()
+                        )
+                        wiped_count = 0
+                        for camp_doc in linked_camps:
+                            camp_id = camp_doc.id
+                            # Delete predictive_cache docs for this campaign only
+                            cache_docs = list(
+                                db.collection("predictive_cache")
+                                  .where(filter=FieldFilter("campaign_id", "==", camp_id))
+                                  .limit(200)
+                                  .stream()
+                            )
+                            batch = db.batch()
+                            for cdoc in cache_docs:
+                                batch.delete(cdoc.reference)
+                            if cache_docs:
+                                batch.commit()
+                            wiped_count += len(cache_docs)
+                            print(f"[PERSONA INVALIDATE] Wiped {len(cache_docs)} cache docs "
+                                  f"for campaign {camp_id} (persona {persona_id_part})")
+
+                        # Also update denormalised fields on linked campaigns
+                        for camp_doc in linked_camps:
+                            camp_doc.reference.update({
+                                "persona_bio":      p_bio,
+                                "persona_keywords": p_keys,
+                                "updatedAt":        firestore.SERVER_TIMESTAMP,
+                            })
+
+                        print(f"[PERSONA INVALIDATE] Total wiped: {wiped_count} cache docs "
+                              f"across {len(linked_camps)} campaigns")
+                    except Exception as inv_err:
+                        print(f"[PERSONA INVALIDATE] Error (non-fatal): {inv_err}")
+
+                    return jsonify({
+                        "status":           "success",
+                        "id":               persona_id_part,
+                        "linked_campaigns": len(linked_camps) if 'linked_camps' in dir() else 0
+                    }), 200
+
             elif request.path == "/api/campaigns" and request.method == "POST":
                 is_valid, status_code, err_msg = check_quota(tenant_id)
                 if not is_valid:
@@ -1517,6 +1662,36 @@ Rules:
                 data['tenant_id'] = tenant_id
                 data['createdAt'] = firestore.SERVER_TIMESTAMP
                 data['updatedAt'] = firestore.SERVER_TIMESTAMP
+
+                # ── Persona Vault: denormalise linked persona onto campaign ─────
+                # Fetch the persona at creation time and store its bio/keywords
+                # directly on the campaign doc. Pipeline reads these fast fields
+                # instead of a subcollection lookup on every producer run.
+                persona_id_val = (data.get("persona_id") or "").strip()
+                if persona_id_val:
+                    try:
+                        p_snap = (
+                            db.collection("tenant_profiles")
+                              .document(tenant_id)
+                              .collection("personas")
+                              .document(persona_id_val)
+                              .get()
+                        )
+                        if p_snap.exists:
+                            p_data = p_snap.to_dict() or {}
+                            data["persona_bio"]      = p_data.get("bio", "")
+                            data["persona_keywords"] = p_data.get("keywords", "")
+                            data["persona_name"]     = p_data.get("name", "")
+                            # If no explicit bio given, use persona bio as campaign bio
+                            if not data.get("bio"):
+                                data["bio"] = data["persona_bio"]
+                            print(f"[PERSONA] Linked persona '{p_data.get('name')}' → campaign")
+                        else:
+                            print(f"[PERSONA] persona_id={persona_id_val} not found — skipping")
+                    except Exception as p_err:
+                        print(f"[PERSONA] Denormalise error (non-fatal): {p_err}")
+                # ─────────────────────────────────────────────────────────────────
+
                 update_time, doc_ref = db.collection("campaigns").add(data)
 
                 # V14: Gate the LLM vector classification to campaign creation only.

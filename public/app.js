@@ -934,6 +934,7 @@ window.saveCampaignAction = async function(payload) {
                 gl:          cpGl,
                 location:    cpLoc,
                 target_urls: targetUrls,
+                persona_id:  window._selectedPersonaId || '',
                 status:      'active'
             })
         });
@@ -1019,6 +1020,10 @@ window.switchTab = function(tabName) {
         if (!isAdmin) { showToast('CRM module is restricted to L0 administrators.', 'error'); return; }
         show('view-crm-test');
         loadCrmBoard();
+    } else if (tabName === 'persona-vault') {
+        show('view-persona-vault');
+        activateNav('tab-personas', 'dock-tab-personas');
+        loadPersonaVault();
     }
 };
 
@@ -3108,3 +3113,235 @@ document.body.addEventListener('click', function(e) {
     // Intentionally empty — kept for future dynamic element delegation only.
     // Do NOT re-add btn-new-twin-* or btn-add-campaign-* here.
 });
+
+// =============================================================================
+// PERSONA VAULT — Full CRUD UI Engine
+// =============================================================================
+
+// In-memory cache of loaded personas for dropdown population
+window._personasCache = [];
+window._selectedPersonaId = '';
+
+// ── loadPersonaVault ──────────────────────────────────────────────────────────
+window.loadPersonaVault = async function() {
+    const grid = document.getElementById('persona-grid');
+    if (!grid) return;
+    grid.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:48px 20px;grid-column:1/-1;">&#8987; Loading&hellip;</div>';
+
+    try {
+        const user  = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken(true);
+        const resp  = await fetch(`${API_BASE}/api/personas`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json  = await resp.json();
+        const list  = json.data || [];
+
+        window._personasCache = list;
+
+        if (list.length === 0) {
+            grid.innerHTML = `
+                <div style="text-align:center; color:var(--text-muted); padding:64px 20px; grid-column:1/-1;">
+                    <div style="font-size:3rem; margin-bottom:12px;">&#127918;</div>
+                    <div style="font-size:1.05rem; font-weight:600; margin-bottom:8px;">No Personas Yet</div>
+                    <div style="font-size:0.85rem; margin-bottom:20px; max-width:360px; margin-left:auto; margin-right:auto;">
+                        Create named AI agent personas with unique pitches and keywords.
+                        Attach them to campaigns so each search uses the right voice.
+                    </div>
+                    <button class="primary-btn" onclick="openPersonaModal()" style="min-height:44px; padding:10px 28px;">
+                        &#43; Create Your First Persona
+                    </button>
+                </div>`;
+            return;
+        }
+
+        grid.innerHTML = list.map(p => _buildPersonaCard(p)).join('');
+    } catch(err) {
+        console.error('[Persona Vault]', err);
+        if (grid) grid.innerHTML = `<div style="text-align:center;color:#ef4444;padding:32px;grid-column:1/-1;">Failed to load personas: ${err.message}</div>`;
+    }
+};
+
+// ── _buildPersonaCard ─────────────────────────────────────────────────────────
+function _buildPersonaCard(p) {
+    const kwChips = (p.keywords || '').split(',')
+        .map(k => k.trim()).filter(Boolean).slice(0, 5)
+        .map(k => `<span style="display:inline-block; background:rgba(79,70,229,0.08); color:#4f46e5; font-size:0.7rem; font-weight:600; padding:3px 8px; border-radius:20px; margin:2px;">${k}</span>`)
+        .join('');
+    const bioPreview = (p.bio || '').length > 120 ? p.bio.slice(0, 120) + '…' : (p.bio || '—');
+    const safeId  = (p.id  || '').replace(/'/g, "\\'");
+    const safeName = (p.name||'').replace(/'/g, "\\'");
+    const safeBio  = (p.bio ||'').replace(/'/g, "\\'").replace(/\n/g, ' ');
+    const safeKeys = (p.keywords||'').replace(/'/g, "\\'");
+
+    return `
+    <div style="background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:20px; display:flex; flex-direction:column; gap:12px; box-shadow:0 1px 4px rgba(0,0,0,0.06); transition:box-shadow 0.2s;" onmouseover="this.style.boxShadow='0 4px 16px rgba(79,70,229,0.12)'" onmouseout="this.style.boxShadow='0 1px 4px rgba(0,0,0,0.06)'">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
+            <div style="font-size:1rem; font-weight:700; color:#1e1b4b; line-height:1.3;">${p.name || 'Unnamed Persona'}</div>
+            <div style="display:flex; gap:8px; flex-shrink:0;">
+                <button onclick="openPersonaModal('${safeId}','${safeName}','${safeBio}','${safeKeys}')" style="background:none; border:1px solid #d1d5db; border-radius:8px; padding:5px 10px; font-size:0.75rem; font-weight:600; color:#4f46e5; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.background='#ede9fe'" onmouseout="this.style.background='none'">&#9998; Edit</button>
+                <button onclick="deletePersona('${safeId}','${safeName}')" style="background:none; border:1px solid #fecaca; border-radius:8px; padding:5px 10px; font-size:0.75rem; font-weight:600; color:#ef4444; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.background='#fef2f2'" onmouseout="this.style.background='none'">&#128465;</button>
+            </div>
+        </div>
+        <div style="font-size:0.82rem; color:#6b7280; line-height:1.5;">${bioPreview}</div>
+        <div style="display:flex; flex-wrap:wrap; gap:4px; min-height:24px;">${kwChips || '<span style="font-size:0.72rem;color:#9ca3af;">No keywords set</span>'}</div>
+        <div style="margin-top:auto; padding-top:8px; border-top:1px solid #f1f5f9; display:flex; justify-content:flex-end;">
+            <button onclick="selectPersonaForCampaign('${safeId}','${safeName || 'Persona'}')" style="background:linear-gradient(135deg,#4f46e5,#7c3aed); color:#fff; border:none; border-radius:8px; padding:7px 14px; font-size:0.78rem; font-weight:600; cursor:pointer; transition:opacity 0.15s;" onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
+                &#128640; Use in Campaign
+            </button>
+        </div>
+    </div>`;
+}
+
+// ── openPersonaModal ──────────────────────────────────────────────────────────
+window.openPersonaModal = function(id='', name='', bio='', keywords='') {
+    const overlay = document.getElementById('persona-modal-overlay');
+    const title   = document.getElementById('persona-modal-title');
+    const editId  = document.getElementById('persona-edit-id');
+    const nameEl  = document.getElementById('persona-name');
+    const bioEl   = document.getElementById('persona-bio');
+    const keysEl  = document.getElementById('persona-keywords');
+    if (!overlay) return;
+
+    if (title)  title.textContent  = id ? 'Edit Persona' : 'New Persona';
+    if (editId) editId.value       = id;
+    if (nameEl) nameEl.value       = name;
+    if (bioEl)  bioEl.value        = bio.replace(/ \u2026$/, '');
+    if (keysEl) keysEl.value       = keywords;
+
+    overlay.style.display = 'flex';
+    setTimeout(() => nameEl?.focus(), 80);
+};
+
+// ── closePersonaModal ─────────────────────────────────────────────────────────
+window.closePersonaModal = function() {
+    const overlay = document.getElementById('persona-modal-overlay');
+    if (overlay) overlay.style.display = 'none';
+};
+
+// ── savePersona ───────────────────────────────────────────────────────────────
+window.savePersona = async function() {
+    const editId  = document.getElementById('persona-edit-id')?.value || '';
+    const name    = (document.getElementById('persona-name')?.value    || '').trim();
+    const bio     = (document.getElementById('persona-bio')?.value     || '').trim();
+    const keywords= (document.getElementById('persona-keywords')?.value|| '').trim();
+    const saveBtn = document.getElementById('persona-save-btn');
+
+    if (!name)    { showToast('Persona name is required.', 'error');  return; }
+    if (!bio)     { showToast('Bio / Pitch is required.', 'error');   return; }
+
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '⏳ Saving…'; }
+
+    try {
+        const user  = firebase.auth().currentUser;
+        if (!user) { showToast('Session expired. Please sign in again.', 'error'); return; }
+        const token = await user.getIdToken(true);
+
+        const isEdit  = !!editId;
+        const url     = isEdit ? `${API_BASE}/api/personas/${editId}` : `${API_BASE}/api/personas`;
+        const method  = isEdit ? 'PUT' : 'POST';
+
+        const resp = await fetch(url, {
+            method,
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, bio, keywords })
+        });
+
+        if (!resp.ok) {
+            const e = await resp.json().catch(() => ({}));
+            throw new Error(e.error || `HTTP ${resp.status}`);
+        }
+
+        const result = await resp.json();
+        if (isEdit && result.linked_campaigns > 0) {
+            showToast(`Persona updated. Cache wiped for ${result.linked_campaigns} linked campaign(s).`, 'success');
+        } else {
+            showToast(isEdit ? 'Persona updated.' : 'Persona created!', 'success');
+        }
+
+        closePersonaModal();
+        loadPersonaVault();
+    } catch(err) {
+        console.error('[savePersona]', err);
+        showToast('Save failed: ' + err.message, 'error');
+    } finally {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Persona'; }
+    }
+};
+
+// ── deletePersona ─────────────────────────────────────────────────────────────
+window.deletePersona = async function(id, name) {
+    if (!id) return;
+    if (!confirm(`Delete persona "${name}"?\nThis cannot be undone. Active campaigns using it will fall back to their own bio.`)) return;
+
+    try {
+        const user  = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken(true);
+        const resp  = await fetch(`${API_BASE}/api/personas/${id}`, {
+            method:  'DELETE',
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        const json = await resp.json();
+        if (!resp.ok) {
+            if (resp.status === 409) {
+                showToast(`Cannot delete: in use by campaigns: ${json.campaigns?.join(', ')}`, 'error');
+            } else {
+                throw new Error(json.error || `HTTP ${resp.status}`);
+            }
+            return;
+        }
+        showToast(`Persona "${name}" deleted.`, 'success');
+        loadPersonaVault();
+    } catch(err) {
+        console.error('[deletePersona]', err);
+        showToast('Delete failed: ' + err.message, 'error');
+    }
+};
+
+// ── selectPersonaForCampaign ──────────────────────────────────────────────────
+// Called from persona card "Use in Campaign" — sets the global selection and
+// switches to the campaign builder tab pre-loaded with this persona.
+window.selectPersonaForCampaign = function(id, name) {
+    window._selectedPersonaId = id;
+    showToast(`Persona "${name}" selected. Open a campaign to use it.`, 'success');
+    // Navigate to campaign builder
+    switchTab('target');
+};
+
+// ── populatePersonaDropdown ───────────────────────────────────────────────────
+// Call this when opening the campaign creation modal to inject persona options.
+window.populatePersonaDropdown = async function(selectElId) {
+    const sel = document.getElementById(selectElId);
+    if (!sel) return;
+    sel.innerHTML = '<option value="">— No Persona (use campaign bio) —</option>';
+
+    try {
+        const user  = firebase.auth().currentUser;
+        if (!user) return;
+        // Use cache if available, else fetch
+        let list = window._personasCache;
+        if (!list || list.length === 0) {
+            const token = await user.getIdToken();
+            const resp  = await fetch(`${API_BASE}/api/personas`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            const json  = await resp.json();
+            list = json.data || [];
+            window._personasCache = list;
+        }
+        list.forEach(p => {
+            const opt   = document.createElement('option');
+            opt.value   = p.id;
+            opt.textContent = p.name;
+            if (p.id === window._selectedPersonaId) opt.selected = true;
+            sel.appendChild(opt);
+        });
+        sel.onchange = () => { window._selectedPersonaId = sel.value; };
+    } catch(err) {
+        console.warn('[populatePersonaDropdown]', err);
+    }
+};
+

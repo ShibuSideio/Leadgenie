@@ -121,6 +121,7 @@
         <div class="top-cmd-bar" id="top-cmd-bar">
             <button class="cmd-btn active" id="tab-dashboard" onclick="switchTab('dashboard')">Home</button>
             <button class="cmd-btn" id="tab-campaigns" onclick="switchTab('target')">Searches</button>
+            <button class="cmd-btn" id="tab-personas" onclick="switchTab('persona-vault')">&#127918; Personas</button>
             <button class="cmd-btn" id="tab-reports" onclick="switchTab('reports')">Reports</button>
             <button class="cmd-btn" id="tab-l0-admin" style="display:none;" onclick="switchTab('l0-admin')">Admin</button>
         </div>
@@ -423,6 +424,56 @@
             </div>
 
         </section>
+
+        <!-- PERSONA VAULT VIEW -->
+        <section id="view-persona-vault" class="glass-panel main-feed" style="display:none; padding:24px; overflow-y:auto;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; flex-wrap:wrap; gap:12px;">
+                <div>
+                    <h2 style="margin:0; font-size:1.4rem;">&#127918; Persona Vault</h2>
+                    <p style="margin:4px 0 0; font-size:0.82rem; color:var(--text-muted);">Create named AI agent personas and attach them to individual campaigns.</p>
+                </div>
+                <button class="primary-btn" onclick="openPersonaModal()" style="min-height:44px; padding:10px 22px;">
+                    &#43; New Persona
+                </button>
+            </div>
+
+            <!-- Persona grid -->
+            <div id="persona-grid" style="display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px;">
+                <div style="text-align:center; color:var(--text-muted); padding:48px 20px; grid-column:1/-1;">
+                    &#8987; Loading personas&hellip;
+                </div>
+            </div>
+        </section>
+
+        <!-- PERSONA CREATE/EDIT MODAL -->
+        <div id="persona-modal-overlay" class="sio-modal-overlay" style="display:none;" onclick="if(event.target===this)closePersonaModal()">
+            <div class="sio-modal" style="max-width:520px; width:92%;">
+                <div class="sio-modal-header">
+                    <h3 class="sio-modal-title" id="persona-modal-title">New Persona</h3>
+                    <button class="sio-modal-close" onclick="closePersonaModal()">&#10005;</button>
+                </div>
+                <div class="sio-modal-body" style="padding:24px;">
+                    <input type="hidden" id="persona-edit-id" value="">
+                    <div style="margin-bottom:16px;">
+                        <label style="font-size:0.82rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;">Persona Name *</label>
+                        <input id="persona-name" type="text" class="sio-input" placeholder="e.g. Technical Founder Pitch" style="width:100%; box-sizing:border-box;">
+                    </div>
+                    <div style="margin-bottom:16px;">
+                        <label style="font-size:0.82rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;">Bio / Pitch *</label>
+                        <textarea id="persona-bio" class="sio-input" rows="5" placeholder="Describe what you offer, your ICP, and your unique value proposition..." style="width:100%; box-sizing:border-box; resize:vertical;"></textarea>
+                    </div>
+                    <div style="margin-bottom:24px;">
+                        <label style="font-size:0.82rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;">Target Keywords</label>
+                        <input id="persona-keywords" type="text" class="sio-input" placeholder="e.g. SaaS, B2B, startup, growth" style="width:100%; box-sizing:border-box;">
+                        <div style="font-size:0.72rem; color:var(--text-muted); margin-top:4px;">Comma-separated. Overrides campaign keywords when set.</div>
+                    </div>
+                    <div style="display:flex; gap:12px;">
+                        <button class="secondary-btn" onclick="closePersonaModal()" style="flex:1; min-height:44px;">Cancel</button>
+                        <button class="primary-btn" id="persona-save-btn" onclick="savePersona()" style="flex:2; min-height:44px;">Save Persona</button>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <!-- CRM VIEW -->
         <section id="view-crm-test" class="glass-panel main-feed" style="display:none; padding:20px; overflow:hidden;">

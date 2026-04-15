@@ -1016,6 +1016,23 @@ def produce():
     keywords      = [k.strip() for k in raw_keywords.split(',') if k.strip()] \
                     if isinstance(raw_keywords, str) else raw_keywords
 
+    # ── PERSONA VAULT: inject linked persona bio/keywords ─────────────────────
+    # Reads denormalised persona_bio / persona_keywords written at campaign
+    # creation. Zero extra Firestore reads on the hot path.
+    # Falls back to campaign.bio if no persona linked.
+    _persona_id = campaign.get("persona_id", "")
+    if _persona_id:
+        _persona_bio  = campaign.get("persona_bio", "").strip()
+        _persona_keys = campaign.get("persona_keywords", "").strip()
+        if _persona_bio:
+            bio = _persona_bio
+            print(f"[PERSONA PRODUCER] Injected persona '{campaign.get('persona_name', _persona_id)}' "
+                  f"bio='{bio[:60]}' for campaign {campaign_id}")
+        if _persona_keys:
+            raw_keywords = _persona_keys
+            keywords = [k.strip() for k in _persona_keys.split(',') if k.strip()]
+    # ─────────────────────────────────────────────────────────────────────────
+
     if not keywords:
         print(f"[PRODUCER] Campaign {campaign_id}: empty keywords. Aborting.")
         return jsonify({"error": "Empty keywords matrix"}), 400
@@ -2038,6 +2055,19 @@ def dispatch():
     bio          = campaign.get("bio", "")
     sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
     location     = campaign.get("location", "").strip()
+
+    # ── PERSONA VAULT: inject linked persona bio at consumer path ─────────────
+    # Uses the same denormalised fields written at campaign creation.
+    # Ensures PRISM scoring and Gemini prompts use the correct persona context
+    # even on campaigns created long before Persona Vault was introduced.
+    _c_persona_id = campaign.get("persona_id", "")
+    if _c_persona_id:
+        _c_persona_bio  = campaign.get("persona_bio", "").strip()
+        if _c_persona_bio:
+            bio = _c_persona_bio
+            print(f"[PERSONA CONSUMER] Injected persona '{campaign.get('persona_name', _c_persona_id)}' "
+                  f"for campaign {campaign_id}")
+    # ─────────────────────────────────────────────────────────────────────────
 
     from google.cloud.firestore_v1.base_query import FieldFilter
     # V18 Multi-Campaign Swarm: Pre-fetch ALL active campaigns for tenant ecosystem
