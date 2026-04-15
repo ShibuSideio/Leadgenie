@@ -14,7 +14,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="styles.css?v=44">
+    <link rel="stylesheet" href="styles.css?v=45">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -687,32 +687,76 @@
         </div>
         <div id="cc-recommendation-cards" style="margin-bottom:24px; text-align:left;"></div>
         <div id="cc-custom-fallback-container" style="display:none; text-align:left;">
-            <!-- Persona Selector — required first field -->
-            <div style="margin-bottom:16px; background:linear-gradient(135deg,rgba(79,70,229,0.04),rgba(124,58,237,0.04)); border:1.5px solid rgba(79,70,229,0.18); border-radius:10px; padding:14px;">
-                <label style="font-size:0.78rem; font-weight:700; color:#4338ca; display:block; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.3px;">&#129302; Select AI Agent / Persona <span style="color:#ef4444;">*</span></label>
-                <select id="cc-persona-select" style="width:100%; padding:10px 12px; border:1.5px solid #c7d2fe; border-radius:8px; font-family:'Inter',sans-serif; font-size:0.88rem; color:#111827; background:#fff; cursor:pointer; outline:none;">
-                    <option value="">Loading personas...</option>
+
+            <!-- ── PERSONA SELECTOR (always visible) ─────────────────────── -->
+            <div style="margin-bottom:18px; background:linear-gradient(135deg,rgba(79,70,229,0.05),rgba(124,58,237,0.05)); border:1.5px solid rgba(79,70,229,0.2); border-radius:12px; padding:16px;">
+                <label style="font-size:0.75rem; font-weight:700; color:#4338ca; display:block; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.4px;">&#129302; AI Agent / Persona <span style="color:#ef4444;">*</span></label>
+                <select id="cc-persona-select"
+                    onchange="onCcPersonaChange(this.value)"
+                    style="width:100%; padding:10px 12px; border:1.5px solid #c7d2fe; border-radius:8px; font-family:'Inter',sans-serif; font-size:0.88rem; color:#111827; background:#fff; cursor:pointer; outline:none; appearance:auto;">
+                    <option value="">— Select an AI Agent —</option>
                 </select>
-                <p style="margin:6px 0 0; font-size:0.72rem; color:#6b7280;">No persona yet? <a href="#" onclick="closeModal('child-campaign-modal');switchTab('persona-vault');return false;" style="color:#4f46e5; font-weight:600;">Create one in the Persona Vault &#8594;</a></p>
+                <p style="margin:7px 0 0; font-size:0.72rem; color:#9ca3af;">No persona yet? <a href="#" onclick="closeModal('child-campaign-modal');switchTab('persona-vault');return false;" style="color:#4f46e5; font-weight:600;">Create one in the Persona Vault &#8594;</a></p>
             </div>
-            <div style="margin-bottom:16px;">
-                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:6px;">1. Product Focus</label>
-                <input type="text" id="cc-focus" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif;" placeholder="e.g. Enterprise SEO Audit">
+
+            <!-- ── PERSONA LOADED STATE: Core Directive preview ───────────── -->
+            <div id="cc-persona-preview" style="display:none; margin-bottom:18px; border-radius:12px; border:1px solid #e0e7ff; background:#f5f3ff; padding:14px 16px; position:relative;">
+                <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; color:#6d28d9; margin-bottom:6px; display:flex; align-items:center; gap:6px;">
+                    <span style="background:#ede9fe; padding:2px 8px; border-radius:20px;">&#9889; Core Directive Loaded</span>
+                </div>
+                <div id="cc-persona-bio-preview" style="font-size:0.83rem; color:#374151; line-height:1.55; white-space:pre-wrap; font-family:'Courier New',monospace; background:#fff; border:1px solid #e0e7ff; border-radius:8px; padding:10px 12px; max-height:90px; overflow:hidden; position:relative;"></div>
+                <div style="position:absolute; bottom:14px; right:16px; font-size:0.7rem; color:#a78bfa;">&#128274; Locked to Persona</div>
             </div>
-            <div style="margin-bottom:16px;">
-                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:6px;">2. Target Geography</label>
-                <input type="text" id="cc-location" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif;" placeholder="e.g. New York, EMEA, Worldwide">
+
+            <!-- ── NO PERSONA STATE: Legacy fields (fallback / manual) ─────── -->
+            <div id="cc-legacy-fields">
+                <div style="margin-bottom:4px; padding:10px 14px; background:#fef3c7; border:1px solid #fcd34d; border-radius:8px; font-size:0.78rem; color:#92400e; display:flex; align-items:flex-start; gap:8px;">
+                    <span style="font-size:0.9rem; margin-top:1px;">&#9888;&#65039;</span>
+                    <span>Select a Persona above to auto-load your ICP strategy, or fill in the fields below manually.</span>
+                </div>
+                <div style="margin-top:14px; margin-bottom:14px;">
+                    <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;">1. Product / Service Focus</label>
+                    <input type="text" id="cc-focus" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. Enterprise SEO Audit">
+                </div>
+                <div style="margin-bottom:14px;">
+                    <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;">2. Core Pain Point</label>
+                    <textarea id="cc-pain" style="width:100%; min-height:72px; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; resize:vertical; box-sizing:border-box;" placeholder="What keeps them up at night?"></textarea>
+                </div>
+                <div style="margin-bottom:14px;">
+                    <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;">3. Unfair Advantage</label>
+                    <textarea id="cc-advantage" style="width:100%; min-height:72px; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; resize:vertical; box-sizing:border-box;" placeholder="Why should they choose you?"></textarea>
+                </div>
             </div>
-            <div style="margin-bottom:16px;">
-                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:6px;">3. Core Pain Point</label>
-                <textarea id="cc-pain" style="width:100%; min-height:80px; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; resize:vertical;" placeholder="What keeps them up at night?"></textarea>
+
+            <!-- ── CAMPAIGN-SCOPED FIELDS (always visible) ───────────────── -->
+            <div style="border-top:1px solid #f0f0f5; padding-top:16px; margin-top:4px;">
+                <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; color:#6b7280; margin-bottom:14px;">Campaign Settings</div>
+
+                <div style="margin-bottom:14px;">
+                    <label style="font-size:0.8rem; font-weight:600; color:#374151; display:block; margin-bottom:6px;">Campaign Name <span style="color:#ef4444;">*</span></label>
+                    <input type="text" id="cc-name" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. Kochi Infopark Q3 Push">
+                </div>
+
+                <div style="margin-bottom:14px;">
+                    <label style="font-size:0.8rem; font-weight:600; color:#374151; display:block; margin-bottom:6px;">Target Geography <span style="color:#ef4444;">*</span></label>
+                    <input type="text" id="cc-location" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. India, New York, Worldwide">
+                </div>
+
+                <div style="margin-bottom:20px;">
+                    <label style="font-size:0.8rem; font-weight:600; color:#374151; display:block; margin-bottom:4px;">Additional Keywords <span style="font-weight:400; color:#9ca3af;">(optional)</span></label>
+                    <p style="font-size:0.72rem; color:#9ca3af; margin:0 0 6px;">Merged with your Persona's base keywords to sharpen this campaign's targeting.</p>
+                    <input type="text" id="cc-extra-keywords" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. fintech, Series A, remote-first">
+                </div>
             </div>
-            <div style="margin-bottom:24px;">
-                <label style="font-size:0.8rem; color:var(--text-muted); display:block; margin-bottom:6px;">4. Unfair Advantage</label>
-                <textarea id="cc-advantage" style="width:100%; min-height:80px; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; resize:vertical;" placeholder="Why should they choose you?"></textarea>
-            </div>
-            <button class="primary-btn full-width" onclick="saveChildCampaign()">Launch Campaign</button>
+
+            <button class="primary-btn full-width" onclick="saveChildCampaign()" style="min-height:48px; font-size:0.95rem; font-weight:700; letter-spacing:0.2px;">&#9889; Launch Campaign</button>
+
+            <!-- Hidden legacy passthrough fields — read by saveChildCampaign -->
+            <input type="hidden" id="cc-focus-hidden">
+            <input type="hidden" id="cc-pain-hidden">
+            <input type="hidden" id="cc-advantage-hidden">
         </div>
+
         <div style="margin-top:16px; text-align:center;">
             <a href="#" onclick="showCcCustomFallback(); return false;" style="font-size:0.9rem; color:var(--primary); text-decoration:underline;">I want to launch a custom product instead.</a>
         </div>
@@ -881,6 +925,6 @@
         });
     }
 </script>
-<script src="app.js?v=64"></script>
+<script src="app.js?v=65"></script>
 </body>
 </html>

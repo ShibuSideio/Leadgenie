@@ -3013,58 +3013,115 @@ window.deployPredictiveCard = async function(idx, origProd, origHook, origAdv) {
     });
 };
 
+// ── Campaign Builder: Persona dropdown state binding ─────────────────────────
+// Called by onchange on #cc-persona-select. Drives all conditional rendering.
+window.onCcPersonaChange = function(personaId) {
+    const preview    = document.getElementById('cc-persona-preview');
+    const bioPreview = document.getElementById('cc-persona-bio-preview');
+    const legacy     = document.getElementById('cc-legacy-fields');
+    const container  = document.getElementById('cc-persona-select')?.closest('div[style*="border-radius:12px"]') || null;
+
+    if (personaId) {
+        // Look up persona from cache (populated by populatePersonaDropdown)
+        const persona = (window._personasCache || []).find(p => (p.id || p.persona_id) === personaId);
+        const bio     = persona?.bio || '';
+        const preview100 = bio.length > 150 ? bio.slice(0, 150) + '\u2026' : bio;
+
+        // Show preview card
+        if (preview)    { preview.style.display = 'block'; }
+        if (bioPreview) { bioPreview.textContent = preview100 || '(No core directive set for this persona)'; }
+
+        // Hide legacy ICP fields — persona owns these
+        if (legacy) { legacy.style.display = 'none'; }
+
+        // Focus campaign name for next input
+        setTimeout(() => document.getElementById('cc-name')?.focus(), 80);
+    } else {
+        // No persona — show warning + legacy fields
+        if (preview) { preview.style.display = 'none'; }
+        if (legacy)  { legacy.style.display = 'block'; }
+    }
+};
+
 window.showCcCustomFallback = function() {
-    // FIX T2: hide cards, show manual form; pre-fill location from DT state
     const r = document.getElementById('cc-recommendation-cards');
     if (r) r.style.display = 'none';
     const f = document.getElementById('cc-custom-fallback-container');
     if (f) f.style.display = 'block';
+
+    // Pre-fill geography from DT state
     const locEl = document.getElementById('cc-location');
-    if (locEl && !locEl.value && window._dtState && window._dtState.extractedGl) {
+    if (locEl && !locEl.value && window._dtState?.extractedGl) {
         locEl.value = window._dtState.extractedGl;
     }
-    // Populate persona dropdown — always refresh to catch newly created personas
+
+    // Reset form to clean state (persona-unselected)
+    const sel = document.getElementById('cc-persona-select');
+    if (sel) sel.value = '';
+    onCcPersonaChange('');  // trigger show/hide
+
+    // Populate dropdown with live personas
     populatePersonaDropdown('cc-persona-select');
 };
 
 window.saveChildCampaign = async function() {
-    const focusEl   = document.getElementById('cc-focus');
-    const locEl     = document.getElementById('cc-location');
-    const painEl    = document.getElementById('cc-pain');
-    const advEl     = document.getElementById('cc-advantage');
-    const personaSel= document.getElementById('cc-persona-select');
+    const personaSel   = document.getElementById('cc-persona-select');
+    const nameEl       = document.getElementById('cc-name');
+    const locEl        = document.getElementById('cc-location');
+    const extraKeysEl  = document.getElementById('cc-extra-keywords');
+    // Legacy fields (visible only when no persona)
+    const focusEl      = document.getElementById('cc-focus');
+    const painEl       = document.getElementById('cc-pain');
+    const advEl        = document.getElementById('cc-advantage');
 
-    const focus   = focusEl?.value.trim()    || 'Custom Campaign';
-    const loc     = locEl?.value.trim()      || '';
-    const pain    = painEl?.value.trim()     || '';
-    const adv     = advEl?.value.trim()      || '';
-    const selPid  = personaSel?.value        || '';
+    const selPid     = personaSel?.value    || '';
+    const campName   = (nameEl?.value       || '').trim();
+    const loc        = (locEl?.value        || '').trim();
+    const extraKeys  = (extraKeysEl?.value  || '').trim();
 
-    // Persona validation — required
+    // ── Validation ────────────────────────────────────────────────────────────
     if (!selPid) {
         showToast('Please select an AI Agent / Persona before launching.', 'error');
         personaSel?.focus();
         return;
     }
-    window._selectedPersonaId = selPid;
-
-    if (!loc) {
-        showToast('Target Geography is required.', 'error');
+    if (!campName) {
+        showToast('Campaign Name is required.', 'error');
+        nameEl?.focus();
         return;
     }
+    if (!loc) {
+        showToast('Target Geography is required.', 'error');
+        locEl?.focus();
+        return;
+    }
+
+    window._selectedPersonaId = selPid;
+
+    // ── Build payload ─────────────────────────────────────────────────────────
+    // Persona-linked path: campaign_focus = campaign name, ICP from persona.
+    // Legacy fields are hidden but still read as fallback (manual mode).
+    const persona       = (window._personasCache || []).find(p => (p.id || p.persona_id) === selPid);
+    const personaKeys   = persona?.keywords || '';
+    // Merge: persona base keywords + campaign-level extras
+    const mergedKeywords = [personaKeys, extraKeys].filter(Boolean).join(', ');
+
+    // Pain + advantage: use persona bio in persona mode, legacy fields in manual mode
+    const pain = painEl?.value.trim() || '';
+    const adv  = advEl?.value.trim()  || '';
 
     closeModal('child-campaign-modal');
 
     saveCampaignAction({
-        name:             focus,
-        bio:              'CHILD_CAMPAIGN_OVERRIDE',
-        keywords:         '',
-        campaign_focus:   focus,
-        pain_point:       pain,
-        unfair_advantage: adv,
-        gl:               '',
-        location:         loc,
-        target_urls:      []
+        name:              campName,
+        bio:               'CHILD_CAMPAIGN_OVERRIDE',
+        keywords:          mergedKeywords,
+        campaign_focus:    campName,
+        pain_point:        pain,
+        unfair_advantage:  adv,
+        gl:                '',
+        location:          loc,
+        target_urls:       []
     });
 };
 
