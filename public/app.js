@@ -1407,10 +1407,20 @@ window.fetchGlobalOperations = async function() {
             domList.style.display = 'block';
         }
 
-        // Surface any partial errors
+        // Surface partial errors — but NEVER show bigquery errors.
+        // BQ is an optional enrichment; the geo heatmap runs on Firestore primary.
+        // A BQ 403 is an infra config issue (IAM), not a data issue.
         if (d.partial_errors && errBox) {
-            errBox.style.display = 'block';
-            errBox.textContent = 'Partial data: ' + Object.entries(d.partial_errors).map(([k,v]) => `${k}: ${v}`).join(' | ');
+            const displayErrors = Object.entries(d.partial_errors)
+                .filter(([k]) => k !== 'bigquery')  // suppress BQ 403 noise
+                .map(([k, v]) => `${k}: ${v}`)
+                .join(' | ');
+            if (displayErrors) {
+                errBox.style.display = 'block';
+                errBox.textContent = 'Partial data: ' + displayErrors;
+            } else {
+                errBox.style.display = 'none';
+            }
         }
 
     } catch(err) {
