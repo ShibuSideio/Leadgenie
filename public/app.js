@@ -3014,32 +3014,40 @@ window.deployPredictiveCard = async function(idx, origProd, origHook, origAdv) {
 };
 
 // ── Campaign Builder: Persona dropdown state binding ─────────────────────────
-// Called by onchange on #cc-persona-select. Drives all conditional rendering.
+// Called on <select> change. Drives ALL conditional rendering in the form.
 window.onCcPersonaChange = function(personaId) {
     const preview    = document.getElementById('cc-persona-preview');
     const bioPreview = document.getElementById('cc-persona-bio-preview');
     const legacy     = document.getElementById('cc-legacy-fields');
-    const container  = document.getElementById('cc-persona-select')?.closest('div[style*="border-radius:12px"]') || null;
 
     if (personaId) {
-        // Look up persona from cache (populated by populatePersonaDropdown)
-        const persona = (window._personasCache || []).find(p => (p.id || p.persona_id) === personaId);
-        const bio     = persona?.bio || '';
-        const preview100 = bio.length > 150 ? bio.slice(0, 150) + '\u2026' : bio;
+        // Lookup from cache — guaranteed populated before this fires
+        const persona      = (window._personasCache || []).find(p => p.id === personaId);
+        const bio          = (persona && persona.bio)      || '';
+        const safeKeywords = (persona && persona.keywords) || '';
+        const bioPreview150 = bio.length > 150 ? bio.slice(0, 150) + '\u2026' : (bio || '(No core directive set for this persona)');
 
-        // Show preview card
-        if (preview)    { preview.style.display = 'block'; }
-        if (bioPreview) { bioPreview.textContent = preview100 || '(No core directive set for this persona)'; }
+        console.log('[CC] Persona selected:', personaId, '| bio:', bio.slice(0, 60), '| keywords:', safeKeywords);
 
-        // Hide legacy ICP fields — persona owns these
-        if (legacy) { legacy.style.display = 'none'; }
+        // ── Show directive preview card ───────────────────────────────────
+        if (preview)    preview.style.display = 'block';
+        if (bioPreview) bioPreview.textContent = bioPreview150;
 
-        // Focus campaign name for next input
+        // ── Hide legacy ICP fields + their warning banner ─────────────────
+        if (legacy) legacy.style.display = 'none';
+
+        // Store for saveChildCampaign keyword merge
+        window._ccActivePersonaKeywords = safeKeywords;
+
+        // Auto-focus campaign name field
         setTimeout(() => document.getElementById('cc-name')?.focus(), 80);
+
     } else {
-        // No persona — show warning + legacy fields
-        if (preview) { preview.style.display = 'none'; }
-        if (legacy)  { legacy.style.display = 'block'; }
+        // ── No persona selected — show legacy fields + warning ────────────
+        console.log('[CC] Persona cleared — showing legacy fields');
+        if (preview) preview.style.display = 'none';
+        if (legacy)  legacy.style.display  = 'block';
+        window._ccActivePersonaKeywords = '';
     }
 };
 
@@ -3098,13 +3106,13 @@ window.saveChildCampaign = async function() {
 
     window._selectedPersonaId = selPid;
 
-    // ── Build payload ─────────────────────────────────────────────────────────
-    // Persona-linked path: campaign_focus = campaign name, ICP from persona.
-    // Legacy fields are hidden but still read as fallback (manual mode).
-    const persona       = (window._personasCache || []).find(p => (p.id || p.persona_id) === selPid);
-    const personaKeys   = persona?.keywords || '';
+    // ── Build keyword payload ─────────────────────────────────────────────────
+    // _ccActivePersonaKeywords is set by onCcPersonaChange when user picks a persona.
+    // Guaranteed non-null (empty string if persona has no keywords).
+    const personaKeys    = window._ccActivePersonaKeywords || '';
     // Merge: persona base keywords + campaign-level extras
     const mergedKeywords = [personaKeys, extraKeys].filter(Boolean).join(', ');
+
 
     // Pain + advantage: use persona bio in persona mode, legacy fields in manual mode
     const pain = painEl?.value.trim() || '';
@@ -3528,15 +3536,20 @@ window.selectPersonaForCampaign = function(id, name) {
 };
 
 // ── populatePersonaDropdown ───────────────────────────────────────────────────
-// Call this when opening the campaign creation modal to inject persona options.
+// Call this when opening a modal that has a persona <select> element.
+// Fetches from API once, then serves from _personasCache.
+// CRITICAL: does NOT overwrite onchange — wires to onCcPersonaChange.
 window.populatePersonaDropdown = async function(selectElId) {
     const sel = document.getElementById(selectElId);
     if (!sel) return;
-    sel.innerHTML = '<option value="">— No Persona (use campaign bio) —</option>';
+
+    // Reset to blank placeholder
+    sel.innerHTML = '<option value="">\u2014 Select an AI Agent \u2014</option>';
 
     try {
-        const user  = firebase.auth().currentUser;
+        const user = firebase.auth().currentUser;
         if (!user) return;
+
         // Use cache if available, else fetch
         let list = window._personasCache;
         if (!list || list.length === 0) {
@@ -3548,16 +3561,33 @@ window.populatePersonaDropdown = async function(selectElId) {
             list = json.data || [];
             window._personasCache = list;
         }
+
         list.forEach(p => {
-            const opt   = document.createElement('option');
-            opt.value   = p.id;
+            const opt       = document.createElement('option');
+            opt.value       = p.id;           // always p.id — matches onCcPersonaChange lookup
             opt.textContent = p.name;
             if (p.id === window._selectedPersonaId) opt.selected = true;
             sel.appendChild(opt);
         });
-        sel.onchange = () => { window._selectedPersonaId = sel.value; };
+
+        // BUG FIX: Do NOT reassign sel.onchange here.
+        // The HTML attribute onchange="onCcPersonaChange(this.value)" is the
+        // authoritative binding. Overwriting it with a bare value-sync killed
+        // all DOM-toggling logic. Instead: wire via addEventListener so both
+        // the HTML attribute AND this handler coexist.
+        sel.addEventListener('change', function() {
+            window._selectedPersonaId = sel.value;
+            window.onCcPersonaChange(sel.value);
+        }, { once: false });
+
+        // If a persona is already pre-selected (e.g. editing), trigger the toggle
+        if (sel.value) {
+            window.onCcPersonaChange(sel.value);
+        }
+
+        console.log(`[populatePersonaDropdown] Loaded ${list.length} persona(s) into #${selectElId}`);
     } catch(err) {
         console.warn('[populatePersonaDropdown]', err);
+        sel.innerHTML = '<option value="">Failed to load personas</option>';
     }
 };
-
