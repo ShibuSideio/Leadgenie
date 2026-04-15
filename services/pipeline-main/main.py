@@ -759,10 +759,24 @@ Do NOT return an empty contact_endpoints array if a user profile link is present
 Look for patterns like '/u/', '/user/', '/profile/', '@username', or any author attribution link."""
 
     import json
+
+    def _resolve_campaign_bio(c: dict) -> str:
+        """Resolve the effective bio for a campaign in the Gemini scoring prompt.
+        Priority: persona_bio > effective_bio > campaign_focus > raw bio.
+        Strips CHILD_CAMPAIGN_OVERRIDE sentinel."""
+        if c.get("persona_id") and c.get("persona_bio"):
+            return c["persona_bio"]
+        raw = c.get("bio", "")
+        if raw == "CHILD_CAMPAIGN_OVERRIDE":
+            return (c.get("effective_bio") or
+                    c.get("campaign_focus") or
+                    c.get("pain_point") or "")
+        return raw
+
     campaigns_str = json.dumps([{
         "campaign_id": c.get("id", c.get("name")),
-        "bio": c.get("bio", ""),
-        "keywords": c.get("keywords", "")
+        "bio":         _resolve_campaign_bio(c),
+        "keywords":    c.get("persona_keywords") or c.get("keywords", "")
     } for c in active_campaigns], indent=2)
 
     prompt = f"""You are a Dynamic Intent Analyzer evaluating a lead against multiple campaigns.
@@ -1034,8 +1048,15 @@ def produce():
     # ─────────────────────────────────────────────────────────────────────────
 
     if not keywords:
-        print(f"[PRODUCER] Campaign {campaign_id}: empty keywords. Aborting.")
-        return jsonify({"error": "Empty keywords matrix"}), 400
+        # RISK 4 FIX: if a persona-linked campaign has bio but no keywords,
+        # synthesise a minimal keyword from the bio so the producer never aborts.
+        if bio:
+            keywords = [w.strip() for w in bio.split() if len(w.strip()) > 3][:5]
+            print(f"[PRODUCER] No keywords — synthesised {len(keywords)} terms from bio "
+                  f"for campaign {campaign_id}")
+        if not keywords:
+            print(f"[PRODUCER] Campaign {campaign_id}: empty keywords. Aborting.")
+            return jsonify({"error": "Empty keywords matrix"}), 400
 
     # ── V19: CHILD_CAMPAIGN_OVERRIDE sentinel guard ──────────────────────────────
     # DT child campaigns set bio='CHILD_CAMPAIGN_OVERRIDE' as a routing marker.
