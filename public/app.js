@@ -3196,20 +3196,98 @@ function _buildPersonaCard(p) {
 }
 
 // ── openPersonaModal ──────────────────────────────────────────────────────────
+// ── Tag engine internal state ────────────────────────────────────────────────
+let _personaTags = [];
+
+function _syncPersonaTagsToHidden() {
+    const hidden = document.getElementById('persona-keywords');
+    if (hidden) hidden.value = _personaTags.join(', ');
+}
+
+function _renderPersonaTags() {
+    const container = document.getElementById('persona-tag-container');
+    const input     = document.getElementById('persona-tag-input');
+    if (!container || !input) return;
+
+    // Remove all existing pills (leave the input in place)
+    container.querySelectorAll('.persona-pill').forEach(p => p.remove());
+
+    _personaTags.forEach((tag, idx) => {
+        const isNegative = tag.toLowerCase().startsWith('not ');
+        const pill = document.createElement('span');
+        pill.className = 'persona-pill';
+        pill.style.cssText = [
+            'display:inline-flex', 'align-items:center', 'gap:5px',
+            'padding:4px 10px', 'border-radius:20px',
+            'font-size:0.78rem', 'font-weight:600', 'line-height:1', 'cursor:default',
+            isNegative
+                ? 'background:#fff1f0; color:#cf1322; border:1px solid #ffa39e;'
+                : 'background:rgba(79,70,229,0.09); color:#4338ca; border:1px solid rgba(79,70,229,0.2);'
+        ].join(';');
+        pill.innerHTML = `${tag}<button tabindex="-1" onclick="_removePersonaTag(${idx})" style="background:none;border:none;cursor:pointer;padding:0 0 0 2px;color:inherit;opacity:0.6;font-size:0.85rem;line-height:1;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.6'">&#10005;</button>`;
+        container.insertBefore(pill, input);
+    });
+
+    input.placeholder = _personaTags.length === 0 ? 'Type a signal and press Enter\u2026' : '';
+    _syncPersonaTagsToHidden();
+}
+
+window._removePersonaTag = function(idx) {
+    _personaTags.splice(idx, 1);
+    _renderPersonaTags();
+};
+
+window.handlePersonaTagInput = function(e) {
+    const input = e.target;
+    const val   = (input.value || '').trim().replace(/,+$/, '').trim();
+
+    if ((e.key === 'Enter' || e.key === ',') && val) {
+        e.preventDefault();
+        if (!_personaTags.includes(val)) {
+            _personaTags.push(val);
+            _renderPersonaTags();
+        }
+        input.value = '';
+        input.style.width = '';
+        return;
+    }
+
+    // Backspace on empty input removes last tag
+    if (e.key === 'Backspace' && !input.value && _personaTags.length > 0) {
+        _personaTags.pop();
+        _renderPersonaTags();
+    }
+};
+
+// ── openPersonaModal ──────────────────────────────────────────────────────────
+const _BIO_TEMPLATE = `[Who we help]: ...
+[The problem we solve]: ...
+[Our unfair advantage / Unique Value]: ...`;
+
 window.openPersonaModal = function(id='', name='', bio='', keywords='') {
     const overlay = document.getElementById('persona-modal-overlay');
     const title   = document.getElementById('persona-modal-title');
     const editId  = document.getElementById('persona-edit-id');
     const nameEl  = document.getElementById('persona-name');
     const bioEl   = document.getElementById('persona-bio');
-    const keysEl  = document.getElementById('persona-keywords');
+    const tagInput= document.getElementById('persona-tag-input');
     if (!overlay) return;
 
-    if (title)  title.textContent  = id ? 'Edit Persona' : 'New Persona';
-    if (editId) editId.value       = id;
-    if (nameEl) nameEl.value       = name;
-    if (bioEl)  bioEl.value        = bio.replace(/ \u2026$/, '');
-    if (keysEl) keysEl.value       = keywords;
+    const isEdit = !!id;
+
+    if (title)  title.textContent = isEdit ? 'Edit AI Agent' : 'Configure AI Agent';
+    if (editId) editId.value      = id;
+    if (nameEl) nameEl.value      = name;
+
+    // Bio: use template for new, actual bio for edit (strip trailing ellipsis from card preview)
+    if (bioEl)  bioEl.value = isEdit ? bio.replace(/\u2026$/, '').trimEnd() : _BIO_TEMPLATE;
+
+    // Rebuild tag pills from existing keywords
+    _personaTags = keywords
+        ? keywords.split(',').map(k => k.trim()).filter(Boolean)
+        : [];
+    _renderPersonaTags();
+    if (tagInput) { tagInput.value = ''; tagInput.style.width = ''; }
 
     overlay.style.display = 'flex';
     setTimeout(() => nameEl?.focus(), 80);
@@ -3219,6 +3297,9 @@ window.openPersonaModal = function(id='', name='', bio='', keywords='') {
 window.closePersonaModal = function() {
     const overlay = document.getElementById('persona-modal-overlay');
     if (overlay) overlay.style.display = 'none';
+    // Reset tag state
+    _personaTags = [];
+    _renderPersonaTags();
 };
 
 // ── savePersona ───────────────────────────────────────────────────────────────
@@ -3229,19 +3310,22 @@ window.savePersona = async function() {
     const keywords= (document.getElementById('persona-keywords')?.value|| '').trim();
     const saveBtn = document.getElementById('persona-save-btn');
 
-    if (!name)    { showToast('Persona name is required.', 'error');  return; }
-    if (!bio)     { showToast('Bio / Pitch is required.', 'error');   return; }
+    if (!name) { showToast('Agent Name / Strategy is required.', 'error');  return; }
+    if (!bio || bio === _BIO_TEMPLATE) { showToast('Please fill in the Core Directive.', 'error'); return; }
 
-    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '⏳ Saving…'; }
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '&#9203; Deploying\u2026';
+    }
 
     try {
         const user  = firebase.auth().currentUser;
         if (!user) { showToast('Session expired. Please sign in again.', 'error'); return; }
         const token = await user.getIdToken(true);
 
-        const isEdit  = !!editId;
-        const url     = isEdit ? `${API_BASE}/api/personas/${editId}` : `${API_BASE}/api/personas`;
-        const method  = isEdit ? 'PUT' : 'POST';
+        const isEdit = !!editId;
+        const url    = isEdit ? `${API_BASE}/api/personas/${editId}` : `${API_BASE}/api/personas`;
+        const method = isEdit ? 'PUT' : 'POST';
 
         const resp = await fetch(url, {
             method,
@@ -3256,20 +3340,24 @@ window.savePersona = async function() {
 
         const result = await resp.json();
         if (isEdit && result.linked_campaigns > 0) {
-            showToast(`Persona updated. Cache wiped for ${result.linked_campaigns} linked campaign(s).`, 'success');
+            showToast(`Agent updated. Cache refreshed for ${result.linked_campaigns} campaign(s).`, 'success');
         } else {
-            showToast(isEdit ? 'Persona updated.' : 'Persona created!', 'success');
+            showToast(isEdit ? 'Agent configuration saved.' : '&#9889; Agent deployed!', 'success');
         }
 
         closePersonaModal();
         loadPersonaVault();
     } catch(err) {
         console.error('[savePersona]', err);
-        showToast('Save failed: ' + err.message, 'error');
+        showToast('Deploy failed: ' + err.message, 'error');
     } finally {
-        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save Persona'; }
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.innerHTML = '<span>&#9889;</span> Deploy Agent';
+        }
     }
 };
+
 
 // ── deletePersona ─────────────────────────────────────────────────────────────
 window.deletePersona = async function(id, name) {
