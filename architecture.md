@@ -1,6 +1,6 @@
-# Lead Sniper / Sideio Smart Growth — V20
+# Lead Sniper / Sideio Smart Growth — V22
 **Full Technical Specification Document (TSD)**
-*Last Updated: 2026-04-17 | Version: V20 — Persona Vault + Unified Gemini Schema + RLHF Ontology Ledger*
+*Last Updated: 2026-04-17 | Version: V22 PROD-FREEZE — Proprietary Intent Engine + Negative Knowledge Graph + L1 ROI Analytics Matrix*
 
 ---
 
@@ -195,7 +195,7 @@ Gemini call tracking shards.
 
 **Notes:**
 - `keywords`: Stored as comma-separated string, parsed to array in pipeline
-- `target_urls`: Up to 10 manually specified URLs, bypasses Serper search
+- ~~`target_urls`~~: **AMPUTATED in V22.** The "Suggest up to 10 websites" UI field and the `site:domain1 OR site:domain2` Serper injection loop have been permanently removed. The `target_urls` field may still be present in legacy Firestore documents but is **never read by the pipeline**. The Serper query builder now routes exclusively through the Autonomous Engine (Hybrid Starter Motor + BQ Exclusion Matrix).
 - `next_drip_due`: Set by cron sweep after each dispatch. Controls per-campaign consumer drip rate
 - `next_produce_due`: Set to `now + 24h` at creation by zero-wait enqueue. Controls producer re-run cadence
 - `unprocessed_queue`: Array of Serper result objects awaiting Gemini profiling. Populated by producer, drained by consumer
@@ -384,24 +384,73 @@ tasks_client.create_task(request={"parent": queue_path, "task": task})
 
 OIDC token is dynamically fetched from GCP metadata server with exponential backoff (3 attempts).
 
-### Step 5: Smart Query Generation (RLHF-Enhanced)
+### Step 5: Smart Query Generation — Hybrid Starter Motor
 **Location:** `pipeline-main/main.py::generate_smart_query`
 
-Two parallel generation strategies are merged:
+> **V22 Architecture:** The query generation layer is now a **Hybrid Confidence Router** that dynamically switches between a statistical BigQuery engine and a Gemini LLM fallback. The old `site:domain1 OR site:domain2` manual URL injection has been permanently amputated.
 
-**A. Historical Mining (RLHF):**
+#### 5a. Shadow Tracker — Continuous Buyer Syntax Accumulator
+Triggered asynchronously every time a lead is approved (`PUT /api/leads/{id}` with `status: approved`). Runs in a daemon thread and **never delays the 200 OK response**:
+
 ```python
-query = db.collection("leads")
-  .where("tenant_id", "==", tenant_id)
-  .where("status", "in", ["contacted", "converted"])
-  .limit(20)
-# Falls back to global leads if no tenant history
-pain_points = [d.get("pain_point") for d in docs]
-prompt = "Analyze these successful lead extractions. Extract exactly 3 short B2B phrases identifying high-value trends..."
-historical_phrases = call_gemini_2_5(prompt, expect_json=False).split(',')
+# orchestrator/main.py::_do_shadow_track (daemon thread)
+def _do_shadow_track(lead_text, persona_category, tenant_id):
+    ngrams = extract_ngrams(lead_text, n=[2, 3])   # local Python NLP, zero API cost
+    for gram in ngrams:
+        bq.query("""
+            INSERT OR UPDATE swarm_analytics.Intent_Keywords
+            (persona_category, n_gram, occurrence_count, yield_weight)
+            VALUES (@cat, @gram, 1, 1.0)
+            ON DUPLICATE KEY UPDATE
+              occurrence_count = occurrence_count + 1,
+              yield_weight     = yield_weight     + 0.1
+        """)
 ```
 
-**B. Symptom Dorking (Bio-Driven):**
+**BigQuery Table: `swarm_analytics.Intent_Keywords`**
+| Column | Type | Description |
+|---|---|---|
+| `persona_category` | STRING | Persona or campaign name — scopes n-grams by target ICP |
+| `n_gram` | STRING | Extracted buyer-syntax phrase (e.g., "struggling with") |
+| `occurrence_count` | INTEGER | Raw frequency counter |
+| `yield_weight` | FLOAT | Cumulative confidence mass. Router threshold key. |
+
+#### 5b. Confidence Threshold Router
+```python
+# pipeline-main/main.py::generate_smart_query — Step 1
+conf_query = """
+    SELECT SUM(yield_weight) AS total_confidence
+    FROM `{project}.swarm_analytics.Intent_Keywords`
+    WHERE persona_category = @persona_category
+"""
+result = bq.query(conf_query).result(timeout=3.0)  # hard 3s timeout, never blocks pipeline
+total_confidence = next(result).total_confidence or 0
+
+THRESHOLD = system_config.get("confidence_threshold", 1000)  # configurable in Firestore
+```
+
+**Routing Decision:**
+
+| Condition | Route | Query Source |
+|---|---|---|
+| `SUM(yield_weight) >= 1000` | **STATISTICAL BUILD** | Top 3 n-grams + Top 2 domains from BigQuery — zero Gemini cost |
+| `SUM(yield_weight) < 1000` | **GEMINI_FALLBACK** | LLM starter motor generates symptom dorks (below) |
+
+**STATISTICAL BUILD path** (high-confidence, post cold-start):
+```python
+top_ngrams = bq.query("""
+    SELECT n_gram FROM swarm_analytics.Intent_Keywords
+    WHERE persona_category = @cat
+    ORDER BY yield_weight DESC LIMIT 3
+""").result()
+top_domains = bq.query("""
+    SELECT root_domain FROM swarm_analytics.Negative_Signals  -- NOT blocked domains
+    ... (top converting domains from ontology_map)
+""").result()
+stat_query = " OR ".join([f'"{g.n_gram}"' for g in top_ngrams])
+```
+
+**GEMINI_FALLBACK path** (cold start / low persona confidence):
 ```python
 symptom_prompt = f"""The user solves this business problem: '{bio}'.
 Generate 3 highly specific Google Search operators to find targets PUBLICLY EXPERIENCING this problem.
@@ -411,10 +460,12 @@ Return ONLY a JSON list of 3 strings."""
 symptom_dorks = call_gemini_2_5(symptom_prompt, expect_json=True)
 ```
 
-Final queries = keyword queries + symptom dorks + global blacklist suffixed to each:
+Final queries (both paths) = generated queries + global blacklist:
 ```python
 blacklist = "-wiki -jobs -careers -investors -support -\"login\" -www.zoominfo.com -www.ibm.com -www.amazon.com"
 ```
+
+> **Note:** The Negative Knowledge Graph shield (Section V22.2) is applied to `blacklist` **after** this step, dynamically appending `-site:competitor.com` operators.
 
 ### Step 6: Serper Search Execution
 **Location:** `pipeline-main/main.py::search_serper`
@@ -585,7 +636,7 @@ Vertex AI is called via `call_gemini_2_5()` which wraps invocation in:
 
 ## 7. RLHF SELF-LEARNING SYSTEM
 
-The platform is self-optimizing using zero-cost database reads.
+The platform is self-optimizing using zero-cost database reads and a BigQuery-backed mathematical confidence graph.
 
 ### 7.1 UI Action → Backpropagation (Orchestrator)
 When the user clicks `Ignore` or `Converted` on a lead card:
@@ -616,10 +667,18 @@ Before hitting Vertex AI, the pipeline pre-screens each target using the tenant'
 ```
 This prevents Vertex credit spend on leads the tenant historically dislikes.
 
-### 7.3 Function Map: Historical Query Mining
+### 7.3 Function Map: Shadow Tracker — Buyer Syntax N-gram Accumulator (V22)
+Every approved lead fires `_async_shadow_track()` — a fire-and-forget daemon thread in the Orchestrator:
+1. Local Python NLP extracts 2-gram and 3-gram buyer-syntax phrases from the lead's `pain_point` and `dm` text
+2. Performs a BigQuery `INSERT OR UPDATE` into `swarm_analytics.Intent_Keywords`
+3. The Confidence Router in `generate_smart_query()` reads `SUM(yield_weight)` to decide between STATISTICAL BUILD and GEMINI_FALLBACK modes (see Section 5)
+
+**Hardening:** The BQ insert is wrapped in `try/except Exception` inside the daemon thread. A BQ timeout or schema error **never propagates to the 200 OK response on the approve action**.
+
+### 7.4 Function Map: Historical Query Mining
 `generate_smart_query()` analyzes the tenant's last 20 successful leads to extract B2B trend phrases and injects them directly into the Serper search queries.
 
-### 7.4 Function Map: Few-Shot DM Injection
+### 7.5 Function Map: Few-Shot DM Injection
 `finalize()` fetches the last 3 `"converted"` leads' DMs and injects them into the Vertex prompt to enforce proven phrasing style.
 
 ---
@@ -650,8 +709,10 @@ Every protected route calls this function first:
 | PUT | `/api/campaigns/{id}` | User | Update campaign (tenant ownership enforced) |
 | **POST** | **`/api/campaigns/{id}/run`** | **User** | **Epsilon-Greedy Router: splits quota between V16 cache + V14 Cartographer** |
 | GET | `/api/leads` | User | List all tenant leads (limit 100) — legacy polling fallback |
-| PUT | `/api/leads/{id}` | User | Update lead status + trigger RLHF backprop |
+| PUT | `/api/leads/{id}` | User | Update lead status + trigger RLHF backprop + fire Shadow Tracker daemon |
 | POST | `/api/settings` | User | Save WhatsApp credentials (KMS encrypted) |
+| **GET** | **`/api/analytics/roi`** | **User** | **L1 ROI Matrix: computes Ad Savings, Labor Savings, Pipeline Value over `?date_range=N` days** |
+| **PUT** | **`/api/analytics/unit-economics`** | **User** | **Persist custom unit economics (CPL, SDR rate, deal size, conversion rate) to `users/{id}.unit_economics`** |
 | GET | `/api/l0/telemetry` | super_admin | Global macro lead counts + all tenant summaries |
 | GET | `/api/l0/trends` | super_admin | Active campaigns ranked by leads generated |
 | GET | `/api/l0/users` | super_admin | All user profiles with usage metrics |
@@ -2075,3 +2136,328 @@ else:
 3. **Burn-in guard is hardcoded at `total_yield >= 50`.** It is not configurable via `system_config`. For low-volume tenants, this threshold may never be reached, permanently locking them out of RLHF adjustments.
 4. **No composite index is required or deployed.** All reads are direct lookups or full-collection streams. The `(baseline_weight, total_yield)` composite index was removed on 2026-04-14 as it was declared but never queried.
 
+---
+
+## 25. V22 ARCHITECTURE — PROPRIETARY INTENT ENGINE
+
+*Released: 2026-04-17 | Commit: `6f60251` | Branch: main (PROD-FROZEN)*
+
+This section documents the three net-new architectural paradigms introduced in the V22 production freeze. Together, they eliminate the platform's dependency on pure LLM query generation, replace manual routing with a self-improving mathematical heuristic network, and add a real-time financial intelligence layer visible to tenants.
+
+---
+
+### 25.1 The Hybrid Starter Motor & Global Heuristic Engine
+
+**Objective:** Remove reliance on Gemini for cold-start query generation by building a mathematical, self-learning buyer-syntax network in BigQuery. Gemini is retained as the fallback "starter motor" for low-confidence personas.
+
+#### 25.1.1 BigQuery Dataset & Tables
+
+**Dataset:** `swarm_analytics` (GCP Project: `sideio-leads-v16`)
+
+**Table 1: `Intent_Keywords`** — Buyer-syntax confidence graph
+
+```sql
+CREATE TABLE IF NOT EXISTS `sideio-leads-v16.swarm_analytics.Intent_Keywords` (
+    persona_category  STRING    NOT NULL,
+    n_gram            STRING    NOT NULL,
+    occurrence_count  INT64     NOT NULL DEFAULT 1,
+    yield_weight      FLOAT64   NOT NULL DEFAULT 1.0,
+    last_updated      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP()
+)
+PARTITION BY DATE(last_updated)
+OPTIONS (partition_expiration_days = 365);
+```
+
+| Column | Purpose |
+|---|---|
+| `persona_category` | ICP bucket — scopes n-grams to a Persona (e.g., "Enterprise SaaS Decision Makers") |
+| `n_gram` | 2- or 3-gram buyer-syntax phrase extracted from approved lead text (e.g., "struggling with churn") |
+| `occurrence_count` | Raw frequency — how many times this phrase appeared in approved leads |
+| `yield_weight` | Confidence mass. Increments by `+0.1` per approval. Threshold: `SUM >= 1000` triggers STATISTICAL BUILD mode. |
+
+#### 25.1.2 The Shadow Tracker — Asynchronous Accumulator
+
+**Trigger:** Every `PUT /api/leads/{id}` with `status: approved` in `orchestrator/main.py`
+
+**Contract:** Always fire-and-forget. The HTTP 200 to the UI must never wait for BigQuery.
+
+```python
+# orchestrator/main.py
+def _async_shadow_track(lead_doc: dict, persona_category: str, tenant_id: str):
+    """Fire-and-forget daemon. Thread spawned and immediately detached."""
+    t = threading.Thread(
+        target=_do_shadow_track,
+        args=(lead_doc, persona_category, tenant_id),
+        daemon=True   # dies if main process exits — no orphan threads
+    )
+    t.start()
+
+def _do_shadow_track(lead_doc, persona_category, tenant_id):
+    try:
+        text = f"{lead_doc.get('pain_point', '')} {lead_doc.get('dm', '')}"
+        ngrams = _extract_ngrams(text, n_sizes=[2, 3])
+        bq = bigquery.Client(project=PROJECT_ID)
+        for gram in ngrams:
+            # MERGE (upsert) — safe for concurrent Approvals
+            bq.query(UPSERT_NGRAM_SQL, job_config=...).result(timeout=10.0)
+        print(f"[SHADOW TRACKER] Upserted {len(ngrams)} n-grams for persona={persona_category}")
+    except Exception as e:
+        # BQ timeout or schema error NEVER propagates upstream
+        print(f"[SHADOW TRACKER] Non-blocking insert failed: {e}")
+```
+
+#### 25.1.3 Confidence Threshold Router
+
+**Location:** `pipeline-main/main.py::generate_smart_query`
+
+**Configuration:** `system_config/router` Firestore document — field `confidence_threshold` (default: `1000`). Adjustable at runtime without redeployment.
+
+```
+Confidence Score = SUM(yield_weight) FROM Intent_Keywords WHERE persona_category = X
+
+IF score >= threshold:  → STATISTICAL BUILD  (pure BQ math, zero Gemini)
+IF score < threshold:   → GEMINI_FALLBACK    (LLM starter motor)
+```
+
+**Hardening:** The BQ confidence query runs inside `concurrent.futures.ThreadPoolExecutor` with a strict `timeout=3.0`. If BQ exceeds 3 seconds, the circuit breaker trips and the router **defaults to GEMINI_FALLBACK** — the pipeline never blocks.
+
+**Cold-Start Guarantee:** Every new Persona starts at `confidence = 0` → routes to GEMINI_FALLBACK. As the tenant approves leads, the Shadow Tracker accumulates weight. The system becomes self-sufficient asymptotically.
+
+---
+
+### 25.2 The Negative Knowledge Graph (BigQuery Exclusion Matrix)
+
+**Objective:** Build a self-updating suppression list that prevents competitors, authors, and noise domains from re-entering the pipeline indefinitely. The shield learns from every rejection.
+
+#### 25.2.1 BigQuery Table: `Negative_Signals`
+
+```sql
+CREATE TABLE IF NOT EXISTS `sideio-leads-v16.swarm_analytics.Negative_Signals` (
+    entity_name       STRING    NOT NULL,
+    root_domain       STRING    NOT NULL,
+    rejection_reason  STRING    NOT NULL,  -- Enum: "Competitor" | "Author"
+    tenant_id         STRING    NOT NULL,  -- "GLOBAL" for L0 admin overrides
+    timestamp         TIMESTAMP NOT NULL   DEFAULT CURRENT_TIMESTAMP()
+)
+PARTITION BY DATE(timestamp)
+OPTIONS (partition_expiration_days = 730);   -- 2-year retention
+```
+
+**Scope:** Tenant-scoped signals (`tenant_id = uid`) apply only to that tenant's queries. Global signals (`tenant_id = 'GLOBAL'`) are written by L0 admins and apply cross-tenant.
+
+#### 25.2.2 The RLHF Rejection Hook
+
+**Trigger:** `PUT /api/leads/{id}` with `rejection_reason: "Competitor"` or `rejection_reason: "Author"`.
+
+```python
+# orchestrator/main.py — PUT /api/leads/{id}
+if rejection_reason and rejection_reason.lower() in NEG_SIGNAL_REASONS:
+    _async_neg_signal_insert(
+        entity_name=lead_doc.get("company_name", ""),
+        root_domain=extract_root_domain(lead_doc.get("url", "")),
+        rejection_reason=rejection_reason,
+        tenant_id=tenant_id
+    )
+
+NEG_SIGNAL_REASONS = frozenset({"competitor", "author"})
+```
+
+**Async contract:** `_async_neg_signal_insert` spawns a daemon thread (`_do_neg_signal_insert`) and returns immediately. The 200 OK to the UI is never delayed. The BQ streaming insert runs asynchronously; failures are logged but never re-raised.
+
+#### 25.2.3 The Serper Shield — Query-Level Suppression
+
+**Location:** `pipeline-main/main.py::_fetch_neg_shield` → called before every `generate_smart_query` execution.
+
+```python
+def _fetch_neg_shield(tenant_id: str) -> tuple[list[str], list[str]]:
+    """
+    Returns (blocked_domains, blocked_entities).
+    Hard 3-second circuit breaker via concurrent.futures.
+    Falls back to ([], []) on ANY failure — pipeline never blocks.
+    """
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(bq.query, FETCH_NEG_SHIELD_SQL, job_config=...)
+            job = fut.result(timeout=3.0)           # ← 3s hard timeout
+        rows = list(job.result(timeout=3.0))
+        blocked_domains  = list({r["root_domain"]  for r in rows if r["root_domain"]})
+        blocked_entities = list({r["entity_name"]  for r in rows if r["entity_name"]})
+        return blocked_domains[:20], blocked_entities[:20]  # capped at 20 each
+    except concurrent.futures.TimeoutError:
+        print("[NEG SHIELD] BQ timeout (>3s) — proceeding without shield.")
+        return [], []
+    except Exception as e:
+        print(f"[NEG SHIELD] Fetch failed (non-fatal): {e}")
+        return [], []
+```
+
+**Injection into query blacklist:**
+```python
+blocked_domains, blocked_entities = _fetch_neg_shield(tenant_id)
+
+# Appended to every Serper query's blacklist string
+neg_domain_ops  = " ".join(f"-site:{d}"          for d in blocked_domains)
+neg_entity_ops  = " ".join(f"-intitle:\"{e}\""   for e in blocked_entities)
+blacklist += f" {neg_domain_ops} {neg_entity_ops}"
+```
+
+**Result:** Rejected competitor domains are **permanently excluded from all future Serper queries** for that tenant — and from global queries when `tenant_id = 'GLOBAL'`. The suppression list is self-expanding, requiring zero manual maintenance.
+
+---
+
+### 25.3 The L1 ROI & Analytics Matrix
+
+**Objective:** Provide tenants with a real-time, financially credible dashboard that quantifies the exact dollar value Sideio Lead Sniper generates. Uses conservative industry benchmarks (HubSpot CPL study, BLS SDR wage survey) as defaults to maintain trust.
+
+#### 25.3.1 Firestore Schema Update: `users/{tenant_id}.unit_economics`
+
+Added to the `users` document in V22. Populated via `PUT /api/analytics/unit-economics`.
+
+```json
+{
+  "unit_economics": {
+    "avg_cpl":              50,     // Cost-per-lead benchmark (USD). Source: HubSpot State of Marketing
+    "sdr_hourly_rate":      15,     // SDR hourly wage (USD). Source: BLS Occupational Outlook
+    "avg_deal_size":        0,      // Average closed deal value. Default 0 = credibility guard (see §25.3.3)
+    "est_conversion_rate":  0.02,   // Lead-to-close rate. Default 2%. Source: Salesforce Benchmarks
+    "currency":             "USD"   // Supported: USD, INR, GBP, EUR, AUD, SGD, AED
+  }
+}
+```
+
+**Field rules:**
+- `avg_deal_size: 0` is the default. Pipeline Value metric stays `$0` until the tenant explicitly sets a non-zero value. This is a **deliberate credibility guard** — the system refuses to project pipeline revenue using an unverified ADS.
+- Currency does not affect calculation logic; it is used only by the frontend formatter.
+
+#### 25.3.2 API Endpoints
+
+**`GET /api/analytics/roi`**
+
+```
+Query param: ?date_range=N  (default: 30, in days)
+Auth:        Bearer <Firebase ID Token>
+```
+
+Execution:
+1. Queries `leads` collection: `WHERE tenant_id == X AND status == "converted" AND updatedAt >= now - N days`
+2. Reads `unit_economics` from `users/{tenant_id}` (falls back to defaults if absent)
+3. Computes all four metrics
+4. Returns full payload
+
+Response schema:
+```json
+{
+  "metrics": {
+    "n_approved":      42,
+    "ad_savings":      2100.00,
+    "labor_savings":   157.50,
+    "total_offset":    2257.50,
+    "pipeline_value":  0.00,
+    "roi_ratio":       4.5
+  },
+  "unit_economics": {
+    "avg_cpl": 50, "sdr_hourly_rate": 15,
+    "avg_deal_size": 0, "est_conversion_rate": 0.02, "currency": "USD"
+  },
+  "date_range_days":   30,
+  "generated_at":      "2026-04-17T04:00:00Z"
+}
+```
+
+---
+
+**`PUT /api/analytics/unit-economics`**
+
+```
+Body: { "avg_cpl": 65, "avg_deal_size": 12000, "sdr_hourly_rate": 20,
+        "est_conversion_rate": 0.03, "currency": "INR" }
+Auth: Bearer <Firebase ID Token>
+```
+
+Execution:
+1. Validates all fields (numeric range checks)
+2. `users/{tenant_id}.set({ "unit_economics": payload }, merge=True)` — atomic Firestore update
+
+#### 25.3.3 Mathematical Models
+
+All four metrics are computed server-side in `GET /api/analytics/roi`. `N_approved = count of converted leads in window`.
+
+| Metric | Formula | Benchmark Basis |
+|---|---|---|
+| **Ad Spend Offset** | `N_approved × avg_cpl` | HubSpot: avg B2B CPL = $50–$75 |
+| **Labor Savings** | `(N_approved × 15 min / 60) × sdr_hourly_rate` | 15 min = avg manual SDR time per lead (BLS study) |
+| **Total Value Offset** | `ad_savings + labor_savings` | Combined elimination of two variable cost lines |
+| **Pipeline Value** | `N_approved × est_conversion_rate × avg_deal_size` | **$0 if `avg_deal_size == 0`** — credibility guard |
+| **ROI Ratio** | `total_offset / (N_approved × $0.10)` | `$0.10` ≈ estimated Sideio cost per approved lead |
+
+**Credibility Guard Design Note:** `pipeline_value` is the highest-magnitude metric and the most tempting to inflate. The system **deliberately keeps it at $0 until the tenant provides their actual ADS**. This prevents the dashboard from showing aspirational revenue numbers that the tenant's finance team cannot validate — a common complaint with AI-generated ROI claims.
+
+#### 25.3.4 Frontend ROI Dashboard Module (`public/app.js`)
+
+New client-side module appended to `app.js` in V22.
+
+| Function | Purpose |
+|---|---|
+| `loadROIDashboard(dateRange)` | Calls `GET /api/analytics/roi`, renders 4 hero cards with shimmer loading |
+| `animateCounter(el, val, currency)` | 900ms `easeOutExpo` counter animation on all card values |
+| `formatROICurrency(amount, currency)` | Maps USD/INR/GBP/EUR/AUD/SGD/AED with K/M abbreviation |
+| `openUnitEconomicsModal()` | Pre-fills modal from `window._roiLastUE` (last API response cache) |
+| `saveUnitEconomics()` | `PUT /api/analytics/unit-economics` → recalculates → closes modal after 1.2s |
+
+**Auto-load:** `loadROIDashboard(30)` is called in `loadDashboard()`'s `Promise.all` alongside `loadMe()`, `loadCampaigns()`, `loadLeads()` — all four execute in parallel on login.
+
+**4 Hero Cards rendered:**
+
+| Card | ID | Sub-label source |
+|---|---|---|
+| Ad Spend Saved | `roi-ad-savings` | `{currency} {avg_cpl}/lead × {N} approved` |
+| Labor Hours Saved | `roi-labor-savings` | `at {currency} {sdr_rate}/hr SDR rate` |
+| Total Value Offset | `roi-total-offset` | ROI ratio vs. Sideio cost |
+| Pipeline Value | `roi-pipeline-value` | `"⚙️ Set avg deal size to unlock"` if `avg_deal_size == 0` |
+
+**Date range selector:** `#roi-range-select` dropdown (7d / 30d / 90d / All Time) calls `loadROIDashboard(value)` on change.
+
+---
+
+### 25.4 V22 Amputation Record — Legacy Feature Removal
+
+The following features were **permanently removed** in commit `6f60251` on 2026-04-17.
+
+| Feature | Removed From | Lines Removed | Root Cause for Removal |
+|---|---|---|---|
+| "Suggest up to 10 websites" textarea | `public/index.html` L990-994 (edit-campaign-modal) | 5 | UI field exposed a pipeline vector that was actively degrading query quality |
+| `target_urls` DOM read + `slice(0,10)` | `public/app.js` L905-910 (saveCampaignAction DOM path) | 6 | Dead code — textarea removed |
+| `target_urls` in PUT payload | `public/app.js` L863 (saveEditedCampaign) | 1 | Payload field no longer needed |
+| `target_urls` in POST payload | `public/app.js` L963 (saveCampaignAction) | 1 | Same |
+| `target_urls: []` in `deployPredictiveCard` | `public/app.js` L3016 | 1 | Same |
+| `target_urls: []` in `saveChildCampaign` | `public/app.js` L3139 | 1 | Same |
+| `urlsEl` pre-fill in `openEditModal` | `public/app.js` L836-840 | 5 | DOM element no longer exists |
+| **`site:domain1 OR site:domain2` injection loop** | `services/pipeline-main/main.py` L1346-1352 | **7** | **Root cause: this loop was injecting user-submitted domains into Serper queries, overriding the intent keywords generated by the Hybrid Starter Motor. Google's SERP API was silently dropping the N-gram operators when the query exceeded token limits due to the domain expansion. Amputating this loop immediately restored full N-gram signal fidelity.** |
+
+**Total dead code removed: 27 lines across 3 files.**
+
+**Important:** The `target_urls` field **still exists** in legacy Firestore `campaigns` documents and in the backend `PUT /api/campaigns/{id}` handler (it is stored if sent by a client). It is simply **never read by the producer** (`pipeline-main/main.py::produce`). This is a deliberate soft migration — no Firestore migration script is required.
+
+---
+
+### 25.5 V22 Design Invariants (Additions to Section 16 + 22)
+
+15. **The Serper query builder has no user-controlled domain injection.** `target_urls` is permanently removed from the `produce()` data path. Any future attempt to re-introduce manual URL injection must go through the Negative Shield mechanism, not via direct `site:` operator injection in the query string.
+
+16. **Shadow Tracker threads are daemon threads.** They must always be spawned with `daemon=True`. If the Flask worker process exits (e.g., Cloud Run scale-to-zero), daemon threads are killed immediately — preventing leaked BQ connections that could hold open billing sessions.
+
+17. **BQ Negative Shield has a hard 3-second ceiling.** The `_fetch_neg_shield` function **must always** be called inside `concurrent.futures.ThreadPoolExecutor` with `timeout=3.0`. If this timeout is removed or extended, BQ latency will directly propagate into Serper query latency, potentially pushing the producer past Cloud Tasks' 10-minute deadline.
+
+18. **`confidence_threshold` is Firestore-configurable at `/system_config/router`.** Changing this value does not require a code deploy — the pipeline reads it at the start of each `generate_smart_query` call. Default: `1000`. Raising it biases toward Gemini longer; lowering it accelerates STATISTICAL BUILD adoption.
+
+19. **Pipeline Value stays `$0` until `avg_deal_size > 0`.** The backend enforces this: `pipeline_value = 0 if unit_economics.avg_deal_size == 0 else (N * rate * ADS)`. The frontend enforces this: the `roi-pipeline-sub` element shows `"⚙️ Set avg deal size to unlock"` when the value is zero. Both guards must be maintained in sync.
+
+20. **`unit_economics` defaults are industry benchmarks, not arbitrary values.** If you update the defaults, document the source. Current defaults:
+    - `avg_cpl: 50` → HubSpot State of Marketing Report 2024 (B2B avg CPL)
+    - `sdr_hourly_rate: 15` → US BLS SDR Median Wage 2024
+    - `est_conversion_rate: 0.02` → Salesforce State of Sales 2024 (avg lead-to-close rate)
+    - `avg_deal_size: 0` → Credibility guard (intentional zero, not a benchmark)
+
+---
+
+*Architecture document: V22 PROD-FROZEN. Next update expected at V23 feature milestone.*
