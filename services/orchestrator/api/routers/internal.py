@@ -258,20 +258,34 @@ def cron_sweep():
 
         # ── Consumer (4h interval) ────────────────────────────────────────────
         DRIP_INTERVAL_H = 4
-        next_drip_due   = campaign_data.get("next_drip_due")
-        drip_due        = True
-        if next_drip_due and hasattr(next_drip_due, "timestamp"):
-            ndd = next_drip_due
-            if ndd.tzinfo is None:
-                ndd = ndd.replace(tzinfo=datetime.timezone.utc)
-            if ndd > now_utc:
-                drip_due = False
+        # CRITICAL: the entire drip evaluation MUST live inside try/finally.
+        # Any exception in the timestamp comparison phase (e.g. TypeError from
+        # naive vs aware datetime, AttributeError on malformed Firestore
+        # DatetimeWithNanoseconds) would otherwise crash BETWEEN the produce
+        # finally: and this finally:, permanently skipping next_drip_due update.
+        try:
+            next_drip_due = campaign_data.get("next_drip_due")
+            drip_due      = True
+            if next_drip_due and hasattr(next_drip_due, "timestamp"):
+                try:
+                    ndd = next_drip_due
+                    if hasattr(ndd, "tzinfo") and ndd.tzinfo is None:
+                        ndd = ndd.replace(tzinfo=datetime.timezone.utc)
+                    if ndd > now_utc:
+                        drip_due = False
+                except Exception as ts_cmp_err:
+                    # Malformed timestamp — treat as overdue so drip fires
+                    log.warning("drip_timestamp_comparison_failed",
+                                campaign_id=campaign_id, error=str(ts_cmp_err))
+                    drip_due = True
 
-        queue_depth = len(campaign_data.get("unprocessed_queue", []))
-        if drip_due:
-            try:
+            queue_depth = len(campaign_data.get("unprocessed_queue", []) or [])
+
+            if drip_due:
                 if queue_depth == 0:
-                    audit_trail.append(f"⏸ CONSUMER skipped {campaign_id}: queue empty — drip timer advancing")
+                    audit_trail.append(
+                        f"⏸ CONSUMER skipped {campaign_id}: queue empty — drip timer advancing"
+                    )
                 else:
                     jitter  = random.randint(1, 290)
                     sched_t = ts_pb2.Timestamp()
@@ -281,21 +295,22 @@ def cron_sweep():
                     tasks_client.create_task(request={"parent": queue_path, "task": task})
                     consume_dispatched += 1
                     audit_trail.append(f"⚙️ CONSUMER queued for {campaign_id} (depth={queue_depth})")
-            except Exception as drip_err:
-                log.error("consumer_dispatch_failed", campaign_id=campaign_id,
-                          tenant_id=tenant_id, error=str(drip_err), exc_info=True)
-                audit_trail.append(f"❌ CONSUMER ERROR {campaign_id}: {drip_err}")
-            finally:
-                # Clock MUST advance regardless of queue state or dispatch outcome.
-                # This is the core fix for the next_drip_due permanent deadlock.
-                try:
-                    camp_doc.reference.update({
-                        "next_drip_due":         now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H),
-                        "drip_interval_minutes": DRIP_INTERVAL_H * 60,
-                    })
-                except Exception as ts_err:
-                    log.error("drip_timestamp_update_failed", campaign_id=campaign_id,
-                              error=str(ts_err))
+
+        except Exception as drip_err:
+            log.error("consumer_dispatch_failed", campaign_id=campaign_id,
+                      tenant_id=tenant_id, error=str(drip_err), exc_info=True)
+            audit_trail.append(f"❌ CONSUMER ERROR {campaign_id}: {drip_err}")
+        finally:
+            # Clock MUST advance regardless of any exception above.
+            # This finally: is now bulletproof — nothing above can skip it.
+            try:
+                camp_doc.reference.update({
+                    "next_drip_due":         now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H),
+                    "drip_interval_minutes": DRIP_INTERVAL_H * 60,
+                })
+            except Exception as ts_err:
+                log.error("drip_timestamp_update_failed", campaign_id=campaign_id,
+                          error=str(ts_err))
 
 
     # ── Zombie Lead Recovery ─────────────────────────────────────────────────
