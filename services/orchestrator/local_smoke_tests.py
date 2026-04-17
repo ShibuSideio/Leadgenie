@@ -215,23 +215,23 @@ def t_import_core_exceptions():
 
 def t_import_core_config():
     import importlib, sys
-    # Ensure key is set before triggering the lazy getter
     _saved = os.environ.get("ENCRYPTION_KEY")
     os.environ["ENCRYPTION_KEY"] = _SMOKE_FERNET_KEY
-    # Force fresh module load to pick up the key
-    for mod_name in [k for k in sys.modules if k in ("core.config", "core_config")]:
+    for mod_name in [k for k in list(sys.modules) if k in ("core.config", "core_config")]:
         del sys.modules[mod_name]
     try:
         from core.config import (
             PROJECT_ID, LOCATION, QUEUE, ROI_DEFAULTS, ALLOWED_ORIGINS, get_cipher
         )
-        assert PROJECT_ID == "sideio-leads-v16"
-        assert isinstance(ROI_DEFAULTS, dict)
-        assert "avg_cpl" in ROI_DEFAULTS
+        # PROJECT_ID can be the real GCP project (Cloud Build injects it) or
+        # the local default — just assert it is a non-empty string.
+        assert isinstance(PROJECT_ID, str) and PROJECT_ID, \
+            f"PROJECT_ID must be a non-empty string, got {PROJECT_ID!r}"
+        assert isinstance(ROI_DEFAULTS, dict), "ROI_DEFAULTS must be a dict"
+        assert "avg_cpl" in ROI_DEFAULTS, "ROI_DEFAULTS must contain avg_cpl"
         cipher = get_cipher()
-        assert cipher is not None
+        assert cipher is not None, "get_cipher() returned None"
     finally:
-        # Restore whatever the caller had
         if _saved is not None:
             os.environ["ENCRYPTION_KEY"] = _saved
         elif "ENCRYPTION_KEY" in os.environ:
