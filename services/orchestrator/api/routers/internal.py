@@ -230,7 +230,13 @@ def cron_sweep():
         queue_depth = len(campaign_data.get("unprocessed_queue", []))
         if drip_due:
             if queue_depth == 0:
-                audit_trail.append(f"⏸ CONSUMER skipped {campaign_id}: queue empty")
+                # DEADLOCK FIX: advance next_drip_due even when queue is empty.
+                # Without this, the timestamp stays in the past permanently and
+                # every future sweep idles on this campaign forever.
+                camp_doc.reference.update({
+                    "next_drip_due": now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H),
+                })
+                audit_trail.append(f"⏸ CONSUMER skipped {campaign_id}: queue empty — drip timer advanced +{DRIP_INTERVAL_H}h")
             else:
                 jitter  = random.randint(1, 290)
                 sched_t = ts_pb2.Timestamp()
@@ -393,8 +399,8 @@ def cron_reflection():
         try:
             for doc in (
                 db.collection("leads")
-                  .where("status",    "==", outcome_status)
-                  .where("updatedAt", ">=", cutoff)
+                  .where(filter=FieldFilter("status",    "==", outcome_status))
+                  .where(filter=FieldFilter("updatedAt", ">=", cutoff))
                   .limit(50).stream()
             ):
                 d = doc.to_dict()
