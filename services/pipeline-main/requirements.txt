@@ -16,8 +16,9 @@ Jinja2==3.1.4
 MarkupSafe==2.1.5
 
 # ── gRPC / protobuf — BINARY ONLY, no source compilation ─────────────────────
-grpcio==1.67.1
-grpcio-status==1.67.1
+# 1.66.2: last minor compatible with protobuf 4.x (same triplet as orchestrator).
+grpcio==1.66.2
+grpcio-status==1.66.2
 protobuf==4.25.5
 
 # ── GCP core ──────────────────────────────────────────────────────────────────

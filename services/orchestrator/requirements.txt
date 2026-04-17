@@ -22,10 +22,12 @@ Jinja2==3.1.4
 MarkupSafe==2.1.5
 
 # ── gRPC / protobuf — BINARY ONLY, no source compilation ─────────────────────
-# 1.67.1: last minor with confirmed cp310-manylinux2014_x86_64 wheel on PyPI.
-# grpcio-status must match grpcio exactly.
-grpcio==1.67.1
-grpcio-status==1.67.1
+# 1.66.2: last minor in the grpcio 1.66.x series — this is the last release
+# that accepts protobuf 4.x.  grpcio 1.67.0+ requires protobuf>=5.26.1 which
+# is a breaking change incompatible with google-cloud-aiplatform==1.51.0.
+# These three pins form a tested, binary-only triplet for cp310-manylinux.
+grpcio==1.66.2
+grpcio-status==1.66.2
 protobuf==4.25.5
 
 # ── GCP core ──────────────────────────────────────────────────────────────────
