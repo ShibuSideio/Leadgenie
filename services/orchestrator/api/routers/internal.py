@@ -240,8 +240,16 @@ def cron_sweep():
         campaign_data = camp_doc.to_dict() or {}
         campaign_id   = camp_doc.id
         tenant_id     = campaign_data.get("tenant_id")
+
+        log.info("sweep_campaign_evaluating", campaign_id=campaign_id,
+                 status=campaign_data.get("status"),
+                 next_produce_due=str(campaign_data.get("next_produce_due")),
+                 next_drip_due=str(campaign_data.get("next_drip_due")))
+
         if not tenant_id:
-            log.warning("sweep_skip_no_tenant_id", campaign_id=campaign_id)
+            log.warning("BYPASS_NO_TENANT_ID",
+                        campaign_id=campaign_id,
+                        reason="campaign document missing tenant_id field — skipping")
             audit_trail.append(f"⚠️ SKIPPED {campaign_id}: missing tenant_id field")
             continue
 
@@ -255,27 +263,78 @@ def cron_sweep():
         user_role = user_doc.get("role", "")
         if user_role != "super_admin":
             wallet    = user_doc.get("wallet", {})
+            # FIELD SCHEMA NOTE:
+            #   allocated_credits — total credits granted (always present)
+            #   total_consumed    — authoritative consumed count (written by _atomic_settle_txn)
+            #   consumed_credits  — legacy field (written by old wallet_shards path)
+            #   reserved_credits  — in-flight reservations
+            # We read BOTH consumed field names and take the max to handle schema drift.
             credits   = int(wallet.get("allocated_credits", 0) or 0)
-            consumed  = int(wallet.get("consumed_credits",  0) or 0)
-            reserved  = int(wallet.get("reserved_credits",  0) or 0)
+            consumed  = max(
+                int(wallet.get("total_consumed",   0) or 0),
+                int(wallet.get("consumed_credits", 0) or 0),
+            )
+            reserved  = int(wallet.get("reserved_credits", 0) or 0)
             available = credits - consumed - reserved
+            log.info("sweep_quota_check",
+                     campaign_id=campaign_id, tenant_id=tenant_id,
+                     credits=credits, consumed=consumed,
+                     reserved=reserved, available=available)
             if available <= 0:
-                log.warning("sweep_skip_quota_exhausted",
+                log.warning("BYPASS_QUOTA_EXHAUSTED",
                             campaign_id=campaign_id, tenant_id=tenant_id,
-                            available=available)
-                audit_trail.append(f"🚫 SKIPPED {campaign_id} (tenant={tenant_id[:8]}): quota exhausted")
+                            credits=credits, consumed=consumed,
+                            reserved=reserved, available=available,
+                            reason="available credits <= 0 — no task dispatched")
+                audit_trail.append(f"🚫 SKIPPED {campaign_id} (tenant={tenant_id[:8]}): quota exhausted "
+                                   f"[allocated={credits} consumed={consumed} reserved={reserved}]")
                 continue
 
         # ── Producer (24h interval) ──────────────────────────────────────────
         PRODUCE_INTERVAL_H = 24
         next_produce_due   = campaign_data.get("next_produce_due")
         produce_due        = True
-        if next_produce_due and hasattr(next_produce_due, "timestamp"):
-            npd = next_produce_due
-            if npd.tzinfo is None:
-                npd = npd.replace(tzinfo=datetime.timezone.utc)
-            if npd > now_utc:
-                produce_due = False
+
+        # next_produce_due may be:
+        #   (a) a Firestore DatetimeWithNanoseconds  → hasattr(.timestamp) = True
+        #   (b) an ISO-8601 string "2026-..."        → written by our finally: block
+        #   (c) None                                 → field missing, treat as overdue
+        if next_produce_due:
+            ndd_dt = None
+            if hasattr(next_produce_due, "timestamp"):
+                # Firestore native datetime
+                ndd_dt = next_produce_due
+                if hasattr(ndd_dt, "tzinfo") and ndd_dt.tzinfo is None:
+                    ndd_dt = ndd_dt.replace(tzinfo=datetime.timezone.utc)
+            elif isinstance(next_produce_due, str):
+                # ISO-8601 string written by our finally: block
+                try:
+                    ndd_dt = datetime.datetime.fromisoformat(next_produce_due)
+                    if ndd_dt.tzinfo is None:
+                        ndd_dt = ndd_dt.replace(tzinfo=datetime.timezone.utc)
+                except Exception as _parse_err:
+                    log.warning("BYPASS_PRODUCE_TIMESTAMP_UNPARSEABLE",
+                                campaign_id=campaign_id,
+                                next_produce_due=str(next_produce_due),
+                                error=str(_parse_err),
+                                action="Treating as overdue — produce_due=True")
+            if ndd_dt is not None:
+                try:
+                    if ndd_dt > now_utc:
+                        produce_due = False
+                        log.info("BYPASS_PRODUCE_NOT_YET_DUE",
+                                 campaign_id=campaign_id,
+                                 next_produce_due=str(next_produce_due),
+                                 now_utc=now_utc.isoformat(),
+                                 hours_remaining=round((ndd_dt - now_utc).total_seconds() / 3600, 2))
+                except Exception as _cmp_err:
+                    log.warning("BYPASS_PRODUCE_TIMESTAMP_CMP_FAILED",
+                                campaign_id=campaign_id, error=str(_cmp_err),
+                                action="Treating as overdue")
+
+        log.info("sweep_produce_gate_result",
+                 campaign_id=campaign_id, produce_due=produce_due,
+                 next_produce_due=str(next_produce_due))
 
         if produce_due:
             try:
@@ -286,6 +345,8 @@ def cron_sweep():
                 task["schedule_time"] = sched_t
                 tasks_client.create_task(request={"parent": queue_path, "task": task})
                 produce_dispatched += 1
+                log.info("produce_task_dispatched",
+                         campaign_id=campaign_id, tenant_id=tenant_id, jitter_s=jitter)
                 audit_trail.append(f"🏭 PRODUCER queued for {campaign_id} (jitter={jitter}s)")
             except Exception as prod_err:
                 log.error("producer_dispatch_failed", campaign_id=campaign_id,
@@ -314,23 +375,48 @@ def cron_sweep():
         try:
             next_drip_due = campaign_data.get("next_drip_due")
             drip_due      = True
-            if next_drip_due and hasattr(next_drip_due, "timestamp"):
-                try:
-                    ndd = next_drip_due
-                    if hasattr(ndd, "tzinfo") and ndd.tzinfo is None:
-                        ndd = ndd.replace(tzinfo=datetime.timezone.utc)
-                    if ndd > now_utc:
-                        drip_due = False
-                except Exception as ts_cmp_err:
-                    # Malformed timestamp — treat as overdue so drip fires
-                    log.warning("drip_timestamp_comparison_failed",
-                                campaign_id=campaign_id, error=str(ts_cmp_err))
-                    drip_due = True
+
+            if next_drip_due:
+                ndd_drip = None
+                if hasattr(next_drip_due, "timestamp"):
+                    ndd_drip = next_drip_due
+                    if hasattr(ndd_drip, "tzinfo") and ndd_drip.tzinfo is None:
+                        ndd_drip = ndd_drip.replace(tzinfo=datetime.timezone.utc)
+                elif isinstance(next_drip_due, str):
+                    try:
+                        ndd_drip = datetime.datetime.fromisoformat(next_drip_due)
+                        if ndd_drip.tzinfo is None:
+                            ndd_drip = ndd_drip.replace(tzinfo=datetime.timezone.utc)
+                    except Exception as _dp_err:
+                        log.warning("drip_timestamp_unparseable",
+                                    campaign_id=campaign_id,
+                                    next_drip_due=str(next_drip_due),
+                                    error=str(_dp_err))
+                if ndd_drip is not None:
+                    try:
+                        if ndd_drip > now_utc:
+                            drip_due = False
+                            log.info("BYPASS_DRIP_NOT_YET_DUE",
+                                     campaign_id=campaign_id,
+                                     next_drip_due=str(next_drip_due),
+                                     hours_remaining=round((ndd_drip - now_utc).total_seconds() / 3600, 2))
+                    except Exception as ts_cmp_err:
+                        # Malformed timestamp — treat as overdue so drip fires
+                        log.warning("drip_timestamp_comparison_failed",
+                                    campaign_id=campaign_id, error=str(ts_cmp_err))
+                        drip_due = True
 
             queue_depth = len(campaign_data.get("unprocessed_queue", []) or [])
 
+            log.info("sweep_drip_gate_result",
+                     campaign_id=campaign_id, drip_due=drip_due,
+                     queue_depth=queue_depth)
+
             if drip_due:
                 if queue_depth == 0:
+                    log.info("BYPASS_DRIP_QUEUE_EMPTY",
+                             campaign_id=campaign_id,
+                             reason="unprocessed_queue is empty — consumer skipped, clock will advance")
                     audit_trail.append(
                         f"⏸ CONSUMER skipped {campaign_id}: queue empty — drip timer advancing"
                     )
@@ -342,6 +428,9 @@ def cron_sweep():
                     task["schedule_time"] = sched_t
                     tasks_client.create_task(request={"parent": queue_path, "task": task})
                     consume_dispatched += 1
+                    log.info("consume_task_dispatched",
+                             campaign_id=campaign_id, tenant_id=tenant_id,
+                             queue_depth=queue_depth, jitter_s=jitter)
                     audit_trail.append(f"⚙️ CONSUMER queued for {campaign_id} (depth={queue_depth})")
 
         except Exception as drip_err:
