@@ -79,22 +79,87 @@ def _async_gcs_dump(raw_payload: dict, tenant_id: str):
 def health_check():
     return jsonify({"status": "healthy", "version": "12.99.1", "location": "us-central1"}), 200
 
-db = firestore.Client()
+# =============================================================================
+# LAZY CLIENT SINGLETONS — gRPC PRE-FORK DEADLOCK FIX
+#
+# ROOT CAUSE OF DEADLOCK: Gunicorn forks worker processes AFTER module import.
+# Any gRPC channel opened at module scope (firestore.Client(), secretmanager
+# .SecretManagerServiceClient(), vertexai.init()) is inherited by the child
+# process as a DEAD/LOCKED file descriptor. The first .get()/.stream() call
+# in the child blocks forever — the channel-level mutex is held by the parent
+# thread that no longer exists. No Python timeout fires because the lock is
+# at the C-extension level, below Python's signal machinery.
+#
+# FIX: All three clients are now lazy singletons. The gRPC channel is opened
+# inside get_db() / get_sm_client() / ensure_vertexai_init() on the FIRST
+# call from within the already-forked worker process. The threading.Lock()
+# prevents duplicate initialization under concurrent Flask requests.
+# =============================================================================
+import threading as _threading_init
+
+_db_instance: "firestore.Client | None" = None
+_db_lock = _threading_init.Lock()
+
+def get_db() -> "firestore.Client":
+    global _db_instance
+    if _db_instance is None:
+        with _db_lock:
+            if _db_instance is None:
+                print("[LAZY_INIT] Initializing Firestore client (post-fork)...")
+                _db_instance = firestore.Client()
+                print("[LAZY_INIT] Firestore client ready.")
+    return _db_instance
+
+# Backward-compat module-level alias — resolved lazily on first attribute access.
+# All existing code references `db.collection(...)` which triggers get_db() on
+# the first actual call, NOT at import time.
+class _LazyDB:
+    """Proxy that defers firestore.Client() construction until first attribute access."""
+    def __getattr__(self, name):
+        return getattr(get_db(), name)
+
+db = _LazyDB()
+
+_sm_instance: "secretmanager.SecretManagerServiceClient | None" = None
+_sm_lock = _threading_init.Lock()
+
+def get_sm_client() -> "secretmanager.SecretManagerServiceClient":
+    global _sm_instance
+    if _sm_instance is None:
+        with _sm_lock:
+            if _sm_instance is None:
+                print("[LAZY_INIT] Initializing Secret Manager client (post-fork)...")
+                _sm_instance = secretmanager.SecretManagerServiceClient()
+                print("[LAZY_INIT] Secret Manager client ready.")
+    return _sm_instance
+
+sm_client = get_sm_client  # kept as callable alias; callers do get_sm_client()
+
+_vertexai_initialized = False
+_vertexai_lock = _threading_init.Lock()
+
+def ensure_vertexai_init():
+    global _vertexai_initialized
+    if not _vertexai_initialized:
+        with _vertexai_lock:
+            if not _vertexai_initialized:
+                print("[LAZY_INIT] Initializing Vertex AI SDK (post-fork)...")
+                vertexai.init(location="us-central1")
+                _vertexai_initialized = True
+                print("[LAZY_INIT] Vertex AI SDK ready.")
+
 project_id = os.environ.get("PROJECT_ID", "sideio-leads-v16")
 PROJECT_ID = project_id
-LOCATION = os.environ.get("LOCATION", "asia-south1")
-QUEUE = os.environ.get("QUEUE", "lead-pipeline-queue")
-sm_client = secretmanager.SecretManagerServiceClient()
+LOCATION   = os.environ.get("LOCATION", "asia-south1")
+QUEUE      = os.environ.get("QUEUE", "lead-pipeline-queue")
 
-SCRAPER_HEAVY_URL = os.environ.get("SCRAPER_HEAVY_URL", "https://scraper-heavy-abc.a.run.app/scrape")
+SCRAPER_HEAVY_URL   = os.environ.get("SCRAPER_HEAVY_URL", "https://scraper-heavy-abc.a.run.app/scrape")
 SERPER_API_KEY_NAME = f"projects/{project_id}/secrets/SERPER_API_KEY/versions/latest"
-FERNET_KEY = os.environ.get("ENCRYPTION_KEY", "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0=")
-cipher_suite = Fernet(FERNET_KEY.encode())
-
-# Global initialization explicitly routed to the central US cluster
-vertexai.init(location="us-central1")
+FERNET_KEY          = os.environ.get("ENCRYPTION_KEY", "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0=")
+cipher_suite        = Fernet(FERNET_KEY.encode())
 
 def call_gemini_2_5(prompt: str, expect_json: bool = True, response_schema=None, system_instruction=None):
+    ensure_vertexai_init()  # gRPC-safe: no-op if already initialized in this worker
     model = GenerativeModel("gemini-2.5-flash", system_instruction=system_instruction)
     if expect_json:
         config = GenerationConfig(response_mime_type="application/json", response_schema=response_schema)
@@ -119,7 +184,7 @@ def call_gemini_2_5(prompt: str, expect_json: bool = True, response_schema=None,
     return response.text
 
 def get_secret(secret_name):
-    response = sm_client.access_secret_version(request={"name": secret_name})
+    response = get_sm_client().access_secret_version(request={"name": secret_name})
     return response.payload.data.decode("UTF-8")
 
 def search_serper(query, location=None, gl=None):
@@ -1244,19 +1309,30 @@ def produce():
               f"Direct access not permitted. IP={request.remote_addr}")
         return jsonify({"error": "Forbidden", "message": "Task queue header required."}), 403
 
+    import logging as _tlog
+    _tlog.info("TRACE-1: produce() entered. Parsing payload...")
     lead_data = request.json or {}
     tenant_id   = lead_data.get("tenant_id")
     campaign_id = lead_data.get("campaign_id")
+    _tlog.info("TRACE-2: payload parsed. tenant_id=%s campaign_id=%s", tenant_id, campaign_id)
     if not tenant_id or not campaign_id:
         print(f"[PRODUCER] CRITICAL: Missing tenant_id or campaign_id. Aborting.")
         return jsonify({"error": "Missing campaign_id or tenant_id"}), 400
 
-    campaign_ref  = db.collection("campaigns").document(campaign_id)
-    campaign      = campaign_ref.get().to_dict() or {}
-    bio           = campaign.get("bio", "")
+    _tlog.info("TRACE-3: Acquiring Firestore db handle (lazy init)...")
+    campaign_ref  = get_db().collection("campaigns").document(campaign_id)
+    _tlog.info("TRACE-4: db handle ready. Fetching campaign document...")
+    try:
+        campaign = campaign_ref.get().to_dict() or {}
+    except Exception as _cg_err:
+        _tlog.error("TRACE-4-FAIL: campaign .get() failed: %s", _cg_err)
+        return jsonify({"error": "Firestore timeout or error fetching campaign"}), 500
+    _tlog.info("TRACE-5: Campaign doc fetched. sourcing_vector=%s",
+               campaign.get("sourcing_vector"))
+    bio             = campaign.get("bio", "")
     sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
-    location      = campaign.get("location", "").strip()
-    gl            = campaign.get("gl", "").strip()
+    location        = campaign.get("location", "").strip()
+    gl              = campaign.get("gl", "").strip()
 
     # ── V23 Persona Vault field extraction (priority over legacy fields) ────────
     # PREVIOUS BUG: code read campaign.get('keywords') first, then tried to
@@ -1318,6 +1394,8 @@ def produce():
                 }
             }), 400
 
+    _tlog.info("TRACE-6: Keywords resolved. count=%d bio_len=%d sourcing=%s",
+               len(keywords), len(bio), sourcing_vector)
 
     # ── V19: CHILD_CAMPAIGN_OVERRIDE sentinel guard ──────────────────────────────
     # DT child campaigns set bio='CHILD_CAMPAIGN_OVERRIDE' as a routing marker.
@@ -1332,6 +1410,7 @@ def produce():
                ", ".join(keywords))
         print(f"[PRODUCER] CHILD_CAMPAIGN_OVERRIDE resolved → bio='{bio[:80]}'")
 
+    _tlog.info("TRACE-7: Calling generate_smart_query (Vertex AI)...")
     print(f"[SYNAPTIC ROUTER] Campaign {campaign_id} → sourcing vector: '{sourcing_vector}'")
 
     # ── Step 3: Intent Translation + Smart Query Generation ─────────────────
@@ -1343,6 +1422,7 @@ def produce():
         keywords, tenant_id, bio, sourcing_vector,
         persona_category=_persona_cat
     )
+    _tlog.info("TRACE-8: generate_smart_query complete. smart_keyword_count=%d", len(smart_keywords))
 
     # Telemetry billing
     db.collection("usage_metrics").document(tenant_id).set(
@@ -1357,6 +1437,7 @@ def produce():
 
     raw_urls    = []       # ordered list of raw URLs
     snippet_db  = {}       # url → {"title": ..., "snippet": ...} for hand-off
+    _tlog.info("TRACE-9: Entering Serper execution loop. keyword_count=%d", len(smart_keywords))
 
     for kw in smart_keywords:
         # ── Query Builder Guard: clean location string, no orphaned AND operators ──
