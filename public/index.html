@@ -13,7 +13,6 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="styles.css?v=45">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
@@ -310,7 +309,57 @@
                 <span>Value: <strong id="stat-value">&#x20b9;&nbsp;0</strong></span>
             </div>
 
-            <!-- ════ ROI HERO DASHBOARD ════════════════════════════════= -->
+
+            <div class="feed-header">
+                <h3 class="feed-title">Lead Intelligence Feed</h3>
+                <select id="campaign-filter" class="feed-filter" onchange="filterLeadsByCampaign(this.value)">
+                    <option value="all">All Searches</option>
+                </select>
+            </div>
+            <div id="active-campaign-feed"></div>
+            <div id="leads-list" class="leads-list">
+                <div class="lead-card pulse">Connecting to intelligence engine...</div>
+            </div>
+            <div class="load-more-row">
+                <button class="secondary-btn" onclick="loadMoreLeads()" style="padding:10px 24px;">Load Older Leads</button>
+            </div>
+        </section>
+
+        <!-- SEARCHES VIEW -->
+        <section id="view-target" class="main-feed" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h2>Active Campaign Matrix</h2>
+                <div id="matrix-btn-container">
+                    <button id="btn-new-twin-matrix" class="primary-btn" onclick="openNewCampaignModal()" style="display:none;">&#43; Find New Clients</button>
+                    <button id="btn-add-campaign-matrix" class="primary-btn" onclick="openChildCampaignModal()" style="display:none;">&#43; Add Campaign</button>
+                </div>
+            </div>
+            <div class="stats-box mt-3" style="background:#ffffff; padding:0; overflow:hidden;">
+                <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.9rem;">
+                    <thead style="background:rgba(79,70,229,0.05); border-bottom:1px solid var(--glass-border);">
+                        <tr>
+                            <th style="padding:12px;">Campaign</th>
+                            <th style="padding:12px;">Keywords</th>
+                            <th style="padding:12px;">Status</th>
+                            <th style="padding:12px; text-align:right;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="campaign-list-table">
+                        <tr><td colspan="4" style="padding:16px; text-align:center;">Loading campaigns...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- REPORTS VIEW -->
+        <section id="view-reports" class="main-feed" style="display:none;">
+            <div class="greeting-bar" style="margin-bottom:20px;">
+                <div class="greeting-text">
+                    <span>&#128200; Reports &amp; ROI Intelligence</span>
+                </div>
+            </div>
+
+            <!-- ════ ROI INTELLIGENCE MATRIX ════════════════════════════ -->
             <div class="roi-section" id="roi-section">
                 <div class="roi-header">
                     <div class="roi-title">
@@ -368,68 +417,19 @@
                     </div>
                 </div>
             </div>
-            <!-- ═══════════════════════════════════════════════════════= -->
+            <!-- ═══════════════════════════════════════════════════════ -->
 
-            <div id="funnel-wrap" class="funnel-wrap" style="display:none;">
-                <div class="funnel-hdr">Pipeline Analytics</div>
-                <div style="height:160px; position:relative;">
-                    <canvas id="funnelChart"></canvas>
-                </div>
-            </div>
-
-            <div class="feed-header">
-                <h3 class="feed-title">Lead Intelligence Feed</h3>
-                <select id="campaign-filter" class="feed-filter" onchange="filterLeadsByCampaign(this.value)">
-                    <option value="all">All Searches</option>
-                </select>
-            </div>
-            <div id="active-campaign-feed"></div>
-            <div id="leads-list" class="leads-list">
-                <div class="lead-card pulse">Connecting to intelligence engine...</div>
-            </div>
-            <div class="load-more-row">
-                <button class="secondary-btn" onclick="loadMoreLeads()" style="padding:10px 24px;">Load Older Leads</button>
-            </div>
-        </section>
-
-        <!-- SEARCHES VIEW -->
-        <section id="view-target" class="main-feed" style="display:none;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h2>Active Campaign Matrix</h2>
-                <div id="matrix-btn-container">
-                    <button id="btn-new-twin-matrix" class="primary-btn" onclick="openNewCampaignModal()" style="display:none;">&#43; Find New Clients</button>
-                    <button id="btn-add-campaign-matrix" class="primary-btn" onclick="openChildCampaignModal()" style="display:none;">&#43; Add Campaign</button>
-                </div>
-            </div>
-            <div class="stats-box mt-3" style="background:#ffffff; padding:0; overflow:hidden;">
-                <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.9rem;">
-                    <thead style="background:rgba(79,70,229,0.05); border-bottom:1px solid var(--glass-border);">
-                        <tr>
-                            <th style="padding:12px;">Campaign</th>
-                            <th style="padding:12px;">Keywords</th>
-                            <th style="padding:12px;">Status</th>
-                            <th style="padding:12px; text-align:right;">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="campaign-list-table">
-                        <tr><td colspan="4" style="padding:16px; text-align:center;">Loading campaigns...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </section>
-
-        <!-- REPORTS VIEW -->
-        <section id="view-reports" class="main-feed" style="display:none;">
-            <h2>Custom Reports</h2>
-            <div class="stats-box mt-3" style="background:#ffffff; padding:24px;">
+            <!-- Export Controls -->
+            <div class="stats-box" style="background:#ffffff; padding:24px; margin-top:20px;">
+                <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-muted); margin-bottom:16px;">&#128196; Export Report</div>
                 <div style="display:flex; gap:16px; margin-bottom:16px;">
                     <div style="flex:1;">
                         <label style="font-size:0.8rem; color:var(--text-muted);">Start Date</label>
-                        <input type="date" id="report-start" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
+                        <input type="date" id="report-start" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px; box-sizing:border-box;">
                     </div>
                     <div style="flex:1;">
                         <label style="font-size:0.8rem; color:var(--text-muted);">End Date</label>
-                        <input type="date" id="report-end" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px;">
+                        <input type="date" id="report-end" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px; box-sizing:border-box;">
                     </div>
                 </div>
                 <button class="primary-btn full-width" onclick="showToast('Aggregating Intelligence Arrays...', 'info')">Generate Report</button>

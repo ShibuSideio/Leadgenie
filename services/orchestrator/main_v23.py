@@ -1,23 +1,31 @@
 """
-Sideio Lead Sniper — Orchestrator V23 Entrypoint.
+Sideio Lead Sniper — Orchestrator V23 Entrypoint (Phase 3 — Final Cutover).
 
-Thin entrypoint: registers V23 Blueprints, then attaches the V22 legacy
-catch-all for any routes not yet migrated.  V22 production routes remain
-100% live throughout the migration.
+All routes fully migrated to Blueprint architecture. Legacy monolith removed.
 
-V23 Blueprints (migrated, smoke-tested):
-  /api/me                    → api/routers/me.py
-  /api/campaigns (GET)       → api/routers/data_reads.py
-  /api/leads (GET)           → api/routers/data_reads.py
-  /api/tenant_profiles (GET) → api/routers/data_reads.py
-  /api/analytics/roi         → api/routers/analytics.py
-  /api/analytics/unit-economics → api/routers/analytics.py
+V23 Blueprint Registry:
+  Phase 1 (read paths):
+    /api/me                       -> api/routers/me.py
+    /api/campaigns GET            -> api/routers/data_reads.py
+    /api/leads GET                -> api/routers/data_reads.py
+    /api/tenant_profiles GET      -> api/routers/data_reads.py
+    /api/analytics/*              -> api/routers/analytics.py
 
-All other routes (L0, campaign mutations, lead updates, personas, etc.)
-handled by main_legacy.py → original main.py until extracted to Blueprints.
+  Phase 3 (mutation paths):
+    /api/campaigns POST/PUT/DEL   -> api/routers/campaigns.py
+    /api/campaigns/<id>/*         -> api/routers/campaigns.py
+    /api/leads/<id> PUT           -> api/routers/leads.py
+    /api/personas/*               -> api/routers/personas.py
+    /api/migrate-personas         -> api/routers/personas.py
 
-Zero-downtime guarantee: original main.py UNTOUCHED, still the production
-entrypoint until gcloud --entrypoint switch is confirmed green.
+  Phase 3 (governance + internal):
+    /api/l0/*                     -> api/routers/l0_admin.py
+    /api/internal/*               -> api/routers/internal.py
+    /api/telemetry/*              -> api/routers/internal.py
+    /purge                        -> api/routers/internal.py
+    /api/settings                 -> api/routers/settings.py
+    /api/tenant_profiles POST     -> api/routers/settings.py
+    /api/analyze-website          -> api/routers/settings.py
 """
 from __future__ import annotations
 
@@ -36,23 +44,26 @@ from flask import Flask, jsonify, make_response, request
 from core.config import ALLOWED_ORIGINS  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
 
-from api.routers.me import bp as me_bp  # type: ignore[import]
-from api.routers.analytics import bp as analytics_bp  # type: ignore[import]
+# Phase 1 Blueprints
+from api.routers.me import bp as me_bp                  # type: ignore[import]
+from api.routers.analytics import bp as analytics_bp    # type: ignore[import]
 from api.routers.data_reads import bp as data_reads_bp  # type: ignore[import]
+
+# Phase 3 Blueprints
+from api.routers.campaigns import bp as campaigns_bp    # type: ignore[import]
+from api.routers.leads import bp as leads_bp            # type: ignore[import]
+from api.routers.personas import bp as personas_bp      # type: ignore[import]
+from api.routers.l0_admin import bp as l0_admin_bp      # type: ignore[import]
+from api.routers.internal import bp as internal_bp      # type: ignore[import]
+from api.routers.settings import bp as settings_bp      # type: ignore[import]
 
 log = get_logger("orchestrator.v23")
 
 
 def create_app() -> Flask:
-    """Create the V23 Flask application.
-
-    Returns:
-        Configured :class:`flask.Flask` instance with V23 Blueprints
-        registered and V22 legacy catch-all attached as fallback.
-    """
+    """Create the V23 Flask application with all Phase 3 Blueprints."""
     app = Flask(__name__)
 
-    # ── CORS (mirrors V22 exactly) ────────────────────────────────────────────
     @app.before_request
     def handle_preflight():
         if request.method == "OPTIONS":
@@ -77,30 +88,30 @@ def create_app() -> Flask:
             response.headers["Access-Control-Expose-Headers"] = "Content-Type, X-Request-Id"
         return response
 
-    # ── Health check ──────────────────────────────────────────────────────────
     @app.route("/", methods=["GET"])
     @app.route("/health", methods=["GET"])
     def health():
-        """Cloud Run health probe endpoint."""
-        return jsonify({"status": "healthy", "version": "23.0.0", "arch": "modular"}), 200
+        return jsonify({"status": "healthy", "version": "23.1.0", "arch": "modular-v23-final"}), 200
 
-    # ── V23 Blueprints (migrated routes) ─────────────────────────────────────
+    # Phase 1
     app.register_blueprint(me_bp)
     app.register_blueprint(analytics_bp)
     app.register_blueprint(data_reads_bp)
 
-    # ── V22 legacy catch-all (Strangler Fig — unmigrated routes) ─────────────
-    from main_legacy import register_legacy_routes  # type: ignore[import]
-    register_legacy_routes(app)
+    # Phase 3
+    app.register_blueprint(campaigns_bp)
+    app.register_blueprint(leads_bp)
+    app.register_blueprint(personas_bp)
+    app.register_blueprint(l0_admin_bp)
+    app.register_blueprint(internal_bp)
+    app.register_blueprint(settings_bp)
 
-    # ── Global error handler ──────────────────────────────────────────────────
     @app.errorhandler(Exception)
     def handle_unhandled(exc: Exception):
-        """Return structured JSON — never raw HTML stack traces."""
         log.error("unhandled_exception", error=str(exc), exc_type=type(exc).__name__)
         return jsonify({"error": "Internal Server Error", "message": str(exc)}), 500
 
-    log.info("orchestrator_v23_started", version="23.0.0")
+    log.info("orchestrator_v23_started", version="23.1.0", phase="final-cutover")
     return app
 
 

@@ -1,0 +1,210 @@
+"""
+Orchestrator V23 — /api/leads/<id> Blueprint.
+
+Routes:
+  PUT /api/leads/<id>  — RLHF backpropagation + Shadow Tracker + Negative Signal
+                          + Ontology weight update + CRM egress webhook
+"""
+from __future__ import annotations
+
+from flask import Blueprint, jsonify, request
+from google.cloud.firestore_v1.base_query import FieldFilter
+
+from core.config import db  # type: ignore[import]
+from core.auth import require_auth  # type: ignore[import]
+from core.logging import get_logger  # type: ignore[import]
+from services.shared.helpers import (  # type: ignore[import]
+    parse_base_path,
+    _async_neg_signal_insert,
+    _async_shadow_track,
+    _enqueue_bq_telemetry_task,
+)
+
+import httpx
+
+bp = Blueprint("leads", __name__)
+log = get_logger("orchestrator.v23.leads")
+
+NEG_SIGNAL_REASONS = frozenset({"competitor", "author"})
+
+REJECTION_PENALTY_MAP: dict[str, float] = {
+    "not_b2b":        -0.25,
+    "bad_data":       -0.20,
+    "wrong_industry": -0.15,
+    "too_small":      -0.05,
+    "competitor":      0.00,
+    "author":          0.00,
+}
+
+
+# =============================================================================
+# PUT /api/leads/<id>
+# =============================================================================
+@bp.route("/api/leads/<string:doc_id>", methods=["PUT"])
+@require_auth
+def update_lead(uid, tenant_id, user_role, doc_id):
+    """
+    Update lead status. Triggers:
+    - RLHF backpropagation (converted / ignored)
+    - Shadow Tracker N-gram upsert (converted)
+    - Categorical Rejection Engine + Ontology penalty (rejected)
+    - Negative Signal BQ insert (competitor / author)
+    - BQ RLHF telemetry enqueue
+    - Headless CRM egress webhook
+    """
+    from google.cloud import firestore  # SERVER_TIMESTAMP
+
+    doc_ref  = db.collection("leads").document(doc_id)
+    doc_data = doc_ref.get()
+
+    if not doc_data.exists or doc_data.to_dict().get("tenant_id") != tenant_id:
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = request.json or {}
+    data.pop("tenant_id", None)
+    data["updatedAt"] = firestore.SERVER_TIMESTAMP
+
+    # Persist the update
+    if "interactions" in data:
+        db_interaction = {"action": data.get("interactions", ""), "date": firestore.SERVER_TIMESTAMP}
+        doc_ref.update({
+            "status":       data.get("status"),
+            "updatedAt":    firestore.SERVER_TIMESTAMP,
+            "interactions": firestore.ArrayUnion([db_interaction]),
+        })
+    else:
+        doc_ref.update(data)
+
+    status           = data.get("status")
+    lead_dict        = doc_data.to_dict()
+    tech_stack       = lead_dict.get("tech_stack_found", [])
+    hiring_intent    = lead_dict.get("hiring_intent_found", "")
+    rejection_reason = data.get("rejection_reason")
+
+    # ── RLHF Backpropagation ──────────────────────────────────────────────────
+    if status in ("converted", "ignored"):
+        import re
+        delta       = 1 if status == "converted" else -1
+        user_ref    = db.collection("users").document(tenant_id)
+        pref_updates: dict = {}
+
+        if hiring_intent and hiring_intent.lower() != "none":
+            pref_updates["preferences_weights.hiring_intent"] = firestore.Increment(delta)
+        for tech in tech_stack:
+            pref_updates[f"preferences_weights.tech_{tech}"] = firestore.Increment(delta)
+        if status == "ignored":
+            pain_point = lead_dict.get("pain_point", "")
+            words      = list(set(re.findall(r"\b\w{4,}\b", pain_point.lower())))
+            extracted  = words[:3]
+            if isinstance(tech_stack, list) and tech_stack:
+                extracted.extend([t.lower() for t in tech_stack[:2]])
+            if extracted:
+                pref_updates["dynamic_blocklist"] = firestore.ArrayUnion(extracted)
+        if pref_updates:
+            try:
+                user_ref.set(pref_updates, merge=True)
+            except Exception as e:
+                log.warning("rlhf_backprop_failed", error=str(e))
+
+    # ── Shadow Tracker (converted only) ──────────────────────────────────────
+    if status == "converted":
+        try:
+            pain_st     = (lead_dict.get("pain_point") or "").strip()
+            camp_id_st  = lead_dict.get("campaign_id") or ""
+            persona_cat = "general"
+            if camp_id_st:
+                camp_snap  = db.collection("campaigns").document(camp_id_st).get()
+                camp_dict  = camp_snap.to_dict() if camp_snap.exists else {}
+                persona_cat = (camp_dict.get("persona_name") or camp_dict.get("name") or "general").strip()
+            if pain_st and persona_cat:
+                _async_shadow_track(persona_category=persona_cat, pain_point=pain_st, tenant_id=tenant_id)
+        except Exception as st_e:
+            log.warning("shadow_tracker_hook_failed", error=str(st_e))
+
+    # ── CRM Ontology RLHF (won / negotiating / lost) ─────────────────────────
+    crm_status = data.get("crm_status")
+    if crm_status in ("won", "negotiating", "lost"):
+        source_url    = lead_dict.get("source_url", lead_dict.get("url", ""))
+        base_path_key = parse_base_path(source_url)
+        if base_path_key and base_path_key != "unknown":
+            try:
+                ont_ref  = db.collection("ontology_map").document(base_path_key)
+                ont_snap = ont_ref.get()
+                if ont_snap.exists:
+                    total_yield = ont_snap.to_dict().get("total_yield", 0)
+                    if total_yield >= 50:
+                        delta_w = 0.15 if crm_status in ("won", "negotiating") else -0.05
+                        ont_ref.update({"baseline_weight": firestore.Increment(delta_w), "last_seen": firestore.SERVER_TIMESTAMP})
+                        log.info("ontology_rlhf_applied", base_path=base_path_key, delta=delta_w)
+            except Exception as re_err:
+                log.warning("ontology_rlhf_failed", error=str(re_err))
+
+    # ── Categorical Rejection Engine (rejected with reason) ──────────────────
+    if status == "rejected" and rejection_reason:
+        if rejection_reason not in REJECTION_PENALTY_MAP:
+            log.warning("invalid_rejection_reason", reason=rejection_reason)
+        else:
+            penalty = REJECTION_PENALTY_MAP[rejection_reason]
+            try:
+                doc_ref.update({
+                    "rejection_reason": rejection_reason,
+                    "status":           "rejected",
+                    "updatedAt":        firestore.SERVER_TIMESTAMP,
+                })
+            except Exception as rej_e:
+                log.warning("rejection_lead_update_failed", error=str(rej_e))
+
+            if penalty != 0.0:
+                try:
+                    src_url = lead_dict.get("source_url", lead_dict.get("url", ""))
+                    bpk     = parse_base_path(src_url)
+                    if bpk and bpk != "unknown":
+                        ont_ref  = db.collection("ontology_map").document(bpk)
+                        ont_snap = ont_ref.get()
+                        if ont_snap.exists:
+                            ont_ref.update({
+                                "baseline_weight": firestore.Increment(penalty),
+                                "last_seen":       firestore.SERVER_TIMESTAMP,
+                                f"rejection_counts.{rejection_reason}": firestore.Increment(1),
+                            })
+                except Exception as rlhf_e:
+                    log.warning("rejection_ontology_failed", error=str(rlhf_e))
+
+    # ── Negative Signal BQ insert ─────────────────────────────────────────────
+    if status == "rejected" and rejection_reason in NEG_SIGNAL_REASONS:
+        try:
+            entity_name = (
+                lead_dict.get("company_name") or lead_dict.get("dm") or lead_dict.get("name") or ""
+            ).strip()
+            raw_url     = lead_dict.get("source_url") or lead_dict.get("url") or ""
+            root_domain = parse_base_path(raw_url).split("/")[0]  # domain-only
+            if root_domain or entity_name:
+                _async_neg_signal_insert(
+                    entity_name=entity_name, root_domain=root_domain,
+                    rejection_reason=rejection_reason, tenant_id=tenant_id,
+                )
+        except Exception as ns_e:
+            log.warning("neg_signal_hook_failed", error=str(ns_e))
+
+    # ── BQ RLHF telemetry enqueue ─────────────────────────────────────────────
+    bq_status = data.get("status") or data.get("crm_status") or "updated"
+    _enqueue_bq_telemetry_task(tenant_id, lead_dict, bq_status)
+
+    # ── Headless CRM egress webhook (converted) ───────────────────────────────
+    if status == "converted":
+        try:
+            user_crm_doc    = db.collection("users").document(tenant_id).get().to_dict() or {}
+            crm_webhook_url = user_crm_doc.get("crm_webhook_url")
+            if crm_webhook_url:
+                crm_payload = {
+                    "lead_id":           doc_id,
+                    "score":             lead_dict.get("score"),
+                    "dm":                lead_dict.get("dm"),
+                    "intent_signal":     lead_dict.get("intent_signal", ""),
+                    "contact_endpoints": lead_dict.get("contact_endpoints", []),
+                }
+                httpx.post(crm_webhook_url, json=crm_payload, timeout=5)
+        except Exception as crm_e:
+            log.warning("crm_egress_failed", error=str(crm_e))
+
+    return jsonify({"status": "success"}), 200
