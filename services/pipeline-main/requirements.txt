@@ -1,8 +1,7 @@
 # =============================================================================
-# Pipeline-main — STRICT PIN manifest (V23 hotfix 2026-04-17)
+# Pipeline-main — STRICT PIN manifest (V23 hotfix 2026-04-17 rev-3)
 # Base image: python:3.10-slim  (cp310-cp310-manylinux2014_x86_64)
-#
-# Same pinning rules as orchestrator — see orchestrator/requirements.txt header.
+# Same ecosystem-resolved triplet as orchestrator.
 # =============================================================================
 
 # ── Web framework ──────────────────────────────────────────────────────────────
@@ -16,37 +15,42 @@ Jinja2==3.1.4
 MarkupSafe==2.1.5
 
 # ── gRPC / protobuf — BINARY ONLY, no source compilation ─────────────────────
-# 1.66.2: last minor compatible with protobuf 4.x (same triplet as orchestrator).
-grpcio==1.66.2
-grpcio-status==1.66.2
-protobuf==4.25.5
+grpcio==1.80.0
+grpcio-status==1.80.0
+protobuf==6.33.6
 
 # ── GCP core ──────────────────────────────────────────────────────────────────
 google-auth==2.29.0
 google-auth-httplib2==0.2.0
 google-api-core==2.19.2
-google-api-python-client==2.131.0
-googleapis-common-protos==1.63.2
+googleapis-common-protos==1.74.0
+proto-plus==1.27.2
 
 # ── Firebase / Firestore ───────────────────────────────────────────────────────
 firebase-admin==6.5.0
-google-cloud-firestore==2.16.1
+google-cloud-firestore==2.27.0
 google-cloud-storage==2.17.0
+google-cloud-core==2.5.1
+google-resumable-media==2.8.2
 
 # ── Cloud Tasks ───────────────────────────────────────────────────────────────
 google-cloud-tasks==2.16.3
 
 # ── Secret Manager ────────────────────────────────────────────────────────────
 google-cloud-secret-manager==2.20.0
+grpc-google-iam-v1==0.14.4
 
 # ── BigQuery ──────────────────────────────────────────────────────────────────
-google-cloud-bigquery==3.25.0
+google-cloud-bigquery==3.41.0
 google-cloud-bigquery-storage==2.25.0
 pyarrow==16.1.0
+google-crc32c==1.8.0
 
 # ── Vertex AI ─────────────────────────────────────────────────────────────────
-google-cloud-aiplatform==1.51.0
+google-cloud-aiplatform==1.148.0
+google-cloud-resource-manager==1.17.0
 shapely==2.0.6
+docstring-parser==0.16
 
 # ── HTTP / Scraping ────────────────────────────────────────────────────────────
 httpx==0.27.0
@@ -64,6 +68,7 @@ urllib3==2.2.2
 cryptography==42.0.8
 cffi==1.16.0
 pycparser==2.22
+PyJWT==2.10.1
 
 # ── Data / validation ─────────────────────────────────────────────────────────
 pydantic==2.7.1
@@ -75,3 +80,7 @@ typing_extensions==4.12.2
 tenacity==8.2.3
 packaging==24.1
 six==1.16.0
+python-dateutil==2.9.0.post0
+pyasn1==0.6.1
+pyasn1-modules==0.4.1
+rsa==4.9
