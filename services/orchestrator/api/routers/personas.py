@@ -13,9 +13,11 @@ from __future__ import annotations
 from flask import Blueprint, jsonify, request
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from core.config import db  # type: ignore[import]
+from core.clients import get_db  # type: ignore[import]
 from core.auth import require_auth  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
+
+db = get_db()
 
 bp = Blueprint("personas", __name__)
 log = get_logger("orchestrator.v23.personas")

@@ -24,9 +24,10 @@ import json
 from flask import Blueprint, jsonify, request
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from core.config import db, PROJECT_ID, LOCATION, QUEUE, PIPELINE_URL  # type: ignore[import]
+from core.clients import get_db  # type: ignore[import]
+from core.config import PROJECT_ID, LOCATION, QUEUE, PIPELINE_URL  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
-from services.shared.helpers import (  # type: ignore[import]
+from core.helpers import (  # type: ignore[import]
     _handle_bq_push_task,
     _atomic_settle_txn,
     check_quota,
@@ -44,6 +45,8 @@ except ImportError:
     pass  # Handled at startup
 
 import random
+
+db = get_db()
 
 bp = Blueprint("internal", __name__)
 log = get_logger("orchestrator.v23.internal")

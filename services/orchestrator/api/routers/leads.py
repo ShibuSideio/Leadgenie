@@ -7,20 +7,22 @@ Routes:
 """
 from __future__ import annotations
 
+import httpx
+
 from flask import Blueprint, jsonify, request
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from core.config import db  # type: ignore[import]
+from core.clients import get_db  # type: ignore[import]
 from core.auth import require_auth  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
-from services.shared.helpers import (  # type: ignore[import]
+from core.helpers import (  # type: ignore[import]
     parse_base_path,
     _async_neg_signal_insert,
     _async_shadow_track,
     _enqueue_bq_telemetry_task,
 )
 
-import httpx
+db = get_db()
 
 bp = Blueprint("leads", __name__)
 log = get_logger("orchestrator.v23.leads")

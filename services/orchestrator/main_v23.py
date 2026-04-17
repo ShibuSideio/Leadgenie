@@ -1,30 +1,21 @@
 """
-Sideio Lead Sniper — Orchestrator V23 Entrypoint (Phase 3 — Stabilized).
+Sideio Lead Sniper — Orchestrator V23 Entrypoint (Phase 3 — Complete).
 
-HOTFIX (post-deploy 503): Phase 3 Blueprints (campaigns, leads, personas,
-l0_admin, internal, settings) reference `services.shared.helpers` and
-`core.config.db` which do not yet exist as importable modules. They are
-defined inside the legacy main.py module.
+All routes are served by V23 Blueprints. main_legacy.py is permanently retired.
 
-Stabilization approach (Strangler Fig — Phase 2 stable state):
-  - Phase 1 Blueprints (me, analytics, data_reads) remain live — they have
-    correct imports and are smoke-tested.
-  - Phase 3 Blueprints are DISABLED at registration time to prevent the
-    ImportError crash loop.
-  - The legacy Strangler Fig catch-all is re-enabled to serve all routes
-    that Phase 3 was meant to cover — zero production regression.
-
-Next sprint: extract helpers into core/config.py and core/helpers.py so
-Phase 3 Blueprints can be re-enabled one by one.
-
-V23 Blueprint Registry (LIVE):
-  /api/me                       -> api/routers/me.py
-  /api/campaigns GET            -> api/routers/data_reads.py
-  /api/leads GET                -> api/routers/data_reads.py
-  /api/tenant_profiles GET      -> api/routers/data_reads.py
-  /api/analytics/*              -> api/routers/analytics.py
-
-All other routes -> main_legacy.py (Strangler Fig catch-all -> main.py)
+Blueprint Registry:
+  /api/me, /health            -> api/routers/me.py
+  /api/analytics/*            -> api/routers/analytics.py
+  /api/campaigns* (GET)       -> api/routers/data_reads.py
+  /api/tenant_profiles (GET)  -> api/routers/data_reads.py
+  /api/campaigns* (POST/PUT/DELETE/ignite/consume/run)
+                              -> api/routers/campaigns.py
+  /api/leads/<id> (PUT)       -> api/routers/leads.py
+  /api/personas*              -> api/routers/personas.py
+  /api/l0/*                   -> api/routers/l0_admin.py
+  /api/internal/*             -> api/routers/internal.py
+  /api/settings, /api/tenant_profiles (POST), /api/analyze-website
+                              -> api/routers/settings.py
 """
 from __future__ import annotations
 
@@ -43,16 +34,24 @@ from flask import Flask, jsonify, make_response, request
 from core.config import ALLOWED_ORIGINS  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
 
-# Phase 1 Blueprints — stable, correct imports
+# ── Phase 1 Blueprints (stable) ───────────────────────────────────────────────
 from api.routers.me import bp as me_bp                  # type: ignore[import]
 from api.routers.analytics import bp as analytics_bp    # type: ignore[import]
 from api.routers.data_reads import bp as data_reads_bp  # type: ignore[import]
+
+# ── Phase 3 Blueprints (newly fixed) ─────────────────────────────────────────
+from api.routers.campaigns import bp as campaigns_bp    # type: ignore[import]
+from api.routers.leads import bp as leads_bp            # type: ignore[import]
+from api.routers.personas import bp as personas_bp      # type: ignore[import]
+from api.routers.l0_admin import bp as l0_admin_bp      # type: ignore[import]
+from api.routers.internal import bp as internal_bp      # type: ignore[import]
+from api.routers.settings import bp as settings_bp      # type: ignore[import]
 
 log = get_logger("orchestrator.v23")
 
 
 def create_app() -> Flask:
-    """Create the V23 Flask application (Phase 2 stable / hotfix state)."""
+    """Create the V23 Flask application — fully modular, no legacy."""
     app = Flask(__name__)
 
     @app.before_request
@@ -82,25 +81,27 @@ def create_app() -> Flask:
     @app.route("/", methods=["GET"])
     @app.route("/health", methods=["GET"])
     def health():
-        return jsonify({"status": "healthy", "version": "23.1.1", "arch": "modular-v23-hotfix"}), 200
+        return jsonify({"status": "healthy", "version": "23.2.0", "arch": "modular-v23-phase3"}), 200
 
-    # ── Phase 1 Blueprints (live) ─────────────────────────────────────────────
+    # ── Phase 1 ───────────────────────────────────────────────────────────────
     app.register_blueprint(me_bp)
     app.register_blueprint(analytics_bp)
     app.register_blueprint(data_reads_bp)
 
-    # ── Strangler Fig: legacy catch-all for all Phase 3 routes ───────────────
-    # Re-enabled post-503 hotfix. Phase 3 blueprints will be re-connected
-    # once services/shared/helpers.py is extracted from main.py.
-    from main_legacy import register_legacy_routes  # type: ignore[import]
-    register_legacy_routes(app)
+    # ── Phase 3 ───────────────────────────────────────────────────────────────
+    app.register_blueprint(campaigns_bp)
+    app.register_blueprint(leads_bp)
+    app.register_blueprint(personas_bp)
+    app.register_blueprint(l0_admin_bp)
+    app.register_blueprint(internal_bp)
+    app.register_blueprint(settings_bp)
 
     @app.errorhandler(Exception)
     def handle_unhandled(exc: Exception):
         log.error("unhandled_exception", error=str(exc), exc_type=type(exc).__name__)
         return jsonify({"error": "Internal Server Error", "message": str(exc)}), 500
 
-    log.info("orchestrator_v23_started", version="23.1.1", phase="phase2-stable-hotfix")
+    log.info("orchestrator_v23_started", version="23.2.0", phase="phase3-complete")
     return app
 
 

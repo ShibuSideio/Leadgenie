@@ -14,13 +14,16 @@ import json
 import os
 import re
 
+import httpx
+
 from flask import Blueprint, jsonify, request
 
-from core.config import db, PROJECT_ID  # type: ignore[import]
+from core.clients import get_db  # type: ignore[import]
+from core.config import PROJECT_ID  # type: ignore[import]
 from core.auth import require_auth  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
 
-import httpx
+db = get_db()
 
 bp = Blueprint("settings", __name__)
 log = get_logger("orchestrator.v23.settings")
@@ -77,7 +80,7 @@ def update_settings(uid, tenant_id, user_role):
 @require_auth
 def upsert_tenant_profile(uid, tenant_id, user_role):
     from google.cloud import firestore
-    from services.shared.helpers import check_quota  # type: ignore[import]
+    from core.helpers import check_quota  # type: ignore[import]
 
     is_valid, status_code, err_msg = check_quota(tenant_id)
     if not is_valid:
@@ -143,7 +146,7 @@ def extract_kb(uid, tenant_id, user_role):
 @bp.route("/api/analyze-website", methods=["POST"])
 @require_auth
 def analyze_website(uid, tenant_id, user_role):
-    from services.shared.helpers import _call_gemini_bounded  # type: ignore[import]
+    from core.helpers import _call_gemini_bounded  # type: ignore[import]
 
     data = request.json or {}
     url  = data.get("url", "").strip()

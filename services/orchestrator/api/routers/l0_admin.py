@@ -21,9 +21,12 @@ import datetime
 from flask import Blueprint, jsonify, request
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from core.config import db, PROJECT_ID  # type: ignore[import]
+from core.clients import get_db  # type: ignore[import]
+from core.config import PROJECT_ID  # type: ignore[import]
 from core.auth import require_auth, require_super_admin  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
+
+db = get_db()
 
 bp = Blueprint("l0_admin", __name__)
 log = get_logger("orchestrator.v23.l0_admin")
