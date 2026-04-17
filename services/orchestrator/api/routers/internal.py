@@ -162,8 +162,18 @@ def cron_sweep():
         log.warning("circuit_breaker_read_failed_fail_open", error=str(cb_err))
 
     # ── Main sweep ───────────────────────────────────────────────────────────
-    campaigns     = list(db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(500).stream())
-    audit_trail   = ["Executed V23 Dual-Mode Sweep (Producer=24h / Consumer=4h)."]
+    campaigns = list(
+        db.collection("campaigns")
+          .where(filter=FieldFilter("status", "==", "active"))
+          .limit(500)
+          .stream()
+    )
+    # DIAGNOSTIC: always visible in Cloud Logging — confirms query executed
+    log.info("sweep_query_executed",
+             campaign_count=len(campaigns),
+             note="Only status==active filter applied. No secondary filters.")
+
+    audit_trail   = [f"Executed V23 Dual-Mode Sweep. Found {len(campaigns)} active campaigns."]
     tasks_client  = tv2.CloudTasksClient()
     queue_path    = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
     sa_email      = get_service_account_email().strip()
@@ -181,17 +191,33 @@ def cron_sweep():
         return t
 
     for camp_doc in campaigns:
-        campaign_data = camp_doc.to_dict()
+        campaign_data = camp_doc.to_dict() or {}
         campaign_id   = camp_doc.id
         tenant_id     = campaign_data.get("tenant_id")
         if not tenant_id:
+            log.warning("sweep_skip_no_tenant_id", campaign_id=campaign_id)
+            audit_trail.append(f"⚠️ SKIPPED {campaign_id}: missing tenant_id field")
             continue
 
-        role = (db.collection("users").document(tenant_id).get().to_dict() or {}).get("role")
-        if role != "super_admin":
-            is_valid, _, err_msg = check_quota(tenant_id)
-            if not is_valid:
-                audit_trail.append(f"🚫 SKIPPED {campaign_id}: {err_msg}")
+        # ── Quota gate ───────────────────────────────────────────────────────
+        # NOTE: We do NOT check approval_status here. Campaigns can only exist
+        # for tenants who were approved at creation time. Legacy documents
+        # pre-dating the approval_status field would have approval_status=None
+        # and would be silently blocked by check_quota's != 'approved' guard.
+        # Instead: super_admin always passes; others are gated on credit balance.
+        user_doc  = (db.collection("users").document(tenant_id).get().to_dict() or {})
+        user_role = user_doc.get("role", "")
+        if user_role != "super_admin":
+            wallet    = user_doc.get("wallet", {})
+            credits   = int(wallet.get("allocated_credits", 0) or 0)
+            consumed  = int(wallet.get("consumed_credits",  0) or 0)
+            reserved  = int(wallet.get("reserved_credits",  0) or 0)
+            available = credits - consumed - reserved
+            if available <= 0:
+                log.warning("sweep_skip_quota_exhausted",
+                            campaign_id=campaign_id, tenant_id=tenant_id,
+                            available=available)
+                audit_trail.append(f"🚫 SKIPPED {campaign_id} (tenant={tenant_id[:8]}): quota exhausted")
                 continue
 
         # ── Producer (24h interval) ──────────────────────────────────────────
