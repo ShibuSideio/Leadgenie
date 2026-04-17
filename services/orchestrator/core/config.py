@@ -30,6 +30,10 @@ PIPELINE_URL: str = os.environ.get(
     "PIPELINE_URL",
     "https://lead-pipeline-main-abc.a.run.app/dispatch",
 )
+# Static SA email for OIDC task auth — set via ORCHESTRATOR_SA_EMAIL env var.
+# Eliminates per-request blocking calls to http://metadata.google.internal.
+# If unset, _oidc_task falls back to a 1-second metadata fetch with a hard timeout.
+ORCHESTRATOR_SA_EMAIL: str = os.environ.get("ORCHESTRATOR_SA_EMAIL", "")
 
 # ---------------------------------------------------------------------------
 # Application limits

@@ -25,7 +25,7 @@ from flask import Blueprint, jsonify, request
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from core.clients import get_db  # type: ignore[import]
-from core.config import PROJECT_ID, LOCATION, QUEUE, PIPELINE_URL  # type: ignore[import]
+from core.config import PROJECT_ID, LOCATION, QUEUE, PIPELINE_URL, ORCHESTRATOR_SA_EMAIL  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
 from core.helpers import (  # type: ignore[import]
     _handle_bq_push_task,
@@ -176,18 +176,64 @@ def cron_sweep():
     audit_trail   = [f"Executed V23 Dual-Mode Sweep. Found {len(campaigns)} active campaigns."]
     tasks_client  = tv2.CloudTasksClient()
     queue_path    = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
-    sa_email      = get_service_account_email().strip()
-    base_url      = PIPELINE_URL.split("/dispatch")[0]
-    produce_url   = f"{base_url}/produce"
-    consume_url   = f"{base_url}/dispatch"
+
+    # ── OIDC identity — static config first, 1-second metadata fallback ─────
+    # PREVIOUS BUG: get_service_account_email() was called here, making 3
+    # blocking urllib calls (up to 18s) to metadata.google.internal.
+    # On cold starts or slow metadata this returned "" → no OIDC token →
+    # Cloud Tasks hit pipeline-main with HTTP 403 from Cloud Run IAM.
+    #
+    # FIX: Read ORCHESTRATOR_SA_EMAIL env var set in Cloud Run console.
+    # Only falls back to metadata if env var is absent, with a 1-second hard cap.
+    if ORCHESTRATOR_SA_EMAIL:
+        sa_email = ORCHESTRATOR_SA_EMAIL
+        log.info("oidc_sa_email_from_config", sa_email=sa_email)
+    else:
+        try:
+            import urllib.request as _ur
+            import concurrent.futures as _cf
+            _meta_url = (
+                "http://metadata.google.internal/computeMetadata/v1"
+                "/instance/service-accounts/default/email"
+            )
+            def _fetch_sa():
+                req = _ur.Request(_meta_url, headers={"Metadata-Flavor": "Google"})
+                with _ur.urlopen(req, timeout=1) as r:
+                    return r.read().decode("utf-8").strip()
+            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+                sa_email = _pool.submit(_fetch_sa).result(timeout=1)
+            log.info("oidc_sa_email_from_metadata", sa_email=sa_email)
+        except Exception as _meta_err:
+            sa_email = ""
+            log.warning("sa_email_metadata_fallback_failed",
+                        error=str(_meta_err),
+                        action="Tasks will be dispatched WITHOUT OIDC token. "
+                               "Set ORCHESTRATOR_SA_EMAIL env var to permanently fix.")
+
+    base_url    = PIPELINE_URL.split("/dispatch")[0]
+    produce_url = f"{base_url}/produce"
+    consume_url = f"{base_url}/dispatch"
     produce_dispatched = consume_dispatched = 0
 
     def _oidc_task(url, payload):
-        t: dict = {"http_request": {"http_method": tv2.HttpMethod.POST, "url": url,
-                                     "headers": {"Content-Type": "application/json"},
-                                     "body": json.dumps(payload).encode()}}
+        t: dict = {
+            "http_request": {
+                "http_method": tv2.HttpMethod.POST,
+                "url": url,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps(payload).encode(),
+            }
+        }
         if sa_email:
-            t["http_request"]["oidc_token"] = {"service_account_email": sa_email, "audience": base_url}
+            t["http_request"]["oidc_token"] = {
+                "service_account_email": sa_email,
+                "audience": base_url,
+            }
+        else:
+            log.warning("oidc_token_missing_no_sa_email",
+                        url=url,
+                        note="Task dispatched without OIDC. Will be rejected with "
+                             "403 by Cloud Run IAM. Set ORCHESTRATOR_SA_EMAIL.")
         return t
 
     for camp_doc in campaigns:

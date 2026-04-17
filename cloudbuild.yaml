@@ -323,7 +323,7 @@ steps:
   # V18: ORCHESTRATOR_URL is a Cloud Build substitution variable (_ORCHESTRATOR_URL).
   # Set this once in the Cloud Build trigger config (GCP Console → Cloud Build → Triggers).
   # Value: the live orchestrator Cloud Run URL, e.g. https://orchestrator-xxx.asia-south1.run.app
-  - --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL
+  - --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,ORCHESTRATOR_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
   - --quiet
 
 # =============================================================================

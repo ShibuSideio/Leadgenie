@@ -1258,37 +1258,66 @@ def produce():
     location      = campaign.get("location", "").strip()
     gl            = campaign.get("gl", "").strip()
 
-    raw_keywords  = campaign.get("keywords", "")
-    keywords      = [k.strip() for k in raw_keywords.split(',') if k.strip()] \
-                    if isinstance(raw_keywords, str) else raw_keywords
+    # ── V23 Persona Vault field extraction (priority over legacy fields) ────────
+    # PREVIOUS BUG: code read campaign.get('keywords') first, then tried to
+    # override if persona_id was set. Campaigns created via the Persona Vault
+    # flow may not have a root-level 'keywords' field at all — only persona_bio
+    # and persona_keywords. The legacy read returned "" and the persona block
+    # only overwrote if the persona fields were non-empty, but the keywords list
+    # was already empty by the time it was checked → silent HTTP 400 abort.
+    #
+    # FIX: persona fields are now primary. Legacy fields are the fallback.
+    _persona_id   = campaign.get("persona_id", "")
+    _persona_bio  = campaign.get("persona_bio", "").strip()
+    _persona_keys = campaign.get("persona_keywords", "").strip()
 
-    # ── PERSONA VAULT: inject linked persona bio/keywords ─────────────────────
-    # Reads denormalised persona_bio / persona_keywords written at campaign
-    # creation. Zero extra Firestore reads on the hot path.
-    # Falls back to campaign.bio if no persona linked.
-    _persona_id = campaign.get("persona_id", "")
-    if _persona_id:
-        _persona_bio  = campaign.get("persona_bio", "").strip()
-        _persona_keys = campaign.get("persona_keywords", "").strip()
-        if _persona_bio:
-            bio = _persona_bio
-            print(f"[PERSONA PRODUCER] Injected persona '{campaign.get('persona_name', _persona_id)}' "
-                  f"bio='{bio[:60]}' for campaign {campaign_id}")
-        if _persona_keys:
-            raw_keywords = _persona_keys
-            keywords = [k.strip() for k in _persona_keys.split(',') if k.strip()]
+    # bio: persona_bio → campaign.bio → ""
+    bio = _persona_bio or campaign.get("bio", "")
+    if _persona_id and _persona_bio:
+        print(f"[PERSONA PRODUCER] Injected persona '{campaign.get('persona_name', _persona_id)}' "
+              f"bio='{bio[:60]}' for campaign {campaign_id}")
+
+    # raw_keywords: persona_keywords → campaign.keywords → ""
+    raw_keywords = _persona_keys or campaign.get("keywords", "")
+    if isinstance(raw_keywords, str):
+        keywords = [k.strip() for k in raw_keywords.split(",") if k.strip()]
+    else:
+        keywords = list(raw_keywords) if raw_keywords else []
+
+    if _persona_id and _persona_keys and not keywords:
+        print(f"[PERSONA PRODUCER] persona_keywords present but parsed to empty "
+              f"list for campaign {campaign_id} — raw='{_persona_keys[:80]}'")
     # ─────────────────────────────────────────────────────────────────────────
 
     if not keywords:
-        # RISK 4 FIX: if a persona-linked campaign has bio but no keywords,
-        # synthesise a minimal keyword from the bio so the producer never aborts.
+        # RISK 4 FIX: synthesise from bio so the producer never aborts on
+        # campaigns that have bio context but no explicit keyword list.
         if bio:
             keywords = [w.strip() for w in bio.split() if len(w.strip()) > 3][:5]
             print(f"[PRODUCER] No keywords — synthesised {len(keywords)} terms from bio "
                   f"for campaign {campaign_id}")
         if not keywords:
-            print(f"[PRODUCER] Campaign {campaign_id}: empty keywords. Aborting.")
-            return jsonify({"error": "Empty keywords matrix"}), 400
+            import logging as _stdlib_log
+            _stdlib_log.error(
+                "[PRODUCER] CRITICAL ABORT: campaign %s has empty keywords AND empty bio. "
+                "No Serper query can be constructed. "
+                "Campaign fields: persona_id=%r persona_keywords=%r keywords=%r bio=%r",
+                campaign_id, _persona_id,
+                campaign.get("persona_keywords"),
+                campaign.get("keywords"),
+                campaign.get("bio"),
+            )
+            return jsonify({
+                "error": "Empty keywords matrix",
+                "campaign_id": campaign_id,
+                "debug": {
+                    "persona_id": _persona_id,
+                    "persona_keywords": campaign.get("persona_keywords"),
+                    "keywords": campaign.get("keywords"),
+                    "bio": campaign.get("bio"),
+                }
+            }), 400
+
 
     # ── V19: CHILD_CAMPAIGN_OVERRIDE sentinel guard ──────────────────────────────
     # DT child campaigns set bio='CHILD_CAMPAIGN_OVERRIDE' as a routing marker.
