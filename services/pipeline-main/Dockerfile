@@ -12,4 +12,12 @@ RUN pip install --no-cache-dir \
 
 COPY . .
 
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 main_v23:app
+CMD exec gunicorn \
+      --bind :$PORT \
+      --workers 1 \
+      --threads 8 \
+      --worker-class gthread \
+      --timeout 120 \
+      --graceful-timeout 30 \
+      --log-level info \
+      main_v23:app

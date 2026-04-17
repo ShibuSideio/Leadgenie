@@ -1,39 +1,50 @@
 """
 Pipeline-Main V23 — /produce Blueprint.
 
-The Producer is the 24-hour Serper fetch + unprocessed_queue population step.
-This Blueprint wraps the produce() function from the legacy module so that
-main_v23.py can register it as a proper Flask Blueprint.
+CIRCUIT BREAKER ACTIVE
+======================
+The legacy shim (from main_legacy_pipeline import _legacy_app) was importing
+the entire monolith at module load time inside the Gunicorn master process.
+This dragged all gRPC C-extensions (firestore, secretmanager, vertexai) into
+the master before fork(), causing child workers to inherit dead gRPC channels
+that deadlocked on the first .get() call.
 
-The actual logic remains in the legacy pipeline module during the cutover
-transition. A future services/shared/ sprint will inline the helpers here.
+This stub returns 200 with zero I/O so we can confirm:
+  1. Cloud Tasks can reach this service (OIDC + IAM clear)
+  2. Flask is running and routing correctly (no import deadlock)
+  3. The frozen thread was caused by the legacy import, not infrastructure
+
+Once a 200 is confirmed in Cloud Logging, the full inline implementation
+will be wired in here without importing from main.py.
 """
 from __future__ import annotations
 
+import logging
+
 from flask import Blueprint, jsonify, request
 
-# Import the legacy produce function directly so we get a zero-regression shim.
-# When the legacy module is eventually deleted, this import is replaced with
-# the inline implementation.
-try:
-    from main_legacy_pipeline import _legacy_app as _legacy  # type: ignore[import]
-    _produce_fn = _legacy.view_functions.get("produce")
-except Exception:
-    _produce_fn = None
-
 bp = Blueprint("produce", __name__)
+
+log = logging.getLogger("pipeline.produce")
 
 
 @bp.route("/produce", methods=["POST"])
 def produce():
     """
-    24-hour Serper Producer.
-    Fetches search results from Serper, filters candidates, and populates
-    campaigns/{id}.unprocessed_queue for the downstream Consumer (dispatch).
+    CIRCUIT BREAKER — proof-of-life endpoint.
+    Zero gRPC. Zero AI. Zero database calls.
+    Returns 200 immediately to confirm infrastructure is operational.
     """
-    if _produce_fn is not None:
-        # Delegate to the legacy implementation — zero business-logic change.
-        return _produce_fn()
-
-    # Fallback: should never reach here after Phase 3 legacy deletion.
-    return jsonify({"error": "Producer function not available", "code": "shim_error"}), 503
+    queue_name = request.headers.get("X-CloudTasks-QueueName", "MISSING")
+    log.info(
+        "CIRCUIT_BREAKER_PRODUCE_HIT: request received. "
+        "queue=%s remote_addr=%s content_type=%s",
+        queue_name,
+        request.remote_addr,
+        request.content_type,
+    )
+    return jsonify({
+        "status":  "circuit_breaker_ok",
+        "message": "Proof-of-life: infrastructure is clear. Pipeline logic is stubbed.",
+        "queue":   queue_name,
+    }), 200
