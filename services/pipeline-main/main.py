@@ -1234,8 +1234,17 @@ def produce():
     Deduplicates against global leads collection.
     Writes unprocessed URLs to campaigns/{id}.unprocessed_queue.
     Does NOT call the Gemini Gate. Halts here.
+
+    Auth: Cloud Tasks MUST inject X-CloudTasks-QueueName header.
+    Service is --no-allow-unauthenticated; Cloud Run IAM enforces OIDC.
+    This header check is an additional defense-in-depth layer.
     """
-    lead_data = request.json
+    if not request.headers.get("X-CloudTasks-QueueName"):
+        print(f"[PRODUCER] REJECTED: Missing X-CloudTasks-QueueName header. "
+              f"Direct access not permitted. IP={request.remote_addr}")
+        return jsonify({"error": "Forbidden", "message": "Task queue header required."}), 403
+
+    lead_data = request.json or {}
     tenant_id   = lead_data.get("tenant_id")
     campaign_id = lead_data.get("campaign_id")
     if not tenant_id or not campaign_id:
@@ -2276,6 +2285,10 @@ def _acquire_lead_lock(transaction, lock_ref, now_utc):
 
 @app.route("/dispatch", methods=["POST"])
 def dispatch():
+    if not request.headers.get("X-CloudTasks-QueueName"):
+        print(f"[DISPATCH] REJECTED: Missing X-CloudTasks-QueueName header. "
+              f"Direct access not permitted. IP={request.remote_addr}")
+        return jsonify({"error": "Forbidden", "message": "Task queue header required."}), 403
     """
     V14.4: THE CONSUMER — 4-Hour Drip Processor.
     Pops exactly 10 URLs from campaigns/{id}.unprocessed_queue (destructive read).

@@ -363,6 +363,25 @@ steps:
     echo "  gcloud run services update orchestrator --update-env-vars GUNICORN_MAIN=main_v23:app --to-latest"
     echo "[V23-PREVIEW] Deploy commit: $COMMIT_SHA"
 
+# =============================================================================
+# CRITICAL: Cloud Tasks IAM — ONE-TIME MANUAL GRANT REQUIRED
+#
+# Cloud Tasks sends OIDC tokens signed as lead-pipeline-sa to /produce and
+# /dispatch. Cloud Run rejects these with HTTP 401 unless lead-pipeline-sa
+# has roles/run.invoker on the lead-pipeline-main service.
+#
+# Cloud Build SA lacks resourcemanager.projects.setIamPolicy so this cannot
+# be automated here. Run ONCE from a terminal with Owner/IAM Admin rights:
+#
+#   gcloud run services add-iam-policy-binding lead-pipeline-main \
+#     --region=asia-south1 \
+#     --member="serviceAccount:lead-pipeline-sa@lead-sniper-prod.iam.gserviceaccount.com" \
+#     --role="roles/run.invoker" \
+#     --project=lead-sniper-prod
+#
+# Symptom if missing: Cloud Tasks queue shows tasks with HTTP 401 retrying
+# indefinitely. No Serper execution. Campaigns stall despite sweep running.
+# =============================================================================
 - id: 'deploy-pipeline-main'
   waitFor: ['push-pipeline-main']
   name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
