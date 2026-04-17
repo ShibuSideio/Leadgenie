@@ -194,7 +194,7 @@ def cron_sweep():
                 audit_trail.append(f"🚫 SKIPPED {campaign_id}: {err_msg}")
                 continue
 
-        # Producer (24h interval)
+        # ── Producer (24h interval) ──────────────────────────────────────────
         PRODUCE_INTERVAL_H = 24
         next_produce_due   = campaign_data.get("next_produce_due")
         produce_due        = True
@@ -206,17 +206,31 @@ def cron_sweep():
                 produce_due = False
 
         if produce_due:
-            jitter  = random.randint(1, 120)
-            sched_t = ts_pb2.Timestamp()
-            sched_t.FromDatetime(now_utc + datetime.timedelta(seconds=jitter))
-            task    = _oidc_task(produce_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
-            task["schedule_time"] = sched_t
-            tasks_client.create_task(request={"parent": queue_path, "task": task})
-            camp_doc.reference.update({"next_produce_due": now_utc + datetime.timedelta(hours=PRODUCE_INTERVAL_H)})
-            produce_dispatched += 1
-            audit_trail.append(f"🏭 PRODUCER queued for {campaign_id} (jitter={jitter}s)")
+            try:
+                jitter  = random.randint(1, 120)
+                sched_t = ts_pb2.Timestamp()
+                sched_t.FromDatetime(now_utc + datetime.timedelta(seconds=jitter))
+                task    = _oidc_task(produce_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
+                task["schedule_time"] = sched_t
+                tasks_client.create_task(request={"parent": queue_path, "task": task})
+                produce_dispatched += 1
+                audit_trail.append(f"🏭 PRODUCER queued for {campaign_id} (jitter={jitter}s)")
+            except Exception as prod_err:
+                log.error("producer_dispatch_failed", campaign_id=campaign_id,
+                          tenant_id=tenant_id, error=str(prod_err), exc_info=True)
+                audit_trail.append(f"❌ PRODUCER ERROR {campaign_id}: {prod_err}")
+            finally:
+                # Clock MUST advance regardless of task dispatch success/failure.
+                # Without this, a Cloud Tasks blip permanently freezes next_produce_due.
+                try:
+                    camp_doc.reference.update({
+                        "next_produce_due": now_utc + datetime.timedelta(hours=PRODUCE_INTERVAL_H),
+                    })
+                except Exception as ts_err:
+                    log.error("produce_timestamp_update_failed", campaign_id=campaign_id,
+                              error=str(ts_err))
 
-        # Consumer (4h interval, non-empty queue only)
+        # ── Consumer (4h interval) ────────────────────────────────────────────
         DRIP_INTERVAL_H = 4
         next_drip_due   = campaign_data.get("next_drip_due")
         drip_due        = True
@@ -229,27 +243,34 @@ def cron_sweep():
 
         queue_depth = len(campaign_data.get("unprocessed_queue", []))
         if drip_due:
-            if queue_depth == 0:
-                # DEADLOCK FIX: advance next_drip_due even when queue is empty.
-                # Without this, the timestamp stays in the past permanently and
-                # every future sweep idles on this campaign forever.
-                camp_doc.reference.update({
-                    "next_drip_due": now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H),
-                })
-                audit_trail.append(f"⏸ CONSUMER skipped {campaign_id}: queue empty — drip timer advanced +{DRIP_INTERVAL_H}h")
-            else:
-                jitter  = random.randint(1, 290)
-                sched_t = ts_pb2.Timestamp()
-                sched_t.FromDatetime(now_utc + datetime.timedelta(seconds=jitter))
-                task    = _oidc_task(consume_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
-                task["schedule_time"] = sched_t
-                tasks_client.create_task(request={"parent": queue_path, "task": task})
-                camp_doc.reference.update({
-                    "next_drip_due": now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H),
-                    "drip_interval_minutes": DRIP_INTERVAL_H * 60,
-                })
-                consume_dispatched += 1
-                audit_trail.append(f"⚙️ CONSUMER queued for {campaign_id} (depth={queue_depth})")
+            try:
+                if queue_depth == 0:
+                    audit_trail.append(f"⏸ CONSUMER skipped {campaign_id}: queue empty — drip timer advancing")
+                else:
+                    jitter  = random.randint(1, 290)
+                    sched_t = ts_pb2.Timestamp()
+                    sched_t.FromDatetime(now_utc + datetime.timedelta(seconds=jitter))
+                    task    = _oidc_task(consume_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
+                    task["schedule_time"] = sched_t
+                    tasks_client.create_task(request={"parent": queue_path, "task": task})
+                    consume_dispatched += 1
+                    audit_trail.append(f"⚙️ CONSUMER queued for {campaign_id} (depth={queue_depth})")
+            except Exception as drip_err:
+                log.error("consumer_dispatch_failed", campaign_id=campaign_id,
+                          tenant_id=tenant_id, error=str(drip_err), exc_info=True)
+                audit_trail.append(f"❌ CONSUMER ERROR {campaign_id}: {drip_err}")
+            finally:
+                # Clock MUST advance regardless of queue state or dispatch outcome.
+                # This is the core fix for the next_drip_due permanent deadlock.
+                try:
+                    camp_doc.reference.update({
+                        "next_drip_due":         now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H),
+                        "drip_interval_minutes": DRIP_INTERVAL_H * 60,
+                    })
+                except Exception as ts_err:
+                    log.error("drip_timestamp_update_failed", campaign_id=campaign_id,
+                              error=str(ts_err))
+
 
     # ── Zombie Lead Recovery ─────────────────────────────────────────────────
     from google.cloud import firestore as _fs

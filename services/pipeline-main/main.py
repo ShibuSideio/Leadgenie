@@ -87,7 +87,7 @@ QUEUE = os.environ.get("QUEUE", "lead-pipeline-queue")
 sm_client = secretmanager.SecretManagerServiceClient()
 
 SCRAPER_HEAVY_URL = os.environ.get("SCRAPER_HEAVY_URL", "https://scraper-heavy-abc.a.run.app/scrape")
-SERPER_API_KEY_NAME = f"projects/{project_id}/secrets/serper_api_key/versions/latest"
+SERPER_API_KEY_NAME = f"projects/{project_id}/secrets/SERPER_API_KEY/versions/latest"
 FERNET_KEY = os.environ.get("ENCRYPTION_KEY", "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0=")
 cipher_suite = Fernet(FERNET_KEY.encode())
 
@@ -132,6 +132,12 @@ def search_serper(query, location=None, gl=None):
     Cloud Tasks' default 10-minute task deadline.
     """
     api_key = get_secret(SERPER_API_KEY_NAME).strip()
+    if not api_key:
+        raise ValueError(
+            f"CRITICAL: SERPER_API_KEY resolved to empty string from secret "
+            f"'{SERPER_API_KEY_NAME}'. Verify the secret exists in GCP Secret Manager "
+            f"with exact name 'SERPER_API_KEY' (uppercase) and has an active version."
+        )
     url     = "https://google.serper.dev/search"
     payload_dict = {"q": query, "num": 20}
     if location:

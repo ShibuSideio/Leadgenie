@@ -637,7 +637,8 @@ def t_config_pipeline_serper_key_name():
         _sys.modules[_mod_key] = mod
         spec.loader.exec_module(mod)  # type: ignore
         assert hasattr(mod, "SERPER_API_KEY_NAME"), "SERPER_API_KEY_NAME missing"
-        assert "serper_api_key" in mod.SERPER_API_KEY_NAME
+        assert "SERPER_API_KEY" in mod.SERPER_API_KEY_NAME, \
+            f"Expected uppercase 'SERPER_API_KEY' in secret name, got: {mod.SERPER_API_KEY_NAME!r}"
         assert hasattr(mod, "NEG_SHIELD_BQ_TIMEOUT_S"), "NEG_SHIELD_BQ_TIMEOUT_S missing"
         assert mod.NEG_SHIELD_BQ_TIMEOUT_S == 3.0
     except AssertionError:
