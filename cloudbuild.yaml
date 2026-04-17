@@ -102,7 +102,7 @@ steps:
   - |
     set -eo pipefail
     echo "[GATE PY] Installing test dependencies..."
-    pip install cryptography flask --quiet --no-cache-dir
+    pip install --no-cache-dir --prefer-binary cryptography flask --quiet
 
     # Generate a fresh, disposable Fernet key ONLY for the smoke-test run.
     # This is NOT the production key. The real key lives in Secret Manager

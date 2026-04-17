@@ -1,39 +1,76 @@
 # =============================================================================
-# Pipeline-main — Python dependencies (V23 Enterprise Modular Architecture)
-# Last updated: 2026-04-17 — V23 refactor adds flask-cors, bumps GCP SDKs.
+# Pipeline-main — STRICT PIN manifest (V23 hotfix 2026-04-17)
+# Base image: python:3.10-slim  (cp310-cp310-manylinux2014_x86_64)
 #
-# Pinning strategy:
-#   == : exact pin — security-sensitive or known-breaking minor bumps
-#   >= : minimum floor — SDK-stable, allows patch/minor security fixes
+# Same pinning rules as orchestrator — see orchestrator/requirements.txt header.
 # =============================================================================
 
 # ── Web framework ──────────────────────────────────────────────────────────────
 Flask==3.0.3
 flask-cors==4.0.1
 gunicorn==22.0.0
-Werkzeug>=3.0.3
+Werkzeug==3.0.6
+click==8.1.7
+itsdangerous==2.2.0
+Jinja2==3.1.4
+MarkupSafe==2.1.5
 
-# ── GCP SDK ────────────────────────────────────────────────────────────────────
-firebase-admin>=6.5.0
-google-cloud-firestore>=2.16.0
-google-cloud-secret-manager>=2.20.0
-google-cloud-bigquery>=3.20.0
-google-cloud-storage>=2.16.0
-google-cloud-tasks>=2.16.0
-google-cloud-aiplatform>=1.51.0
-google-auth>=2.29.0
-google-api-core>=2.19.0
-grpcio>=1.63.0
-protobuf>=4.25.3
+# ── gRPC / protobuf — BINARY ONLY, no source compilation ─────────────────────
+grpcio==1.67.1
+grpcio-status==1.67.1
+protobuf==4.25.5
 
-# ── AI / ML ────────────────────────────────────────────────────────────────────
-vertexai>=1.51.0
+# ── GCP core ──────────────────────────────────────────────────────────────────
+google-auth==2.29.0
+google-auth-httplib2==0.2.0
+google-api-core==2.19.2
+google-api-python-client==2.131.0
+googleapis-common-protos==1.63.2
+
+# ── Firebase / Firestore ───────────────────────────────────────────────────────
+firebase-admin==6.5.0
+google-cloud-firestore==2.16.1
+google-cloud-storage==2.17.0
+
+# ── Cloud Tasks ───────────────────────────────────────────────────────────────
+google-cloud-tasks==2.16.3
+
+# ── Secret Manager ────────────────────────────────────────────────────────────
+google-cloud-secret-manager==2.20.0
+
+# ── BigQuery ──────────────────────────────────────────────────────────────────
+google-cloud-bigquery==3.25.0
+google-cloud-bigquery-storage==2.25.0
+pyarrow==16.1.0
+
+# ── Vertex AI ─────────────────────────────────────────────────────────────────
+google-cloud-aiplatform==1.51.0
+shapely==2.0.6
 
 # ── HTTP / Scraping ────────────────────────────────────────────────────────────
-httpx>=0.27.0
+httpx==0.27.0
+httpcore==1.0.5
+h11==0.14.0
 beautifulsoup4==4.12.3
+soupsieve==2.5
+certifi==2024.7.4
+charset-normalizer==3.3.2
+idna==3.7
+requests==2.32.3
+urllib3==2.2.2
 
-# ── Utilities ──────────────────────────────────────────────────────────────────
-cryptography>=42.0.0
+# ── Crypto ────────────────────────────────────────────────────────────────────
+cryptography==42.0.8
+cffi==1.16.0
+pycparser==2.22
+
+# ── Data / validation ─────────────────────────────────────────────────────────
+pydantic==2.7.1
+pydantic-core==2.18.3
+annotated-types==0.7.0
+typing_extensions==4.12.2
+
+# ── Pipeline utilities ────────────────────────────────────────────────────────
 tenacity==8.2.3
-pydantic>=2.6.0
+packaging==24.1
+six==1.16.0

@@ -2,7 +2,15 @@ FROM python:3.10-slim
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# --prefer-binary: always use pre-built wheels, never compile from source.
+# --only-binary=grpcio,grpcio-status,protobuf: hard block on C++ source builds
+#   for the three packages that caused 10-min compilation delays.
+# --no-deps is NOT used — transitive deps are already fully pinned in requirements.txt.
+RUN pip install --no-cache-dir \
+      --prefer-binary \
+      --only-binary=grpcio,grpcio-status,protobuf \
+      -r requirements.txt
 
 COPY . .
 
