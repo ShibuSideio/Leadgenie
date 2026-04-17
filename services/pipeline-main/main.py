@@ -2335,8 +2335,15 @@ def dispatch():
         return jsonify({"error": "Missing campaign_id context"}), 400
 
     campaign_id  = target_campaign_id
+    print(f"[CONSUMER] campaign_id={campaign_id} tenant_id={tenant_id} — fetching campaign document...")
     campaign_ref = db.collection("campaigns").document(campaign_id)
-    campaign     = campaign_ref.get().to_dict() or {}
+    try:
+        campaign     = campaign_ref.get().to_dict() or {}
+    except Exception as _cget_err:
+        print(f"[CONSUMER] CRITICAL: Firestore campaign.get() blocked/failed: {_cget_err}")
+        return jsonify({"error": "Firestore timeout fetching campaign"}), 500
+    print(f"[CONSUMER] Campaign document loaded. sourcing_vector={campaign.get('sourcing_vector')} "
+          f"queue_depth={len(campaign.get('unprocessed_queue', []))}")
     bio          = campaign.get("bio", "")
     sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
     location     = campaign.get("location", "").strip()
@@ -2356,12 +2363,17 @@ def dispatch():
 
     from google.cloud.firestore_v1.base_query import FieldFilter
     # V18 Multi-Campaign Swarm: Pre-fetch ALL active campaigns for tenant ecosystem
-    active_campaigns_docs = db.collection("campaigns").where(filter=FieldFilter("tenant_id", "==", tenant_id)).where(filter=FieldFilter("status", "==", "active")).stream()
-    active_campaigns = []
-    for doc in active_campaigns_docs:
-        d = doc.to_dict()
-        d["id"] = doc.id
-        active_campaigns.append(d)
+    print(f"[CONSUMER] Fetching active campaigns for tenant {tenant_id}...")
+    try:
+        active_campaigns_docs = db.collection("campaigns").where(filter=FieldFilter("tenant_id", "==", tenant_id)).where(filter=FieldFilter("status", "==", "active")).stream()
+        active_campaigns = []
+        for doc in active_campaigns_docs:
+            d = doc.to_dict()
+            d["id"] = doc.id
+            active_campaigns.append(d)
+    except Exception as _ac_err:
+        print(f"[CONSUMER] active_campaigns query failed (non-fatal): {_ac_err}. Using current campaign only.")
+        active_campaigns = []
     if not active_campaigns:
         active_campaigns = [campaign]
 
@@ -2421,8 +2433,14 @@ def dispatch():
 
     print(f"[FUNNEL] Campaign: {campaign_id} | Consumer: Processing Batch of {len(batch_urls)} URLs")
 
-    user_doc             = db.collection("users").document(tenant_id).get()
-    preferences_weights  = user_doc.to_dict().get("preferences_weights", {}) if user_doc.exists else {}
+    print(f"[CONSUMER] Fetching user preferences for tenant {tenant_id}...")
+    try:
+        user_doc            = db.collection("users").document(tenant_id).get()
+        preferences_weights = user_doc.to_dict().get("preferences_weights", {}) if user_doc.exists else {}
+    except Exception as _udoc_err:
+        print(f"[CONSUMER] user doc .get() blocked/failed: {_udoc_err}. Continuing with empty preferences.")
+        preferences_weights = {}
+    print(f"[CONSUMER] User preferences loaded. Hydrating snippet_map for {len(batch_urls)} URLs...")
 
     # ── P2: Hydrate snippet_map from scraped_cache (Producer hand-off) ────────
     # The Producer wrote Serper snippets to scraped_cache with source=serper_snippet.
@@ -2447,13 +2465,23 @@ def dispatch():
     # ── Step 5: Confidence Tiering Gate ─────────────────────────────────────
     # Feed batch URLs into pre_filter_gemini. Include snippet text where available
     # so the tiering LLM has real context (not just bare URLs) for social leads.
+    print(f"[CONSUMER] Calling pre_filter_gemini for {len(batch_urls)} URLs (hard timeout=30s)...")
     synthetic_snippets = [
         {"link": u, "snippet": snippet_map.get(u, ""), "title": ""}
         for u in batch_urls
     ]
-    tiered = pre_filter_gemini(synthetic_snippets, bio, location)
+    try:
+        import concurrent.futures as _cf_gate
+        with _cf_gate.ThreadPoolExecutor(max_workers=1) as _gate_pool:
+            _gate_future = _gate_pool.submit(pre_filter_gemini, synthetic_snippets, bio, location)
+            tiered = _gate_future.result(timeout=30)
+    except Exception as _gate_err:
+        print(f"[CONSUMER] pre_filter_gemini timed out or failed ({_gate_err}). "
+              f"Treating ALL {len(batch_urls)} URLs as High-tier to unblock scraper.")
+        tiered = {"High": batch_urls, "Medium": [], "Low": []}
     high_urls   = tiered.get("High", [])
     medium_urls = tiered.get("Medium", [])
+    print(f"[CONSUMER] Gemini gate complete: High={len(high_urls)} Medium={len(medium_urls)}")
 
     velocity_threshold = int(os.environ.get("VELOCITY_THRESHOLD", "10"))
     try:

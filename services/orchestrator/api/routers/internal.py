@@ -293,14 +293,16 @@ def cron_sweep():
                 audit_trail.append(f"❌ PRODUCER ERROR {campaign_id}: {prod_err}")
             finally:
                 # Clock MUST advance regardless of task dispatch success/failure.
-                # Without this, a Cloud Tasks blip permanently freezes next_produce_due.
+                # datetime → ISO-8601 string: avoids Firestore protobuf serialization
+                # rejection of offset-aware datetime objects on some SDK versions.
                 try:
-                    camp_doc.reference.update({
-                        "next_produce_due": now_utc + datetime.timedelta(hours=PRODUCE_INTERVAL_H),
-                    })
+                    _next_produce = (now_utc + datetime.timedelta(hours=PRODUCE_INTERVAL_H)).isoformat()
+                    camp_doc.reference.update({"next_produce_due": _next_produce})
+                    log.info("produce_clock_advanced", campaign_id=campaign_id,
+                             next_produce_due=_next_produce)
                 except Exception as ts_err:
                     log.error("produce_timestamp_update_failed", campaign_id=campaign_id,
-                              error=str(ts_err))
+                              error=str(ts_err), exc_info=True)
 
         # ── Consumer (4h interval) ────────────────────────────────────────────
         DRIP_INTERVAL_H = 4
@@ -348,15 +350,19 @@ def cron_sweep():
             audit_trail.append(f"❌ CONSUMER ERROR {campaign_id}: {drip_err}")
         finally:
             # Clock MUST advance regardless of any exception above.
+            # datetime → ISO-8601 string: Firestore-safe across all SDK versions.
             # This finally: is now bulletproof — nothing above can skip it.
             try:
+                _next_drip = (now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H)).isoformat()
                 camp_doc.reference.update({
-                    "next_drip_due":         now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H),
+                    "next_drip_due":         _next_drip,
                     "drip_interval_minutes": DRIP_INTERVAL_H * 60,
                 })
+                log.info("drip_clock_advanced", campaign_id=campaign_id,
+                         next_drip_due=_next_drip)
             except Exception as ts_err:
                 log.error("drip_timestamp_update_failed", campaign_id=campaign_id,
-                          error=str(ts_err))
+                          error=str(ts_err), exc_info=True)
 
 
     # ── Zombie Lead Recovery ─────────────────────────────────────────────────
