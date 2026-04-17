@@ -48,7 +48,7 @@ GEMINI_TIMEOUT_S: float = 45.0          # wall-clock ceiling on Vertex AI calls
 # Serper secrets (key name in Secret Manager — resolved at runtime)
 # ---------------------------------------------------------------------------
 SERPER_API_KEY_NAME: str = (
-    f"projects/{PROJECT_ID}/secrets/serper_api_key/versions/latest"
+    f"projects/{PROJECT_ID}/secrets/SERPER_API_KEY/versions/latest"
 )
 
 # ---------------------------------------------------------------------------
