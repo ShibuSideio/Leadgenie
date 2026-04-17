@@ -14,7 +14,7 @@
 #   Phase 3:  Cloud Run Services deployed (parallel where independent)
 #   Phase 3b': orchestrator v23-preview --no-traffic (NEW)
 #   Phase 4:  Cloud Run Jobs (autonomous-engine, shadow-learner)
-#   Phase 5:  Cloud Scheduler (depends on orchestrator deploy for live URL)
+#   Phase 5:  Cloud Scheduler — 3 V23 jobs only (pipeline-sweep, ai-reflection, ontology-decay)
 #   Phase 6:  Firebase (starts immediately after gate-passed)
 #
 # Key production rules applied:
@@ -703,37 +703,8 @@ steps:
         --oidc-token-audience=$$ORCH_URL \
         --quiet
     fi
-    echo "[SCHEDULER] ontology-decay OK"
-
-    # ------------------------------------------------------------------
-    # Job 4: V16 Autonomous Engine Trigger — daily 03:00 UTC
-    # Uses OAuth2 (not OIDC): calling Google's own Cloud Run Jobs API,
-    # not an OIDC-secured HTTP endpoint.
-    # ------------------------------------------------------------------
-    JOB_RESOURCE="projects/$PROJECT_ID/locations/asia-south1/jobs/autonomous-engine"
-    if gcloud scheduler jobs describe autonomous-engine-trigger \
-        --location=asia-south1 --project=$PROJECT_ID --quiet 2>/dev/null; then
-      gcloud scheduler jobs update http autonomous-engine-trigger \
-        --location=asia-south1 \
-        --schedule='0 3 * * *' \
-        --uri="https://run.googleapis.com/v2/$$JOB_RESOURCE:run" \
-        --message-body='{}' \
-        --http-method=POST \
-        --oauth-service-account-email=$$SA \
-        --quiet
-    else
-      gcloud scheduler jobs create http autonomous-engine-trigger \
-        --location=asia-south1 \
-        --schedule='0 3 * * *' \
-        --uri="https://run.googleapis.com/v2/$$JOB_RESOURCE:run" \
-        --message-body='{}' \
-        --http-method=POST \
-        --oauth-service-account-email=$$SA \
-        --quiet
-    fi
-    echo "[SCHEDULER] autonomous-engine-trigger OK"
-
-    echo "[SCHEDULER] All 4 Cloud Scheduler jobs provisioned. Build: $COMMIT_SHA"
+    echo "[SCHEDULER] All 3 V23 Cloud Scheduler jobs provisioned. Build: $COMMIT_SHA"
+    echo "[SCHEDULER] Zombie jobs purged from pipeline: autonomous-engine-trigger"
 
 # =============================================================================
 # PHASE 6: FIREBASE DEPLOY (hosting + firestore rules/indexes)
