@@ -12,6 +12,10 @@ RUN pip install --no-cache-dir \
       --only-binary=grpcio,grpcio-status,protobuf \
       -r requirements.txt
 
+# CACHEBUST: increment to force a clean layer rebuild and guarantee
+# the container picks up the latest source tree (no stale main.py).
+ARG CACHEBUST=2
 COPY . .
 
-CMD exec gunicorn --bind :$PORT main_v23:app --workers 1 --threads 8 --timeout 0
+# Explicit V23 entrypoint — gunicorn must load main_v23:app, never main:app.
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "0", "main_v23:app"]
