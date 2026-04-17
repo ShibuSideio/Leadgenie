@@ -1,18 +1,39 @@
-google-cloud-firestore>=2.14.0
-google-cloud-secret-manager>=2.16.2
-grpcio>=1.60.0
-google-cloud-aiplatform>=1.45.0
-firebase-admin>=6.5.0
-google-api-core>=2.17.1
-Flask==3.0.0
-gunicorn==21.2.0
-httpx>=0.26.0
-beautifulsoup4==4.12.3
-cryptography>=38.0.0
-tenacity==8.2.3
-google-cloud-tasks>=2.14.2
-pydantic>=2.0.0
-google-cloud-storage>=2.14.0
-google-auth>=2.22.0
-protobuf>=4.25.0
+# =============================================================================
+# Pipeline-main — Python dependencies (V23 Enterprise Modular Architecture)
+# Last updated: 2026-04-17 — V23 refactor adds flask-cors, bumps GCP SDKs.
+#
+# Pinning strategy:
+#   == : exact pin — security-sensitive or known-breaking minor bumps
+#   >= : minimum floor — SDK-stable, allows patch/minor security fixes
+# =============================================================================
 
+# ── Web framework ──────────────────────────────────────────────────────────────
+Flask==3.0.3
+flask-cors==4.0.1
+gunicorn==22.0.0
+Werkzeug>=3.0.3
+
+# ── GCP SDK ────────────────────────────────────────────────────────────────────
+firebase-admin>=6.5.0
+google-cloud-firestore>=2.16.0
+google-cloud-secret-manager>=2.20.0
+google-cloud-bigquery>=3.20.0
+google-cloud-storage>=2.16.0
+google-cloud-tasks>=2.16.0
+google-cloud-aiplatform>=1.51.0
+google-auth>=2.29.0
+google-api-core>=2.19.0
+grpcio>=1.63.0
+protobuf>=4.25.3
+
+# ── AI / ML ────────────────────────────────────────────────────────────────────
+vertexai>=1.51.0
+
+# ── HTTP / Scraping ────────────────────────────────────────────────────────────
+httpx>=0.27.0
+beautifulsoup4==4.12.3
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+cryptography>=42.0.0
+tenacity==8.2.3
+pydantic>=2.6.0

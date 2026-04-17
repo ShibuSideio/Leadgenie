@@ -1,15 +1,21 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V19 Enterprise Build Pipeline
-# Deploy trigger: 2026-04-14 | Includes: circuit breaker, ontology crash fix,
-#   Velocity index IaC, state migration, load test harness
+# cloudbuild.yaml — Sideio Leads V23 Enterprise Build Pipeline
+# Deploy trigger: 2026-04-17 | V23 Modular Refactor
+# Changes from V22:
+#   + Phase 0b: Python V23 smoke test gate (50 tests must pass before build)
+#   + Phase 3b': orchestrator v23-preview --no-traffic revision deploy
+#   + requirements.txt: flask-cors, gunicorn 22, cryptography 42, vertexai alias
 # =============================================================================
 # Architecture:
-#   Phase 1: All 6 Docker images built IN PARALLEL (waitFor: ['syntax-check-appjs'])
-#   Phase 2: All 6 images pushed IN PARALLEL (waitFor: respective build id)
-#   Phase 3: Cloud Run Services deployed (parallel where independent)
-#   Phase 4: Cloud Run Job (autonomous-engine, depends on push only)
-#   Phase 5: Cloud Scheduler (depends on orchestrator deploy for live URL)
-#   Phase 6: Firebase (starts immediately, no Cloud Run dependency)
+#   Phase 0a: Frontend JS syntax gate
+#   Phase 0b: Python V23 smoke test gate (NEW — blocks build on any failure)
+#   Phase 1:  All 8 Docker images built IN PARALLEL (waitFor: ['gate-passed'])
+#   Phase 2:  All 8 images pushed IN PARALLEL (waitFor: respective build id)
+#   Phase 3:  Cloud Run Services deployed (parallel where independent)
+#   Phase 3b': orchestrator v23-preview --no-traffic (NEW)
+#   Phase 4:  Cloud Run Jobs (autonomous-engine, shadow-learner)
+#   Phase 5:  Cloud Scheduler (depends on orchestrator deploy for live URL)
+#   Phase 6:  Firebase (starts immediately after gate-passed)
 #
 # Key production rules applied:
 #   - $$VAR   = bash variable (Cloud Build escapes → bash sees $VAR)
@@ -78,7 +84,40 @@ steps:
       if (failed) process.exit(1);
       console.log('[GATE L2] All critical declarations present.');
     "
-    echo "[GATE] All checks passed — build proceeding."
+    echo "[GATE] All JS checks passed — proceeding."
+
+# =============================================================================
+# PHASE 0b: PYTHON V23 SMOKE TEST GATE
+# Runs the local_smoke_tests.py suite (50 tests) against the V23 module tree.
+# Blocks ALL Docker builds if any test fails — zero broken images possible.
+# Cost: ~5s on E2_HIGHCPU_8. Runs in parallel with syntax-check-appjs.
+# =============================================================================
+
+- id: 'python-v23-smoke-gate'
+  waitFor: ['-']
+  name: 'python:3.11-slim'
+  entrypoint: bash
+  args:
+  - '-c'
+  - |
+    set -eo pipefail
+    echo "[GATE PY] Installing test dependencies..."
+    pip install cryptography flask --quiet --no-cache-dir
+    echo "[GATE PY] Running V23 local smoke tests (50 cases)..."
+    export ENCRYPTION_KEY="$$ENCRYPTION_KEY_PLACEHOLDER"
+    export PROJECT_ID="$PROJECT_ID"
+    export LOCATION="asia-south1"
+    export PYTHONIOENCODING=utf-8
+    cd services/orchestrator
+    python local_smoke_tests.py
+    echo "[GATE PY] All 50 smoke tests PASSED. Build proceeding."
+
+# Barrier step: both gates must pass before any Docker build starts
+- id: 'gate-passed'
+  waitFor: ['syntax-check-appjs', 'python-v23-smoke-gate']
+  name: 'alpine'
+  entrypoint: echo
+  args: ['[BARRIER] Both QA gates passed. Initiating parallel Docker builds.']
 
 # =============================================================================
 # NOTE: BigQuery IAM grant for L0 geo heatmap
@@ -102,7 +141,7 @@ steps:
 # =============================================================================
 
 - id: 'build-orchestrator'
-  waitFor: ['syntax-check-appjs']
+  waitFor: ['gate-passed']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -114,7 +153,7 @@ steps:
   - ./services/orchestrator
 
 - id: 'build-pipeline-main'
-  waitFor: ['syntax-check-appjs']
+  waitFor: ['gate-passed']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -126,7 +165,7 @@ steps:
   - ./services/pipeline-main
 
 - id: 'build-scraper-heavy'
-  waitFor: ['syntax-check-appjs']
+  waitFor: ['gate-passed']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -138,7 +177,7 @@ steps:
   - ./services/scraper-heavy
 
 - id: 'build-whatsapp-webhook'
-  waitFor: ['syntax-check-appjs']
+  waitFor: ['gate-passed']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -150,7 +189,7 @@ steps:
   - ./services/whatsapp-webhook
 
 - id: 'build-email-summary'
-  waitFor: ['syntax-check-appjs']
+  waitFor: ['gate-passed']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -162,7 +201,7 @@ steps:
   - ./services/email-summary
 
 - id: 'build-autonomous-engine'
-  waitFor: ['syntax-check-appjs']
+  waitFor: ['gate-passed']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -174,7 +213,7 @@ steps:
   - ./services/autonomous-engine
 
 - id: 'build-digital-twin-engine'
-  waitFor: ['syntax-check-appjs']
+  waitFor: ['gate-passed']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -187,7 +226,7 @@ steps:
 
 # V18: Shadow Learner Aggregator — Cloud Run Job (12h BQ aggregation cycle)
 - id: 'build-shadow-learner'
-  waitFor: ['syntax-check-appjs']
+  waitFor: ['gate-passed']
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
@@ -277,6 +316,43 @@ steps:
   # Value: the live orchestrator Cloud Run URL, e.g. https://orchestrator-xxx.asia-south1.run.app
   - --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL
   - --quiet
+
+# =============================================================================
+# PHASE 3b': V23 PREVIEW DEPLOY — NO TRAFFIC
+# Deploys main_v23.py as a tagged preview revision isolated from production.
+# Zero traffic is routed to it. CEO performs UAT against the tagged URL.
+# Switch production traffic manually after UAT passes:
+#   gcloud run services update orchestrator --update-env-vars GUNICORN_MAIN=main_v23:app --to-latest
+#
+# The GUNICORN_MAIN env var is NOT set here (constraint from QA mandate).
+# It is set only after manual GO decision following UAT.
+# =============================================================================
+
+- id: 'deploy-orchestrator-v23-preview'
+  waitFor: ['deploy-orchestrator']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+  entrypoint: bash
+  args:
+  - '-c'
+  - |
+    set -eo pipefail
+    echo "[V23-PREVIEW] Deploying v23 preview revision (no traffic)..."
+    gcloud run deploy orchestrator \
+      --image=gcr.io/$PROJECT_ID/lead-orchestrator:$COMMIT_SHA \
+      --region=asia-south1 \
+      --platform=managed \
+      --no-traffic \
+      --tag=v23-preview \
+      --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com \
+      --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,GUNICORN_MAIN=main_v23:app \
+      --quiet
+    PREVIEW_URL=$(gcloud run services describe orchestrator \
+      --region=asia-south1 --project=$PROJECT_ID \
+      --format='value(status.traffic[].url)' 2>/dev/null | grep v23-preview || echo 'See Cloud Console')
+    echo "[V23-PREVIEW] Preview URL: $$PREVIEW_URL"
+    echo "[V23-PREVIEW] Run UAT, then execute:"
+    echo "  gcloud run services update orchestrator --update-env-vars GUNICORN_MAIN=main_v23:app --to-latest"
+    echo "[V23-PREVIEW] Deploy commit: $COMMIT_SHA"
 
 - id: 'deploy-pipeline-main'
   waitFor: ['push-pipeline-main']
@@ -658,7 +734,7 @@ steps:
 # =============================================================================
 
 - id: 'firebase-deploy'
-  waitFor: ['syntax-check-appjs']
+  waitFor: ['gate-passed']
   name: 'node:20-slim'
   entrypoint: bash
   args:
