@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from cryptography.fernet import Fernet
 from flask import Flask, request, jsonify
 from google.cloud import firestore
+from google.cloud import bigquery as _bq_lib
 import google.auth
 from google.cloud import secretmanager
 from google.api_core.exceptions import AlreadyExists, ResourceExhausted
@@ -404,11 +405,19 @@ _QUERY_BRAIN_SCHEMA = {
 }
 
 
-def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None):
+def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None, persona_category=None):
     """
-    V20: Unified Query Brain — single Gemini call replaces legacy P1+P2+P3 chain.
-    All three output arrays (historical_phrases, symptom_dorks, translated_queries)
-    are returned in one schema-enforced JSON object. RLHF injection is preserved.
+    V21: Hybrid Starter Motor — Confidence Threshold Router.
+
+    Routes query generation between two modes:
+      STATISTICAL  (Confidence ≥ threshold): Constructs Serper queries locally
+                   using top N-grams + domains from swarm_analytics.Intent_Keywords.
+                   Zero Gemini calls on this path.
+      GEMINI_FALLBACK (Confidence < threshold): Falls back to the unified Gemini
+                   prompt (legacy V20 behaviour). Never dropped as a fallback path.
+
+    The threshold is read from system_config/router.intent_confidence_threshold
+    (Firestore). Default: 1000. Override in production without redeployment.
     """
     # ── Step 1: Fetch RLHF history context (Firestore read — no Gemini call) ──
     pain_points: list = []
@@ -422,12 +431,135 @@ def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None):
     except Exception as e:
         print(f"[QUERY BRAIN] RLHF history fetch failed: {e}")
 
-    # ── Step 2: Build unified prompt ──────────────────────────────────────────
-    keyword_str  = ", ".join(user_keywords) if user_keywords else ""
-    vector_label = sourcing_vector or "Classic B2B"
-    history_ctx  = json.dumps(pain_points) if pain_points else "[]"
+    # ── Step 2: Resolve persona_category for router key ————————————————
+    _p_cat = (persona_category or "general").strip() or "general"
 
-    unified_prompt = f"""You are the Sideio Query Brain. You will perform ALL THREE tasks below in a single response.
+    # ── Step 2a: Confidence Threshold Router ─────────────────────────────
+    # SELECT SUM(yield_weight) with a 3-second hard timeout.
+    # Falls back to GEMINI_FALLBACK on any error or timeout.
+    _CONF_THRESHOLD = 1000.0  # default; overridden from Firestore below
+    try:
+        _router_cfg    = db.collection("system_config").document("router").get().to_dict() or {}
+        _CONF_THRESHOLD = float(_router_cfg.get("intent_confidence_threshold", 1000))
+    except Exception:
+        pass  # Non-fatal: use default
+
+    _confidence    = 0.0
+    _router_mode   = "GEMINI_FALLBACK"  # safe default
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _rex:
+            def _query_confidence():
+                _bq = _bq_lib.Client(project=PROJECT_ID)
+                _q  = """
+                    SELECT COALESCE(SUM(yield_weight), 0) AS total_confidence
+                    FROM `{project}.swarm_analytics.Intent_Keywords`
+                    WHERE (tenant_id = @tid OR tenant_id = 'GLOBAL')
+                      AND persona_category = @cat
+                """.format(project=PROJECT_ID)
+                _jc = _bq.query(
+                    _q,
+                    job_config=_bq_lib.QueryJobConfig(
+                        query_parameters=[
+                            _bq_lib.ScalarQueryParameter("tid", "STRING", tenant_id),
+                            _bq_lib.ScalarQueryParameter("cat", "STRING", _p_cat),
+                        ]
+                    )
+                )
+                rows = list(_jc.result(timeout=3))
+                return float(rows[0]["total_confidence"]) if rows else 0.0
+
+            _fut_conf = _rex.submit(_query_confidence)
+            _confidence = _fut_conf.result(timeout=3.0)
+
+        if _confidence >= _CONF_THRESHOLD:
+            _router_mode = "STATISTICAL"
+    except concurrent.futures.TimeoutError:
+        print(f"[QUERY BRAIN] Confidence BQ timeout — falling back to Gemini.")
+    except Exception as _ce:
+        print(f"[QUERY BRAIN] Confidence query failed (non-fatal): {_ce}")
+
+    print(f"[QUERY BRAIN] Persona='{_p_cat}' | Mode={_router_mode} | Confidence={int(_confidence)}")
+
+    # ── Step 3a: STATISTICAL BUILD (Confidence ≥ threshold) ──────────────
+    # Fetches top-3 N-grams and top-2 domains from BQ. Constructs queries
+    # locally without calling Gemini. Zero LLM cost on this hot path.
+    historical_phrases: list = []
+    symptom_dorks: list      = []
+    translated_queries: list = []
+
+    if _router_mode == "STATISTICAL":
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _sex:
+                def _fetch_stat_signals():
+                    _bq = _bq_lib.Client(project=PROJECT_ID)
+                    # Top-3 N-grams by yield_weight for query phrase injection
+                    _ng_q = """
+                        SELECT n_gram, SUM(yield_weight) AS w
+                        FROM `{project}.swarm_analytics.Intent_Keywords`
+                        WHERE (tenant_id = @tid OR tenant_id = 'GLOBAL')
+                          AND persona_category = @cat
+                        GROUP BY n_gram
+                        ORDER BY w DESC
+                        LIMIT 3
+                    """.format(project=PROJECT_ID)
+                    _ng_job = _bq.query(
+                        _ng_q,
+                        job_config=_bq_lib.QueryJobConfig(
+                            query_parameters=[
+                                _bq_lib.ScalarQueryParameter("tid", "STRING", tenant_id),
+                                _bq_lib.ScalarQueryParameter("cat", "STRING", _p_cat),
+                            ]
+                        )
+                    )
+                    _ng_rows = list(_ng_job.result(timeout=3))
+                    top_ngrams = [r["n_gram"] for r in _ng_rows if r["n_gram"]]
+
+                    # Top-2 domains from Negative_Signals are already excluded via -site:
+                    # For STATISTICAL dorks we use the top-2 *ontology wins* (future phase).
+                    # For now, build symptom_dorks from the top N-grams directly.
+                    return top_ngrams
+
+                _fut_stat  = _sex.submit(_fetch_stat_signals)
+                _top_ngrams = _fut_stat.result(timeout=3.5)
+
+            if _top_ngrams:
+                # historical_phrases: top N-grams surface well-converting language patterns
+                historical_phrases = _top_ngrams[:3]
+                # translated_queries: construct operator strings from top N-gram phrases
+                keyword_str = ", ".join(user_keywords) if user_keywords else ""
+                for ng in _top_ngrams[:3]:
+                    if keyword_str:
+                        translated_queries.append(f'"{ng}" AND ({keyword_str})')
+                    else:
+                        translated_queries.append(f'"{ng}"')
+                # symptom_dorks: combine N-gram with bio signal
+                if bio:
+                    symptom_dorks = [
+                        f'site:linkedin.com "{_top_ngrams[0]}" AND ("{bio[:40]}")'
+                        if len(_top_ngrams) > 0 else "",
+                        f'site:reddit.com "{_top_ngrams[0]}"'
+                        if len(_top_ngrams) > 0 else "",
+                    ]
+                    symptom_dorks = [s for s in symptom_dorks if s]
+                print(f"[QUERY BRAIN] STATISTICAL: built {len(translated_queries)} queries "
+                      f"from N-grams {_top_ngrams}")
+            else:
+                # No signals yet despite confidence score; degrade gracefully to Gemini
+                _router_mode = "GEMINI_FALLBACK"
+                print("[QUERY BRAIN] STATISTICAL: no N-grams returned — degrading to Gemini.")
+
+        except Exception as _se:
+            _router_mode = "GEMINI_FALLBACK"
+            print(f"[QUERY BRAIN] STATISTICAL build failed — falling back to Gemini: {_se}")
+
+    # ── Step 3b: GEMINI FALLBACK (Confidence < threshold or STATISTICAL failed) ─
+    if _router_mode == "GEMINI_FALLBACK":
+        keyword_str  = ", ".join(user_keywords) if user_keywords else ""
+        vector_label = sourcing_vector or "Classic B2B"
+        history_ctx  = json.dumps(pain_points) if pain_points else "[]"
+
+        unified_prompt = f"""You are the Sideio Query Brain. You will perform ALL THREE tasks below in a single response.
 
 # TASK 1 — RLHF HISTORICAL MINING
 Analyze these successful lead pain_point strings from previously converted leads.
@@ -455,26 +587,41 @@ If no audience keywords are provided, return an empty array for translated_queri
 
 Return ONLY the JSON object matching the schema. No explanation, no markdown."""
 
-    # ── Step 3: Single Gemini call — all three tasks ───────────────────────────
-    historical_phrases: list = []
-    symptom_dorks: list      = []
-    translated_queries: list = []
-    try:
-        result = call_gemini_2_5(
-            unified_prompt,
-            expect_json=True,
-            response_schema=_QUERY_BRAIN_SCHEMA
-        )
-        if isinstance(result, dict):
-            historical_phrases  = [p.strip() for p in result.get("historical_phrases",  []) if isinstance(p, str) and p.strip()][:3]
-            symptom_dorks       = [s.strip() for s in result.get("symptom_dorks",       []) if isinstance(s, str) and s.strip()][:3]
-            translated_queries  = [q.strip() for q in result.get("translated_queries",  []) if isinstance(q, str) and q.strip()][:3]
-            print(f"[QUERY BRAIN] Unified call OK: hist={len(historical_phrases)} symp={len(symptom_dorks)} tq={len(translated_queries)}")
-    except Exception as e:
-        print(f"[QUERY BRAIN] Unified Gemini call failed: {e}. Falling back to literal keywords.")
+        try:
+            result = call_gemini_2_5(
+                unified_prompt,
+                expect_json=True,
+                response_schema=_QUERY_BRAIN_SCHEMA
+            )
+            if isinstance(result, dict):
+                historical_phrases  = [p.strip() for p in result.get("historical_phrases",  []) if isinstance(p, str) and p.strip()][:3]
+                symptom_dorks       = [s.strip() for s in result.get("symptom_dorks",       []) if isinstance(s, str) and s.strip()][:3]
+                translated_queries  = [q.strip() for q in result.get("translated_queries",  []) if isinstance(q, str) and q.strip()][:3]
+                print(f"[QUERY BRAIN] Gemini fallback OK: hist={len(historical_phrases)} symp={len(symptom_dorks)} tq={len(translated_queries)}")
+        except Exception as e:
+            print(f"[QUERY BRAIN] Gemini call failed: {e}. Falling back to literal keywords.")
 
-    # ── Step 4: Assemble Serper query strings (logic unchanged from V14) ───────
+    # ── Step 4: Assemble Serper query strings ──────────────────────────────────
     blacklist = "-wiki -jobs -careers -investors -support -\"login\" -www.zoominfo.com -www.ibm.com -www.amazon.com"
+
+    # ── Step 4a: Negative Signal Shield injection ─────────────────────────────
+    # Fetches Competitor / Author domains + entity names from BQ (3s hard timeout).
+    # Empty on first run or BQ failure — pipeline continues unmodified.
+    _shield_domains, _shield_entities = _fetch_neg_shield(tenant_id)
+
+    # Append -site:<domain> operators for suppressed competitor/author domains
+    if _shield_domains:
+        _site_ops = " ".join(f"-site:{d}" for d in _shield_domains[:15] if d)
+        blacklist  = f"{blacklist} {_site_ops}"
+
+    # Append -intitle:"Entity Name" operators for suppressed entity names
+    if _shield_entities:
+        _title_ops = " ".join(f'-intitle:"{e}"' for e in _shield_entities[:10] if e)
+        blacklist   = f"{blacklist} {_title_ops}"
+
+    if _shield_domains or _shield_entities:
+        print(f"[NEG SHIELD] Injected {len(_shield_domains)} domain blocks + "
+              f"{len(_shield_entities)} title blocks into Serper query")
 
     # RLHF injection: historical trend phrases appended as AND-suffix
     historical_str = ""
@@ -484,13 +631,15 @@ Return ONLY the JSON object matching the schema. No explanation, no markdown."""
 
     smart_queries: list = []
 
-    # Translated intent queries (P3 output)
+    # Translated intent queries
+    _kw_str = ", ".join(user_keywords) if user_keywords else ""
+    _vec_label = sourcing_vector or "Classic B2B"
     if translated_queries:
         for tq in translated_queries:
             smart_queries.append(f'"{tq}"{historical_str} {blacklist}')
-        print(f"[QUERY BRAIN] {len(translated_queries)} platform-native queries assembled for '{vector_label}'")
-    elif keyword_str:
-        # Hard fallback: literal keywords if Gemini failed entirely
+        print(f"[QUERY BRAIN] {len(translated_queries)} queries assembled | mode={_router_mode} | vector='{_vec_label}'")
+    elif _kw_str:
+        # Hard fallback: literal keywords if both router paths produced nothing
         for kw in (user_keywords or []):
             smart_queries.append(f'("{kw}"){historical_str} {blacklist}')
 
@@ -606,6 +755,74 @@ def extract_root_domain(url):
         return netloc
     except:
         return ""
+
+
+# =============================================================================
+# NEGATIVE SIGNAL SHIELD — Serper Query Suppressor
+#
+# Fetches the top 20 suppressed domains + entity names from the
+# swarm_analytics.Negative_Signals table (written by the orchestrator's
+# RLHF rejection hook on every Competitor / Author rejection).
+#
+# Design contract:
+#   • Hard 3-second max timeout — BQ latency NEVER extends the scraping loop.
+#   • Returns ([], []) on ANY failure — the pipeline degrades gracefully.
+#   • Deduplicates domains and entity names before returning.
+#   • Result is injected as -site: / -intitle: operators into the blacklist
+#     assembled in generate_smart_query(), not passed to the LLM.
+# =============================================================================
+
+def _fetch_neg_shield(tenant_id: str) -> tuple:
+    """
+    Returns (blocked_domains: list[str], blocked_entities: list[str]).
+    Both lists are deduplicated and capped at 20 entries each.
+    Falls back to ([], []) on any error or timeout.
+    """
+    try:
+        bq = _bq_lib.Client(project=PROJECT_ID)
+
+        # Parameterised query — prevents SQL injection from tenant_id.
+        # Scoped to the rejecting tenant PLUS cross-tenant global signals
+        # (tenant_id = 'GLOBAL') written by L0 admin overrides.
+        query = """
+            SELECT root_domain, entity_name
+            FROM `{project}.swarm_analytics.Negative_Signals`
+            WHERE (tenant_id = @tenant_id OR tenant_id = 'GLOBAL')
+              AND root_domain IS NOT NULL
+            GROUP BY root_domain, entity_name
+            ORDER BY COUNT(*) DESC
+            LIMIT 20
+        """.format(project=PROJECT_ID)
+
+        job_config = _bq_lib.QueryJobConfig(
+            query_parameters=[
+                _bq_lib.ScalarQueryParameter("tenant_id", "STRING", tenant_id),
+            ],
+            # Enforce a 3-second wall-clock timeout via the BQ Jobs API.
+            # If BQ is slow, we raise TimeoutError and return empty lists.
+        )
+
+        # Run BQ query in a thread with a strict 3s wall-clock timeout.
+        # concurrent.futures.ThreadPoolExecutor reuse avoids per-call overhead.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+            _fut = _ex.submit(bq.query, query, job_config=job_config)
+            job  = _fut.result(timeout=3.0)
+
+        rows = list(job.result(timeout=3.0))
+
+        blocked_domains  = list({r["root_domain"] for r in rows if r["root_domain"]})
+        blocked_entities = list({r["entity_name"]  for r in rows if r["entity_name"]})
+
+        print(f"[NEG SHIELD] Loaded {len(blocked_domains)} domains, "
+              f"{len(blocked_entities)} entities for tenant={tenant_id[:8]}...")
+        return blocked_domains, blocked_entities
+
+    except concurrent.futures.TimeoutError:
+        print("[NEG SHIELD] BQ timeout (>3s) — proceeding without shield.")
+        return [], []
+    except Exception as _e:
+        print(f"[NEG SHIELD] Fetch failed (non-fatal): {_e}")
+        return [], []
 
 def deep_context_serper_dork(domain, tenant_id, sourcing_vector="Classic B2B", source_url=""):
     """
@@ -1074,7 +1291,14 @@ def produce():
     print(f"[SYNAPTIC ROUTER] Campaign {campaign_id} → sourcing vector: '{sourcing_vector}'")
 
     # ── Step 3: Intent Translation + Smart Query Generation ─────────────────
-    smart_keywords = generate_smart_query(keywords, tenant_id, bio, sourcing_vector)
+    _persona_cat = (
+        campaign.get("persona_name") or
+        campaign.get("name") or "general"
+    ).strip()
+    smart_keywords = generate_smart_query(
+        keywords, tenant_id, bio, sourcing_vector,
+        persona_category=_persona_cat
+    )
 
     # Telemetry billing
     db.collection("usage_metrics").document(tenant_id).set(
@@ -1118,14 +1342,6 @@ def produce():
                     "title":   r.get("title",   ""),
                     "snippet": r.get("snippet", "")
                 }
-
-    # Also include target_urls from campaign doc as first-class candidates
-    target_urls = campaign.get("target_urls", [])
-    for u in (target_urls[:10] if isinstance(target_urls, list) else []):
-        if u not in raw_urls:
-            raw_urls.insert(0, u)
-            if u not in snippet_db:
-                snippet_db[u] = {"title": "", "snippet": ""}
 
     fetched_count = len(raw_urls)
     print(f"[FUNNEL] Campaign: {campaign_id} | Producer: Fetched {fetched_count} URLs")

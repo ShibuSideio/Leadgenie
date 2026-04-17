@@ -1,6 +1,6 @@
-# Lead Sniper / Sideio Smart Growth — V18 / V19
+# Lead Sniper / Sideio Smart Growth — V20
 **Full Technical Specification Document (TSD)**
-*Last Updated: 2026-04-10 | Version: V18 / V19 — Predictive Campaign Engine + Autonomous Generation Pipeline*
+*Last Updated: 2026-04-17 | Version: V20 — Persona Vault + Unified Gemini Schema + RLHF Ontology Ledger*
 
 ---
 
@@ -21,27 +21,35 @@ Sideio Lead Sniper is a fully automated, multi-tenant B2B lead generation SaaS p
 ```
 /sideio_leads
 ├── /public                          # Firebase Static Hosting (PWA)
-│   ├── index.html                   # DOM scaffolding, Firebase SDK init, Auth UI (V17 redesigned)
-│   ├── app.js                       # All frontend logic (2,280+ lines — V17 conversational modal)
-│   ├── styles.css                   # CSS design system (798 lines — V17 additions)
+│   ├── index.html                   # DOM scaffolding, Firebase SDK init, Auth UI (V18 redesigned)
+│   ├── app.js                       # All frontend logic (3,594 lines — V20 Persona Vault + DT Engine)
+│   ├── styles.css                   # CSS design system (V18+ additions)
 │   ├── sw.js                        # Service Worker (cache v10-3, Firebase bypass)
 │   └── manifest.json                # PWA manifest
 ├── /services
-│   ├── /orchestrator                # Cloud Run: REST API Gateway + Cron Dispatcher + Epsilon-Greedy Router
+│   ├── /orchestrator                # Cloud Run: REST API Gateway + Cron Dispatcher + Persona Vault
 │   │   ├── Dockerfile
-│   │   ├── main.py                  # 1,237 lines — all API routes + cron sweep + POST /api/campaigns/{id}/run
+│   │   ├── main.py                  # 3,095 lines — all API routes + cron sweep + Persona CRUD + migration hook
 │   │   └── requirements.txt
-│   ├── /pipeline-main               # Cloud Run: AI Extraction Engine (Cartographer)
+│   ├── /pipeline-main               # Cloud Run: AI Extraction Engine (Cartographer / P5 Profiler)
 │   │   ├── Dockerfile
-│   │   ├── main.py                  # 806 lines — search, scrape, score, write
+│   │   ├── main.py                  # Search, scrape, score, write + V20 response_schema enforcement
 │   │   └── requirements.txt
 │   ├── /scraper-heavy               # Cloud Run: Playwright Headless Browser
 │   │   ├── Dockerfile
-│   │   ├── main.py                  # 171 lines — async Chromium + proxy tiers
+│   │   ├── main.py                  # async Chromium + Decodo proxy tiers (standard + premium)
 │   │   └── requirements.txt
-│   ├── /autonomous-engine           # Cloud Run Job: Nightly Digital Exhaust Scraper (V16 NEW)
+│   ├── /digital-twin-engine         # Cloud Run: V20 Website Analyser + RLHF Market Trend Cache
 │   │   ├── Dockerfile
-│   │   ├── engine.py                # Pre-scores leads into predictive_cache (72h TTL)
+│   │   ├── main.py                  # /analyze endpoint, unified Gemini schema, predictive_cache write
+│   │   └── requirements.txt
+│   ├── /shadow-learner-aggregator   # Cloud Run: RLHF Swarm Weight Aggregator
+│   │   ├── Dockerfile
+│   │   ├── main.py                  # Reads campaign RLHF deltas, writes global swarm_weights to Firestore
+│   │   └── requirements.txt
+│   ├── /autonomous-engine           # Cloud Run Job: Nightly Digital Exhaust Scraper
+│   │   ├── Dockerfile
+│   │   ├── engine.py                # Pre-scores leads into predictive_cache root collection (72h TTL)
 │   │   └── requirements.txt
 │   ├── /whatsapp-webhook            # Cloud Run: WhatsApp Business API Receiver
 │   └── /email-summary               # Cloud Run: Email digest sender
@@ -50,8 +58,8 @@ Sideio Lead Sniper is a fully automated, multi-tenant B2B lead generation SaaS p
 ├── firebase.json                    # Hosting config + Firestore rules pointer
 ├── firestore.rules                  # V13.22 multi-tenant security rules (BOM-stripped)
 ├── firestore.indexes.json           # Composite index: tenant_id + timestamp + is_in_crm (BOM-stripped)
-├── cloudbuild.yaml                  # CI/CD: 20-step parallelized enterprise pipeline (V16)
-└── architecture.md                  # This document (V17)
+├── cloudbuild.yaml                  # CI/CD: 20-step parallelized enterprise pipeline
+└── architecture.md                  # This document (V20)
 ```
 
 ---
@@ -60,9 +68,11 @@ Sideio Lead Sniper is a fully automated, multi-tenant B2B lead generation SaaS p
 
 | Service | Cloud Run Name | Auth | Memory | Region |
 |---|---|---|---|---|
-| Orchestrator | `orchestrator` | `--allow-unauthenticated` | 256 Mi | asia-south1 |
-| Pipeline Main | `lead-pipeline-main` | `--no-allow-unauthenticated` | 512 Mi | asia-south1 |
+| Orchestrator | `orchestrator` | `--allow-unauthenticated` | 512 Mi | asia-south1 |
+| Pipeline Main | `lead-pipeline-main` | `--no-allow-unauthenticated` | 1 Gi | asia-south1 |
 | Scraper Heavy | `scraper-heavy` | `--no-allow-unauthenticated` | 2 Gi | asia-south1 |
+| Digital Twin Engine | `digital-twin-engine` | `--no-allow-unauthenticated` | 512 Mi | asia-south1 |
+| Shadow Learner Aggregator | `shadow-learner-aggregator` | `--no-allow-unauthenticated` | 256 Mi | asia-south1 |
 | WhatsApp Webhook | `whatsapp-webhook` | `--allow-unauthenticated` | 128 Mi | asia-south1 |
 | Email Summary | `email-summary` | `--no-allow-unauthenticated` | 128 Mi | asia-south1 |
 | **Autonomous Engine** | **`autonomous-engine`** | **Cloud Run Job (no HTTP)** | **512 Mi** | **asia-south1** |
@@ -170,7 +180,14 @@ Gemini call tracking shards.
   "target_urls": ["https://specific-target.com"],
   "leads_generated": 105,
   "next_drip_due": "<TIMESTAMP>",
+  "next_produce_due": "<TIMESTAMP>",
   "drip_interval_minutes": 60,
+  "unprocessed_queue": [],
+  "sourcing_vector": "Classic B2B",
+  "persona_id": "<firestore_persona_doc_id>",
+  "persona_bio": "Denormalised bio from linked Persona Vault entry.",
+  "persona_keywords": "keyword1, keyword2",
+  "persona_name": "Enterprise SaaS Decision Makers",
   "createdAt": "<SERVER_TIMESTAMP>",
   "updatedAt": "<SERVER_TIMESTAMP>"
 }
@@ -179,8 +196,33 @@ Gemini call tracking shards.
 **Notes:**
 - `keywords`: Stored as comma-separated string, parsed to array in pipeline
 - `target_urls`: Up to 10 manually specified URLs, bypasses Serper search
-- `next_drip_due`: Set by cron sweep after each dispatch. Controls per-campaign drip rate
-- `drip_interval_minutes`: Defaults to 60. Controls time between pipeline runs for this campaign
+- `next_drip_due`: Set by cron sweep after each dispatch. Controls per-campaign consumer drip rate
+- `next_produce_due`: Set to `now + 24h` at creation by zero-wait enqueue. Controls producer re-run cadence
+- `unprocessed_queue`: Array of Serper result objects awaiting Gemini profiling. Populated by producer, drained by consumer
+- `sourcing_vector`: One of `Classic B2B`, `WalledGarden Social`, `B2B2C`. Set by Synaptic Router at creation
+- `persona_id`: Firestore ID of the linked `tenant_profiles/{tenant_id}/personas/{id}` document
+- `persona_bio/keywords/name`: Denormalised from Persona Vault at creation time for fast pipeline reads
+
+### 4.4a `tenant_profiles/{tenant_id}/personas/{persona_id}` Sub-Collection
+Persona Vault: named AI agent configurations scoped to a tenant. Each persona carries a structured ICP directive used by the pipeline to generate targeted outreach.
+
+```json
+{
+  "_id": "auto_generated_firestore_id",
+  "tenant_id": "uid_from_firebase_auth",
+  "name": "Enterprise SaaS Decision Makers",
+  "bio": "[Who we help]: ...\n[The problem we solve]: ...\n[Our unfair advantage]: ...",
+  "keywords": "cto, vp engineering, saas, b2b",
+  "is_legacy": false,
+  "createdAt": "<SERVER_TIMESTAMP>",
+  "updatedAt": "<SERVER_TIMESTAMP>"
+}
+```
+
+**Notes:**
+- `is_legacy: true` marks personas auto-created by the silent migration hook from legacy `tenant_profiles.bio` fields
+- Deleting a persona is blocked (HTTP 409) if any `active` campaigns still reference its `persona_id`
+- On persona `PUT`, the orchestrator performs surgical cache invalidation: wipes all `users/{uid}/predictive_cache` documents linked to affected campaigns and denormalises updated `bio`/`keywords` back onto those campaign documents
 
 ### 4.5 `leads` Collection
 Core atomic lead document. Document ID is a deterministic SHA-256 hash.

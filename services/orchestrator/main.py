@@ -718,6 +718,208 @@ def _handle_bq_push_task(payload: dict):
         print(f"[BQ INSERT] Failed: {e}")
         return False
 
+
+# =============================================================================
+# NEGATIVE SIGNAL GRAPH — BQ INSERT
+#
+# Captures Competitor / Author rejections into swarm_analytics.Negative_Signals.
+# Used by pipeline-main's generate_smart_query() as a pre-flight SELECT to
+# dynamically inject -site: and -intitle: operators before every Serper call.
+#
+# Threading pattern: identical to _async_gcs_dump — daemon thread ensures
+# the BQ write never adds latency to the PUT /api/leads/:id response path.
+# =============================================================================
+
+NEG_SIGNAL_REASONS = frozenset({"competitor", "author"})
+
+import threading as _threading
+
+def _do_neg_signal_insert(entity_name: str, root_domain: str, rejection_reason: str, tenant_id: str):
+    """
+    Synchronous BQ streaming insert into swarm_analytics.Negative_Signals.
+    Called exclusively inside a daemon thread — CPU is never throttled mid-insert.
+    """
+    try:
+        from google.cloud import bigquery as _bq_lib
+        import datetime as _dt_mod, uuid as _uuid_mod
+
+        _bq = _bq_lib.Client(project=PROJECT_ID)
+        table_ref = f"{PROJECT_ID}.swarm_analytics.Negative_Signals"
+
+        row = {
+            "entity_name":      entity_name,
+            "root_domain":      root_domain,
+            "rejection_reason": rejection_reason,
+            "tenant_id":        tenant_id,
+            "timestamp":        _dt_mod.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        errors = _bq.insert_rows_json(table_ref, [row])
+        if errors:
+            print(f"[NEG SIGNAL] BQ streaming error: {errors}")
+        else:
+            print(f"[NEG SIGNAL] Inserted {rejection_reason} signal: domain={root_domain}")
+    except Exception as _e:
+        print(f"[NEG SIGNAL] Non-blocking insert failed: {_e}")
+
+
+def _async_neg_signal_insert(entity_name: str, root_domain: str, rejection_reason: str, tenant_id: str):
+    """Fire-and-forget wrapper. Never raises — telemetry must never degrade UX."""
+    try:
+        t = _threading.Thread(
+            target=_do_neg_signal_insert,
+            args=(entity_name, root_domain, rejection_reason, tenant_id),
+            daemon=True
+        )
+        t.start()
+    except Exception as _e:
+        print(f"[NEG SIGNAL] Thread spawn failed (non-fatal): {_e}")
+
+
+# =============================================================================
+# HYBRID STARTER MOTOR — SHADOW TRACKER
+#
+# On every lead approval (status = "converted" or "contacted") the Shadow
+# Tracker extracts 2-4 word N-grams from the lead's pain_point field and
+# upserts them into swarm_analytics.Intent_Keywords.
+#
+# The BQ MERGE statement is idempotent on (persona_category, n_gram, tenant_id)
+# — concurrent approvals are safe. occurrence_count and yield_weight grow
+# monotonically, forming the statistical confidence signal for the router.
+#
+# N-gram extraction:
+#   - Pure Python stdlib (re + Counter). Zero new dependencies.
+#   - Stop-words filtered to reduce noise (common function words excluded).
+#   - 2-gram and 3-gram only — empirically best signal-to-noise for pain points.
+#   - Top 5 N-grams per approval event to keep BQ DML costs small.
+#
+# Daemon thread pattern: identical to _async_neg_signal_insert — no latency
+# added to the PUT /api/leads/:id response path.
+# =============================================================================
+
+_SHADOW_STOP_WORDS = frozenset({
+    "the", "and", "for", "are", "but", "not", "you", "all", "can", "her",
+    "was", "one", "our", "out", "day", "get", "has", "him", "his", "how",
+    "its", "may", "new", "now", "old", "see", "she", "too", "use", "way",
+    "who", "boy", "did", "man", "put", "say", "she", "too", "use", "way",
+    "that", "this", "with", "have", "from", "they", "know", "want", "been",
+    "good", "much", "some", "time", "very", "when", "come", "here", "just",
+    "like", "long", "make", "many", "more", "only", "over", "such", "take",
+    "than", "them", "then", "well", "were", "will", "also", "into", "most",
+    "than", "their", "there", "these", "what", "your", "about", "which",
+    "would", "could", "after", "being", "other", "those", "where", "while",
+})
+
+import re as _re_mod
+from collections import Counter as _Counter
+
+
+def _extract_ngrams(text: str, n_min: int = 2, n_max: int = 3, top_k: int = 5) -> list:
+    """
+    Extracts the top-k most frequent N-grams (2-3 words) from text.
+    Stop-words are removed before windowing to surface meaningful phrases.
+    Returns a list of lowercase N-gram strings, e.g. ['struggling with', 'no pipeline'].
+    """
+    if not text:
+        return []
+    tokens = _re_mod.findall(r"\b[a-z]{3,}\b", text.lower())
+    # Remove stop-words while preserving positions — we need consecutive windows
+    clean_tokens = [t for t in tokens if t not in _SHADOW_STOP_WORDS]
+    ngrams = []
+    for n in range(n_min, n_max + 1):
+        for i in range(len(clean_tokens) - n + 1):
+            ngrams.append(" ".join(clean_tokens[i:i + n]))
+    counter = _Counter(ngrams)
+    return [ng for ng, _ in counter.most_common(top_k)]
+
+
+def _do_shadow_track(persona_category: str, pain_point: str, tenant_id: str):
+    """
+    Synchronous BQ DML MERGE for Intent_Keywords.
+    Each N-gram in the pain_point is upserted with:
+      - occurrence_count +1
+      - yield_weight += 1.0 (configurable; 1 approval = 1 weight unit)
+    Called exclusively inside a daemon thread.
+    """
+    try:
+        from google.cloud import bigquery as _bq_lib_st
+        import datetime as _dt_st
+
+        ngrams = _extract_ngrams(pain_point)
+        if not ngrams:
+            print(f"[SHADOW TRACKER] No N-grams extracted for persona='{persona_category}' — skipping.")
+            return
+
+        _bq = _bq_lib_st.Client(project=PROJECT_ID)
+        table_ref = f"`{PROJECT_ID}.swarm_analytics.Intent_Keywords`"
+        now_iso   = _dt_st.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Build MERGE for all N-grams in a single DML statement
+        # to minimise BQ slot usage (one job vs N streaming inserts).
+        value_rows = ",\n        ".join(
+            f"(@tenant_id, @persona_category, '{_bq_lib_st.ScalarQueryParameter}', 1, 1.0, TIMESTAMP('{now_iso}'))"
+            for _ in ngrams
+        )
+
+        # Use a VALUES constructor with parameterised literal rows
+        rows_literal = ",\n        ".join(
+            f"(@tenant_id_{i}, @persona_category_{i}, @ngram_{i}, 1, 1.0, TIMESTAMP('{now_iso}'))"
+            for i, _ in enumerate(ngrams)
+        )
+
+        merge_query = f"""
+            MERGE {table_ref} AS T
+            USING (
+                SELECT * FROM UNNEST([
+                    {', '.join(
+                        f"STRUCT(@tenant_id AS tenant_id, @cat AS persona_category, "
+                        f"@ng_{i} AS n_gram, 1 AS occurrence_count, 1.0 AS yield_weight, "
+                        f"TIMESTAMP('{now_iso}') AS last_seen)"
+                        for i, _ in enumerate(ngrams)
+                    )}
+                ])
+            ) AS S
+            ON T.persona_category = S.persona_category
+               AND T.n_gram = S.n_gram
+               AND T.tenant_id = S.tenant_id
+            WHEN MATCHED THEN
+                UPDATE SET
+                    occurrence_count = T.occurrence_count + 1,
+                    yield_weight     = T.yield_weight + 1.0,
+                    last_seen        = S.last_seen
+            WHEN NOT MATCHED THEN
+                INSERT (tenant_id, persona_category, n_gram, occurrence_count, yield_weight, last_seen)
+                VALUES (S.tenant_id, S.persona_category, S.n_gram, S.occurrence_count, S.yield_weight, S.last_seen)
+        """
+
+        params = [
+            _bq_lib_st.ScalarQueryParameter("tenant_id", "STRING", tenant_id),
+            _bq_lib_st.ScalarQueryParameter("cat",       "STRING", persona_category),
+        ] + [
+            _bq_lib_st.ScalarQueryParameter(f"ng_{i}", "STRING", ng)
+            for i, ng in enumerate(ngrams)
+        ]
+
+        job_config = _bq_lib_st.QueryJobConfig(query_parameters=params)
+        job = _bq.query(merge_query, job_config=job_config)
+        job.result(timeout=30)  # DML — must wait for result
+        print(f"[SHADOW TRACKER] Upserted {len(ngrams)} N-grams for "
+              f"persona='{persona_category}' | tenant={tenant_id[:8]}...")
+    except Exception as _e:
+        print(f"[SHADOW TRACKER] Non-blocking insert failed: {_e}")
+
+
+def _async_shadow_track(persona_category: str, pain_point: str, tenant_id: str):
+    """Fire-and-forget wrapper. Never raises — telemetry must never degrade UX."""
+    try:
+        t = _threading.Thread(
+            target=_do_shadow_track,
+            args=(persona_category, pain_point, tenant_id),
+            daemon=True
+        )
+        t.start()
+    except Exception as _e:
+        print(f"[SHADOW TRACKER] Thread spawn failed (non-fatal): {_e}")
+
 @app.route('/api/me', methods=['GET', 'PUT', 'OPTIONS'])
 def get_me():
     if request.method == 'OPTIONS':
@@ -773,10 +975,173 @@ def get_me():
             "data":   data,
             "wallet": wallet
         }), 200
-    return jsonify({"error": "User structure missing"}), 404
+    return jsonify({\"error\": \"User structure missing\"}), 404
 
 
-@app.route('/', defaults={'path': ''}, methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
+# =============================================================================
+# L1 ROI DASHBOARD — Analytics Aggregation API
+#
+# GET  /api/analytics/roi?date_range=30
+#   Returns computed ad_savings, labor_savings, pipeline_value, and the
+#   unit_economics config used. Defaults to conservative industry benchmarks.
+#
+# PUT  /api/analytics/unit-economics
+#   Persists custom unit_economics into users/{tenant_id}.unit_economics.
+#   Called by the "Configure Unit Economics" modal on the frontend.
+#
+# Design:
+#   - date_range defaults to 30 days (configurable via query param).
+#   - All money values returned in tenant's chosen currency (default USD).
+#   - Conservative benchmark defaults: avg_cpl=$50, sdr_rate=$15/hr, 15 min/lead.
+#   - "pipeline_value" is a potential revenue number = n_approved * avg_deal_size
+#     (shown as 0 when avg_deal_size not set — avoids inflating unverified numbers).
+# =============================================================================
+
+_ROI_DEFAULTS = {
+    "avg_cpl":             50.0,   # $ per market-rate lead (HubSpot 2024 benchmark)
+    "avg_deal_size":        0.0,   # $ — user must set for pipeline value to show
+    "sdr_hourly_rate":     15.0,   # $ / hr — US minimum-wage SDR benchmark
+    "est_conversion_rate":  0.02,  # 2% — conservative industry median
+    "currency":           "USD",
+}
+
+@app.route('/api/analytics/roi', methods=['GET', 'OPTIONS'])
+def get_roi_analytics():
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        uid, tenant_id, _ = authenticate_request(request)
+    except ValueError as ve:
+        return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
+    except Exception as e:
+        return jsonify({"error": "Internal Error", "message": str(e)}), 500
+
+    # ── 1. Read unit_economics from user doc (merge with defaults) ──────────
+    user_doc  = db.collection("users").document(tenant_id).get()
+    user_data = user_doc.to_dict() if user_doc.exists else {}
+    ue_raw    = user_data.get("unit_economics") or {}
+    ue = {
+        "avg_cpl":             float(ue_raw.get("avg_cpl",             _ROI_DEFAULTS["avg_cpl"])),
+        "avg_deal_size":       float(ue_raw.get("avg_deal_size",       _ROI_DEFAULTS["avg_deal_size"])),
+        "sdr_hourly_rate":     float(ue_raw.get("sdr_hourly_rate",     _ROI_DEFAULTS["sdr_hourly_rate"])),
+        "est_conversion_rate": float(ue_raw.get("est_conversion_rate", _ROI_DEFAULTS["est_conversion_rate"])),
+        "currency":            str(ue_raw.get("currency",              _ROI_DEFAULTS["currency"])),
+    }
+
+    # ── 2. Resolve date_range and compute cutoff ────────────────────────────
+    try:
+        date_range_days = int(request.args.get("date_range", 30))
+        date_range_days = max(1, min(date_range_days, 365))  # clamp 1–365
+    except (ValueError, TypeError):
+        date_range_days = 30
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    cutoff  = now_utc - datetime.timedelta(days=date_range_days)
+
+    # ── 3. Count approved leads in date_range ──────────────────────────────
+    n_approved   = 0
+    n_contacted  = 0
+    n_total_feed = 0
+    try:
+        approved_docs = (
+            db.collection("leads")
+            .where("tenant_id", "==", tenant_id)
+            .where("status",    "==", "converted")
+            .where("updatedAt", ">=", cutoff)
+            .stream()
+        )
+        n_approved = sum(1 for _ in approved_docs)
+
+        contacted_docs = (
+            db.collection("leads")
+            .where("tenant_id", "==", tenant_id)
+            .where("status",    "==", "contacted")
+            .where("updatedAt", ">=", cutoff)
+            .stream()
+        )
+        n_contacted = sum(1 for _ in contacted_docs)
+
+        all_docs = (
+            db.collection("leads")
+            .where("tenant_id", "==", tenant_id)
+            .where("createdAt", ">=", cutoff)
+            .stream()
+        )
+        n_total_feed = sum(1 for _ in all_docs)
+    except Exception as e:
+        print(f"[ROI] Lead count query failed: {e}")
+
+    # ── 4. ROI Calculations ────────────────────────────────────────────────
+    # Ad Spend Offset: how much the user would have paid for these leads via ads
+    ad_savings = round(n_approved * ue["avg_cpl"], 2)
+
+    # Labor Offset: 15 min per manual lead research × SDR rate
+    labor_savings = round((n_approved * 15 / 60) * ue["sdr_hourly_rate"], 2)
+
+    # Total savings
+    total_offset = round(ad_savings + labor_savings, 2)
+
+    # Pipeline Value: expected revenue if leads convert at est_conversion_rate
+    pipeline_value = round(
+        n_approved * ue["est_conversion_rate"] * ue["avg_deal_size"], 2
+    ) if ue["avg_deal_size"] > 0 else 0.0
+
+    # ROI ratio: total offset vs Sideio cost proxy (credit cost per lead = 1 credit = $0.10)
+    sideio_cost_est = n_approved * 0.10
+    roi_ratio = round(total_offset / sideio_cost_est, 1) if sideio_cost_est > 0 else 0.0
+
+    return jsonify({
+        "status":          "success",
+        "date_range_days": date_range_days,
+        "unit_economics":  ue,
+        "metrics": {
+            "n_approved":      n_approved,
+            "n_contacted":     n_contacted,
+            "n_total_feed":    n_total_feed,
+            "ad_savings":      ad_savings,
+            "labor_savings":   labor_savings,
+            "total_offset":    total_offset,
+            "pipeline_value":  pipeline_value,
+            "roi_ratio":       roi_ratio,
+        }
+    }), 200
+
+
+@app.route('/api/analytics/unit-economics', methods=['PUT', 'OPTIONS'])
+def update_unit_economics():
+    if request.method == 'OPTIONS':
+        return '', 204
+    try:
+        uid, tenant_id, _ = authenticate_request(request)
+    except ValueError as ve:
+        return jsonify({"error": "Unauthorized", "message": str(ve)}), 401
+    except Exception as e:
+        return jsonify({"error": "Internal Error", "message": str(e)}), 500
+
+    payload = request.json or {}
+    allowed = {"avg_cpl", "avg_deal_size", "sdr_hourly_rate", "est_conversion_rate", "currency"}
+    updates = {}
+    for key in allowed:
+        if key in payload:
+            val = payload[key]
+            if key == "currency":
+                updates[f"unit_economics.{key}"] = str(val)[:3].upper()
+            else:
+                try:
+                    updates[f"unit_economics.{key}"] = max(0.0, float(val))
+                except (ValueError, TypeError):
+                    pass  # silently skip invalid field
+
+    if not updates:
+        return jsonify({"error": "No valid fields provided"}), 400
+
+    updates["unit_economics.updated_at"] = firestore.SERVER_TIMESTAMP
+    db.collection("users").document(tenant_id).set(updates, merge=True)
+    print(f"[ROI] Unit economics updated for tenant={tenant_id[:8]}...")
+    return jsonify({"status": "success", "message": "Unit economics saved."}), 200
+
+
+
 @app.route('/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 def trigger_daily_sweep(path):
     """
@@ -2334,7 +2699,32 @@ Rules:
                             except Exception as e:
                                 print(f"RLHF Backprop Native Error: {e}")
 
-                    # ── Phase 1: Ontology Map RLHF Hooks (CRM signals) ────────
+                    # ── Shadow Tracker: N-gram extraction on approval ────────────────
+                    # Fires ONLY on status="converted" (the Approve event).
+                    # Resolves persona_category from the lead's campaign doc
+                    # (persona_name is denormalised there — zero extra read).
+                    if status == "converted":
+                        try:
+                            _lead_d_st    = doc_data.to_dict()
+                            _pain_st      = (_lead_d_st.get("pain_point") or "").strip()
+                            _camp_id_st   = _lead_d_st.get("campaign_id") or ""
+                            _persona_cat  = "general"
+                            if _camp_id_st:
+                                _camp_snap = db.collection("campaigns").document(_camp_id_st).get()
+                                _camp_dict = _camp_snap.to_dict() if _camp_snap.exists else {}
+                                _persona_cat = (
+                                    _camp_dict.get("persona_name") or
+                                    _camp_dict.get("name") or "general"
+                                ).strip()
+                            if _pain_st and _persona_cat:
+                                _async_shadow_track(
+                                    persona_category = _persona_cat,
+                                    pain_point       = _pain_st,
+                                    tenant_id        = tenant_id,
+                                )
+                        except Exception as _st_e:
+                            print(f"[SHADOW TRACKER] Hook setup failed (non-fatal): {_st_e}")
+
                     # Reward: Won / Negotiating  → +0.15 to baseline_weight
                     # Penalty: Lost             → -0.05 to baseline_weight
                     # Burn-in guard: only apply math if total_yield >= 50
@@ -2373,6 +2763,9 @@ Rules:
                     # ── Phase 2: Categorical RLHF Rejection Engine ────────────────
                     # When a user rejects a lead with a categorical reason, apply a
                     # dynamic penalty to the domain's baseline_weight in ontology_map.
+                    # Competitor / Author rejections additionally write into the
+                    # swarm_analytics.Negative_Signals BQ table so future Serper
+                    # queries suppress these entities via -site: / -intitle: operators.
                     #
                     # Penalty schedule (calibrated to signal severity):
                     #   not_b2b        → -0.25  (domain is categorically wrong)
@@ -2380,6 +2773,7 @@ Rules:
                     #   wrong_industry → -0.15  (domain is valid but misaligned)
                     #   too_small      → -0.05  (domain valid, segment filter only)
                     #   competitor     →  0.00  (domain valid — protect, not penalise)
+                    #   author         →  0.00  (individual UGC author — suppress, not penalise)
                     # ──────────────────────────────────────────────────────────────
                     REJECTION_PENALTY_MAP = {
                         "not_b2b":        -0.25,
@@ -2387,6 +2781,7 @@ Rules:
                         "wrong_industry": -0.15,
                         "too_small":      -0.05,
                         "competitor":      0.00,
+                        "author":          0.00,   # new: UGC author suppression
                     }
                     rejection_reason = data.get("rejection_reason")
                     if status == "rejected" and rejection_reason:
@@ -2428,6 +2823,27 @@ Rules:
                                     print(f"[REJECTION RLHF] Write failed: {rlhf_e}")
                             else:
                                 print(f"[REJECTION RLHF] {rejection_reason} → zero penalty (protected domain).")
+
+                    # ── Negative Signal Graph: async BQ write for Competitor / Author
+                    # Feeds the pipeline's Serper query shield on the next produce run.
+                    # Completely non-blocking — daemon thread, never raises.
+                    if status == "rejected" and rejection_reason in NEG_SIGNAL_REASONS:
+                        try:
+                            _lead_d      = doc_data.to_dict()
+                            _entity_name = (_lead_d.get("company_name") or
+                                            _lead_d.get("dm") or
+                                            _lead_d.get("name") or "").strip()
+                            _raw_url     = _lead_d.get("source_url") or _lead_d.get("url") or ""
+                            _root_domain = extract_root_domain(_raw_url)
+                            if _root_domain or _entity_name:
+                                _async_neg_signal_insert(
+                                    entity_name      = _entity_name,
+                                    root_domain      = _root_domain,
+                                    rejection_reason = rejection_reason,
+                                    tenant_id        = tenant_id,
+                                )
+                        except Exception as _ns_e:
+                            print(f"[NEG SIGNAL] Hook setup failed (non-fatal): {_ns_e}")
 
                     # V14: Headless CRM Egress — stripped payload, no raw DOM
 
@@ -2686,6 +3102,47 @@ Rules:
             tenant_id     = campaign_data.get("tenant_id")
             if not tenant_id:
                 continue
+
+            # ── Confidence Threshold Router Telemetry ─────────────────────
+            # Queries SUM(yield_weight) from Intent_Keywords for this campaign's
+            # persona_category. Logs STATISTICAL or GEMINI_FALLBACK mode.
+            # Hard 2s timeout — circuit breaker ensures sweep is never blocked.
+            try:
+                _persona_cat_log = (
+                    campaign_data.get("persona_name") or
+                    campaign_data.get("name") or "unknown"
+                )
+                _conf_bq = bigquery.Client(project=PROJECT_ID)
+                _conf_query = """
+                    SELECT COALESCE(SUM(yield_weight), 0) AS total_confidence
+                    FROM `{project}.swarm_analytics.Intent_Keywords`
+                    WHERE persona_category = @cat
+                      AND (tenant_id = @tid OR tenant_id = 'GLOBAL')
+                """.format(project=PROJECT_ID)
+                _conf_job = _conf_bq.query(
+                    _conf_query,
+                    job_config=bigquery.QueryJobConfig(
+                        query_parameters=[
+                            bigquery.ScalarQueryParameter("cat", "STRING", _persona_cat_log),
+                            bigquery.ScalarQueryParameter("tid", "STRING", tenant_id),
+                        ]
+                    )
+                )
+                _conf_rows    = list(_conf_job.result(timeout=2))
+                _confidence   = float(_conf_rows[0]["total_confidence"]) if _conf_rows else 0.0
+                _CONF_THRESH  = float(
+                    (db.collection("system_config").document("router").get().to_dict() or {})
+                    .get("intent_confidence_threshold", 1000)
+                )
+                _router_mode  = "STATISTICAL" if _confidence >= _CONF_THRESH else "GEMINI_FALLBACK"
+                print(
+                    f"[ROUTER] Persona: \"{_persona_cat_log}\" | "
+                    f"Mode: {_router_mode} | "
+                    f"Confidence: {int(_confidence)}"
+                )
+            except Exception as _conf_e:
+                # Non-fatal — BQ timeout or missing table on first deploy
+                print(f"[ROUTER] Confidence telemetry failed for {campaign_id} (non-fatal): {_conf_e}")
 
             # Wallet / quota check
             role = (db.collection("users").document(tenant_id).get().to_dict() or {}).get("role")

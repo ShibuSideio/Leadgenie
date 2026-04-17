@@ -88,7 +88,108 @@
             justify-content: center; align-items: center;
             backdrop-filter: blur(8px);
         }
+
+        /* ── ROI DASHBOARD ──────────────────────────────── */
+        .roi-section {
+            margin-bottom: 20px;
+        }
+        .roi-header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 14px; flex-wrap: wrap; gap: 10px;
+        }
+        .roi-title {
+            font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 0.08em; color: var(--text-muted);
+            display: flex; align-items: center; gap: 6px;
+        }
+        .roi-title .roi-dot {
+            width: 7px; height: 7px; border-radius: 50%; background: #10b981;
+            display: inline-block; animation: roiPulse 2s infinite;
+        }
+        @keyframes roiPulse {
+            0%,100% { opacity:1; box-shadow: 0 0 0 0 rgba(16,185,129,0.4); }
+            50% { opacity:0.8; box-shadow: 0 0 0 5px rgba(16,185,129,0); }
+        }
+        .roi-controls { display: flex; gap: 8px; align-items: center; }
+        .roi-range-select {
+            font-family: 'Inter', sans-serif; font-size: 0.8rem;
+            padding: 6px 10px; border: 1px solid #e2e8f0; border-radius: 8px;
+            background: white; color: var(--text-main); cursor: pointer;
+            outline: none; transition: border-color 0.15s;
+        }
+        .roi-range-select:focus { border-color: var(--primary); }
+        .roi-config-btn {
+            font-family: 'Inter', sans-serif; font-size: 0.78rem;
+            padding: 6px 12px; border: 1px solid #e2e8f0; border-radius: 8px;
+            background: white; color: var(--text-muted); cursor: pointer;
+            transition: all 0.15s; display: flex; align-items: center; gap: 4px;
+        }
+        .roi-config-btn:hover { background: #f8fafc; border-color: var(--primary); color: var(--primary); }
+        .roi-cards {
+            display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+        }
+        @media (max-width: 900px) { .roi-cards { grid-template-columns: repeat(2, 1fr); } }
+        @media (max-width: 500px) { .roi-cards { grid-template-columns: 1fr; } }
+        .roi-card {
+            background: white; border-radius: 16px; padding: 18px 16px 14px;
+            border: 1px solid #f1f5f9;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+            transition: transform 0.2s, box-shadow 0.2s;
+            position: relative; overflow: hidden;
+        }
+        .roi-card:hover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(0,0,0,0.08); }
+        .roi-card::before {
+            content: ''; position: absolute; top: 0; left: 0; right: 0;
+            height: 3px; border-radius: 16px 16px 0 0;
+        }
+        .roi-card-ad::before   { background: linear-gradient(90deg, #4f46e5, #7c3aed); }
+        .roi-card-labor::before { background: linear-gradient(90deg, #0ea5e9, #06b6d4); }
+        .roi-card-total::before { background: linear-gradient(90deg, #10b981, #059669); }
+        .roi-card-pipeline::before { background: linear-gradient(90deg, #f97316, #ef4444); }
+        .roi-card-label {
+            font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.07em; color: var(--text-muted); margin-bottom: 10px;
+        }
+        .roi-card-value {
+            font-size: 1.65rem; font-weight: 800; letter-spacing: -0.03em;
+            color: var(--text-main); line-height: 1;
+            transition: all 0.6s cubic-bezier(0.16,1,0.3,1);
+        }
+        .roi-card-trend {
+            display: flex; align-items: center; gap: 4px;
+            font-size: 0.75rem; font-weight: 600; color: #10b981;
+            margin-top: 8px;
+        }
+        .roi-card-trend svg {
+            width: 13px; height: 13px; fill: none; stroke: #10b981;
+            stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
+        }
+        .roi-card-sub {
+            font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;
+        }
+        .roi-skeleton {
+            background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+            background-size: 200% 100%;
+            animation: roiShimmer 1.4s infinite;
+            border-radius: 6px; height: 28px; width: 70%;
+        }
+        @keyframes roiShimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+        /* Unit Economics Modal */
+        .ue-form-row { margin-bottom: 16px; }
+        .ue-label { font-size: 0.78rem; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; display: block; }
+        .ue-input {
+            width: 100%; padding: 10px 12px; border: 1.5px solid #e2e8f0;
+            border-radius: 10px; font-family: 'Inter', sans-serif; font-size: 0.92rem;
+            background: #f8fafc; outline: none; transition: border-color 0.2s, box-shadow 0.2s;
+            box-sizing: border-box; color: var(--text-main);
+        }
+        .ue-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,70,229,0.1); background: #fff; }
+        .ue-benchmark { font-size: 0.72rem; color: #10b981; margin-top: 4px; display: flex; align-items: center; gap: 4px; }
     </style>
+
 </head>
 <body>
 
@@ -208,6 +309,66 @@
                 <span class="mstat-div">&#183;</span>
                 <span>Value: <strong id="stat-value">&#x20b9;&nbsp;0</strong></span>
             </div>
+
+            <!-- ════ ROI HERO DASHBOARD ════════════════════════════════= -->
+            <div class="roi-section" id="roi-section">
+                <div class="roi-header">
+                    <div class="roi-title">
+                        <span class="roi-dot"></span>
+                        ROI Intelligence &mdash; Last
+                        <select class="roi-range-select" id="roi-range-select" onchange="loadROIDashboard(this.value)">
+                            <option value="7">7 Days</option>
+                            <option value="30" selected>30 Days</option>
+                            <option value="90">90 Days</option>
+                            <option value="365">All Time</option>
+                        </select>
+                    </div>
+                    <div class="roi-controls">
+                        <button class="roi-config-btn" id="roi-config-btn" onclick="openUnitEconomicsModal()">
+                            &#9881;&#65039; Configure Unit Economics
+                        </button>
+                    </div>
+                </div>
+                <div class="roi-cards">
+                    <div class="roi-card roi-card-ad">
+                        <div class="roi-card-label">&#128176; Ad Spend Saved</div>
+                        <div class="roi-card-value" id="roi-ad-savings"><div class="roi-skeleton"></div></div>
+                        <div class="roi-card-trend">
+                            <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                            vs. paid media CPL
+                        </div>
+                        <div class="roi-card-sub" id="roi-ad-sub">based on $50 market avg</div>
+                    </div>
+                    <div class="roi-card roi-card-labor">
+                        <div class="roi-card-label">&#9201; Labor Hours Saved</div>
+                        <div class="roi-card-value" id="roi-labor-savings"><div class="roi-skeleton"></div></div>
+                        <div class="roi-card-trend">
+                            <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                            15 min/lead SDR saving
+                        </div>
+                        <div class="roi-card-sub" id="roi-labor-sub">at $15/hr SDR rate</div>
+                    </div>
+                    <div class="roi-card roi-card-total">
+                        <div class="roi-card-label">&#127919; Total Value Offset</div>
+                        <div class="roi-card-value" id="roi-total-offset"><div class="roi-skeleton"></div></div>
+                        <div class="roi-card-trend">
+                            <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                            <span id="roi-ratio-label">calculating ROI&hellip;</span>
+                        </div>
+                        <div class="roi-card-sub" id="roi-approved-sub">approved leads in window</div>
+                    </div>
+                    <div class="roi-card roi-card-pipeline">
+                        <div class="roi-card-label">&#128200; Pipeline Value</div>
+                        <div class="roi-card-value" id="roi-pipeline-value"><div class="roi-skeleton"></div></div>
+                        <div class="roi-card-trend" id="roi-pipeline-trend">
+                            <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+                            at 2% conversion est.
+                        </div>
+                        <div class="roi-card-sub" id="roi-pipeline-sub">Set deal size to unlock</div>
+                    </div>
+                </div>
+            </div>
+            <!-- ═══════════════════════════════════════════════════════= -->
 
             <div id="funnel-wrap" class="funnel-wrap" style="display:none;">
                 <div class="funnel-hdr">Pipeline Analytics</div>
@@ -826,11 +987,6 @@
             </div>
         </div>
 
-        <div class="edit-field-group" style="margin-bottom:28px;">
-            <label class="edit-field-label">Priority Target Websites <span style="color:#9ca3af; font-weight:400;">(Max 10, one per line)</span></label>
-            <textarea id="edit-camp-target-urls" class="edit-field-input edit-field-textarea" rows="4" placeholder="https://example.com&#10;https://another-target.io"></textarea>
-        </div>
-
         <div style="display:flex; gap:12px;">
             <button class="primary-btn" style="flex:2; padding:14px; font-size:1rem; border-radius:12px;" onclick="saveEditedCampaign()">Update Engine</button>
             <button class="secondary-btn" style="flex:1; padding:14px; font-size:1rem; border-radius:12px;" onclick="closeEditModal()">Cancel</button>
@@ -906,6 +1062,11 @@
                 <span class="rej-label">Competitor</span>
                 <span class="rej-desc">Direct competitor — do not contact</span>
             </button>
+            <button class="rejection-opt" data-reason="author" onclick="submitRejection('author')">
+                <span class="rej-icon">&#128394;&#65039;</span>
+                <span class="rej-label">Author / Non-Prospect</span>
+                <span class="rej-desc">Content creator or UGC author — suppress from all future searches</span>
+            </button>
             <button class="rejection-opt" data-reason="bad_data" onclick="submitRejection('bad_data')">
                 <span class="rej-icon">&#128465;&#65039;</span>
                 <span class="rej-label">Bad Data</span>
@@ -915,8 +1076,60 @@
     </div>
 </div>
 
+<!-- ════════════════════════════════════════════
+     UNIT ECONOMICS CONFIGURATION MODAL
+════════════════════════════════════════════ -->
+<div id="unit-economics-modal" class="sio-modal-overlay">
+    <div class="sio-modal-box" style="max-width:480px;">
+        <button class="sio-modal-close" onclick="closeModal('unit-economics-modal')">&#10005;</button>
+        <div style="margin-bottom:6px; font-size:1.1rem;">&#9881;&#65039;</div>
+        <h2 style="font-size:1.3rem; font-weight:700; margin-bottom:4px; letter-spacing:-0.02em;">Configure Unit Economics</h2>
+        <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:24px; line-height:1.5;">Set your actual cost and deal metrics to get a hyper-personalised ROI report. Conservative industry benchmarks are used by default.</p>
+
+        <div class="ue-form-row">
+            <label class="ue-label" for="ue-cpl">Cost Per Lead (Avg. Paid Ads CPL)</label>
+            <input class="ue-input" id="ue-cpl" type="number" min="0" step="0.01" placeholder="e.g. 50">
+            <div class="ue-benchmark">&#10003; Industry median: $50 USD (HubSpot B2B 2024)</div>
+        </div>
+        <div class="ue-form-row">
+            <label class="ue-label" for="ue-deal-size">Average Deal Size ($)</label>
+            <input class="ue-input" id="ue-deal-size" type="number" min="0" step="1" placeholder="e.g. 5000 — unlocks Pipeline Value card">
+            <div class="ue-benchmark" style="color:#f97316;">&#9888; Required to calculate pipeline value</div>
+        </div>
+        <div class="ue-form-row">
+            <label class="ue-label" for="ue-sdr-rate">SDR Hourly Rate ($)</label>
+            <input class="ue-input" id="ue-sdr-rate" type="number" min="0" step="0.5" placeholder="e.g. 15">
+            <div class="ue-benchmark">&#10003; US benchmark: $15/hr (BLS 2024)</div>
+        </div>
+        <div class="ue-form-row">
+            <label class="ue-label" for="ue-conv-rate">Estimated Conversion Rate (%)</label>
+            <input class="ue-input" id="ue-conv-rate" type="number" min="0" max="100" step="0.1" placeholder="e.g. 2">
+            <div class="ue-benchmark">&#10003; Industry median: 2% (Salesforce State of Sales)</div>
+        </div>
+        <div class="ue-form-row">
+            <label class="ue-label" for="ue-currency">Currency</label>
+            <select class="ue-input" id="ue-currency" style="cursor:pointer;">
+                <option value="USD">USD — US Dollar</option>
+                <option value="INR">INR — Indian Rupee</option>
+                <option value="GBP">GBP — British Pound</option>
+                <option value="EUR">EUR — Euro</option>
+                <option value="AUD">AUD — Australian Dollar</option>
+                <option value="SGD">SGD — Singapore Dollar</option>
+                <option value="AED">AED — UAE Dirham</option>
+            </select>
+        </div>
+
+        <div style="display:flex; gap:10px; margin-top:4px;">
+            <button class="primary-btn" style="flex:2; padding:13px; border-radius:12px; font-size:0.95rem;" onclick="saveUnitEconomics()">Save &amp; Recalculate</button>
+            <button class="secondary-btn" style="flex:1; padding:13px; border-radius:12px;" onclick="closeModal('unit-economics-modal')">Cancel</button>
+        </div>
+        <div id="ue-save-msg" style="display:none; text-align:center; font-size:0.82rem; color:#10b981; margin-top:12px; font-weight:600;">&#10003; Saved! Recalculating ROI&hellip;</div>
+    </div>
+</div>
+
 <!-- Toast System -->
 <div id="toast-container" class="toast-container"></div>
+
 
 <script>
     if ('serviceWorker' in navigator) {
@@ -925,6 +1138,6 @@
         });
     }
 </script>
-<script src="app.js?v=66"></script>
+<script src="app.js?v=67"></script>
 </body>
 </html>

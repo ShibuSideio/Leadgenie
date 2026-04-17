@@ -94,7 +94,8 @@ async function loadDashboard() {
     await Promise.all([
         loadMe(),
         loadCampaigns(),
-        loadLeads()
+        loadLeads(),
+        loadROIDashboard(30),
     ]);
 
     await initializeDashboardState();
@@ -666,13 +667,14 @@ window.openRejectionModal = function(docId) {
 };
 
 window.submitRejection = async function(reason) {
-    const VALID = ['not_b2b', 'wrong_industry', 'too_small', 'competitor', 'bad_data'];
+    const VALID = ['not_b2b', 'wrong_industry', 'too_small', 'competitor', 'bad_data', 'author'];
     if (!VALID.includes(reason)) return;
     const docId = document.getElementById('rejection-lead-id').value;
     if (!docId) return;
     closeModal('rejection-modal');
     const labels = { not_b2b: 'Not B2B', wrong_industry: 'Wrong Industry',
-                     too_small: 'Too Small', competitor: 'Competitor', bad_data: 'Bad Data' };
+                     too_small: 'Too Small', competitor: 'Competitor', bad_data: 'Bad Data',
+                     author: 'Author / Non-Prospect' };
     try {
         const user = firebase.auth().currentUser;
         if (!user) return;
@@ -754,19 +756,16 @@ window.updateCampaignAction = async function(id) {
     const keysInput = document.getElementById(`edit-camp-keys-${id}`);
     const urlsInput = document.getElementById(`edit-camp-urls-${id}`);
     if (!nameInput || !keysInput) return;
-    let targetUrls = [];
-    if (urlsInput && urlsInput.value.trim()) {
-        targetUrls = urlsInput.value.split('\n').map(u => u.trim()).filter(Boolean).slice(0, 10);
-    }
     try {
         const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', {
-            name: nameInput.value, bio: bioInput?.value || '', keywords: keysInput.value, target_urls: targetUrls
+            name: nameInput.value, bio: bioInput?.value || '', keywords: keysInput.value
         });
         if (success) { showToast('Campaign successfully updated!', 'success'); loadDashboard(); }
     } catch(err) {
         showToast('Error modifying campaign', 'error');
     }
 };
+
 
 // =============================================================================
 // CAMPAIGN EDIT MODAL — openEditModal / closeEditModal / saveEditedCampaign
@@ -831,11 +830,6 @@ window.openEditModal = function(id) {
     if (glEl) glEl.value = camp.gl || '';
     document.getElementById('edit-camp-location').value = camp.location || '';
 
-    const urlsEl = document.getElementById('edit-camp-target-urls');
-    if (urlsEl) {
-        const urls = Array.isArray(camp.target_urls) ? camp.target_urls : [];
-        urlsEl.value = urls.join('\n');
-    }
     showModal('edit-campaign-modal');
 };
 
@@ -850,15 +844,12 @@ window.saveEditedCampaign = async function() {
     const keywords = document.getElementById('edit-camp-keys')?.value      || '';
     const gl       = document.getElementById('edit-camp-gl')?.value        || '';
     const location = document.getElementById('edit-camp-location')?.value  || '';
-    const urlsRaw  = document.getElementById('edit-camp-target-urls')?.value || '';
-    const targetUrls = urlsRaw.split('\n').map(u => u.trim()).filter(Boolean).slice(0, 10);
-
     if (!id)   { showToast('Campaign ID missing. Please refresh.', 'error'); return; }
     if (!name) { showToast('Campaign name is required.', 'error'); return; }
 
     try {
         const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', {
-            name, bio, keywords, gl, location, target_urls: targetUrls
+            name, bio, keywords, gl, location
         });
         if (success) {
             showToast('Campaign updated successfully!', 'success');
@@ -878,7 +869,7 @@ window.saveEditedCampaign = async function() {
 // =============================================================================
 
 window.saveCampaignAction = async function(payload) {
-    let cpName = '', cpBio = '', cpKeys = '', cpGl = '', cpLoc = '', targetUrls = [];
+    let cpName = '', cpBio = '', cpKeys = '', cpGl = '', cpLoc = '';
 
     if (payload) {
         cpName = payload.name || '';
@@ -886,26 +877,18 @@ window.saveCampaignAction = async function(payload) {
         cpKeys = payload.keywords || '';
         cpGl = payload.gl || '';
         cpLoc = payload.location || '';
-        targetUrls = payload.target_urls || [];
     } else {
         const nameInput      = document.getElementById('camp-name');
         const bioInput       = document.getElementById('camp-bio');
         const keysInput      = document.getElementById('camp-keys');
         const glInput        = document.getElementById('camp-gl');
         const locationInput  = document.getElementById('camp-location');
-        const targetUrlsInput = document.getElementById('camp-target-urls');
 
         cpName = nameInput?.value || '';
         cpBio = bioInput?.value || '';
         cpKeys = keysInput?.value || '';
         cpGl = glInput?.value || '';
         cpLoc = locationInput?.value || '';
-        if (targetUrlsInput && targetUrlsInput.value.trim()) {
-            targetUrls = targetUrlsInput.value.split('\n').map(u => u.trim()).filter(Boolean);
-            if (targetUrls.length > 10) {
-                targetUrls = targetUrls.slice(0, 10);
-            }
-        }
     }
 
     // ── PLG Validation: Child Campaign Path ──────────────────────────────────
@@ -958,7 +941,6 @@ window.saveCampaignAction = async function(payload) {
                 keywords:    cpKeys,
                 gl:          cpGl,
                 location:    cpLoc,
-                target_urls: targetUrls,
                 persona_id:  window._selectedPersonaId || '',
                 status:      'active'
             })
@@ -994,6 +976,11 @@ window.saveCampaignAction = async function(payload) {
 
         const targetUrlsInput = document.getElementById('camp-target-urls');
         if (targetUrlsInput) targetUrlsInput.value = '';
+
+        // Clear persona selection state — prevents accidental carry-over
+        // to the next campaign creation (e.g., a second deployPredictiveCard).
+        window._selectedPersonaId = '';
+        window._ccActivePersonaKeywords = '';
 
         _restoreLaunch();
         loadDashboard();
@@ -3006,7 +2993,6 @@ window.deployPredictiveCard = async function(idx, origProd, origHook, origAdv) {
         unfair_advantage:  adv,
         gl:                '',
         location:          loc,
-        target_urls:       [],
         human_edited:      wasEdited,
         target_angle_hook: hook,
         target_angle_adv:  adv
@@ -3128,8 +3114,7 @@ window.saveChildCampaign = async function() {
         pain_point:        pain,
         unfair_advantage:  adv,
         gl:                '',
-        location:          loc,
-        target_urls:       []
+        location:          loc
     });
 };
 
@@ -3591,3 +3576,192 @@ window.populatePersonaDropdown = async function(selectElId) {
         sel.innerHTML = '<option value="">Failed to load personas</option>';
     }
 };
+
+
+// =============================================================================
+// L1 ROI DASHBOARD — Client Module
+//
+// loadROIDashboard(dateRange)
+//   Calls GET /api/analytics/roi?date_range=N
+//   Renders four hero cards with smooth counter animations.
+//
+// openUnitEconomicsModal()
+//   Populates modal inputs from last fetched unit_economics.
+//
+// saveUnitEconomics()
+//   PUTs to /api/analytics/unit-economics, then triggers immediate recalculate.
+// =============================================================================
+
+// Cache the last unit_economics from the API so the modal pre-fills correctly.
+window._roiLastUE = null;
+
+// Currency symbol map + formatter
+function formatROICurrency(amount, currency = 'USD') {
+    const symbols = { USD: '$', INR: '₹', GBP: '£', EUR: '€', AUD: 'A$', SGD: 'S$', AED: 'د.إ' };
+    const sym = symbols[currency] || currency + ' ';
+    if (amount >= 1_000_000) return sym + (amount / 1_000_000).toFixed(1) + 'M';
+    if (amount >= 1_000)     return sym + (amount / 1_000).toFixed(1) + 'K';
+    return sym + amount.toFixed(2);
+}
+
+// Smooth counter animation (easeOutExpo)
+function animateCounter(el, targetVal, currency = 'USD', duration = 900) {
+    if (!el) return;
+    const start     = performance.now();
+    const startVal  = 0;
+    function step(now) {
+        const elapsed = now - start;
+        const progress = Math.min(elapsed / duration, 1);
+        // easeOutExpo
+        const eased = progress === 1 ? 1 : 1 - Math.pow(2, -10 * progress);
+        const current = startVal + (targetVal - startVal) * eased;
+        el.textContent = formatROICurrency(current, currency);
+        if (progress < 1) requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+}
+
+// Show skeleton loader state on all four cards
+function _roiShowSkeleton() {
+    ['roi-ad-savings','roi-labor-savings','roi-total-offset','roi-pipeline-value'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = '<div class="roi-skeleton"></div>';
+    });
+}
+
+window.loadROIDashboard = async function(dateRange = 30) {
+    _roiShowSkeleton();
+    try {
+        const user  = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken();
+        const resp  = await fetch(`${API_BASE}/api/analytics/roi?date_range=${dateRange}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!resp.ok) {
+            console.warn('[ROI] API error:', resp.status);
+            ['roi-ad-savings','roi-labor-savings','roi-total-offset','roi-pipeline-value'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = '—';
+            });
+            return;
+        }
+        const payload = await resp.json();
+        const m  = payload.metrics || {};
+        const ue = payload.unit_economics || {};
+        window._roiLastUE = ue;
+
+        const curr = ue.currency || 'USD';
+        const n    = m.n_approved || 0;
+
+        // Animate card values
+        animateCounter(document.getElementById('roi-ad-savings'),    m.ad_savings    || 0, curr);
+        animateCounter(document.getElementById('roi-labor-savings'),  m.labor_savings  || 0, curr);
+        animateCounter(document.getElementById('roi-total-offset'),   m.total_offset   || 0, curr);
+        animateCounter(document.getElementById('roi-pipeline-value'), m.pipeline_value || 0, curr);
+
+        // Update sub-labels
+        const adSub = document.getElementById('roi-ad-sub');
+        if (adSub) adSub.textContent = `${curr} ${ue.avg_cpl}/lead × ${n} approved`;
+
+        const laborSub = document.getElementById('roi-labor-sub');
+        if (laborSub) laborSub.textContent = `at ${curr} ${ue.sdr_hourly_rate}/hr SDR rate`;
+
+        const approvedSub = document.getElementById('roi-approved-sub');
+        if (approvedSub) approvedSub.textContent = `${n} approved lead${n !== 1 ? 's' : ''} in window`;
+
+        const ratioLabel = document.getElementById('roi-ratio-label');
+        if (ratioLabel) {
+            if (m.roi_ratio > 0) {
+                ratioLabel.textContent = `${m.roi_ratio}× ROI vs. Sideio cost`;
+            } else {
+                ratioLabel.textContent = 'ad + labor offset combined';
+            }
+        }
+
+        // Pipeline value card — show prompt if no deal size set
+        const pipelineSub = document.getElementById('roi-pipeline-sub');
+        if (pipelineSub) {
+            if (ue.avg_deal_size > 0) {
+                const convPct = (ue.est_conversion_rate * 100).toFixed(1);
+                pipelineSub.textContent = `at ${convPct}% conversion × ${formatROICurrency(ue.avg_deal_size, curr)} ADS`;
+            } else {
+                pipelineSub.textContent = '⚙️ Set avg deal size to unlock';
+            }
+        }
+
+        const pipelineTrend = document.getElementById('roi-pipeline-trend');
+        if (pipelineTrend) {
+            const convPct = ((ue.est_conversion_rate || 0.02) * 100).toFixed(1);
+            pipelineTrend.querySelector('span') && (pipelineTrend.lastChild.textContent = `at ${convPct}% conversion est.`);
+        }
+
+    } catch (err) {
+        console.error('[ROI] loadROIDashboard error:', err);
+    }
+};
+
+window.openUnitEconomicsModal = function() {
+    const ue = window._roiLastUE || {};
+    // Pre-fill inputs with current values (or leave blank to show placeholder)
+    const setVal = (id, val, defaultVal) => {
+        const el = document.getElementById(id);
+        if (el && val !== undefined && val !== null && val !== defaultVal) el.value = val;
+    };
+    setVal('ue-cpl',       ue.avg_cpl,             50);
+    setVal('ue-deal-size', ue.avg_deal_size,         0);
+    setVal('ue-sdr-rate',  ue.sdr_hourly_rate,      15);
+    setVal('ue-conv-rate', ue.est_conversion_rate != null
+        ? +(ue.est_conversion_rate * 100).toFixed(2)
+        : '', 2);
+
+    const currSel = document.getElementById('ue-currency');
+    if (currSel && ue.currency) currSel.value = ue.currency;
+
+    const msg = document.getElementById('ue-save-msg');
+    if (msg) msg.style.display = 'none';
+
+    showModal('unit-economics-modal');
+};
+
+window.saveUnitEconomics = async function() {
+    const cpl      = parseFloat(document.getElementById('ue-cpl')?.value)       || null;
+    const deal     = parseFloat(document.getElementById('ue-deal-size')?.value)  || null;
+    const sdr      = parseFloat(document.getElementById('ue-sdr-rate')?.value)   || null;
+    const convPct  = parseFloat(document.getElementById('ue-conv-rate')?.value)  || null;
+    const currency = document.getElementById('ue-currency')?.value              || 'USD';
+
+    const payload = { currency };
+    if (cpl    != null) payload.avg_cpl              = cpl;
+    if (deal   != null) payload.avg_deal_size         = deal;
+    if (sdr    != null) payload.sdr_hourly_rate       = sdr;
+    if (convPct != null) payload.est_conversion_rate  = convPct / 100;
+
+    try {
+        const user  = firebase.auth().currentUser;
+        if (!user) return;
+        const token = await user.getIdToken();
+        const resp  = await fetch(`${API_BASE}/api/analytics/unit-economics`, {
+            method:  'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body:    JSON.stringify(payload)
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+
+        const msg = document.getElementById('ue-save-msg');
+        if (msg) { msg.style.display = 'block'; }
+
+        // Trigger recalculate with current date range
+        const range = document.getElementById('roi-range-select')?.value || 30;
+        await loadROIDashboard(range);
+
+        // Close modal after short delay so user sees the success message
+        setTimeout(() => closeModal('unit-economics-modal'), 1200);
+        showToast('Unit economics saved! ROI recalculated.', 'success');
+
+    } catch(err) {
+        console.error('[ROI] saveUnitEconomics error:', err);
+        showToast('Failed to save unit economics. Please retry.', 'error');
+    }
+};
+
