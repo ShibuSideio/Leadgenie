@@ -1,98 +1,47 @@
 # =============================================================================
-# Orchestrator — STRICT PIN manifest (V23 hotfix 2026-04-17 rev-3)
-# Base image: python:3.10-slim  (cp310-cp310-manylinux2014_x86_64)
+# Orchestrator — Direct-dependency pins only (V23 final 2026-04-17)
+# Base image: python:3.10-slim
 #
-# Triplet validation methodology:
-#   pip install --dry-run --prefer-binary grpcio grpcio-status \
-#     google-cloud-aiplatform google-cloud-firestore firebase-admin
-#   → resolved to grpcio-1.80.0 + protobuf-6.33.6 + firestore-2.27.0
-#   These are the pinned versions below.
-#
-# grpcio: DO NOT pin below 1.80.0. All lower versions that have cp310 binary
-#   wheels require protobuf>=5.26.1; google-cloud-* SDKs now require protobuf 6.x.
-#   The GCP ecosystem has fully migrated to protobuf 6.x as of mid-2025.
+# PINNING PHILOSOPHY (learned from 4 failed builds):
+#   Only pin packages your code DIRECTLY imports. Pinning transitive deps
+#   creates cross-package protobuf/grpcio conflicts that are impossible to
+#   manually resolve as the GCP ecosystem updates.
+#   --prefer-binary in the Dockerfile prevents source compilation.
 # =============================================================================
 
-# ── Web framework ──────────────────────────────────────────────────────────────
+# ── Web framework (direct: Flask app) ─────────────────────────────────────────
 Flask==3.0.3
 flask-cors==4.0.1
 gunicorn==22.0.0
-Werkzeug==3.0.6
-click==8.1.7
-itsdangerous==2.2.0
-Jinja2==3.1.4
-MarkupSafe==2.1.5
 
-# ── gRPC / protobuf — BINARY ONLY, no source compilation ─────────────────────
-# 1.80.0: confirmed cp310-manylinux2014_x86_64 wheel. Requires protobuf>=6.
-# grpcio-status must match grpcio exactly.
-grpcio==1.80.0
-grpcio-status==1.80.0
-protobuf==6.33.6
-
-# ── GCP core ──────────────────────────────────────────────────────────────────
-google-auth==2.29.0
-google-auth-httplib2==0.2.0
-google-api-core==2.19.2
-googleapis-common-protos==1.74.0
-proto-plus==1.27.2
-
-# ── Firebase / Firestore ───────────────────────────────────────────────────────
+# ── Firebase / Auth (direct imports) ─────────────────────────────────────────
 firebase-admin==6.5.0
-google-cloud-firestore==2.27.0
-google-cloud-storage==2.17.0
-google-cloud-core==2.5.1
-google-resumable-media==2.8.2
 
-# ── Cloud Tasks ───────────────────────────────────────────────────────────────
-google-cloud-tasks==2.16.3
+# ── GCP services (direct imports) ─────────────────────────────────────────────
+google-cloud-firestore>=2.14.0
+google-cloud-tasks>=2.16.3
+google-cloud-secret-manager>=2.20.0
+google-cloud-kms>=2.21.3
+google-cloud-bigquery>=3.17.2
+google-cloud-bigquery-storage>=2.25.0
+google-cloud-storage>=2.14.0
 
-# ── Secret Manager / KMS ──────────────────────────────────────────────────────
-google-cloud-secret-manager==2.20.0
-google-cloud-kms==2.21.3
-grpc-google-iam-v1==0.14.4
+# ── Vertex AI (direct imports — vertexai module is inside this package) ───────
+google-cloud-aiplatform>=1.45.0
 
-# ── BigQuery ──────────────────────────────────────────────────────────────────
-google-cloud-bigquery==3.41.0
-google-cloud-bigquery-storage==2.25.0
-pyarrow==16.1.0
-google-crc32c==1.8.0
+# ── gRPC — floor only, let pip find a binary-compatible version ───────────────
+# No upper bound. The Dockerfile --prefer-binary flag prevents source builds.
+grpcio>=1.60.0
 
-# ── Vertex AI (canonical package — vertexai module included) ─────────────────
-# Pinned to ecosystem-resolved version (1.148.0). No separate vertexai== line.
-google-cloud-aiplatform==1.148.0
-google-cloud-resource-manager==1.17.0
-shapely==2.0.6
-docstring-parser==0.16
+# ── HTTP client (direct import) ───────────────────────────────────────────────
+httpx>=0.26.0
 
-# ── HTTP client ────────────────────────────────────────────────────────────────
-httpx==0.27.0
-httpcore==1.0.5
-h11==0.14.0
-certifi==2024.7.4
-charset-normalizer==3.3.2
-idna==3.7
-requests==2.32.3
-urllib3==2.2.2
+# ── Crypto (direct import — Fernet) ──────────────────────────────────────────
+cryptography>=38.0.0
 
-# ── Crypto ────────────────────────────────────────────────────────────────────
-cryptography==42.0.8
-cffi==1.16.0
-pycparser==2.22
-PyJWT==2.10.1
+# ── Data validation (direct import) ──────────────────────────────────────────
+pydantic>=2.7.0
 
-# ── Data / validation ─────────────────────────────────────────────────────────
-pydantic==2.7.1
-pydantic-core==2.18.3
-annotated-types==0.7.0
-typing_extensions==4.12.2
-
-# ── Utilities ──────────────────────────────────────────────────────────────────
-cachetools==5.3.3
+# ── Utilities (direct imports) ────────────────────────────────────────────────
 PyPDF2==3.0.1
-packaging==24.1
-six==1.16.0
-python-dateutil==2.9.0.post0
-pyasn1==0.6.1
-pyasn1-modules==0.4.1
-rsa==4.9
+cachetools>=5.3.0
