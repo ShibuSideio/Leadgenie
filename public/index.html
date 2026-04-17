@@ -959,14 +959,41 @@
             <input type="text" id="edit-camp-name" class="edit-field-input" placeholder="e.g. UK SaaS Founders">
         </div>
 
-        <div class="edit-field-group">
-            <label class="edit-field-label">Product Bio <span style="color:#9ca3af; font-weight:400;">(What you sell)</span></label>
-            <textarea id="edit-camp-bio" class="edit-field-input edit-field-textarea" rows="3" placeholder="e.g. We build AI-powered outbound tools for B2B SaaS companies looking to scale pipeline."></textarea>
+        <!-- ── Active Agent Banner — shown/hidden by openEditModal() ────────── -->
+        <div id="edit-active-agent-block" style="display:none; margin-bottom:20px;">
+            <label class="edit-field-label" style="margin-bottom:8px; display:flex; align-items:center; gap:6px;">
+                <span style="font-size:1rem;">🤖</span> Active Agent / Persona
+            </label>
+            <div id="edit-active-agent-badge" style="
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                padding: 10px 14px;
+                background: linear-gradient(135deg, rgba(99,102,241,0.10), rgba(139,92,246,0.08));
+                border: 1.5px solid rgba(99,102,241,0.35);
+                border-radius: 10px;
+                font-size: 0.85rem;
+                font-weight: 600;
+                color: #4f46e5;
+            ">
+                <span style="font-size:1.1rem;">⚡</span>
+                <span id="edit-agent-name-label">—</span>
+                <span style="margin-left:auto; font-size:0.72rem; font-weight:500; color:#7c3aed; background:rgba(124,58,237,0.10); padding:2px 8px; border-radius:20px;">ACTIVE</span>
+            </div>
         </div>
 
-        <div class="edit-field-group">
+        <div class="edit-field-group" id="edit-bio-group">
+            <label class="edit-field-label">Product Bio <span style="color:#9ca3af; font-weight:400;">(What you sell)</span></label>
+            <textarea id="edit-camp-bio" class="edit-field-input edit-field-textarea" rows="3" placeholder="e.g. We build AI-powered outbound tools for B2B SaaS companies looking to scale pipeline."></textarea>
+            <!-- Shown by JS when persona is locked -->
+            <p id="edit-bio-lock-hint" style="display:none; margin:6px 0 0; font-size:0.75rem; color:#7c3aed; font-style:italic;"></p>
+        </div>
+
+        <div class="edit-field-group" id="edit-keys-group">
             <label class="edit-field-label">Target Keywords</label>
             <textarea id="edit-camp-keys" class="edit-field-input edit-field-textarea" rows="3" placeholder="e.g. digital marketing agency, SEO consultant, growth hacker"></textarea>
+            <!-- Shown by JS when persona is locked -->
+            <p id="edit-keys-lock-hint" style="display:none; margin:6px 0 0; font-size:0.75rem; color:#7c3aed; font-style:italic;"></p>
         </div>
 
         <div class="edit-field-group">

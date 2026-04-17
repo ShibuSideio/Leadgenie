@@ -756,7 +756,7 @@ window.openEditModal = function(id) {
         return;
     }
 
-    document.getElementById('edit-camp-id').value  = id;
+    document.getElementById('edit-camp-id').value   = id;
     document.getElementById('edit-camp-name').value = camp.name || '';
 
     // ── Child Campaign Bio Resolution ──────────────────────────────────────────
@@ -768,16 +768,14 @@ window.openEditModal = function(id) {
     let bioDisplay, keywordsDisplay;
 
     if (isChildCampaign) {
-        // Build readable bio from the DT fields
-        const focus = camp.campaign_focus || camp.name || '';
-        const pain  = camp.pain_point     || '';
-        const adv   = camp.unfair_advantage || '';
+        const focus = camp.campaign_focus    || camp.name || '';
+        const pain  = camp.pain_point        || '';
+        const adv   = camp.unfair_advantage  || '';
         bioDisplay = [
-            focus  ? `Product/Service: ${focus}` : '',
-            pain   ? `Market Hook: ${pain}` : '',
-            adv    ? `Competitive Advantage: ${adv}` : ''
+            focus ? `Product/Service: ${focus}` : '',
+            pain  ? `Market Hook: ${pain}` : '',
+            adv   ? `Competitive Advantage: ${adv}` : ''
         ].filter(Boolean).join('\n\n');
-        // keywords was saved as '' for child campaigns — use company bio from profile if available
         const tenantBio = window.currentUserData?.company_description || window.currentUserData?.bio || '';
         keywordsDisplay = tenantBio || camp.keywords || '';
     } else {
@@ -788,12 +786,79 @@ window.openEditModal = function(id) {
     document.getElementById('edit-camp-bio').value  = bioDisplay;
     document.getElementById('edit-camp-keys').value = keywordsDisplay;
 
+    // ── Active Agent / Persona Lock Logic ─────────────────────────────────────
+    // If the campaign has a persona_id attached, the AI is already using the
+    // detailed Agent instructions. Lock the legacy bio/keywords fields to prevent
+    // a confusing override UX where basic text fields appear editable but have
+    // no effect on the actual AI pipeline.
+    // ──────────────────────────────────────────────────────────────────────────
+    const personaId   = camp.persona_id   || '';
+    const personaName = camp.persona_name || (personaId ? 'Attached Agent' : '');
+
+    const agentBlock  = document.getElementById('edit-active-agent-block');
+    const agentLabel  = document.getElementById('edit-agent-name-label');
+    const bioEl       = document.getElementById('edit-camp-bio');
+    const keysEl      = document.getElementById('edit-camp-keys');
+    const bioHint     = document.getElementById('edit-bio-lock-hint');
+    const keysHint    = document.getElementById('edit-keys-lock-hint');
+
+    if (personaId) {
+        // ── PERSONA ATTACHED: show badge, lock fields ──────────────────────
+        agentLabel.textContent     = personaName;
+        agentBlock.style.display   = 'block';
+
+        // Gray out both textareas
+        const lockedStyle = {
+            opacity:         '0.45',
+            pointerEvents:   'none',
+            background:      '#f3f4f6',
+            borderColor:     '#e5e7eb',
+            color:           '#6b7280',
+            cursor:          'not-allowed',
+        };
+        Object.assign(bioEl.style,  lockedStyle);
+        Object.assign(keysEl.style, lockedStyle);
+        bioEl.setAttribute('disabled', 'disabled');
+        keysEl.setAttribute('disabled', 'disabled');
+
+        // Lock hint messages
+        const lockMsg = `🔒 Locked: The AI is using the detailed instructions from your attached Agent (${personaName}).`;
+        bioHint.textContent  = lockMsg;
+        keysHint.textContent = lockMsg;
+        bioHint.style.display  = 'block';
+        keysHint.style.display = 'block';
+
+    } else {
+        // ── NO PERSONA: hide badge, unlock fields (legacy campaign) ────────
+        agentBlock.style.display = 'none';
+        agentLabel.textContent   = '—';
+
+        const unlockedStyle = {
+            opacity:       '',
+            pointerEvents: '',
+            background:    '',
+            borderColor:   '',
+            color:         '',
+            cursor:        '',
+        };
+        Object.assign(bioEl.style,  unlockedStyle);
+        Object.assign(keysEl.style, unlockedStyle);
+        bioEl.removeAttribute('disabled');
+        keysEl.removeAttribute('disabled');
+
+        bioHint.style.display  = 'none';
+        keysHint.style.display = 'none';
+        bioHint.textContent    = '';
+        keysHint.textContent   = '';
+    }
+
     const glEl = document.getElementById('edit-camp-gl');
     if (glEl) glEl.value = camp.gl || '';
     document.getElementById('edit-camp-location').value = camp.location || '';
 
     showModal('edit-campaign-modal');
 };
+
 
 window.closeEditModal = function() {
     closeModal('edit-campaign-modal');
