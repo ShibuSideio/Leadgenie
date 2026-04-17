@@ -66,18 +66,26 @@ def get_l0_telemetry(uid, tenant_id, user_role):
 
     tenants = []
     for user_doc in db.collection("users").stream():
-        u_data = user_doc.to_dict()
+        u_data = user_doc.to_dict() or {}
         t_id   = u_data.get("tenant_id", user_doc.id)
         leads_count = db.collection("leads").where(filter=FieldFilter("tenant_id", "==", t_id)).count().get()[0][0].value
-        wallet      = u_data.get("wallet", {})
-        shard_sum   = sum(
+        wallet    = u_data.get("wallet", {})
+        shard_sum = sum(
             s.to_dict().get("consumed_credits", 0)
             for s in db.collection("users").document(t_id).collection("wallet_shards").stream()
         )
-        t_info = u_data.copy()
-        t_info.update({"tenant_id": t_id,
-                        "wallet_balance": wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0) - shard_sum,
-                        "total_leads_generated": leads_count})
+        # Serialize only JSON-safe scalars — raw Timestamps crash jsonify
+        t_info = {
+            "tenant_id":              t_id,
+            "email":                  u_data.get("email", ""),
+            "role":                   u_data.get("role", "admin"),
+            "approval_status":        u_data.get("approval_status", "pending"),
+            "is_active":              u_data.get("is_active", True),
+            "wallet_allocated":       wallet.get("allocated_credits", 0),
+            "wallet_consumed":        wallet.get("consumed_credits", 0),
+            "wallet_balance":         wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0) - shard_sum,
+            "total_leads_generated": leads_count,
+        }
         tenants.append(t_info)
 
     return jsonify({"status": "success", "data": {
@@ -258,34 +266,60 @@ def get_system_health(uid, tenant_id, user_role):
 @require_auth
 @require_super_admin
 def get_shadow_ledger(uid, tenant_id, user_role):
-    from google.cloud import firestore
+    """
+    Returns the most recent rejected leads for L0 review.
+
+    Fix notes:
+      - Removed .order_by("updatedAt") from the Firestore query to avoid
+        the composite-index requirement (status + updatedAt index not deployed).
+        Results are sorted Python-side after fetch instead.
+      - All dict field accesses use .get() with safe defaults to handle
+        legacy lead documents that predate field standardization (KeyError fix).
+    """
     limit = min(int(request.args.get("limit", 200)), 500)
     try:
-        rej_docs = (
+        # Fetch without server-side sort to avoid composite index requirement.
+        # Python-side sort on updatedAt (with None-safe key) is equivalent.
+        rej_docs = list(
             db.collection("leads")
               .where(filter=FieldFilter("status", "==", "rejected"))
-              .order_by("updatedAt", direction=firestore.Query.DESCENDING)
               .limit(limit)
               .stream()
         )
+
         leads_out = []
         for doc in rej_docs:
             d = doc.to_dict() or {}
+
+            # Safe Timestamp serialization — field may be absent on legacy docs
+            updated_raw = d.get("updatedAt")
+            created_raw = d.get("createdAt")
+            updated_iso = updated_raw.isoformat() if updated_raw and hasattr(updated_raw, "isoformat") else None
+            created_iso = created_raw.isoformat() if created_raw and hasattr(created_raw, "isoformat") else None
+
             leads_out.append({
                 "id":                  doc.id,
-                "source_url":          d.get("source_url", d.get("url", "")),
+                "source_url":          d.get("source_url") or d.get("url") or "",
                 "base_path":           d.get("base_path", ""),
                 "company_domain":      d.get("company_domain", ""),
                 "domain":              d.get("domain", ""),
                 "score":               d.get("score"),
                 "tenant_id":           d.get("tenant_id", ""),
-                "rejection_reason":    d.get("rejection_reason"),
-                "ai_rejection_reason": d.get("ai_rejection_reason", d.get("rejection_signal", "")),
-                "status":              d.get("status"),
-                "updatedAt":           d["updatedAt"].isoformat() if d.get("updatedAt") and hasattr(d["updatedAt"], "isoformat") else None,
+                "campaign_id":         d.get("campaign_id", ""),
+                "rejection_reason":    d.get("rejection_reason", ""),
+                "ai_rejection_reason": d.get("ai_rejection_reason") or d.get("rejection_signal", ""),
+                "status":              d.get("status", "rejected"),
+                "updatedAt":           updated_iso,
+                "createdAt":           created_iso,
             })
+
+        # Python-side sort: most recently updated first, None timestamps go last
+        leads_out.sort(key=lambda x: x["updatedAt"] or "", reverse=True)
+
         return jsonify({"status": "success", "leads": leads_out, "count": len(leads_out)}), 200
+
     except Exception as e:
+        log.error("shadow_ledger_failed", error=str(e))
         return jsonify({"error": "Shadow Ledger query failed", "message": str(e)}), 500
 
 
