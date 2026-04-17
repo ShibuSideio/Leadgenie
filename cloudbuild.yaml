@@ -103,11 +103,20 @@ steps:
     set -eo pipefail
     echo "[GATE PY] Installing test dependencies..."
     pip install cryptography flask --quiet --no-cache-dir
-    echo "[GATE PY] Running V23 local smoke tests (50 cases)..."
-    export ENCRYPTION_KEY="$$ENCRYPTION_KEY_PLACEHOLDER"
+
+    # Generate a fresh, disposable Fernet key ONLY for the smoke-test run.
+    # This is NOT the production key. The real key lives in Secret Manager
+    # and is injected by Cloud Run --update-env-vars at deploy time.
+    # We only need a valid key shape here to test that the Fernet cipher
+    # initialises and round-trips correctly.
+    SMOKE_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+    export ENCRYPTION_KEY="$$SMOKE_KEY"
+    echo "[GATE PY] Disposable smoke-test Fernet key generated."
+
     export PROJECT_ID="$PROJECT_ID"
     export LOCATION="asia-south1"
     export PYTHONIOENCODING=utf-8
+    echo "[GATE PY] Running V23 local smoke tests (50 cases)..."
     cd services/orchestrator
     python local_smoke_tests.py
     echo "[GATE PY] All 50 smoke tests PASSED. Build proceeding."

@@ -58,14 +58,63 @@ ROI_DEFAULTS: dict[str, float | str] = {
 }
 
 # ---------------------------------------------------------------------------
-# Fernet encryption
+# Fernet encryption — lazy initialization
+#
 # Phase 3 fix: raises ValueError on missing key instead of using a
 # repository-committed fallback (H-3 / L-2 audit findings).
+#
+# Lazy pattern rationale:
+#   Eager init (Fernet at module import) causes test failures when
+#   ENCRYPTION_KEY is injected AFTER the first import (common in CI
+#   and in Cloud Run when the module cache loads before env propagation).
+#   Production containers always have the key set before any request
+#   arrives, so lazy init has zero runtime cost difference.
 # ---------------------------------------------------------------------------
-_raw_fernet_key: str | None = os.environ.get("ENCRYPTION_KEY")
-if not _raw_fernet_key:
-    raise ValueError(
-        "ENCRYPTION_KEY environment variable is not set. "
-        "Deploy must supply this via --update-env-vars or Secret Manager."
-    )
-CIPHER_SUITE: Fernet = Fernet(_raw_fernet_key.encode())
+_cipher_suite: Fernet | None = None
+
+
+def get_cipher() -> Fernet:
+    """Return the singleton Fernet cipher, initializing on first call.
+
+    Raises:
+        ValueError: If ENCRYPTION_KEY is not set or is an empty string.
+    """
+    global _cipher_suite
+    if _cipher_suite is None:
+        _raw_key: str | None = os.environ.get("ENCRYPTION_KEY")
+        if not _raw_key:
+            raise ValueError(
+                "ENCRYPTION_KEY environment variable is not set. "
+                "Deploy must supply this via --update-env-vars or Secret Manager."
+            )
+        _cipher_suite = Fernet(_raw_key.encode())
+    return _cipher_suite
+
+
+# Backwards-compatible alias — resolves lazily on attribute access
+class _LazyCipher:
+    """Descriptor that resolves CIPHER_SUITE lazily to avoid import-time failures."""
+    def __get__(self, obj, objtype=None) -> Fernet:
+        return get_cipher()
+
+
+# CIPHER_SUITE is usable as: ``from core.config import CIPHER_SUITE``
+# It resolves to the Fernet instance on first attribute access.
+class _Config:
+    CIPHER_SUITE = _LazyCipher()
+
+
+_config_singleton = _Config()
+
+
+# Make ``from core.config import CIPHER_SUITE`` work via module-level property
+import sys as _sys
+
+
+class _LazyModule(_sys.modules[__name__].__class__):
+    @property
+    def CIPHER_SUITE(self) -> Fernet:  # type: ignore[override]
+        return get_cipher()
+
+
+_sys.modules[__name__].__class__ = _LazyModule

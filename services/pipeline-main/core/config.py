@@ -52,12 +52,40 @@ SERPER_API_KEY_NAME: str = (
 )
 
 # ---------------------------------------------------------------------------
-# Fernet encryption — fail-fast on missing key (Phase 3 fix L-2)
+# Fernet encryption — lazy initialization (same pattern as orchestrator)
+#
+# Phase 3 fix: raises ValueError on missing key (L-2 audit finding).
+# Lazy to avoid import-time crash when ENCRYPTION_KEY is injected after
+# the module cache loads (CI environments, cold-start race conditions).
 # ---------------------------------------------------------------------------
-_raw_fernet_key: str | None = os.environ.get("ENCRYPTION_KEY")
-if not _raw_fernet_key:
-    raise ValueError(
-        "ENCRYPTION_KEY environment variable is not set. "
-        "Deploy must supply this via --update-env-vars or Secret Manager."
-    )
-CIPHER_SUITE: Fernet = Fernet(_raw_fernet_key.encode())
+_cipher_suite: Fernet | None = None
+
+
+def get_cipher() -> Fernet:
+    """Return the singleton Fernet cipher, initializing on first call.
+
+    Raises:
+        ValueError: If ENCRYPTION_KEY is not set or is an empty string.
+    """
+    global _cipher_suite
+    if _cipher_suite is None:
+        _raw_key: str | None = os.environ.get("ENCRYPTION_KEY")
+        if not _raw_key:
+            raise ValueError(
+                "ENCRYPTION_KEY environment variable is not set. "
+                "Deploy must supply this via --update-env-vars or Secret Manager."
+            )
+        _cipher_suite = Fernet(_raw_key.encode())
+    return _cipher_suite
+
+
+import sys as _sys
+
+
+class _LazyModule(_sys.modules[__name__].__class__):
+    @property
+    def CIPHER_SUITE(self) -> Fernet:  # type: ignore[override]
+        return get_cipher()
+
+
+_sys.modules[__name__].__class__ = _LazyModule

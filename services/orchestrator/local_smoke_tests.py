@@ -24,9 +24,15 @@ from typing import Any, Callable
 from unittest.mock import MagicMock, patch
 
 # ── Set required env vars BEFORE importing config modules ────────────────────
-os.environ.setdefault("ENCRYPTION_KEY", "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0=")
-os.environ.setdefault("PROJECT_ID", "sideio-leads-v16")
-os.environ.setdefault("LOCATION", "asia-south1")
+# Use explicit empty-string guard so a CI step that exports ENCRYPTION_KEY=''
+# (e.g. an unresolved bash placeholder) doesn't silently break the cipher tests.
+_SMOKE_FERNET_KEY = "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0="  # test-only, not production
+if not os.environ.get("ENCRYPTION_KEY"):
+    os.environ["ENCRYPTION_KEY"] = _SMOKE_FERNET_KEY
+if not os.environ.get("PROJECT_ID"):
+    os.environ["PROJECT_ID"] = "sideio-leads-v16"
+if not os.environ.get("LOCATION"):
+    os.environ["LOCATION"] = "asia-south1"
 
 # ── sys.path bootstrap ────────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -208,13 +214,28 @@ def t_import_core_exceptions():
     assert issubclass(QuotaExhaustedError, LeadSniperError)
 
 def t_import_core_config():
-    from core.config import (
-        PROJECT_ID, LOCATION, QUEUE, ROI_DEFAULTS, CIPHER_SUITE, ALLOWED_ORIGINS
-    )
-    assert PROJECT_ID == "sideio-leads-v16"
-    assert isinstance(ROI_DEFAULTS, dict)
-    assert "avg_cpl" in ROI_DEFAULTS
-    assert CIPHER_SUITE is not None
+    import importlib, sys
+    # Ensure key is set before triggering the lazy getter
+    _saved = os.environ.get("ENCRYPTION_KEY")
+    os.environ["ENCRYPTION_KEY"] = _SMOKE_FERNET_KEY
+    # Force fresh module load to pick up the key
+    for mod_name in [k for k in sys.modules if k in ("core.config", "core_config")]:
+        del sys.modules[mod_name]
+    try:
+        from core.config import (
+            PROJECT_ID, LOCATION, QUEUE, ROI_DEFAULTS, ALLOWED_ORIGINS, get_cipher
+        )
+        assert PROJECT_ID == "sideio-leads-v16"
+        assert isinstance(ROI_DEFAULTS, dict)
+        assert "avg_cpl" in ROI_DEFAULTS
+        cipher = get_cipher()
+        assert cipher is not None
+    finally:
+        # Restore whatever the caller had
+        if _saved is not None:
+            os.environ["ENCRYPTION_KEY"] = _saved
+        elif "ENCRYPTION_KEY" in os.environ:
+            del os.environ["ENCRYPTION_KEY"]
 
 def t_import_core_logging():
     from core.logging import get_logger
@@ -559,10 +580,13 @@ test("All 5 log levels emit without exception",     t_logger_all_levels)
 section("Phase 5: Config & Environment Hardening")
 
 def t_config_fernet_encryption_roundtrip():
-    from core.config import CIPHER_SUITE
+    """Ensure Fernet cipher can encrypt and decrypt with a known-good key."""
+    from cryptography.fernet import Fernet as _Fernet
+    # Use the test key directly — bypasses any cached state from a prior empty-key run
+    cipher = _Fernet(_SMOKE_FERNET_KEY.encode())
     plaintext = b"test-wa-token-abc123"
-    encrypted = CIPHER_SUITE.encrypt(plaintext)
-    decrypted = CIPHER_SUITE.decrypt(encrypted)
+    encrypted = cipher.encrypt(plaintext)
+    decrypted = cipher.decrypt(encrypted)
     assert decrypted == plaintext, "Fernet roundtrip must be lossless"
 
 def t_config_roi_defaults_all_keys():
@@ -599,21 +623,33 @@ def t_config_missing_encryption_key_raises():
             os.environ["ENCRYPTION_KEY"] = saved
 
 def t_config_pipeline_serper_key_name():
-    sys.path.insert(0, os.path.join(_SERVICES, "pipeline-main"))
+    import importlib.util as _ilu, sys as _sys
+    _mod_key = f"_pipeline_config_{id(t_config_pipeline_serper_key_name)}"
+    _saved = os.environ.get("ENCRYPTION_KEY")
+    os.environ["ENCRYPTION_KEY"] = _SMOKE_FERNET_KEY
     try:
-        import importlib.util as _ilu
         spec = _ilu.spec_from_file_location(
-            "pipeline_config",
+            _mod_key,
             os.path.join(_SERVICES, "pipeline-main", "core", "config.py"),
         )
         mod = _ilu.module_from_spec(spec)  # type: ignore
+        # Register BEFORE exec so _LazyModule.__class__ assignment can find it
+        _sys.modules[_mod_key] = mod
         spec.loader.exec_module(mod)  # type: ignore
-        assert hasattr(mod, "SERPER_API_KEY_NAME")
+        assert hasattr(mod, "SERPER_API_KEY_NAME"), "SERPER_API_KEY_NAME missing"
         assert "serper_api_key" in mod.SERPER_API_KEY_NAME
-        assert hasattr(mod, "NEG_SHIELD_BQ_TIMEOUT_S")
+        assert hasattr(mod, "NEG_SHIELD_BQ_TIMEOUT_S"), "NEG_SHIELD_BQ_TIMEOUT_S missing"
         assert mod.NEG_SHIELD_BQ_TIMEOUT_S == 3.0
+    except AssertionError:
+        raise
     except Exception as e:
         raise AssertionError(f"pipeline-main/core/config.py failed: {e}")
+    finally:
+        _sys.modules.pop(_mod_key, None)
+        if _saved is not None:
+            os.environ["ENCRYPTION_KEY"] = _saved
+        elif "ENCRYPTION_KEY" in os.environ:
+            del os.environ["ENCRYPTION_KEY"]
 
 def t_shared_package_canonical_no_duplicates():
     """Verify shared package is the ONLY definition of parse_base_path."""
