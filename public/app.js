@@ -95,7 +95,6 @@ async function loadDashboard() {
         loadMe(),
         loadCampaigns(),
         loadLeads(),
-        loadROIDashboard(30),
     ]);
 
     await initializeDashboardState();
@@ -429,42 +428,6 @@ async function loadCampaigns() {
     }
 }
 
-// --- ENTERPRISE CHART.JS PIPELINE ---
-// V18: funnel-wrap is conditionally shown only when leads exist (clean canvas otherwise)
-let conversionChart = null;
-function initAnalyticsChart(newC, contactedC, convertedC) {
-    const ctx = document.getElementById('funnelChart');
-    const wrapper = document.getElementById('funnel-wrap');
-    const totalLeads = newC + contactedC + convertedC;
-
-    // Show/hide the wrapper based on whether there is any data
-    if (wrapper) {
-        if (totalLeads > 0) {
-            wrapper.style.display = '';
-        } else {
-            wrapper.style.display = 'none';
-            return; // No data — keep canvas clean
-        }
-    }
-    if (!ctx) return;
-    if (conversionChart) {
-        conversionChart.data.datasets[0].data = [newC, contactedC, convertedC];
-        conversionChart.update();
-        return;
-    }
-    conversionChart = new Chart(ctx, {
-        type: 'doughnut',
-        data: {
-            labels: ['New Processed', 'Messaged', 'Converted'],
-            datasets: [{
-                data: [newC, contactedC, convertedC],
-                backgroundColor: ['#4F46E5', '#3B82F6', '#25D366'],
-                borderWidth: 0
-            }]
-        },
-        options: { cutout: '75%', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
-    });
-}
 
 
 // =============================================================================
@@ -489,7 +452,7 @@ async function loadLeads() {
                     data.id = doc.id;
                     rawLeadsCache.push(data);
                 });
-                if (rawLeadsCache.length === 0) { renderLeads(); initAnalyticsChart(0,0,0); return; }
+                if (rawLeadsCache.length === 0) { renderLeads(); return; }
                 rawLeadsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
                 let cNew = 0, cContact = 0, cConvert = 0;
                 let cDiscovered = rawLeadsCache.length, cActionable = 0, cIgnored = 0;
@@ -506,7 +469,6 @@ async function loadLeads() {
                 if (elDisc) elDisc.innerText = cDiscovered;
                 if (elAct)  elAct.innerText  = cActionable;
                 if (elIgn)  elIgn.innerText  = cIgnored;
-                initAnalyticsChart(cNew, cContact, cConvert);
                 fcUpdateKPIs(rawLeadsCache);
                 renderLeads();
             }, (error) => {
@@ -1019,6 +981,9 @@ window.switchTab = function(tabName) {
     } else if (tabName === 'reports') {
         show('view-reports');
         activateNav('tab-reports', 'dock-tab-reports');
+        // ROI data loads on-demand when user navigates to Reports
+        const savedRange = document.getElementById('roi-range-select')?.value || 30;
+        loadROIDashboard(savedRange);
     } else if (tabName === 'l0-admin') {
         show('view-l0-admin');
         const l0Tab = document.getElementById('tab-l0-admin');
