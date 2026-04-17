@@ -60,7 +60,7 @@ def get_l0_telemetry(uid, tenant_id, user_role):
     from google.cloud import firestore  # noqa: F401 (used for Query)
     macro_totals: dict = {}
     for st in ["new", "contacted", "ignored", "failed", "processing", "completed"]:
-        res = db.collection("leads").where(field_path="status", op_string="==", value=st).count().get()
+        res = db.collection("leads").where(filter=FieldFilter("status", "==", st)).count().get()
         macro_totals[st] = res[0][0].value
     macro_totals["total_leads"] = sum(macro_totals.values())
 
@@ -68,7 +68,7 @@ def get_l0_telemetry(uid, tenant_id, user_role):
     for user_doc in db.collection("users").stream():
         u_data = user_doc.to_dict()
         t_id   = u_data.get("tenant_id", user_doc.id)
-        leads_count = db.collection("leads").where(field_path="tenant_id", op_string="==", value=t_id).count().get()[0][0].value
+        leads_count = db.collection("leads").where(filter=FieldFilter("tenant_id", "==", t_id)).count().get()[0][0].value
         wallet      = u_data.get("wallet", {})
         shard_sum   = sum(
             s.to_dict().get("consumed_credits", 0)
@@ -101,7 +101,7 @@ def get_l0_trends(uid, tenant_id, user_role):
         t_id = c.get("tenant_id")
         if not t_id or c.get("status", "paused") != "active":
             continue
-        leads_count = db.collection("leads").where(field_path="campaign_id", op_string="==", value=camp.id).count().get()[0][0].value
+        leads_count = db.collection("leads").where(filter=FieldFilter("campaign_id", "==", camp.id)).count().get()[0][0].value
         trends.append({
             "campaign_id": camp.id, "tenant_id": t_id,
             "email": user_map.get(t_id, "Unknown"),
@@ -220,7 +220,7 @@ def get_system_health(uid, tenant_id, user_role):
     try:
         cutoff      = now_h - datetime.timedelta(hours=24)
         health["leads_last_24h"] = len(list(
-            db.collection("leads").where(field_path="createdAt", op_string=">=", value=cutoff).limit(500).stream()
+            db.collection("leads").where(filter=FieldFilter("createdAt", ">=", cutoff)).limit(500).stream()
         ))
     except Exception:
         health["leads_last_24h"] = None
@@ -228,7 +228,7 @@ def get_system_health(uid, tenant_id, user_role):
     # Active campaigns
     try:
         health["active_campaigns"] = len(list(
-            db.collection("campaigns").where(field_path="status", op_string="==", value="active").limit(500).stream()
+            db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(500).stream()
         ))
     except Exception:
         health["active_campaigns"] = None
@@ -236,7 +236,7 @@ def get_system_health(uid, tenant_id, user_role):
     # Rejected lead count
     try:
         health["total_rejected"] = len(list(
-            db.collection("leads").where(field_path="status", op_string="==", value="rejected").limit(500).stream()
+            db.collection("leads").where(filter=FieldFilter("status", "==", "rejected")).limit(500).stream()
         ))
     except Exception:
         health["total_rejected"] = None
@@ -263,7 +263,7 @@ def get_shadow_ledger(uid, tenant_id, user_role):
     try:
         rej_docs = (
             db.collection("leads")
-              .where(field_path="status", op_string="==", value="rejected")
+              .where(filter=FieldFilter("status", "==", "rejected"))
               .order_by("updatedAt", direction=firestore.Query.DESCENDING)
               .limit(limit)
               .stream()

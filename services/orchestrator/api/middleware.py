@@ -59,11 +59,19 @@ def require_auth(fn: Callable) -> Callable:
 
 
 def require_super_admin(fn: Callable) -> Callable:
-    """Authenticate the request AND assert ``user_role == 'super_admin'``.
+    """Assert ``user_role == 'super_admin'`` on an already-authenticated request.
+
+    Must be stacked INSIDE (below) ``@require_auth`` on the route — ``@require_auth``
+    injects ``uid``, ``tenant_id``, ``user_role`` and then this decorator checks the role.
+
+    Correct usage::
+
+        @bp.route("/api/l0/telemetry")
+        @require_auth          # runs first — authenticates and injects identity
+        @require_super_admin   # runs second — checks role only
+        def handler(uid, tenant_id, user_role): ...
 
     Returns HTTP 403 if the authenticated user lacks the super_admin role.
-    Layers on top of ``require_auth`` so authentication failures still
-    return a clean 401.
 
     Args:
         fn: The route handler function to wrap.
@@ -72,7 +80,6 @@ def require_super_admin(fn: Callable) -> Callable:
         Decorated function.
     """
     @functools.wraps(fn)
-    @require_auth
     def wrapper(uid: str, tenant_id: str, user_role: str, *args, **kwargs):
         if user_role != "super_admin":
             return jsonify({
@@ -81,3 +88,4 @@ def require_super_admin(fn: Callable) -> Callable:
             }), 403
         return fn(uid, tenant_id, user_role, *args, **kwargs)
     return wrapper
+
