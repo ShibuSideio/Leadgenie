@@ -2282,7 +2282,7 @@ window.createLeadCardV2 = function(docId, lead) {
     }
 
     var crmCls = 'lc-crm-btn' + (lead.is_in_crm ? ' in-crm' : '');
-    var crmOC  = lead.is_in_crm ? '' : ("pushToCRM('" + docId + "','" + encodeURIComponent(JSON.stringify(lead)).replace(/\\/g,'\\\\') + "')");
+    // XSS-FIX: crmOC removed. CRM button uses data-action delegation.
 
 
     card.innerHTML =
@@ -2299,7 +2299,8 @@ window.createLeadCardV2 = function(docId, lead) {
         '</div>' +
         (signal ? '<div class="lc-signal">'+signal+'</div>' : '') +
         '<div class="lc-badges">'+prismBadge+bHTML+'</div>' +
-        '<button class="lc-expand-btn" onclick="lcToggleExpand(\''+docId+'\')">' +
+        // XSS-FIX: expand btn — data-action delegation
+        '<button class="lc-expand-btn" data-action="expand" data-lead-id="'+docId+'">' +
             '<span id="lc-expand-icon-'+docId+'">&#x2193;</span> See opening message &amp; full intelligence' +
         '</button>' +
         '<div class="lc-expanded" id="'+expandId+'">' +
@@ -2315,19 +2316,88 @@ window.createLeadCardV2 = function(docId, lead) {
                 (isCont?' disabled':'')+'>' +
                 (isCont ? '&#x2713; Contacted' : copilotLbl) +
             '</button>' +
-            '<button class="'+crmCls+'" id="crm-btn-'+docId+'"'+(crmOC?' onclick="'+crmOC+'"':'')+(lead.is_in_crm?' disabled':'')+' title="Send to pipeline CRM">'+(lead.is_in_crm?'In CRM':'-> CRM')+'</button>' +
+            // XSS-FIX (P3): CRM btn — data-action only, no JS string injection.
+            '<button class="'+crmCls+'" id="crm-btn-'+docId+'"' +
+                ' data-action="crm" data-lead-id="'+docId+'"' +
+                (lead.is_in_crm?' disabled':'') +
+                ' title="Send to pipeline CRM">' +
+                (lead.is_in_crm?'In CRM':'→ CRM') +
+            '</button>' +
             '<div style="position:relative;">' +
-                '<button class="lc-more-btn" id="'+moreId+'" onclick="lcToggleMore(\''+docId+'\')" title="More options">...</button>' +
+                // XSS-FIX (P4): more — data-action delegation
+                '<button class="lc-more-btn" id="'+moreId+'" data-action="more" data-lead-id="'+docId+'" title="More options">...</button>' +
                 '<div class="lc-overflow-menu" id="'+overflowId+'">' +
-                    '<button class="lc-overflow-item" onclick="updateLeadStatus(\''+docId+'\',\'converted\');lcCloseMore(\''+docId+'\')">Mark Converted</button>' +
-                    '<button class="lc-overflow-item" onclick="viewLeadTimeline(\''+encodeURIComponent(JSON.stringify(lead.interactions||[]))+'\');lcCloseMore(\''+docId+'\')">View Timeline</button>' +
-                    '<button class="lc-overflow-item danger" onclick="openRejectionModal(\''+docId+'\');lcCloseMore(\''+docId+'\')">&#128683; Skip This Lead</button>' +
+                    // XSS-FIX: overflow items — data-action delegation
+                    '<button class="lc-overflow-item" data-action="converted" data-lead-id="'+docId+'">Mark Converted</button>' +
+                    '<button class="lc-overflow-item" data-action="timeline"  data-lead-id="'+docId+'">View Timeline</button>' +
+                    '<button class="lc-overflow-item danger" data-action="reject" data-lead-id="'+docId+'">&#128683; Skip This Lead</button>' +
                 '</div>' +
             '</div>' +
         '</div>';
 
     return card;
 };
+
+
+// =============================================================================
+// XSS-FIX: DELEGATED CLICK LISTENER — replaces ALL inline onclick in lead cards
+//
+// ROOT CAUSE: createLeadCardV2 built onclick attributes via string concatenation:
+//   onclick="pushToCRM('id','<JSON>')"  when lead.dm has a quote → SyntaxError
+//   onclick="viewLeadTimeline('<URI>')" when interactions has emoji → breaks
+//
+// FIX: Buttons carry data-action + data-lead-id only.
+// Listener reads the full lead from _leadsMap[docId] — zero encoding needed.
+// =============================================================================
+(function lcDelegatedListener() {
+    var container = document.getElementById('leads-list');
+    if (!container) {
+        document.addEventListener('DOMContentLoaded', lcDelegatedListener);
+        return;
+    }
+    container.addEventListener('click', function(e) {
+        var btn    = e.target.closest('[data-action]');
+        if (!btn) return;
+        var action = btn.dataset.action;
+        var docId  = btn.dataset.leadId;
+
+        if (action === 'copilot') {
+            if (!docId) return;
+            window.copilotAction(docId);
+
+        } else if (action === 'crm') {
+            if (!docId || btn.disabled) return;
+            var lead = _leadsMap.get(docId);
+            if (!lead) { showToast('Lead data unavailable. Please refresh.', 'error'); return; }
+            window.pushToCRM(docId, encodeURIComponent(JSON.stringify(lead)));
+
+        } else if (action === 'expand') {
+            if (!docId) return;
+            window.lcToggleExpand(docId);
+
+        } else if (action === 'more') {
+            if (!docId) return;
+            window.lcToggleMore(docId);
+
+        } else if (action === 'converted') {
+            if (!docId) return;
+            updateLeadStatus(docId, 'converted');
+            lcCloseMore(docId);
+
+        } else if (action === 'timeline') {
+            if (!docId) return;
+            var l2      = _leadsMap.get(docId);
+            var evtJson = encodeURIComponent(JSON.stringify((l2 && l2.interactions) || []));
+            window.viewLeadTimeline(evtJson);
+            lcCloseMore(docId);
+
+        } else if (action === 'reject') {
+            if (!docId) return;
+            window.openRejectionModal(docId);
+            lcCloseMore(docId);
+        }
+    });
+})();
 
 
 // Toggle expand/collapse
