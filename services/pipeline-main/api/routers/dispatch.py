@@ -36,7 +36,7 @@ from core.config import (  # type: ignore[import]
     PROJECT_ID, LOCATION, QUEUE, ORCHESTRATOR_URL, SCRAPER_HEAVY_URL,
     SERPER_API_KEY_NAME, VELOCITY_THRESHOLD,
 )
-from core.clients import get_db, get_tasks_client, get_sm_client  # type: ignore[import]
+from core.clients import get_db, get_tasks_client, get_sm_client, get_serper_key  # type: ignore[import]
 from core.logging import get_logger                                 # type: ignore[import]
 from middleware.oidc import require_tasks_oidc                      # type: ignore[import]
 from services.serper_service import (  # type: ignore[import]
@@ -237,16 +237,16 @@ def dispatch():
              persona_count=len(raw_personas))
     prism = None
     try:
-        # SF-002 FIX: Direct instantiation from services.prism_pipeline.
-        # PrismPipeline is imported at the top of this module — no importlib,
-        # no monolith side-effects, no ENCRYPTION_KEY or Flask dependency.
-        _serper_key = _get_secret(SERPER_API_KEY_NAME).strip()
+        # BUG-5 FIX: Use get_serper_key() DCL singleton instead of _get_secret().
+        # _get_secret() made a live Secret Manager RPC on every /dispatch call.
+        # get_serper_key() is cached for the container lifetime — one RPC ever.
+        _serper_key = get_serper_key(SERPER_API_KEY_NAME).strip()
         prism       = PrismPipeline(campaign, _db(), _serper_key)
         log.info("dispatch_prism_instantiated", campaign_id=campaign_id,
                  persona_count=len(raw_personas))
     except Exception as prism_err:
         log.warning("dispatch_prism_init_failed", error=str(prism_err),
-                    note="Falling back to empty-text path (scraper-heavy deferrals).")
+                    note="Falling back to scraper-heavy deferrals.")
 
 
     # ── TRACE-6: Destructive Queue Pop (Batch of 10) ────────────────────────
@@ -259,7 +259,28 @@ def dispatch():
     BATCH_SIZE = 10
     batch_urls = current_queue[:BATCH_SIZE]
     remaining  = current_queue[BATCH_SIZE:]
-    campaign_ref.update({"unprocessed_queue": remaining})
+
+    # BUG-2 FIX: Atomic transactional queue pop — prevents double-dispatch race.
+    # A bare .update({"unprocessed_queue": remaining}) is NOT atomic. If two
+    # Cloud Task workers fire simultaneously for the same campaign_id (Cloud
+    # Tasks guarantees at-least-once delivery), both read the same snapshot,
+    # compute the same remaining slice, and the second .update() silently
+    # overwrites the first — causing duplicate lead processing.
+    # Fix: Use ArrayRemove inside a transaction. ArrayRemove is idempotent
+    # and set-based — even if two workers race, each URL is only removed once.
+    try:
+        @_firestore_transactional
+        def _pop_queue(txn, ref):
+            txn.update(ref, {
+                "unprocessed_queue": firestore.ArrayRemove(batch_urls)
+            })
+        _pop_txn = _db().transaction()
+        _pop_queue(_pop_txn, campaign_ref)
+    except Exception as pop_err:
+        log.error("dispatch_queue_pop_failed", campaign_id=campaign_id,
+                  error=str(pop_err), exc_info=True)
+        return jsonify({"error": "Queue pop transaction failed"}), 500
+
     log.info("TRACE-6: Destructive queue pop complete.",
              campaign_id=campaign_id, batch_size=len(batch_urls),
              remaining=len(remaining))
@@ -308,14 +329,16 @@ def dispatch():
     medium_urls = tiered.get("Medium", [])
 
     # Velocity gate (Medium URLs)
+    # BUG-3 FIX: Replace deprecated positional where() with FieldFilter.
+    # Positional where() is deprecated in google-cloud-firestore >= 2.13.
     velocity_threshold = VELOCITY_THRESHOLD
     try:
         cutoff_24h   = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
         recent_count = (
             _db().collection("leads")
-            .where("tenant_id", "==", tenant_id)
-            .where("status",    "==", "new")
-            .where("createdAt", ">=", cutoff_24h)
+            .where(filter=FieldFilter("tenant_id", "==", tenant_id))
+            .where(filter=FieldFilter("status",    "==", "new"))
+            .where(filter=FieldFilter("createdAt", ">=", cutoff_24h))
             .count().get()[0][0].value
         )
     except Exception:
@@ -329,15 +352,26 @@ def dispatch():
              high=len(high_urls), medium=len(medium_urls),
              approved=len(approved_urls), gate_rejected=len(batch_urls)-len(approved_urls))
 
-    # ── TRACE-8: PRISM Processing Loop ──────────────────────────────────────
-    log.info("TRACE-8: Entering PRISM processing loop.", url_count=len(approved_urls))
+    # ── TRACE-8: PRISM Processing Loop (parallel, per-URL 25s timeout) ─────────
+    # BUG-1 + BUG-4 FIX: Run each URL concurrently via ThreadPoolExecutor.
+    # Each future has a hard 25s wall-clock timeout:
+    #   - prism.process_url(): up to 14s (4s connect + 10s read per httpx call)
+    #   - deep_context_serper_dork(): up to 10s (3 parallel Serper calls)
+    # Total per-URL budget: 25s. Batch of 10 with max 5 workers runs in ~50s,
+    # safely under the 120s Gunicorn timeout and 540s Cloud Run request timeout.
+    # Previously: fully synchronous → 140s+ for 10 URLs → Gunicorn kill → 502.
+    log.info("TRACE-8: Entering PRISM processing loop (parallel).",
+             url_count=len(approved_urls))
     all_results    = []
     scrape_success = scrape_failed = 0
 
-    for url in approved_urls:
+    def _process_single_url(url: str) -> dict:
+        """Process one URL through lock → dedup → PRISM → Gemini → Firestore.
+        Returns a status dict. Exceptions are caught and returned as errors.
+        """
         target_domain = extract_root_domain(url)
         if not target_domain:
-            continue
+            return {"url": url, "status": "skip_no_domain"}
 
         is_social = any(target_domain.endswith(s) for s in SOCIAL_SET)
         if is_social:
@@ -349,20 +383,19 @@ def dispatch():
             lock_entity   = target_domain
             dedupe_target = target_domain
 
-        # ── Global Exclusivity Lock (atomic transactional) ───────────────────
+        # ── Global Exclusivity Lock ──────────────────────────────────────────
         lock_ref = _db().collection("global_lead_locks").document(lock_entity)
         try:
-            now_utc   = datetime.datetime.now(datetime.timezone.utc)
-            lock_txn  = _db().transaction()
-            acquired  = _acquire_lead_lock(lock_txn, lock_ref, now_utc)
+            now_utc  = datetime.datetime.now(datetime.timezone.utc)
+            lock_txn = _db().transaction()
+            acquired = _acquire_lead_lock(lock_txn, lock_ref, now_utc)
             if not acquired:
                 log.info("dispatch_exclusivity_skip", url=url[:80],
                          lock_entity=lock_entity, note="14-day window active.")
-                continue
+                return {"url": url, "status": "skip_exclusivity"}
         except Exception as lock_err:
-            log.warning("dispatch_lock_failed", url=url[:80], error=str(lock_err),
-                        note="Skipping URL to prevent duplicate lead.")
-            continue
+            log.warning("dispatch_lock_failed", url=url[:80], error=str(lock_err))
+            return {"url": url, "status": "skip_lock_error"}
 
         # ── Deterministic Dedup Gateway ──────────────────────────────────────
         lead_id_str = f"{tenant_id}_{dedupe_target}"
@@ -390,36 +423,32 @@ def dispatch():
             else:
                 log.warning("dispatch_stub_create_failed", url=url[:80],
                             error=str(already_err))
-            continue
+            return {"url": url, "status": "skip_dup"}
 
         try:
             # ── PRISM ENGINE ─────────────────────────────────────────────────
-            text = tech_stack = emails = phones = ""
-            tech_stack, emails, phones = [], [], []
-            prism_mode    = "legacy"
-            fallback_used = False
+            text, tech_stack, emails, phones = "", [], [], []
+            prism_mode, fallback_used = "legacy", False
 
             if prism is not None:
-                hook         = prism.process_url(url, tenant_id)
-                text         = hook.get("text", "")
-                tech_stack   = hook.get("tech_stack", [])
-                emails       = hook.get("emails", [])
-                phones       = hook.get("phones", [])
-                prism_mode   = hook.get("mode", "GeneralDomain")
+                hook          = prism.process_url(url, tenant_id)
+                text          = hook.get("text", "")
+                tech_stack    = hook.get("tech_stack", [])
+                emails        = hook.get("emails", [])
+                phones        = hook.get("phones", [])
+                prism_mode    = hook.get("mode", "GeneralDomain")
                 fallback_used = hook.get("fallback_used", False)
 
                 if not text:
-                    # Defer to scraper-heavy via Cloud Task
                     log.info("dispatch_prism_empty_text_defer", url=url[:80],
                              mode=prism_mode)
                     _defer_to_scraper_heavy(url, lead_id, tenant_id, campaign_id,
                                             bio, target_domain, preferences_weights)
-                    continue
+                    return {"url": url, "status": "deferred"}
             else:
-                # Prism init failed — defer all URLs to scraper-heavy
                 _defer_to_scraper_heavy(url, lead_id, tenant_id, campaign_id,
                                         bio, target_domain, preferences_weights)
-                continue
+                return {"url": url, "status": "deferred_prism_uninit"}
 
             # Stamp prism_mode on stub
             try:
@@ -431,8 +460,7 @@ def dispatch():
                 log.warning("dispatch_dead_payload", url=url[:80])
                 doc_ref.update({"status": "failed_scrape",
                                 "error": "Empty DOM — no cache, no snippet, no scrape"})
-                scrape_failed += 1
-                continue
+                return {"url": url, "status": "failed_scrape"}
 
             # WAF/bot detection
             bot_keywords = ["Cloudflare Ray ID", "Please verify you are human",
@@ -440,8 +468,7 @@ def dispatch():
                             "Access Denied", "403 Forbidden"]
             if any(kw.lower() in text.lower() for kw in bot_keywords):
                 doc_ref.update({"status": "failed", "error": "Blocked by Cloudflare/WAF"})
-                scrape_failed += 1
-                continue
+                return {"url": url, "status": "failed_waf"}
 
             # Usage metrics
             shard_id = random.randint(0, 9)
@@ -449,7 +476,9 @@ def dispatch():
                 .collection("shards").document(str(shard_id)) \
                 .set({"gemini_calls": firestore.Increment(1)}, merge=True)
 
-            # Deep context Serper dork
+            # BUG-1 FIX: deep_context_serper_dork is now inside _process_single_url().
+            # The entire function runs in a ThreadPoolExecutor future with a 25s
+            # ceiling — Serper calls block this thread, not the main worker.
             context_payload, native_hiring_intent = deep_context_serper_dork(
                 target_domain, tenant_id, sourcing_vector, source_url=url
             )
@@ -467,9 +496,9 @@ def dispatch():
                     _db().collection("global_lead_locks").document(lock_entity).delete()
                 except Exception:
                     pass
-                continue
+                return {"url": url, "status": "rlhf_drop"}
 
-            # ── TRACE-9: final_score_and_dm — Gemini scoring ─────────────────
+            # ── TRACE-9: final_score_and_dm — Gemini scoring ──────────────────
             log.info("TRACE-9: Calling final_score_and_dm.", url=url[:80])
             try:
                 evaluation = final_score_and_dm(
@@ -477,21 +506,18 @@ def dispatch():
                 )
             except TimeoutError:
                 doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
-                scrape_failed += 1
-                continue
+                return {"url": url, "status": "failed_vertex_timeout"}
             except Exception as eval_err:
                 doc_ref.update({"status": "failed", "error": str(eval_err)})
-                scrape_failed += 1
-                continue
+                return {"url": url, "status": "failed_eval"}
 
-            # ── Dynamic acceptance threshold ──────────────────────────────────
+            # ── Dynamic acceptance threshold ───────────────────────────────────
             is_shadow_thin   = text.strip().startswith("[SHADOW_LEARNER_THIN_PAYLOAD]")
             is_thin_payload  = is_shadow_thin or len(text.strip()) < 500
             accept_threshold = 6 if is_thin_payload else 7
             score            = evaluation.get("score", 0)
 
             if score >= accept_threshold:
-                # Merge extracted emails/phones into contact_endpoints
                 contact_endpoints = list(evaluation.get("contact_endpoints", []))
                 existing_uris     = {e["uri"] for e in contact_endpoints}
                 for em in (emails or [])[:3]:
@@ -503,7 +529,7 @@ def dispatch():
                         contact_endpoints.append({"platform": "other", "uri": ph})
                         existing_uris.add(ph)
 
-                # ── TRACE-10: Lead Firestore write ───────────────────────────
+                # ── TRACE-10: Lead Firestore write ─────────────────────────────
                 log.info("TRACE-10: Writing qualified lead to Firestore.",
                          url=url[:80], score=score, campaign_id=campaign_id)
                 lead_payload = {
@@ -539,12 +565,9 @@ def dispatch():
                 }
                 doc_ref.set(lead_payload, merge=True)
                 _settle_credit(tenant_id, "success", lead_id=lead_id)
-                scrape_success += 1
-                all_results.append({"url": url, "score": score})
-
-                # WhatsApp Business API notification (score >= 8)
                 if score >= 8:
                     _maybe_notify_whatsapp(tenant_id, url, lead_id, score, evaluation)
+                return {"url": url, "score": score, "status": "success"}
             else:
                 log.info("dispatch_score_gate_drop", url=url[:80],
                          score=score, threshold=accept_threshold)
@@ -553,6 +576,7 @@ def dispatch():
                     _db().collection("global_lead_locks").document(lock_entity).delete()
                 except Exception:
                     pass
+                return {"url": url, "status": "score_drop"}
 
         except Exception as loop_err:
             log.error("dispatch_loop_crash", url=url[:80], campaign_id=campaign_id,
@@ -561,8 +585,34 @@ def dispatch():
                 doc_ref.update({"status": "failed", "error": "Consumer pipeline crash"})
             except Exception:
                 pass
-            scrape_failed += 1
-            continue
+            return {"url": url, "status": "crash"}
+
+    # ── Dispatch all approved URLs in parallel (max 5 workers, 25s per URL) ─
+    _URL_TIMEOUT_S = 25   # per-URL hard wall-clock ceiling
+    _MAX_WORKERS   = 5    # Cloud Run 1 vCPU: 5 threads max before I/O queuing
+
+    with _cf.ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+        futures = {executor.submit(_process_single_url, u): u for u in approved_urls}
+        for fut in _cf.as_completed(futures, timeout=(_URL_TIMEOUT_S * len(approved_urls))):
+            url = futures[fut]
+            try:
+                result = fut.result(timeout=_URL_TIMEOUT_S)
+                status = result.get("status", "unknown")
+                if status == "success":
+                    scrape_success += 1
+                    all_results.append(result)
+                elif status in ("failed_scrape", "failed_waf", "failed_vertex_timeout",
+                                "failed_eval", "crash"):
+                    scrape_failed += 1
+            except _cf.TimeoutError:
+                log.error("dispatch_url_timeout", url=url[:80],
+                          timeout_s=_URL_TIMEOUT_S,
+                          note="URL processing exceeded wall-clock ceiling.")
+                scrape_failed += 1
+            except Exception as fut_err:
+                log.error("dispatch_future_crash", url=url[:80], error=str(fut_err),
+                          exc_info=True)
+                scrape_failed += 1
 
     log.info("dispatch_batch_complete", campaign_id=campaign_id,
              processed=len(all_results), scrape_success=scrape_success,
