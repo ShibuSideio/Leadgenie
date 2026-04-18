@@ -107,6 +107,9 @@ steps:
     pip install --no-cache-dir --prefer-binary \
       cryptography flask flask-cors \
       google-auth requests \
+      httpx beautifulsoup4 \
+      google-cloud-firestore google-cloud-secret-manager \
+      tenacity \
       --quiet
 
     # Generate a fresh, disposable Fernet key ONLY for the smoke-test run.
@@ -121,10 +124,10 @@ steps:
     export PROJECT_ID="$PROJECT_ID"
     export LOCATION="asia-south1"
     export PYTHONIOENCODING=utf-8
-    echo "[GATE PY] Running V23 local smoke tests (66 cases)..."
+    echo "[GATE PY] Running V23 local smoke tests (69 cases)..."
     cd services/orchestrator
     python local_smoke_tests.py
-    echo "[GATE PY] All 66 smoke tests PASSED. Build proceeding."
+    echo "[GATE PY] All 69 smoke tests PASSED. Build proceeding."
 
 # Barrier step: both gates must pass before any Docker build starts
 - id: 'gate-passed'

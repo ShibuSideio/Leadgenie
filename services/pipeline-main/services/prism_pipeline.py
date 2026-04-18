@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import concurrent.futures
 import random
+import re
 from urllib.parse import urlparse
 
-import httpx
-from bs4 import BeautifulSoup  # type: ignore[import]
-from google.cloud import firestore  # type: ignore[import]
+import httpx                         # type: ignore[import]
+from bs4 import BeautifulSoup        # type: ignore[import]
+from google.cloud import firestore   # type: ignore[import]
 
 from core.logging import get_logger  # type: ignore[import]
 from services.serper_service import extract_root_domain  # type: ignore[import]

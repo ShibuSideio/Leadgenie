@@ -1184,6 +1184,81 @@ test("query_brain imports cleanly — get_db() NOT called at scope",   t_query_b
 test("EA compliance: gcs_task.py PURGED (must not exist)",           t_gcs_task_purged)
 test("EA compliance: produce.py contains no GCS dump call",          t_produce_no_gcs_import)
 
+
+def t_prism_pipeline_ast_check():
+    """prism_pipeline.py exists and defines PrismPipeline + 4 hooks (AST — no import needed)."""
+    import ast
+    src_path = os.path.join(_PM_PATH, "services", "prism_pipeline.py")
+    assert os.path.isfile(src_path), (
+        f"SF-002 REGRESSION: prism_pipeline.py not found at {src_path}. "
+        "PrismPipeline extraction is missing from the build."
+    )
+    with open(src_path, encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=src_path)
+    class_names = {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+    required = {"PrismPipeline", "OperatingModeRouter", "WalledGardenHook",
+                "GeneralDomainHook", "B2B2CIntermediaryFinder"}
+    missing = required - class_names
+    assert not missing, f"prism_pipeline.py missing classes: {missing}"
+
+
+def t_dispatch_trace_markers_present():
+    """dispatch.py contains all TRACE-1 through TRACE-10 markers (source scan)."""
+    src_path = os.path.join(_PM_PATH, "api", "routers", "dispatch.py")
+    assert os.path.isfile(src_path), f"dispatch.py not found at {src_path}"
+    with open(src_path, encoding="utf-8") as f:
+        src = f.read()
+    # Must NOT contain the hollow-stub sentinel
+    assert "dispatch_received_pending_prism_extraction" not in src, (
+        "REGRESSION: dispatch.py still contains the hollow stub sentinel. "
+        "The full PRISM consumer logic has not been committed."
+    )
+    # Must contain all 10 TRACE markers
+    for i in range(1, 11):
+        marker = f"TRACE-{i}"
+        assert marker in src, (
+            f"dispatch.py is missing {marker}. "
+            f"The consumer pipeline is incomplete — leads will be silently dropped."
+        )
+    # Must contain PrismPipeline usage
+    assert "PrismPipeline" in src, "dispatch.py does not reference PrismPipeline"
+    assert "pre_filter_gemini" in src, "dispatch.py missing pre_filter_gemini call"
+    assert "final_score_and_dm" in src, "dispatch.py missing final_score_and_dm call"
+    assert "settle_credit" in src, "dispatch.py missing settle_credit call"
+    assert "unprocessed_queue" in src, "dispatch.py missing unprocessed_queue pop"
+
+
+def t_dispatch_imports_prism_not_importlib():
+    """dispatch.py must import PrismPipeline directly, not via importlib (SF-002 regression)."""
+    import ast
+    src_path = os.path.join(_PM_PATH, "api", "routers", "dispatch.py")
+    with open(src_path, encoding="utf-8") as f:
+        src = f.read()
+    # Must have the clean top-level import
+    assert "from services.prism_pipeline import PrismPipeline" in src, (
+        "SF-002 REGRESSION: dispatch.py does not have the clean "
+        "'from services.prism_pipeline import PrismPipeline' import. "
+        "It may be using the importlib hack again."
+    )
+    # Must NOT have exec_module in actual code lines (comments describing
+    # the old approach are permitted, but live code must not call exec_module)
+    tree = ast.parse(src, filename=src_path)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            # detect spec.loader.exec_module(mod)
+            if isinstance(fn, ast.Attribute) and fn.attr == "exec_module":
+                raise AssertionError(
+                    "SF-002 REGRESSION: dispatch.py calls exec_module() in live code — "
+                    "the importlib monolith-loading hack has been re-introduced."
+                )
+
+
+
+test("prism_pipeline.py exists with all 5 PRISM classes (AST)",         t_prism_pipeline_ast_check)
+test("dispatch.py: all TRACE-1..10 present, no hollow stub",            t_dispatch_trace_markers_present)
+test("dispatch.py: PrismPipeline imported directly, not via importlib", t_dispatch_imports_prism_not_importlib)
+
 # =============================================================================
 # FINAL REPORT
 # =============================================================================
