@@ -43,6 +43,12 @@ from services.serper_service import (  # type: ignore[import]
     extract_root_domain, SOCIAL_DOMAINS, deep_context_serper_dork,
 )
 from services.gemini_service import pre_filter_gemini, final_score_and_dm  # type: ignore[import]
+from services.prism_pipeline import PrismPipeline                           # type: ignore[import]
+# SF-002 FIX: PrismPipeline is now imported from the standalone
+# services/prism_pipeline.py module (zero import-time side effects).
+# The previous importlib.exec_module(main.py) approach executed 3185 lines
+# of monolith code including Flask app creation and Fernet(ENCRYPTION_KEY)
+# which crashed the worker on env var gaps. This import is safe.
 
 bp  = Blueprint("dispatch", __name__)
 log = get_logger("pipeline.dispatch")
@@ -231,32 +237,17 @@ def dispatch():
              persona_count=len(raw_personas))
     prism = None
     try:
-        # Import from monolith module — PrismPipeline is not yet extracted.
-        # V23 constraint: only import classes, never use module-scope db/app objects.
-        import importlib.util, sys as _sys
-        _pm_path = os.path.join(os.path.dirname(__file__), "..", "..", "main.py")
-        _pm_path = os.path.normpath(_pm_path)
-        if "_pm_monolith_prism" not in _sys.modules:
-            _spec = importlib.util.spec_from_file_location("_pm_monolith_prism", _pm_path)
-            _mod  = importlib.util.module_from_spec(_spec)          # type: ignore[arg-type]
-            # Stub out flask app/db to prevent module-scope side-effects
-            import types
-            _mod.app = types.SimpleNamespace(route=lambda *a, **kw: (lambda f: f))
-            _mod.db  = _db()
-            _sys.modules["_pm_monolith_prism"] = _mod
-            try:
-                _spec.loader.exec_module(_mod)                      # type: ignore[union-attr]
-            except Exception:
-                pass
-        _mod           = _sys.modules["_pm_monolith_prism"]
-        PrismPipeline  = _mod.PrismPipeline
-        _serper_key    = _get_secret(SERPER_API_KEY_NAME).strip()
-        prism          = PrismPipeline(campaign, _db(), _serper_key)
+        # SF-002 FIX: Direct instantiation from services.prism_pipeline.
+        # PrismPipeline is imported at the top of this module — no importlib,
+        # no monolith side-effects, no ENCRYPTION_KEY or Flask dependency.
+        _serper_key = _get_secret(SERPER_API_KEY_NAME).strip()
+        prism       = PrismPipeline(campaign, _db(), _serper_key)
         log.info("dispatch_prism_instantiated", campaign_id=campaign_id,
                  persona_count=len(raw_personas))
     except Exception as prism_err:
         log.warning("dispatch_prism_init_failed", error=str(prism_err),
                     note="Falling back to empty-text path (scraper-heavy deferrals).")
+
 
     # ── TRACE-6: Destructive Queue Pop (Batch of 10) ────────────────────────
     current_queue = campaign.get("unprocessed_queue", [])
