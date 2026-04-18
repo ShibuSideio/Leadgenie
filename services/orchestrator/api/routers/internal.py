@@ -187,7 +187,15 @@ def cron_sweep():
         }), 412
 
     sa_email = ORCHESTRATOR_SA_EMAIL
-    log.info("oidc_sa_email_from_config", sa_email=sa_email)
+    log.info(
+        "oidc_sa_email_from_config",
+        sa_email=sa_email,
+        oidc_audience=base_url,
+        produce_url=f"{base_url}/produce",
+        dispatch_url=f"{base_url}/dispatch",
+        note="OIDC token audience must exactly match PIPELINE_MAIN_URL on the worker. "
+             "Mismatch causes HTTP 401 from zero-trust middleware.",
+    )
 
     # ── Task 4: Circuit Breaker — per-vector isolation ────────────────────────
     # Read breaker state once. Build a set of blocked sourcing vectors.
@@ -407,6 +415,7 @@ def cron_sweep():
                  next_produce_due=str(next_produce_due))
 
         if produce_due:
+            _produce_ok = False  # tracks whether create_task() succeeded
             try:
                 jitter  = random.randint(1, 120)
                 sched_t = ts_pb2.Timestamp()
@@ -414,18 +423,39 @@ def cron_sweep():
                 task    = _oidc_task(produce_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
                 task["schedule_time"] = sched_t
                 tasks_client.create_task(request={"parent": queue_path, "task": task})
+                _produce_ok = True
                 produce_dispatched += 1
                 log.info("produce_task_dispatched",
                          campaign_id=campaign_id, tenant_id=tenant_id, jitter_s=jitter)
                 audit_trail.append(f"🏭 PRODUCER queued for {campaign_id} (jitter={jitter}s)")
             except Exception as prod_err:
-                log.error("producer_dispatch_failed", campaign_id=campaign_id,
-                          tenant_id=tenant_id, error=str(prod_err), exc_info=True)
+                # ── FORENSIC: structured error — triggers GCP Log-Based alert ──────────
+                # Clock is intentionally NOT advanced here. The campaign will be
+                # retried on the next 5-minute sweep cycle (Architecture S5.4 amendment).
+                log.error(
+                    "producer_dispatch_failed",
+                    campaign_id=campaign_id,
+                    tenant_id=tenant_id,
+                    error=str(prod_err),
+                    exc_info=True,
+                    oidc_audience=base_url,
+                    produce_url=produce_url,
+                    sa_email=sa_email,
+                    action="Clock NOT advanced. Campaign will retry on next sweep.",
+                )
                 audit_trail.append(f"❌ PRODUCER ERROR {campaign_id}: {prod_err}")
-            finally:
-                # Clock MUST advance regardless of task dispatch success/failure.
-                # datetime → ISO-8601 string: avoids Firestore protobuf serialization
-                # rejection of offset-aware datetime objects on some SDK versions.
+
+            # ── Clock advance: ONLY on successful dispatch ────────────────────────────
+            # ARCHITECTURE FIX (S5.4 — 2026-04-18):
+            #   Previously a finally: block advanced next_produce_due unconditionally.
+            #   Bug: if Cloud Tasks API returned PermissionDenied / InvalidArgument /
+            #   network timeout, the clock still advanced, permanently skipping the
+            #   next 24-hour production cycle (silent data loss window).
+            #
+            #   Fix: _produce_ok gates the write. On failure the clock is held at its
+            #   current value. The next 5-minute sweep re-evaluates produce_due and
+            #   retries dispatch. The campaign is NEVER silently skipped.
+            if _produce_ok:
                 try:
                     _next_produce = (now_utc + datetime.timedelta(hours=PRODUCE_INTERVAL_H)).isoformat()
                     camp_doc.reference.update({"next_produce_due": _next_produce})
@@ -434,6 +464,13 @@ def cron_sweep():
                 except Exception as ts_err:
                     log.error("produce_timestamp_update_failed", campaign_id=campaign_id,
                               error=str(ts_err), exc_info=True)
+            else:
+                log.warning(
+                    "produce_clock_held",
+                    campaign_id=campaign_id,
+                    reason="task dispatch failed — clock intentionally NOT advanced",
+                    action="Campaign will be retried by the next scheduled sweep.",
+                )
         # ── Consumer (4h interval) ────────────────────────────────────────────
         DRIP_INTERVAL_H = 4
         # CRITICAL: the entire drip evaluation MUST live inside try/finally.
