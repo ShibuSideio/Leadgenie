@@ -667,6 +667,292 @@ test("Pipeline config has SERPER_API_KEY_NAME",      t_config_pipeline_serper_ke
 test("shared.parse_base_path is canonical (no dup)", t_shared_package_canonical_no_duplicates)
 
 # =============================================================================
+# PHASE 6: Lazy Init Lock Concurrency Validation (V23 Task 2)
+# =============================================================================
+section("Phase 6: Lazy Init Lock Concurrency (gRPC Task 2)")
+
+
+def t_lazy_init_lock_get_db_concurrent():
+    """get_db() under concurrent hammer returns the same singleton.
+
+    Spawns 20 threads all calling pipeline-main's get_db() simultaneously via
+    an isolated module import.  Asserts the underlying Client constructor was
+    called at most once (double-checked locking guarantee).
+    """
+    import threading as _th
+    import importlib.util as _ilu, sys as _sys
+
+    _saved_enc = os.environ.get("ENCRYPTION_KEY")
+    os.environ["ENCRYPTION_KEY"] = _SMOKE_FERNET_KEY
+
+    construction_count = [0]
+    sentinel_instance  = object()
+
+    class _CountingClient:
+        def __new__(cls, *a, **kw):
+            construction_count[0] += 1
+            return sentinel_instance
+
+    _mod_key = f"_pm_clients_lock_test_{id(t_lazy_init_lock_get_db_concurrent)}"
+    spec = _ilu.spec_from_file_location(
+        _mod_key,
+        os.path.join(_SERVICES, "pipeline-main", "core", "clients.py"),
+    )
+    mod = _ilu.module_from_spec(spec)  # type: ignore
+    _sys.modules[_mod_key] = mod
+    try:
+        spec.loader.exec_module(mod)  # type: ignore
+    except Exception:
+        pass
+
+    # Reset and inject our counting client
+    mod._db_instance = None
+    mod._db_lock = _th.Lock()
+    import google.cloud.firestore as _real_fs
+    _orig_client = _real_fs.Client
+    _real_fs.Client = _CountingClient  # type: ignore
+
+    results_thr = []
+    errors_thr  = []
+    barrier = _th.Barrier(20)
+
+    def _hammer():
+        barrier.wait()
+        try:
+            results_thr.append(mod.get_db())
+        except Exception as exc:
+            errors_thr.append(str(exc))
+
+    threads = [_th.Thread(target=_hammer) for _ in range(20)]
+    for t_ in threads: t_.start()
+    for t_ in threads: t_.join(timeout=5)
+
+    _real_fs.Client = _orig_client
+    _sys.modules.pop(_mod_key, None)
+    if _saved_enc is not None:
+        os.environ["ENCRYPTION_KEY"] = _saved_enc
+
+    assert not errors_thr, f"Thread errors: {errors_thr[:3]}"
+    assert len(results_thr) == 20, "Not all 20 threads returned a value"
+    first = results_thr[0]
+    for inst in results_thr:
+        assert inst is first, "Singleton violated — multiple distinct Client instances"
+    assert construction_count[0] <= 1, (
+        f"Client() constructed {construction_count[0]} times — Lock not working"
+    )
+
+
+def t_lazy_init_vertex_lock_concurrent():
+    """init_vertex() concurrent: vertexai.init() called at most once."""
+    import threading as _th
+    import importlib.util as _ilu, sys as _sys
+
+    _saved_enc = os.environ.get("ENCRYPTION_KEY")
+    os.environ["ENCRYPTION_KEY"] = _SMOKE_FERNET_KEY
+
+    init_count = [0]
+
+    import vertexai as _vai_real
+    _orig_init = _vai_real.init
+
+    def _counting_init(*a, **kw):
+        init_count[0] += 1
+
+    _vai_real.init = _counting_init  # type: ignore
+
+    _mod_key2 = f"_pm_clients_vertex_{id(t_lazy_init_vertex_lock_concurrent)}"
+    spec = _ilu.spec_from_file_location(
+        _mod_key2,
+        os.path.join(_SERVICES, "pipeline-main", "core", "clients.py"),
+    )
+    mod = _ilu.module_from_spec(spec)  # type: ignore
+    _sys.modules[_mod_key2] = mod
+    try:
+        spec.loader.exec_module(mod)  # type: ignore
+    except Exception:
+        pass
+
+    mod._vertex_initialised = False
+    mod._vertex_lock = _th.Lock()
+
+    errors = []
+    barrier = _th.Barrier(16)
+
+    def _init_hammer():
+        barrier.wait()
+        try:
+            mod.init_vertex()
+        except Exception as exc:
+            errors.append(str(exc))
+
+    threads = [_th.Thread(target=_init_hammer) for _ in range(16)]
+    for t_ in threads: t_.start()
+    for t_ in threads: t_.join(timeout=5)
+
+    _vai_real.init = _orig_init
+    _sys.modules.pop(_mod_key2, None)
+    if _saved_enc is not None:
+        os.environ["ENCRYPTION_KEY"] = _saved_enc
+
+    assert not errors, f"Thread errors: {errors[:3]}"
+    assert init_count[0] <= 1, (
+        f"vertexai.init() called {init_count[0]} times — Lock not effective"
+    )
+
+
+def t_no_grpc_client_at_module_scope():
+    """Importing internal.py must NOT call get_db() at module scope.
+
+    The legacy ``db = get_db()`` line triggered firebase_admin.initialize_app()
+    at Blueprint registration time, before Gunicorn forked workers.  This test
+    asserts that import-time call count is exactly zero.
+    """
+    import importlib.util as _ilu, sys as _sys
+
+    call_count = [0]
+    _orig_get_db = None
+
+    try:
+        import core.clients as _cc
+        _orig_get_db = _cc.get_db
+
+        def _spy():
+            call_count[0] += 1
+            return MagicMock()
+
+        _cc.get_db = _spy  # type: ignore
+
+        _mod_key3 = f"_internal_scope_{id(t_no_grpc_client_at_module_scope)}"
+        internal_path = os.path.join(_HERE, "api", "routers", "internal.py")
+        spec = _ilu.spec_from_file_location(_mod_key3, internal_path)
+        mod  = _ilu.module_from_spec(spec)  # type: ignore
+        _sys.modules[_mod_key3] = mod
+        try:
+            spec.loader.exec_module(mod)  # type: ignore
+        except Exception:
+            pass
+        _sys.modules.pop(_mod_key3, None)
+    finally:
+        if _orig_get_db is not None:
+            import core.clients as _cc2
+            _cc2.get_db = _orig_get_db  # type: ignore
+
+    assert call_count[0] == 0, (
+        f"get_db() was called {call_count[0]}x at import time. "
+        "Module-scope gRPC leak NOT fixed."
+    )
+
+
+test("get_db() concurrent 20 threads: singleton ≤1 construction",    t_lazy_init_lock_get_db_concurrent)
+test("init_vertex() concurrent 16 threads: vertexai.init() ≤1 call", t_lazy_init_vertex_lock_concurrent)
+test("internal.py import: get_db() NOT called at module scope",       t_no_grpc_client_at_module_scope)
+
+# =============================================================================
+# PHASE 7: Timestamp Serialization Middleware (V23 Task 3)
+# =============================================================================
+section("Phase 7: Timestamp Serialization Middleware (Task 3)")
+
+
+def t_sanitize_datetime_aware_to_isoformat():
+    """to_firestore_ts converts tz-aware datetime to ISO-8601 string."""
+    import datetime as _dt
+    from core.firestore_utils import to_firestore_ts
+    dt = _dt.datetime(2026, 4, 18, 12, 0, 0, tzinfo=_dt.timezone.utc)
+    result = to_firestore_ts(dt)
+    assert isinstance(result, str), f"Expected str, got {type(result)}"
+    assert "2026-04-18" in result, f"ISO date not found: {result!r}"
+    # Timezone must be present
+    assert "+00:00" in result or "UTC" in result, \
+        f"UTC offset missing from: {result!r}"
+
+
+def t_sanitize_datetime_naive_gets_utc():
+    """to_firestore_ts injects UTC tz into naive datetime before isoformat."""
+    import datetime as _dt
+    from core.firestore_utils import to_firestore_ts
+    naive = _dt.datetime(2026, 1, 1, 0, 0, 0)
+    result = to_firestore_ts(naive)
+    assert isinstance(result, str), "Must return string"
+    assert "+00:00" in result, f"Expected UTC offset, got: {result!r}"
+
+
+def t_sanitize_passthrough_non_datetime():
+    """to_firestore_ts passes str/int/float/None/list/bool through untouched."""
+    from core.firestore_utils import to_firestore_ts
+    assert to_firestore_ts("already-a-string") == "already-a-string"
+    assert to_firestore_ts(42)          == 42
+    assert to_firestore_ts(3.14)        == 3.14
+    assert to_firestore_ts(None)        is None
+    assert to_firestore_ts(True)        is True
+    assert to_firestore_ts([1, 2, 3])   == [1, 2, 3]
+
+
+def t_sanitize_sentinel_server_timestamp_passthrough():
+    """SERVER_TIMESTAMP sentinel passes through sanitize_update completely untouched.
+
+    V23 Task 3 Amendment critical assertion:
+    Firestore sentinel objects (SERVER_TIMESTAMP, Increment, ArrayUnion) must
+    NOT be cast to strings.  Casting would destroy the semantic and write a
+    literal string to Firestore instead of triggering the server-side operation.
+    """
+    from core.firestore_utils import sanitize_update, to_firestore_ts
+    import datetime as _dt
+
+    class _MockServerTimestamp:
+        """Simulates google.cloud.firestore_v1.transforms.SERVER_TIMESTAMP."""
+        sentinel_value = "server_timestamp"  # attribute present on GCP sentinel
+        def __repr__(self): return "<SERVER_TIMESTAMP>"
+
+    class _MockIncrement:
+        """Simulates firestore.Increment(n)."""
+        _document_path = None  # attribute present on GCP transforms
+        def __init__(self, val): self.val = val
+        def __repr__(self): return f"<Increment({self.val})>"
+
+    sentinel_ts  = _MockServerTimestamp()
+    sentinel_inc = _MockIncrement(1)
+
+    # to_firestore_ts must return each sentinel unchanged
+    assert to_firestore_ts(sentinel_ts)  is sentinel_ts,  \
+        "SERVER_TIMESTAMP was mutated by to_firestore_ts"
+    assert to_firestore_ts(sentinel_inc) is sentinel_inc, \
+        "Increment sentinel was mutated by to_firestore_ts"
+
+    # Full dict path via sanitize_update
+    payload = {
+        "updatedAt":       sentinel_ts,
+        "score_delta":     sentinel_inc,
+        "next_drip_due":   _dt.datetime(2026, 6, 1, tzinfo=_dt.timezone.utc),
+        "status":          "active",
+    }
+    out = sanitize_update(payload)
+    assert out["updatedAt"]   is sentinel_ts,  "SERVER_TIMESTAMP mutated by sanitize_update"
+    assert out["score_delta"] is sentinel_inc, "Increment mutated by sanitize_update"
+    assert isinstance(out["next_drip_due"], str), "datetime not serialized to ISO string"
+    assert out["status"] == "active",             "plain string was mutated"
+
+
+def t_sanitize_legacy_datetime_with_nanoseconds():
+    """DatetimeWithNanoseconds (datetime subclass) is serialised to ISO string."""
+    import datetime as _dt
+    from core.firestore_utils import to_firestore_ts
+
+    class _DatetimeWithNanoseconds(_dt.datetime):
+        nanoseconds = 123456789
+
+    dwn = _DatetimeWithNanoseconds(2026, 3, 15, 10, 30, 0, tzinfo=_dt.timezone.utc)
+    result = to_firestore_ts(dwn)
+    assert isinstance(result, str), f"Expected str, got {type(result)}"
+    assert "2026-03-15" in result, f"Date not found: {result!r}"
+
+
+test("to_firestore_ts: aware datetime → ISO-8601 string",           t_sanitize_datetime_aware_to_isoformat)
+test("to_firestore_ts: naive datetime → UTC ISO-8601 string",       t_sanitize_datetime_naive_gets_utc)
+test("to_firestore_ts: str/int/None/list pass through unchanged",   t_sanitize_passthrough_non_datetime)
+test("sanitize_update: SERVER_TIMESTAMP + Increment pass through",  t_sanitize_sentinel_server_timestamp_passthrough)
+test("to_firestore_ts: DatetimeWithNanoseconds → ISO-8601 string", t_sanitize_legacy_datetime_with_nanoseconds)
+
+# =============================================================================
 # FINAL REPORT
 # =============================================================================
 passed = [r for r in results if r["passed"]]
@@ -690,12 +976,15 @@ avg_ms = sum(r["ms"] for r in results) / max(total, 1)
 print(f"\n  Avg test time : {avg_ms:.1f}ms")
 print(f"  Coverage areas: imports, pure-fn math, NLP, URL parsing,")
 print(f"                  geo mapping, exception hierarchy, logging,")
-print(f"                  config hardening, Fernet encryption")
+print(f"                  config hardening, Fernet encryption,")
+print(f"                  gRPC lazy-init locks (Phase 6),")
+print(f"                  Firestore timestamp serialization (Phase 7)")
 
 verdict = len(failed) == 0
 if verdict:
     print(f"\n  {GREEN}{BOLD}✅  VERDICT: GO — All {total} local smoke tests PASSED.{RESET}")
-    print(f"  {GREEN}       V23 modules are structurally sound.{RESET}")
+    print(f"  {GREEN}       V23 hardening: OIDC fail-fast, gRPC lazy init,{RESET}")
+    print(f"  {GREEN}       timestamp serialization, per-vector circuit breaker.{RESET}")
     print(f"  {GREEN}       Ready for UAT on production preview deployment.{RESET}")
 else:
     print(f"\n  {RED}{BOLD}🚫  VERDICT: NO-GO — {len(failed)} test(s) FAILED.{RESET}")

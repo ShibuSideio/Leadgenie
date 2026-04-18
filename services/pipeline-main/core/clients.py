@@ -8,11 +8,21 @@ Phase 3 fix (M-5 / hot-loop audit):
   cached in ``_serper_key_cache``.  Subsequent calls return the cached value.
   This eliminates the per-query Secret Manager RPC that was adding 20-100 ms
   of latency per Serper call in the scraping hot loop.
+
+V23 Hardening (Task 2 — gRPC Lazy Init):
+  get_db(), get_secret_manager_client(), and init_vertex() use threading.Lock
+  double-checked locking instead of bare lru_cache.  Under Gunicorn's gthread
+  worker class, two threads can simultaneously observe a lru_cache miss and
+  both call the gRPC constructor — producing two stubs sharing the same
+  underlying channel, corrupting state and causing pre-fork deadlocks.
+  The Lock serialises first-call construction; all subsequent calls return the
+  cached singleton instantly with zero contention.
 """
 from __future__ import annotations
 
 import functools
 import os
+import threading
 from typing import Optional
 
 from google.cloud import firestore, bigquery, tasks_v2, secretmanager, storage
@@ -58,16 +68,27 @@ def get_serper_key(secret_name: Optional[str] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Firestore
+# Firestore — threading.Lock double-checked locking (V23 Task 2 fix)
 # ---------------------------------------------------------------------------
-@functools.lru_cache(maxsize=None)
+_db_lock: threading.Lock = threading.Lock()
+_db_instance: Optional[firestore.Client] = None
+
+
 def get_db() -> firestore.Client:
-    """Return the shared Firestore client.
+    """Return the shared Firestore client (lazy, thread-safe).
+
+    Uses double-checked locking to guarantee exactly one ``firestore.Client``
+    is constructed per process even under Gunicorn gthread workers.
 
     Returns:
         :class:`google.cloud.firestore.Client`
     """
-    return firestore.Client()
+    global _db_instance
+    if _db_instance is None:
+        with _db_lock:
+            if _db_instance is None:  # re-check inside lock
+                _db_instance = firestore.Client()
+    return _db_instance
 
 
 # ---------------------------------------------------------------------------
@@ -98,16 +119,26 @@ def get_tasks_client() -> tasks_v2.CloudTasksClient:
 
 
 # ---------------------------------------------------------------------------
-# Secret Manager
+# Secret Manager — threading.Lock double-checked locking (V23 Task 2 fix)
 # ---------------------------------------------------------------------------
-@functools.lru_cache(maxsize=None)
+_sm_lock: threading.Lock = threading.Lock()
+_sm_instance: Optional[secretmanager.SecretManagerServiceClient] = None
+
+
 def get_secret_manager_client() -> secretmanager.SecretManagerServiceClient:
-    """Return the shared Secret Manager client.
+    """Return the shared Secret Manager client (lazy, thread-safe).
+
+    Uses double-checked locking — see get_db() rationale.
 
     Returns:
         :class:`google.cloud.secretmanager.SecretManagerServiceClient`
     """
-    return secretmanager.SecretManagerServiceClient()
+    global _sm_instance
+    if _sm_instance is None:
+        with _sm_lock:
+            if _sm_instance is None:
+                _sm_instance = secretmanager.SecretManagerServiceClient()
+    return _sm_instance
 
 
 # ---------------------------------------------------------------------------
@@ -123,13 +154,25 @@ def get_gcs_client() -> storage.Client:
 
 
 # ---------------------------------------------------------------------------
-# Vertex AI
+# Vertex AI — threading.Lock double-checked locking (V23 Task 2 fix)
 # ---------------------------------------------------------------------------
-@functools.lru_cache(maxsize=None)
+_vertex_lock: threading.Lock = threading.Lock()
+_vertex_initialised: bool = False
+
+
 def init_vertex() -> None:
-    """Initialise Vertex AI SDK (idempotent).
+    """Initialise Vertex AI SDK (idempotent, thread-safe).
+
+    Uses double-checked locking to guarantee ``vertexai.init()`` is called
+    exactly once per process, preventing concurrent gRPC channel setup races
+    under Gunicorn gthread workers.
 
     Returns:
         None
     """
-    vertexai.init(location="us-central1")
+    global _vertex_initialised
+    if not _vertex_initialised:
+        with _vertex_lock:
+            if not _vertex_initialised:
+                vertexai.init(location="us-central1")
+                _vertex_initialised = True

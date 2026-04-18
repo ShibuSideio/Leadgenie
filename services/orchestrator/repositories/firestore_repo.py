@@ -17,6 +17,8 @@ from typing import Any, Optional
 
 from google.cloud import firestore as fs
 
+from core.firestore_utils import sanitize_update  # type: ignore[import]
+
 
 # ---------------------------------------------------------------------------
 # Users
@@ -62,12 +64,17 @@ def create_user(db, uid: str, email: str) -> None:
 def update_user(db, uid: str, updates: dict[str, Any]) -> None:
     """Perform a partial update on a user document.
 
+    All ``datetime`` values in *updates* are serialised to ISO-8601 strings
+    before the Firestore write to prevent silent SDK rejection on some versions.
+    Firestore sentinel objects (``SERVER_TIMESTAMP``, ``Increment``, etc.) are
+    passed through unchanged.
+
     Args:
         db:      Firestore client.
         uid:     Firebase UID.
         updates: Dict of field paths → values.
     """
-    db.collection("users").document(uid).update(updates)
+    db.collection("users").document(uid).update(sanitize_update(updates))
 
 
 def get_unit_economics(db, tenant_id: str) -> dict[str, Any]:
@@ -182,12 +189,15 @@ def create_campaign(db, campaign_data: dict[str, Any]) -> str:
 def update_campaign(db, campaign_id: str, updates: dict[str, Any]) -> None:
     """Partial update on a campaign document.
 
+    All ``datetime`` values in *updates* are serialised to ISO-8601 strings.
+    Firestore sentinels pass through unchanged.
+
     Args:
         db:          Firestore client.
         campaign_id: Firestore document ID.
         updates:     Field-path → value dict.
     """
-    db.collection("campaigns").document(campaign_id).update(updates)
+    db.collection("campaigns").document(campaign_id).update(sanitize_update(updates))
 
 
 # ---------------------------------------------------------------------------
@@ -245,12 +255,15 @@ def get_lead(db, lead_id: str) -> Optional[dict[str, Any]]:
 def update_lead(db, lead_id: str, updates: dict[str, Any]) -> None:
     """Partial update on a lead document.
 
+    All ``datetime`` values in *updates* are serialised to ISO-8601 strings.
+    Firestore sentinels pass through unchanged.
+
     Args:
         db:      Firestore client.
         lead_id: Firestore document ID.
         updates: Field-path → value dict.
     """
-    db.collection("leads").document(lead_id).update(updates)
+    db.collection("leads").document(lead_id).update(sanitize_update(updates))
 
 
 def count_leads_by_status(

@@ -46,7 +46,24 @@ except ImportError:
 
 import random
 
-db = get_db()
+# ---------------------------------------------------------------------------
+# V23 Task 2 fix — NO module-level Firestore client instantiation.
+#
+# PREVIOUS BUG: ``db = get_db()`` at module scope (line 49 of legacy file)
+# triggered firebase_admin.initialize_app() + firestore.Client() during
+# Blueprint registration, BEFORE Gunicorn forked worker processes.  Child
+# workers inherited an open gRPC channel in a copy-on-write page, causing
+# mutex contention and indefinite hangs on the first real Firestore RPC.
+#
+# FIX: All route handlers call _db() which resolves lazily via get_db().
+# The first call inside a live worker process is safe because
+# _ensure_firebase_init() in core/clients.py guards initialisation with a
+# threading.Lock.
+# ---------------------------------------------------------------------------
+def _db():
+    """Return the shared Firestore client (lazy — never at import time)."""
+    return get_db()
+
 
 bp = Blueprint("internal", __name__)
 log = get_logger("orchestrator.v23.internal")
@@ -96,10 +113,10 @@ def settle_credits():
     lead_id   = payload.get("lead_id", "")
     if not tenant_id or outcome not in ("success", "failure") or count <= 0:
         return jsonify({"error": "Invalid settlement payload"}), 400
-    user_ref = db.collection("users").document(tenant_id)
-    lead_ref = db.collection("leads").document(lead_id) if lead_id else None
+    user_ref = _db().collection("users").document(tenant_id)
+    lead_ref = _db().collection("leads").document(lead_id) if lead_id else None
     try:
-        txn = db.transaction()
+        txn = _db().transaction()
         _atomic_settle_txn(txn, user_ref, lead_ref, outcome, count)
         log.info("credit_settled", tenant_id=tenant_id, outcome=outcome, count=count,
                  lead_id=lead_id[:12] if lead_id else "N/A")
@@ -134,13 +151,68 @@ def cron_sweep():
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
 
-    # ── Circuit Breaker ──────────────────────────────────────────────────────
+    # ── Task 1: OIDC config pre-flight ────────────────────────────────────────
+    # Fail fast with HTTP 412 (Precondition Failed) — NOT 503.
+    # Rationale: 503 triggers Cloud Scheduler exponential-backoff retry storms
+    # when the env var is permanently missing (a configuration error, not a
+    # transient one).  412 causes Cloud Scheduler to record a hard failure and
+    # stop retrying, alerting the operator immediately.
+    if not ORCHESTRATOR_SA_EMAIL:
+        log.critical(
+            "oidc_sa_email_missing_hard_fail",
+            action="Sweep aborted — set ORCHESTRATOR_SA_EMAIL env var in Cloud Run console.",
+            impact="All pipeline Cloud Tasks will be dispatched WITHOUT an OIDC token "
+                   "and will be rejected with HTTP 403 by Cloud Run IAM.",
+            resolution="Cloud Run → Edit & Deploy → Environment Variables → "
+                        "ORCHESTRATOR_SA_EMAIL=<service-account>@<project>.iam.gserviceaccount.com",
+        )
+        return jsonify({
+            "error": "Precondition Failed",
+            "code": "ORCHESTRATOR_SA_EMAIL_MISSING",
+            "message": "ORCHESTRATOR_SA_EMAIL environment variable is not set. "
+                       "Set it in Cloud Run to enable OIDC task authentication.",
+        }), 412
+
+    base_url = PIPELINE_URL.split("/dispatch")[0].strip()
+    if not base_url:
+        log.critical(
+            "pipeline_url_missing_hard_fail",
+            action="Sweep aborted — PIPELINE_URL env var is empty or malformed.",
+            resolution="Set PIPELINE_URL to the pipeline-main Cloud Run base URL.",
+        )
+        return jsonify({
+            "error": "Precondition Failed",
+            "code": "PIPELINE_URL_MISSING",
+            "message": "PIPELINE_URL is not set or does not contain a valid base URL.",
+        }), 412
+
+    sa_email = ORCHESTRATOR_SA_EMAIL
+    log.info("oidc_sa_email_from_config", sa_email=sa_email)
+
+    # ── Task 4: Circuit Breaker — per-vector isolation ────────────────────────
+    # Read breaker state once. Build a set of blocked sourcing vectors.
+    # GeneralDomain (Serper + scraper) is affected by both thresholds.
+    # WalledGarden (LinkedIn, social-platform) is immune to Serper/scraper.
+    # Per-campaign gate (below) skips only campaigns whose vector is blocked;
+    # all others proceed normally.
     SERPER_429_THRESHOLD  = float(__import__("os").environ.get("CB_SERPER_THRESHOLD",  "0.15"))
     SCRAPER_OOM_THRESHOLD = float(__import__("os").environ.get("CB_SCRAPER_THRESHOLD", "0.05"))
     CB_WINDOW_MINUTES     = int(__import__("os").environ.get("CB_WINDOW_MINUTES", "15"))
 
+    # Mapping: which sourcing vector labels are impacted by each breaker.
+    # GeneralDomain vectors depend on Serper + scraper-heavy.
+    # WalledGarden vectors (LinkedIn, social) are unaffected.
+    _GENERAL_DOMAIN_VECTORS = frozenset({
+        "Classic B2B", "Review Hijacking", "Maps/GMB Targeting",
+    })
+    _WALLED_GARDEN_VECTORS = frozenset({
+        "Social/Forum Listening",
+    })
+
+    blocked_vectors: set[str] = set()
+    serper_rate = scraper_rate = 0.0
     try:
-        cb_data = (db.collection("system_telemetry").document("circuit_breaker_state").get().to_dict() or {})
+        cb_data = (_db().collection("system_telemetry").document("circuit_breaker_state").get().to_dict() or {})
         window_start  = now_utc - datetime.timedelta(minutes=CB_WINDOW_MINUTES)
         serper_total  = int(cb_data.get("serper_calls_window",  0))
         serper_429s   = int(cb_data.get("serper_429s_window",   0))
@@ -155,15 +227,26 @@ def cron_sweep():
         serper_rate  = (serper_429s  / serper_total)  if serper_total  > 10 else 0.0
         scraper_rate = (scraper_ooms / scraper_total) if scraper_total > 10 else 0.0
         if serper_rate > SERPER_429_THRESHOLD or scraper_rate > SCRAPER_OOM_THRESHOLD:
-            reason = f"serper={serper_rate*100:.1f}% | scraper={scraper_rate*100:.1f}%"
-            log.warning("circuit_breaker_open", reason=reason)
-            return jsonify({"circuit_breaker": "open", "reason": reason}), 503
+            blocked_vectors.update(_GENERAL_DOMAIN_VECTORS)
+            # V23 Task 4 Amendment: structured warning for GCP Log-Based alert.
+            log.warning(
+                "circuit_breaker_active",
+                blocked_vectors=sorted(blocked_vectors),
+                immune_vectors=sorted(_WALLED_GARDEN_VECTORS),
+                status="partial_sweep",
+                serper_rate_pct=round(serper_rate * 100, 2),
+                scraper_rate_pct=round(scraper_rate * 100, 2),
+                serper_threshold_pct=round(SERPER_429_THRESHOLD * 100, 2),
+                scraper_threshold_pct=round(SCRAPER_OOM_THRESHOLD * 100, 2),
+                note="Wire a GCP Log-Based Metric on jsonPayload.message=circuit_breaker_active "
+                     "to preserve 5xx-equivalent alerting.",
+            )
     except Exception as cb_err:
         log.warning("circuit_breaker_read_failed_fail_open", error=str(cb_err))
 
     # ── Main sweep ───────────────────────────────────────────────────────────
     campaigns = list(
-        db.collection("campaigns")
+        _db().collection("campaigns")
           .where(filter=FieldFilter("status", "==", "active"))
           .limit(500)
           .stream()
@@ -171,46 +254,18 @@ def cron_sweep():
     # DIAGNOSTIC: always visible in Cloud Logging — confirms query executed
     log.info("sweep_query_executed",
              campaign_count=len(campaigns),
+             blocked_vectors=sorted(blocked_vectors) if blocked_vectors else [],
              note="Only status==active filter applied. No secondary filters.")
 
     audit_trail   = [f"Executed V23 Dual-Mode Sweep. Found {len(campaigns)} active campaigns."]
+    if blocked_vectors:
+        audit_trail.append(
+            f"⚡ Circuit breaker ACTIVE: {sorted(blocked_vectors)} blocked. "
+            f"Serper={serper_rate*100:.1f}% | Scraper={scraper_rate*100:.1f}%"
+        )
     tasks_client  = tv2.CloudTasksClient()
     queue_path    = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
 
-    # ── OIDC identity — static config first, 1-second metadata fallback ─────
-    # PREVIOUS BUG: get_service_account_email() was called here, making 3
-    # blocking urllib calls (up to 18s) to metadata.google.internal.
-    # On cold starts or slow metadata this returned "" → no OIDC token →
-    # Cloud Tasks hit pipeline-main with HTTP 403 from Cloud Run IAM.
-    #
-    # FIX: Read ORCHESTRATOR_SA_EMAIL env var set in Cloud Run console.
-    # Only falls back to metadata if env var is absent, with a 1-second hard cap.
-    if ORCHESTRATOR_SA_EMAIL:
-        sa_email = ORCHESTRATOR_SA_EMAIL
-        log.info("oidc_sa_email_from_config", sa_email=sa_email)
-    else:
-        try:
-            import urllib.request as _ur
-            import concurrent.futures as _cf
-            _meta_url = (
-                "http://metadata.google.internal/computeMetadata/v1"
-                "/instance/service-accounts/default/email"
-            )
-            def _fetch_sa():
-                req = _ur.Request(_meta_url, headers={"Metadata-Flavor": "Google"})
-                with _ur.urlopen(req, timeout=1) as r:
-                    return r.read().decode("utf-8").strip()
-            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
-                sa_email = _pool.submit(_fetch_sa).result(timeout=1)
-            log.info("oidc_sa_email_from_metadata", sa_email=sa_email)
-        except Exception as _meta_err:
-            sa_email = ""
-            log.warning("sa_email_metadata_fallback_failed",
-                        error=str(_meta_err),
-                        action="Tasks will be dispatched WITHOUT OIDC token. "
-                               "Set ORCHESTRATOR_SA_EMAIL env var to permanently fix.")
-
-    base_url    = PIPELINE_URL.split("/dispatch")[0]
     produce_url = f"{base_url}/produce"
     consume_url = f"{base_url}/dispatch"
     produce_dispatched = consume_dispatched = 0
@@ -224,16 +279,11 @@ def cron_sweep():
                 "body": json.dumps(payload).encode(),
             }
         }
-        if sa_email:
-            t["http_request"]["oidc_token"] = {
-                "service_account_email": sa_email,
-                "audience": base_url,
-            }
-        else:
-            log.warning("oidc_token_missing_no_sa_email",
-                        url=url,
-                        note="Task dispatched without OIDC. Will be rejected with "
-                             "403 by Cloud Run IAM. Set ORCHESTRATOR_SA_EMAIL.")
+        # sa_email is guaranteed non-empty at this point (412 guard above).
+        t["http_request"]["oidc_token"] = {
+            "service_account_email": sa_email,
+            "audience": base_url,  # audience = pipeline-main base URL
+        }
         return t
 
     for camp_doc in campaigns:
@@ -253,13 +303,33 @@ def cron_sweep():
             audit_trail.append(f"⚠️ SKIPPED {campaign_id}: missing tenant_id field")
             continue
 
+        # ── Task 4: Per-vector circuit breaker gate ──────────────────────────────
+        # Skip only campaigns whose sourcing vector is in the blocked set.
+        # WalledGarden campaigns (Social/Forum Listening) are immune and
+        # continue even when Serper / scraper thresholds are breached.
+        campaign_vector = campaign_data.get("sourcing_vector", "Classic B2B") or "Classic B2B"
+        if campaign_vector in blocked_vectors:
+            log.warning(
+                "circuit_breaker_campaign_skipped",
+                campaign_id=campaign_id,
+                tenant_id=tenant_id,
+                sourcing_vector=campaign_vector,
+                blocked_vectors=sorted(blocked_vectors),
+                status="skipped_by_circuit_breaker",
+            )
+            audit_trail.append(
+                f"⚡ CIRCUIT-BREAKER SKIP {campaign_id} "
+                f"(vector={campaign_vector}): GeneralDomain blocked"
+            )
+            continue
+
         # ── Quota gate ───────────────────────────────────────────────────────
         # NOTE: We do NOT check approval_status here. Campaigns can only exist
         # for tenants who were approved at creation time. Legacy documents
         # pre-dating the approval_status field would have approval_status=None
         # and would be silently blocked by check_quota's != 'approved' guard.
         # Instead: super_admin always passes; others are gated on credit balance.
-        user_doc  = (db.collection("users").document(tenant_id).get().to_dict() or {})
+        user_doc  = (_db().collection("users").document(tenant_id).get().to_dict() or {})
         user_role = user_doc.get("role", "")
         if user_role != "super_admin":
             wallet    = user_doc.get("wallet", {})
@@ -364,7 +434,6 @@ def cron_sweep():
                 except Exception as ts_err:
                     log.error("produce_timestamp_update_failed", campaign_id=campaign_id,
                               error=str(ts_err), exc_info=True)
-
         # ── Consumer (4h interval) ────────────────────────────────────────────
         DRIP_INTERVAL_H = 4
         # CRITICAL: the entire drip evaluation MUST live inside try/finally.
@@ -461,7 +530,7 @@ def cron_sweep():
     zombie_recovered = zombie_locks_released = 0
     try:
         zombie_docs = (
-            db.collection("leads")
+            _db().collection("leads")
               .where(filter=FieldFilter("status",    "==", "processing"))
               .where(filter=FieldFilter("createdAt", "<",  zombie_cutoff))
               .limit(100).stream()
@@ -480,7 +549,7 @@ def cron_sweep():
             lock_entity = zombie_data.get("lock_entity")
             if lock_entity:
                 try:
-                    lr = db.collection("global_lead_locks").document(lock_entity)
+                    lr = _db().collection("global_lead_locks").document(lock_entity)
                     if lr.get().exists:
                         lr.delete()
                         zombie_locks_released += 1
@@ -489,7 +558,7 @@ def cron_sweep():
             zombie_tenant = zombie_data.get("tenant_id")
             if zombie_tenant:
                 try:
-                    db.collection("users").document(zombie_tenant).update(
+                    _db().collection("users").document(zombie_tenant).update(
                         {"wallet.reserved_credits": _fs.Increment(-1)}
                     )
                 except Exception:
@@ -499,13 +568,16 @@ def cron_sweep():
 
     log.info("cron_sweep_complete",
              producers=produce_dispatched, consumers=consume_dispatched,
-             zombies=zombie_recovered)
+             zombies=zombie_recovered,
+             circuit_breaker_blocked_vectors=sorted(blocked_vectors) if blocked_vectors else [])
     return jsonify({
         "message": f"V23 Sweep: {produce_dispatched} producers + {consume_dispatched} consumers.",
         "produce_dispatched":    produce_dispatched,
         "consume_dispatched":    consume_dispatched,
         "zombie_recovered":      zombie_recovered,
         "zombie_locks_released": zombie_locks_released,
+        "circuit_breaker":       "partial" if blocked_vectors else "closed",
+        "blocked_vectors":       sorted(blocked_vectors) if blocked_vectors else [],
         "audit_trail":           audit_trail,
     }), 200
 
@@ -539,7 +611,7 @@ def conversion_feedback():
     if not lead_id or status not in ("converted", "rejected"):
         return jsonify({"error": "Bad Request", "message": "Requires lead_id and status: converted|rejected"}), 400
 
-    lead_doc = db.collection("leads").document(lead_id).get()
+    lead_doc = _db().collection("leads").document(lead_id).get()
     if not lead_doc.exists:
         return jsonify({"error": "Not Found", "message": f"Lead {lead_id} not found."}), 404
 
@@ -562,19 +634,19 @@ def conversion_feedback():
             pref_updates["dynamic_blocklist"] = firestore.ArrayUnion(words)
     if tenant_id and pref_updates:
         try:
-            db.collection("users").document(tenant_id).set(pref_updates, merge=True)
+            _db().collection("users").document(tenant_id).set(pref_updates, merge=True)
         except Exception as e:
             log.warning("reverse_rlhf_backprop_failed", error=str(e))
 
     try:
-        db.collection("system_telemetry").document("vector_weights").set(
+        _db().collection("system_telemetry").document("vector_weights").set(
             {sourcing_vector: firestore.Increment(delta)}, merge=True
         )
     except Exception as e:
         log.warning("vector_weights_update_failed", error=str(e))
 
     try:
-        db.collection("leads").document(lead_id).update(
+        _db().collection("leads").document(lead_id).update(
             {"status": status, "updatedAt": firestore.SERVER_TIMESTAMP}
         )
     except Exception as e:
@@ -601,7 +673,7 @@ def cron_reflection():
     for outcome_status in ("converted", "failed"):
         try:
             for doc in (
-                db.collection("leads")
+                _db().collection("leads")
                   .where(filter=FieldFilter("status",    "==", outcome_status))
                   .where(filter=FieldFilter("updatedAt", ">=", cutoff))
                   .limit(50).stream()
@@ -653,7 +725,7 @@ LEAD OUTCOMES: {json.dumps(scrubbed)}"""
     except Exception as e:
         return jsonify({"error": "Reflection LLM failed", "details": str(e)}), 500
 
-    db.collection("system_telemetry").document("vector_weights").set(new_weights)
+    _db().collection("system_telemetry").document("vector_weights").set(new_weights)
     log.info("reflection_complete", new_weights=new_weights, sample_size=len(scrubbed))
     return jsonify({"status": "reflection_complete", "sample_size": len(scrubbed), "new_weights": new_weights}), 200
 
@@ -672,7 +744,7 @@ def cron_ontology_decay():
     updated = skipped = errored = 0
     decay_log: list = []
     try:
-        for doc in db.collection("ontology_map").stream():
+        for doc in _db().collection("ontology_map").stream():
             d      = doc.to_dict()
             weight = d.get("baseline_weight", 1.0)
             diff   = weight - 1.0
@@ -681,7 +753,7 @@ def cron_ontology_decay():
                 continue
             new_weight = round(weight - diff * 0.10, 6)
             try:
-                db.collection("ontology_map").document(doc.id).update({
+                _db().collection("ontology_map").document(doc.id).update({
                     "baseline_weight": new_weight,
                     "last_decayed":    firestore.SERVER_TIMESTAMP,
                 })
