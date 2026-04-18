@@ -8,15 +8,14 @@ Deduplicates against global leads collection.
 Writes fresh URLs to campaigns/{id}.unprocessed_queue.
 Does NOT call the Gemini Gate — only the Consumer does.
 
+Raw GCS firehose dump deliberately removed per EA directive (2026-04-18).
+Intelligence is sourced exclusively from BigQuery swarm_analytics via
+the shadow_track hook — no parallel GCS write path exists.
+
 Auth:
   - Zero-Trust OIDC: Google-signed JWT verified by @require_tasks_oidc.
   - Defense-in-depth: X-CloudTasks-QueueName header also enforced.
   - Cloud Run IAM (--no-allow-unauthenticated) is the outermost gate.
-
-V23 Enterprise Amendments:
-  1. OIDC: cryptographic JWT validation (not header-only).
-  2. GCS dump: Cloud Task enqueue (no daemon threads).
-  3. gRPC: all clients via lazy threading.Lock accessors.
 """
 from __future__ import annotations
 
@@ -35,7 +34,6 @@ from services.serper_service import (  # type: ignore[import]
     extract_root_domain,
     SOCIAL_DOMAINS,
 )
-from services.gcs_task import enqueue_gcs_dump  # type: ignore[import]
 from services.telemetry import update_circuit_telemetry  # type: ignore[import]
 
 bp  = Blueprint("produce", __name__)
@@ -213,16 +211,6 @@ def produce():
             location=clean_location or None,
             gl=gl or None,
         )
-
-        # Amendment 2: enqueue GCS dump via Cloud Task (no daemon thread)
-        enqueue_gcs_dump({
-            "query":          search_query,
-            "campaign_id":    campaign_id,
-            "sourcing_vector": sourcing_vector,
-            "keyword":        kw,
-            "result_count":   len(raw_results) if raw_results else 0,
-            "raw_results":    raw_results or [],
-        }, tenant_id)
 
         update_circuit_telemetry("serper_call")
 

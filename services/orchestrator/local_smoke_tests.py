@@ -1154,44 +1154,35 @@ def t_query_brain_imports_without_db_call():
     assert hasattr(mod, "VECTOR_PLATFORM_MAP"),    "VECTOR_PLATFORM_MAP not exported"
 
 
-def t_gcs_task_no_module_scope_cloud_tasks():
-    """services/gcs_task.py imports without constructing CloudTasksClient."""
-    import importlib.util as _ilu
-    from google.cloud import tasks_v2 as _tasks
-
-    ctor_called = [0]
-    _orig_ctor  = _tasks.CloudTasksClient
-
-    class _SpyClient:
-        def __new__(cls, *a, **kw):
-            ctor_called[0] += 1
-            return object.__new__(cls)
-
-    _tasks.CloudTasksClient = _SpyClient  # type: ignore
-
-    key  = f"_pm_gcstask_{os.getpid()}"
-    spec = _ilu.spec_from_file_location(
-        key, os.path.join(_PM_PATH, "services", "gcs_task.py")
+def t_gcs_task_purged():
+    """EA directive compliance: services/gcs_task.py must NOT exist."""
+    gcs_path = os.path.join(_PM_PATH, "services", "gcs_task.py")
+    assert not os.path.exists(gcs_path), (
+        f"COMPLIANCE VIOLATION: gcs_task.py still exists at {gcs_path}. "
+        "EA directive mandated full removal of GCS dump infrastructure."
     )
-    mod = _ilu.module_from_spec(spec)  # type: ignore
-    sys.modules[key] = mod
-    try:
-        spec.loader.exec_module(mod)  # type: ignore
-    except Exception:
-        pass
-
-    _tasks.CloudTasksClient = _orig_ctor  # type: ignore
-    sys.modules.pop(key, None)
-
-    assert ctor_called[0] == 0, \
-        f"CloudTasksClient() was constructed {ctor_called[0]}x at import time — gRPC leak"
-    assert hasattr(mod, "enqueue_gcs_dump"), "enqueue_gcs_dump not exported"
 
 
-test("serper_service imports cleanly — no gRPC at module scope",   t_serper_service_imports_no_grpc)
-test("gemini_service imports cleanly — vertexai.init() NOT called", t_gemini_service_imports_no_module_scope_vertex)
-test("query_brain imports cleanly — get_db() NOT called at scope",  t_query_brain_imports_without_db_call)
-test("gcs_task imports cleanly — CloudTasksClient NOT called",      t_gcs_task_no_module_scope_cloud_tasks)
+def t_produce_no_gcs_import():
+    """EA directive compliance: produce.py must contain no gcs_task import."""
+    import ast
+    src_path = os.path.join(_PM_PATH, "api", "routers", "produce.py")
+    with open(src_path, encoding="utf-8") as f:
+        src = f.read()
+    assert "gcs_task" not in src, (
+        "COMPLIANCE VIOLATION: 'gcs_task' string found in produce.py. "
+        "GCS dump must be fully removed from the /produce route."
+    )
+    assert "enqueue_gcs_dump" not in src, (
+        "COMPLIANCE VIOLATION: 'enqueue_gcs_dump' call found in produce.py."
+    )
+
+
+test("serper_service imports cleanly — no gRPC at module scope",    t_serper_service_imports_no_grpc)
+test("gemini_service imports cleanly — vertexai.init() NOT called",  t_gemini_service_imports_no_module_scope_vertex)
+test("query_brain imports cleanly — get_db() NOT called at scope",   t_query_brain_imports_without_db_call)
+test("EA compliance: gcs_task.py PURGED (must not exist)",           t_gcs_task_purged)
+test("EA compliance: produce.py contains no GCS dump call",          t_produce_no_gcs_import)
 
 # =============================================================================
 # FINAL REPORT
