@@ -259,14 +259,17 @@ class WalledGardenHook:
         except Exception as ce:
             log.warning("walled_garden_cache_read_error", url=url[:80], error=str(ce))
 
-        # Parallel triangulation
-        queries   = self._build_queries(url, root_domain, persona_summary)
+        # BUG-P1 FIX: as_completed(timeout=7.0) raises TimeoutError on the iterator
+        # if ANY single future is not done within 7s of the FIRST completion.
+        # This silently abandoned any futures not yet complete — no text collected.
+        # Fix: iterate without outer timeout; each future already has a 6s httpx
+        # timeout internally. Add individual fut.result(timeout=8) per future.
         all_texts: list[str] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             futures = {pool.submit(self._run_serper, q): q for q in queries}
-            for future in concurrent.futures.as_completed(futures, timeout=7.0):
+            for future in concurrent.futures.as_completed(futures):
                 try:
-                    extracted = self._extract_snippets(future.result())
+                    extracted = self._extract_snippets(future.result(timeout=8))
                     if extracted:
                         all_texts.append(extracted)
                 except Exception as fe:
@@ -414,12 +417,27 @@ class GeneralDomainHook:
             )
             return wg_result
         except Exception as e:
-            log.warning("general_domain_scrape_error", url=url[:80], error=str(e))
-            return {
-                "text": "", "tech_stack": [], "emails": [], "phones": [],
-                "mode": "GeneralDomain", "fallback_used": False,
-                "persona_match_score": 0,
-            }
+            # BUG-P2 FIX: Previously returned empty text dict immediately.
+            # Empty text causes dispatch.py to defer to scraper-heavy.
+            # Better: attempt WalledGarden snippet triangulation first —
+            # even a thin snippet gives Gemini something to score.
+            log.warning("general_domain_scrape_error_wg_fallback",
+                        url=url[:80], error=str(e))
+            try:
+                wg_result = self._wg_hook.fetch(url, root_domain, persona_summary, tenant_id)
+                wg_result["fallback_used"]       = True
+                wg_result["mode"]                = "GeneralDomain→WalledGardenFallback(Error)"
+                wg_result["persona_match_score"] = _persona_match_score(
+                    wg_result.get("text", ""), persona_summary
+                )
+                return wg_result
+            except Exception as wg_e:
+                log.warning("general_domain_wg_fallback_failed", url=url[:80], error=str(wg_e))
+                return {
+                    "text": "", "tech_stack": [], "emails": [], "phones": [],
+                    "mode": "GeneralDomain", "fallback_used": False,
+                    "persona_match_score": 0,
+                }
 
         # Cache write
         try:
@@ -524,12 +542,15 @@ class B2B2CIntermediaryFinder:
         log.info("b2b2c_finding_intermediaries",
                  category=product_category, geo=location_str, gl=gl)
 
+        # BUG-P1 FIX (same as WalledGarden): drop outer as_completed timeout.
+        # Individual futures already have 6s httpx timeout. Use per-future
+        # result(timeout=8) to bound each individual call.
         all_snippets: list[str] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(self._serper_search, q, gl or None) for q in queries]
-            for future in concurrent.futures.as_completed(futures, timeout=7.0):
+            for future in concurrent.futures.as_completed(futures):
                 try:
-                    for r in future.result()[:6]:
+                    for r in future.result(timeout=8)[:6]:
                         snippet = r.get("snippet", "")
                         if snippet:
                             all_snippets.append(

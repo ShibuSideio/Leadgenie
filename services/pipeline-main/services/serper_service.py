@@ -13,6 +13,7 @@ V23 changes:
 from __future__ import annotations
 
 import json
+import concurrent.futures as _cf
 from urllib.parse import urlparse
 from typing import Optional
 
@@ -217,19 +218,43 @@ def deep_context_serper_dork(
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     context_data: list[str] = []
 
-    def _fetch(serper_url: str, body: dict) -> dict:
+    # BUG-S1 FIX: Previously 3 sequential Serper calls with timeout=15 each = 45s max.
+    # Fix: Run all 3 calls in parallel via ThreadPoolExecutor. Max wall time ~15s.
+    # BUG-S2 FIX: Usage metrics Firestore write was inside _fetch() per call = 3 RPCs.
+    # Fix: Single batched write at the end (1 RPC total).
+    def _fetch_parallel(serper_url: str, body: dict) -> dict:
+        """Fire a Serper request. No Firestore write here (batched externally)."""
         try:
-            get_db().collection("usage_metrics").document(tenant_id).set(
-                {"serper_searches": firestore.Increment(1)}, merge=True
-            )
-            resp = httpx.post(serper_url, headers=headers, json=body, timeout=15)
+            resp = httpx.post(serper_url, headers=headers, json=body, timeout=12)
             if resp.status_code == 200:
                 return resp.json()
         except Exception:
             pass
         return {}
 
-    gmb_data = _fetch("https://google.serper.dev/places", {"q": domain, "num": 3})
+    tasks = [
+        ("https://google.serper.dev/places",  {"q": domain, "num": 3}),
+        ("https://google.serper.dev/search",  {"q": f'site:linkedin.com/company OR site:facebook.com "{domain}"', "num": 3}),
+        ("https://google.serper.dev/search",  {
+            "q": (
+                f'site:naukri.com/job-listings OR site:instahyre.com/job OR '
+                f'site:linkedin.com/jobs OR site:indeed.com/cmp "{domain}"'
+            ),
+            "num": 3,
+        }),
+    ]
+
+    with _cf.ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(_fetch_parallel, url, body) for url, body in tasks]
+        results = []
+        for fut in futures:
+            try:
+                results.append(fut.result(timeout=13))
+            except Exception:
+                results.append({})
+
+    gmb_data, social_data, hiring_data = results[0], results[1], results[2]
+
     for place in gmb_data.get("places", []):
         context_data.append(
             f"[GMB] Rating: {place.get('rating', 'N/A')}, "
@@ -237,16 +262,8 @@ def deep_context_serper_dork(
             f"Address: {place.get('address', 'N/A')}"
         )
 
-    social_q    = f'site:linkedin.com/company OR site:facebook.com "{domain}"'
-    social_data = _fetch("https://google.serper.dev/search", {"q": social_q, "num": 3})
     for org in social_data.get("organic", []):
         context_data.append(f"[SOCIAL] {org.get('snippet', '')}")
-
-    hiring_q    = (
-        f'site:naukri.com/job-listings OR site:instahyre.com/job OR '
-        f'site:linkedin.com/jobs OR site:indeed.com/cmp "{domain}"'
-    )
-    hiring_data = _fetch("https://google.serper.dev/search", {"q": hiring_q, "num": 3})
 
     hiring_sigs = [
         "we are hiring", "job description", "apply today",
@@ -258,6 +275,15 @@ def deep_context_serper_dork(
         context_data.append(f"[HIRING] {snippet_lc}")
         if any(sig in snippet_lc for sig in hiring_sigs):
             hiring_intent = True
+
+    # BUG-S2 FIX: Single batched Firestore write for all 3 Serper calls.
+    try:
+        from google.cloud import firestore as _fs  # type: ignore[import]
+        get_db().collection("usage_metrics").document(tenant_id).set(
+            {"serper_searches": _fs.Increment(len(tasks))}, merge=True
+        )
+    except Exception:
+        pass
 
     context_str = " | ".join(context_data)[:3000]
     return context_str, hiring_intent

@@ -3,7 +3,7 @@ Sideio Lead Sniper — Pipeline Main Service Entrypoint (V23 Production Cutover)
 
 V23 Blueprint Registry:
   /produce   -> api/routers/produce.py      [FULL IMPL — stub retired]
-  /dispatch  -> api/routers/dispatch.py     [OIDC hardened — PRISM pending]
+  /dispatch  -> api/routers/dispatch.py     [FULL IMPL — PRISM engine active v23.3.1]
   /finalize  -> api/routers/dispatch.py     [OIDC hardened]
 
 V23 Security Amendments (Enterprise Architecture Review 2026-04-18):

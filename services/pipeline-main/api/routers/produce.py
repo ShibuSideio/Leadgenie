@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 
 from google.cloud import firestore  # type: ignore[import]
+from google.cloud.firestore_v1.base_query import FieldFilter  # type: ignore[import]
 from flask import Blueprint, jsonify, request
 
 from core.logging import get_logger    # type: ignore[import]
@@ -253,9 +254,13 @@ def produce():
     # ------------------------------------------------------------------
     existing_ids: set[str] = set()
     try:
+        # BUG-PR1 FIX: Deprecated positional .where() → FieldFilter.
+        # Positional where() is deprecated in google-cloud-firestore >= 2.13.
+        # Also: no limit on this query — could scan entire leads collection for busy
+        # tenants. Consider pagination if leads grow beyond 10k.
         known_docs = (
             get_db().collection("leads")
-            .where("tenant_id", "==", tenant_id)
+            .where(filter=FieldFilter("tenant_id", "==", tenant_id))
             .select(["url"])
             .stream()
         )

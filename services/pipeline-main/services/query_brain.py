@@ -106,15 +106,18 @@ def generate_smart_query(
     # ── Step 1: RLHF history (Firestore read) ─────────────────────────────────
     pain_points: list[str] = []
     try:
+        from google.cloud.firestore_v1.base_query import FieldFilter as _FF  # noqa: PLC0415
+        # BUG-QB1 FIX: Deprecated positional .where() → FieldFilter.
+        # .where("status", "in", [...]) deprecated in firestore >= 2.13.
         q = (
             get_db().collection("leads")
-            .where("tenant_id", "==", tenant_id)
-            .where("status", "in", ["contacted", "converted"])
+            .where(filter=_FF("tenant_id", "==", tenant_id))
+            .where(filter=_FF("status", "in", ["contacted", "converted"]))
             .limit(20)
         )
         docs = list(q.stream())
         if not docs:
-            q    = get_db().collection("leads").where("status", "in", ["contacted", "converted"]).limit(20)
+            q    = get_db().collection("leads").where(filter=_FF("status", "in", ["contacted", "converted"])).limit(20)
             docs = list(q.stream())
         pain_points = [
             d.to_dict().get("pain_point", "")
@@ -122,6 +125,7 @@ def generate_smart_query(
         ]
     except Exception as exc:
         log.warning("query_brain_rlhf_fetch_failed", error=str(exc))
+
 
     _p_cat = (persona_category or "general").strip() or "general"
 

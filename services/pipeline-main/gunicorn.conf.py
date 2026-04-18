@@ -33,7 +33,11 @@ bind          = f"0.0.0.0:{os.environ.get('PORT', '8080')}"
 workers       = 1               # Cloud Run: single-process, multi-thread
 threads       = 8               # gthread concurrency
 worker_class  = "gthread"
-timeout       = 120             # hard worker timeout (seconds)
+# BUG-G1 FIX: Raised from 120s to 180s.
+# dispatch.py now runs 5 parallel URL workers × 25s ceiling = ~125s max.
+# 120s timeout was killing workers on full 10-URL batches (5 pass, 5 queued).
+# 180s gives headroom for the ThreadPoolExecutor to drain all futures.
+timeout       = 180             # hard worker timeout (seconds)
 graceful_timeout = 30           # SIGTERM grace period
 loglevel      = "info"
 accesslog     = "-"             # stdout → Cloud Logging
