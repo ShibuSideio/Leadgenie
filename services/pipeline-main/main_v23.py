@@ -1,12 +1,16 @@
 """
-Sideio Lead Sniper -- Pipeline Main Service Entrypoint (V23 Phase 3 Final Cutover).
+Sideio Lead Sniper — Pipeline Main Service Entrypoint (V23 Production Cutover).
 
-All routes migrated to Blueprint architecture. Legacy monolith removed.
+V23 Blueprint Registry:
+  /produce              -> api/routers/produce.py      [FULL IMPL — stub retired]
+  /dispatch             -> api/routers/dispatch.py     [OIDC hardened — PRISM pending]
+  /finalize             -> api/routers/dispatch.py     [OIDC hardened]
+  /internal/gcs-dump    -> api/routers/internal_pipeline.py  [Cloud Task handler]
 
-Blueprint Registry:
-  /produce   -> api/routers/produce.py
-  /dispatch  -> api/routers/dispatch.py
-  /finalize  -> api/routers/dispatch.py
+V23 Security Amendments (Enterprise Architecture Review 2026-04-18):
+  1. Zero-Trust OIDC JWT validation on /produce and /dispatch via @require_tasks_oidc.
+  2. GCS dump via Cloud Task enqueue (gcs-dump-queue) — no daemon threads.
+  3. All gRPC clients via threading.Lock DCL accessors (BQ and Tasks upgraded).
 """
 from __future__ import annotations
 
@@ -23,8 +27,9 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 
 from core.logging import get_logger  # type: ignore[import]
-from api.routers.produce import bp as produce_bp    # type: ignore[import]
-from api.routers.dispatch import bp as dispatch_bp  # type: ignore[import]
+from api.routers.produce import bp as produce_bp                        # type: ignore[import]
+from api.routers.dispatch import bp as dispatch_bp                      # type: ignore[import]
+from api.routers.internal_pipeline import bp as internal_pipeline_bp    # type: ignore[import]
 
 log = get_logger("pipeline.main")
 
@@ -37,17 +42,22 @@ def create_app() -> Flask:
     @app.route("/", methods=["GET"])
     @app.route("/health", methods=["GET"])
     def health():
-        return jsonify({"status": "healthy", "version": "23.1.0", "arch": "modular-v23-final"}), 200
+        return jsonify({
+            "status":  "healthy",
+            "version": "23.2.0",
+            "arch":    "modular-v23-production-cutover",
+        }), 200
 
     app.register_blueprint(produce_bp)
     app.register_blueprint(dispatch_bp)
+    app.register_blueprint(internal_pipeline_bp)
 
     @app.errorhandler(Exception)
     def handle_exception(exc: Exception):
-        log.error("unhandled_pipeline_exception", error=str(exc))
+        log.error("unhandled_pipeline_exception", error=str(exc), exc_info=True)
         return jsonify({"error": "Internal Server Error"}), 500
 
-    log.info("pipeline_started", version="23.1.0", phase="final-cutover")
+    log.info("pipeline_started", version="23.2.0", phase="production-cutover")
     return app
 
 

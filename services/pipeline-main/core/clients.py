@@ -92,30 +92,52 @@ def get_db() -> firestore.Client:
 
 
 # ---------------------------------------------------------------------------
-# BigQuery
+# BigQuery — threading.Lock double-checked locking (V23 Amendment 3)
 # ---------------------------------------------------------------------------
-@functools.lru_cache(maxsize=None)
+_bq_lock: threading.Lock = threading.Lock()
+_bq_instance: Optional[bigquery.Client] = None
+
+
 def get_bq_client() -> bigquery.Client:
-    """Return the shared BigQuery client.
+    """Return the shared BigQuery client (lazy, thread-safe).
+
+    Upgraded from lru_cache to threading.Lock DCL to prevent concurrent
+    gRPC constructor races under Gunicorn gthread workers (V23 Amendment 3).
 
     Returns:
         :class:`google.cloud.bigquery.Client`
     """
-    project = os.environ.get("PROJECT_ID", "sideio-leads-v16")
-    return bigquery.Client(project=project)
+    global _bq_instance
+    if _bq_instance is None:
+        with _bq_lock:
+            if _bq_instance is None:
+                _bq_instance = bigquery.Client(
+                    project=os.environ.get("PROJECT_ID", "sideio-leads-v16")
+                )
+    return _bq_instance
 
 
 # ---------------------------------------------------------------------------
-# Cloud Tasks
+# Cloud Tasks — threading.Lock double-checked locking (V23 Amendment 3)
 # ---------------------------------------------------------------------------
-@functools.lru_cache(maxsize=None)
+_tasks_lock: threading.Lock = threading.Lock()
+_tasks_instance: Optional[tasks_v2.CloudTasksClient] = None
+
+
 def get_tasks_client() -> tasks_v2.CloudTasksClient:
-    """Return the shared Cloud Tasks client.
+    """Return the shared Cloud Tasks client (lazy, thread-safe).
+
+    Upgraded from lru_cache to threading.Lock DCL (V23 Amendment 3).
 
     Returns:
         :class:`google.cloud.tasks_v2.CloudTasksClient`
     """
-    return tasks_v2.CloudTasksClient()
+    global _tasks_instance
+    if _tasks_instance is None:
+        with _tasks_lock:
+            if _tasks_instance is None:
+                _tasks_instance = tasks_v2.CloudTasksClient()
+    return _tasks_instance
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +161,10 @@ def get_secret_manager_client() -> secretmanager.SecretManagerServiceClient:
             if _sm_instance is None:
                 _sm_instance = secretmanager.SecretManagerServiceClient()
     return _sm_instance
+
+
+# Alias used by service modules for consistent naming
+get_sm_client = get_secret_manager_client
 
 
 # ---------------------------------------------------------------------------

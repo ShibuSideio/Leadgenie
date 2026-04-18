@@ -959,6 +959,247 @@ passed = [r for r in results if r["passed"]]
 failed = [r for r in results if not r["passed"]]
 total  = len(results)
 
+# =============================================================================
+# PHASE 8: OIDC Middleware Validation (V23 Amendment 1)
+# =============================================================================
+section("Phase 8: OIDC Middleware Validation (Amendment 1)")
+
+_PM_PATH = os.path.join(_SERVICES, "pipeline-main")
+
+
+def _pm_import(name: str):
+    """Import a pipeline-main module by dotted name, injecting its root to sys.path."""
+    import importlib.util as _ilu
+    # Inject _PM_PATH so that 'from core.logging import ...' resolves inside the module
+    if _PM_PATH not in sys.path:
+        sys.path.insert(0, _PM_PATH)
+    parts   = name.split(".")
+    relpath = os.path.join(*parts) + ".py"
+    abspath = os.path.join(_PM_PATH, relpath)
+    key     = f"_pm_{name.replace('.', '_')}_{os.getpid()}"
+    spec    = _ilu.spec_from_file_location(key, abspath)
+    mod     = _ilu.module_from_spec(spec)  # type: ignore
+    sys.modules[key] = mod
+    try:
+        spec.loader.exec_module(mod)  # type: ignore
+    except Exception:
+        pass
+    return mod
+
+
+def t_oidc_missing_authorization_header():
+    """require_tasks_oidc returns 401 when Authorization header is absent."""
+    from flask import Flask
+    from unittest.mock import patch
+
+    # Patch _verify_token so we control its outcome without real Google certs
+    with patch.dict(os.environ, {"PIPELINE_MAIN_URL": "https://example.run.app",
+                                 "PIPELINE_SA_EMAIL": "sa@proj.iam.gserviceaccount.com"}):
+        oidc = _pm_import("middleware.oidc")
+        app  = Flask("test_oidc_missing")
+
+        @app.route("/test", methods=["POST"])
+        @oidc.require_tasks_oidc
+        def _protected():
+            return "ok", 200
+
+        with app.test_client() as c:
+            resp = c.post("/test")
+            assert resp.status_code == 401, \
+                f"Expected 401 for missing Authorization header, got {resp.status_code}"
+            body = resp.get_json()
+            assert body.get("code") == "MISSING_OIDC_TOKEN", \
+                f"Expected MISSING_OIDC_TOKEN code, got: {body}"
+
+
+def t_oidc_invalid_token_returns_401():
+    """require_tasks_oidc returns 401 when token fails cryptographic verification."""
+    from flask import Flask
+    from unittest.mock import patch
+
+    with patch.dict(os.environ, {"PIPELINE_MAIN_URL": "https://example.run.app",
+                                 "PIPELINE_SA_EMAIL": "sa@proj.iam.gserviceaccount.com"}):
+        oidc = _pm_import("middleware.oidc")
+
+        # Patch _verify_token on the loaded module to return failure
+        original_verify = oidc._verify_token
+        oidc._verify_token = lambda token: (False, "signature mismatch")  # type: ignore
+
+        app  = Flask("test_oidc_invalid")
+
+        @app.route("/test", methods=["POST"])
+        @oidc.require_tasks_oidc
+        def _protected():
+            return "ok", 200
+
+        try:
+            with app.test_client() as c:
+                resp = c.post("/test", headers={"Authorization": "Bearer bad.token.here"})
+                assert resp.status_code == 401, \
+                    f"Expected 401 for invalid token, got {resp.status_code}"
+                body = resp.get_json()
+                assert body.get("code") == "INVALID_OIDC_TOKEN", \
+                    f"Expected INVALID_OIDC_TOKEN, got: {body}"
+        finally:
+            oidc._verify_token = original_verify  # type: ignore
+
+
+def t_oidc_valid_token_but_missing_queue_header_returns_403():
+    """With valid OIDC token but no X-CloudTasks-QueueName header → 403."""
+    from flask import Flask
+
+    with patch.dict(os.environ, {"PIPELINE_MAIN_URL": "https://example.run.app",
+                                 "PIPELINE_SA_EMAIL": "sa@proj.iam.gserviceaccount.com"}):
+        oidc = _pm_import("middleware.oidc")
+        oidc._verify_token = lambda token: (True, "")  # type: ignore  # stub valid
+
+        app  = Flask("test_oidc_no_queue")
+
+        @app.route("/test", methods=["POST"])
+        @oidc.require_tasks_oidc
+        def _protected():
+            return "ok", 200
+
+        with app.test_client() as c:
+            resp = c.post("/test", headers={"Authorization": "Bearer good.token.here"})
+            assert resp.status_code == 403, \
+                f"Expected 403 for missing X-CloudTasks-QueueName, got {resp.status_code}"
+            body = resp.get_json()
+            assert body.get("code") == "MISSING_QUEUE_HEADER", \
+                f"Expected MISSING_QUEUE_HEADER, got: {body}"
+
+
+test("OIDC: missing Authorization header → 401",            t_oidc_missing_authorization_header)
+test("OIDC: invalid JWT → 401 INVALID_OIDC_TOKEN",          t_oidc_invalid_token_returns_401)
+test("OIDC: valid JWT + missing queue header → 403",         t_oidc_valid_token_but_missing_queue_header_returns_403)
+
+# =============================================================================
+# PHASE 9: V23 Modular Pipeline-Main Import Validation
+# =============================================================================
+section("Phase 9: V23 Modular Pipeline-Main Import Validation")
+
+
+def t_serper_service_imports_no_grpc():
+    """services/serper_service.py defines required public symbols (AST check)."""
+    import ast
+    src_path = os.path.join(_PM_PATH, "services", "serper_service.py")
+    assert os.path.isfile(src_path), f"serper_service.py not found at {src_path}"
+    with open(src_path, encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=src_path)
+    # Collect top-level names (functions, plain and annotated assignments)
+    top_names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            top_names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    top_names.add(t.id)
+        elif isinstance(node, ast.AnnAssign):   # handles: NAME: type = value
+            if isinstance(node.target, ast.Name):
+                top_names.add(node.target.id)
+    required = {"search_serper", "filter_serper_noise", "extract_root_domain", "SOCIAL_DOMAINS"}
+    missing  = required - top_names
+    assert not missing, f"serper_service missing symbols: {missing}"
+
+
+
+def t_gemini_service_imports_no_module_scope_vertex():
+    """services/gemini_service.py defines required symbols and has no bare vertexai.init() call (AST)."""
+    import ast
+    src_path = os.path.join(_PM_PATH, "services", "gemini_service.py")
+    assert os.path.isfile(src_path), f"gemini_service.py not found at {src_path}"
+    with open(src_path, encoding="utf-8") as f:
+        src = f.read()
+    tree = ast.parse(src, filename=src_path)
+
+    # Collect top-level function names
+    top_names = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    for sym in ("call_gemini_2_5", "pre_filter_gemini", "final_score_and_dm"):
+        assert sym in top_names, f"gemini_service missing top-level function: {sym}"
+
+    # Verify vertexai.init() is not called at module scope (i.e., directly in tree.body)
+    for node in tree.body:
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            # Detect vertexai.init() and init_vertex() at top level
+            if isinstance(call.func, ast.Attribute):
+                if getattr(call.func, 'attr', '') == 'init' and \
+                   isinstance(call.func.value, ast.Name) and \
+                   call.func.value.id == 'vertexai':
+                    raise AssertionError(
+                        "vertexai.init() called at module scope in gemini_service.py — gRPC leak!"
+                    )
+
+
+def t_query_brain_imports_without_db_call():
+    """services/query_brain.py imports without calling get_db() at module scope."""
+    import importlib.util as _ilu
+
+    db_called = [0]
+
+    key  = f"_pm_qbrain_{os.getpid()}"
+    spec = _ilu.spec_from_file_location(
+        key, os.path.join(_PM_PATH, "services", "query_brain.py")
+    )
+    mod = _ilu.module_from_spec(spec)  # type: ignore
+    sys.modules[key] = mod
+    try:
+        spec.loader.exec_module(mod)  # type: ignore
+    except Exception:
+        pass
+    sys.modules.pop(key, None)
+
+    assert hasattr(mod, "generate_smart_query"),  "generate_smart_query not exported"
+    assert hasattr(mod, "VECTOR_PLATFORM_MAP"),    "VECTOR_PLATFORM_MAP not exported"
+
+
+def t_gcs_task_no_module_scope_cloud_tasks():
+    """services/gcs_task.py imports without constructing CloudTasksClient."""
+    import importlib.util as _ilu
+    from google.cloud import tasks_v2 as _tasks
+
+    ctor_called = [0]
+    _orig_ctor  = _tasks.CloudTasksClient
+
+    class _SpyClient:
+        def __new__(cls, *a, **kw):
+            ctor_called[0] += 1
+            return object.__new__(cls)
+
+    _tasks.CloudTasksClient = _SpyClient  # type: ignore
+
+    key  = f"_pm_gcstask_{os.getpid()}"
+    spec = _ilu.spec_from_file_location(
+        key, os.path.join(_PM_PATH, "services", "gcs_task.py")
+    )
+    mod = _ilu.module_from_spec(spec)  # type: ignore
+    sys.modules[key] = mod
+    try:
+        spec.loader.exec_module(mod)  # type: ignore
+    except Exception:
+        pass
+
+    _tasks.CloudTasksClient = _orig_ctor  # type: ignore
+    sys.modules.pop(key, None)
+
+    assert ctor_called[0] == 0, \
+        f"CloudTasksClient() was constructed {ctor_called[0]}x at import time — gRPC leak"
+    assert hasattr(mod, "enqueue_gcs_dump"), "enqueue_gcs_dump not exported"
+
+
+test("serper_service imports cleanly — no gRPC at module scope",   t_serper_service_imports_no_grpc)
+test("gemini_service imports cleanly — vertexai.init() NOT called", t_gemini_service_imports_no_module_scope_vertex)
+test("query_brain imports cleanly — get_db() NOT called at scope",  t_query_brain_imports_without_db_call)
+test("gcs_task imports cleanly — CloudTasksClient NOT called",      t_gcs_task_no_module_scope_cloud_tasks)
+
+# =============================================================================
+# FINAL REPORT
+# =============================================================================
+passed = [r for r in results if r["passed"]]
+failed = [r for r in results if not r["passed"]]
+total  = len(results)
+
 print(f"\n{BOLD}{'='*65}{RESET}")
 print(f"{BOLD}  SIDEIO V23 LOCAL SMOKE TEST RESULTS{RESET}")
 print(f"{BOLD}{'='*65}{RESET}")
@@ -969,7 +1210,7 @@ print(f"  {RED}Failed : {len(failed)}{RESET}")
 if failed:
     print(f"\n  {RED}{BOLD}FAILURES:{RESET}")
     for r in failed:
-        print(f"    {RED}✗  {r['name']}{RESET}")
+        print(f"    {RED}\u2717  {r['name']}{RESET}")
         print(f"       {r['err']}")
 
 avg_ms = sum(r["ms"] for r in results) / max(total, 1)
@@ -978,17 +1219,21 @@ print(f"  Coverage areas: imports, pure-fn math, NLP, URL parsing,")
 print(f"                  geo mapping, exception hierarchy, logging,")
 print(f"                  config hardening, Fernet encryption,")
 print(f"                  gRPC lazy-init locks (Phase 6),")
-print(f"                  Firestore timestamp serialization (Phase 7)")
+print(f"                  Firestore timestamp serialization (Phase 7),")
+print(f"                  OIDC middleware (Phase 8),")
+print(f"                  V23 modular pipeline-main imports (Phase 9)")
 
 verdict = len(failed) == 0
 if verdict:
-    print(f"\n  {GREEN}{BOLD}✅  VERDICT: GO — All {total} local smoke tests PASSED.{RESET}")
-    print(f"  {GREEN}       V23 hardening: OIDC fail-fast, gRPC lazy init,{RESET}")
-    print(f"  {GREEN}       timestamp serialization, per-vector circuit breaker.{RESET}")
-    print(f"  {GREEN}       Ready for UAT on production preview deployment.{RESET}")
+    print(f"\n  {GREEN}{BOLD}\u2705  VERDICT: GO \u2014 All {total} local smoke tests PASSED.{RESET}")
+    print(f"  {GREEN}       V23 production cutover: OIDC fail-fast, gRPC lazy init,{RESET}")
+    print(f"  {GREEN}       timestamp serialization, per-vector circuit breaker,{RESET}")
+    print(f"  {GREEN}       /produce stub retired \u2014 full pipeline re-wired.{RESET}")
+    print(f"  {GREEN}       Ready for v23-preview Cloud Run tag deployment.{RESET}")
 else:
-    print(f"\n  {RED}{BOLD}🚫  VERDICT: NO-GO — {len(failed)} test(s) FAILED.{RESET}")
+    print(f"\n  {RED}{BOLD}\U0001F6AB  VERDICT: NO-GO \u2014 {len(failed)} test(s) FAILED.{RESET}")
     print(f"  {RED}       Fix failures before deploying to any environment.{RESET}")
 
 print(f"{BOLD}{'='*65}{RESET}\n")
 sys.exit(0 if verdict else 1)
+

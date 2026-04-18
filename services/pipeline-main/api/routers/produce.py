@@ -1,50 +1,339 @@
 """
-Pipeline-Main V23 — /produce Blueprint.
+Pipeline-Main V23 — /produce Blueprint (FULL IMPLEMENTATION).
 
-CIRCUIT BREAKER ACTIVE
-======================
-The legacy shim (from main_legacy_pipeline import _legacy_app) was importing
-the entire monolith at module load time inside the Gunicorn master process.
-This dragged all gRPC C-extensions (firestore, secretmanager, vertexai) into
-the master before fork(), causing child workers to inherit dead gRPC channels
-that deadlocked on the first .get() call.
+THE PRODUCER — 24-Hour Serper Fetch Job.
+=========================================
+Runs Intent Translation (Query Brain) + Serper Execution.
+Deduplicates against global leads collection.
+Writes fresh URLs to campaigns/{id}.unprocessed_queue.
+Does NOT call the Gemini Gate — only the Consumer does.
 
-This stub returns 200 with zero I/O so we can confirm:
-  1. Cloud Tasks can reach this service (OIDC + IAM clear)
-  2. Flask is running and routing correctly (no import deadlock)
-  3. The frozen thread was caused by the legacy import, not infrastructure
+Auth:
+  - Zero-Trust OIDC: Google-signed JWT verified by @require_tasks_oidc.
+  - Defense-in-depth: X-CloudTasks-QueueName header also enforced.
+  - Cloud Run IAM (--no-allow-unauthenticated) is the outermost gate.
 
-Once a 200 is confirmed in Cloud Logging, the full inline implementation
-will be wired in here without importing from main.py.
+V23 Enterprise Amendments:
+  1. OIDC: cryptographic JWT validation (not header-only).
+  2. GCS dump: Cloud Task enqueue (no daemon threads).
+  3. gRPC: all clients via lazy threading.Lock accessors.
 """
 from __future__ import annotations
 
-import logging
+import hashlib
 
+from google.cloud import firestore  # type: ignore[import]
 from flask import Blueprint, jsonify, request
 
-bp = Blueprint("produce", __name__)
+from core.logging import get_logger    # type: ignore[import]
+from core.clients import get_db        # type: ignore[import]
+from middleware.oidc import require_tasks_oidc  # type: ignore[import]
+from services.query_brain import generate_smart_query  # type: ignore[import]
+from services.serper_service import (  # type: ignore[import]
+    search_serper,
+    filter_serper_noise,
+    extract_root_domain,
+    SOCIAL_DOMAINS,
+)
+from services.gcs_task import enqueue_gcs_dump  # type: ignore[import]
+from services.telemetry import update_circuit_telemetry  # type: ignore[import]
 
-log = logging.getLogger("pipeline.produce")
+bp  = Blueprint("produce", __name__)
+log = get_logger("pipeline.produce")
+
+_SOCIAL_DOMAINS_PRODUCER = SOCIAL_DOMAINS
 
 
 @bp.route("/produce", methods=["POST"])
+@require_tasks_oidc
 def produce():
+    """V23 Producer — Intent Translation + Serper Execution.
+
+    TRACE log convention (matches Cloud Run log filter):
+      ``jsonPayload.message =~ "TRACE-[0-9]+"``
     """
-    CIRCUIT BREAKER — proof-of-life endpoint.
-    Zero gRPC. Zero AI. Zero database calls.
-    Returns 200 immediately to confirm infrastructure is operational.
-    """
-    queue_name = request.headers.get("X-CloudTasks-QueueName", "MISSING")
+    # ------------------------------------------------------------------
+    # TRACE-1: Payload parsing
+    # ------------------------------------------------------------------
+    log.info("TRACE-1: produce() entered. Parsing payload.", path=request.path)
+    lead_data   = request.json or {}
+    tenant_id   = lead_data.get("tenant_id")
+    campaign_id = lead_data.get("campaign_id")
+    log.info("TRACE-2: payload parsed.", tenant_id=tenant_id, campaign_id=campaign_id)
+
+    if not tenant_id or not campaign_id:
+        log.critical(
+            "produce_missing_ids",
+            tenant_id=tenant_id,
+            campaign_id=campaign_id,
+            note="ABORT: Cloud Task payload must include tenant_id and campaign_id.",
+        )
+        return jsonify({"error": "Missing campaign_id or tenant_id"}), 400
+
+    # ------------------------------------------------------------------
+    # TRACE-3/4: Campaign document fetch
+    # ------------------------------------------------------------------
+    log.info("TRACE-3: Acquiring Firestore handle (lazy init).")
+    campaign_ref = get_db().collection("campaigns").document(campaign_id)
+    log.info("TRACE-4: Firestore handle ready. Fetching campaign document.")
+
+    try:
+        campaign = campaign_ref.get().to_dict() or {}
+    except Exception as exc:
+        log.critical(
+            "produce_campaign_fetch_failed",
+            campaign_id=campaign_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        return jsonify({"error": "Firestore error fetching campaign"}), 500
+
     log.info(
-        "CIRCUIT_BREAKER_PRODUCE_HIT: request received. "
-        "queue=%s remote_addr=%s content_type=%s",
-        queue_name,
-        request.remote_addr,
-        request.content_type,
+        "TRACE-5: Campaign fetched.",
+        sourcing_vector=campaign.get("sourcing_vector"),
     )
+
+    sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
+    location        = campaign.get("location", "").strip()
+    gl              = campaign.get("gl", "").strip()
+
+    # ------------------------------------------------------------------
+    # Persona Vault field extraction (V23 Persona Vault precedence fix)
+    # ------------------------------------------------------------------
+    _persona_id   = campaign.get("persona_id", "")
+    _persona_bio  = campaign.get("persona_bio", "").strip()
+    _persona_keys = campaign.get("persona_keywords", "").strip()
+
+    bio = _persona_bio or campaign.get("bio", "")
+    if _persona_id and _persona_bio:
+        log.info(
+            "persona_injected",
+            persona_name=campaign.get("persona_name", _persona_id),
+            bio_preview=bio[:60],
+            campaign_id=campaign_id,
+        )
+
+    raw_keywords = _persona_keys or campaign.get("keywords", "")
+    if isinstance(raw_keywords, str):
+        keywords = [k.strip() for k in raw_keywords.split(",") if k.strip()]
+    else:
+        keywords = list(raw_keywords) if raw_keywords else []
+
+    # CHILD_CAMPAIGN_OVERRIDE sentinel guard
+    if bio == "CHILD_CAMPAIGN_OVERRIDE":
+        bio = (
+            campaign.get("effective_bio")
+            or campaign.get("campaign_focus")
+            or ", ".join(keywords)
+        )
+        log.info("child_campaign_override_resolved", bio_preview=bio[:80])
+
+    # Synthesise keywords from bio if empty
+    if not keywords:
+        if bio:
+            keywords = [w.strip() for w in bio.split() if len(w.strip()) > 3][:5]
+            log.info("keywords_synthesised_from_bio",
+                     count=len(keywords), campaign_id=campaign_id)
+        if not keywords:
+            log.critical(
+                "produce_empty_keywords",
+                campaign_id=campaign_id,
+                persona_id=_persona_id,
+                persona_keywords=campaign.get("persona_keywords"),
+                keywords=campaign.get("keywords"),
+                bio=campaign.get("bio"),
+                note="ABORT: No Serper query can be constructed.",
+            )
+            return jsonify({
+                "error":       "Empty keywords matrix",
+                "campaign_id": campaign_id,
+                "debug": {
+                    "persona_id":        _persona_id,
+                    "persona_keywords":  campaign.get("persona_keywords"),
+                    "keywords":          campaign.get("keywords"),
+                    "bio":               campaign.get("bio"),
+                },
+            }), 400
+
+    log.info(
+        "TRACE-6: Keywords resolved.",
+        keyword_count=len(keywords),
+        bio_len=len(bio),
+        sourcing_vector=sourcing_vector,
+    )
+
+    # ------------------------------------------------------------------
+    # TRACE-7: Query Brain (Intent Translation)
+    # ------------------------------------------------------------------
+    log.info("TRACE-7: Calling generate_smart_query() (Vertex AI).")
+    _persona_cat = (
+        campaign.get("persona_name") or campaign.get("name") or "general"
+    ).strip()
+
+    try:
+        smart_keywords = generate_smart_query(
+            keywords, tenant_id, bio, sourcing_vector,
+            persona_category=_persona_cat,
+        )
+    except Exception as exc:
+        log.critical(
+            "produce_query_brain_failed",
+            campaign_id=campaign_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        return jsonify({"error": "Query Brain failed", "details": str(exc)}), 500
+
+    log.info("TRACE-8: generate_smart_query() complete.",
+             smart_keyword_count=len(smart_keywords))
+
+    # Telemetry: bill the expected Serper calls
+    try:
+        get_db().collection("usage_metrics").document(tenant_id).set(
+            {"serper_searches": firestore.Increment(len(smart_keywords))}, merge=True
+        )
+    except Exception:
+        pass  # non-fatal
+
+    # ------------------------------------------------------------------
+    # TRACE-9: Serper Execution loop
+    # ------------------------------------------------------------------
+    raw_urls:   list[str] = []
+    snippet_db: dict[str, dict] = {}
+
+    log.info("TRACE-9: Entering Serper execution loop.",
+             keyword_count=len(smart_keywords))
+
+    for kw in smart_keywords:
+        clean_location = location if location and location.lower() != "all" else ""
+        search_query   = f"{kw} AND {clean_location}" if clean_location else kw
+
+        raw_results = search_serper(
+            search_query,
+            location=clean_location or None,
+            gl=gl or None,
+        )
+
+        # Amendment 2: enqueue GCS dump via Cloud Task (no daemon thread)
+        enqueue_gcs_dump({
+            "query":          search_query,
+            "campaign_id":    campaign_id,
+            "sourcing_vector": sourcing_vector,
+            "keyword":        kw,
+            "result_count":   len(raw_results) if raw_results else 0,
+            "raw_results":    raw_results or [],
+        }, tenant_id)
+
+        update_circuit_telemetry("serper_call")
+
+        filtered = filter_serper_noise(raw_results)
+        for r in filtered:
+            link = r.get("link")
+            if link and link not in raw_urls:
+                raw_urls.append(link)
+                snippet_db[link] = {
+                    "title":   r.get("title", ""),
+                    "snippet": r.get("snippet", ""),
+                }
+
+    fetched_count = len(raw_urls)
+    log.info("TRACE-10: Serper loop complete.", fetched_count=fetched_count)
+
+    # ------------------------------------------------------------------
+    # Snippet cache: persist social/walled-garden snippets for Consumer
+    # ------------------------------------------------------------------
+    for surl, meta in snippet_db.items():
+        s_domain    = extract_root_domain(surl)
+        is_social   = any(s_domain.endswith(d) for d in _SOCIAL_DOMAINS_PRODUCER)
+        combined    = f"{meta['title']}\n{meta['snippet']}".strip()
+        if is_social and combined:
+            try:
+                cache_key = surl.replace("/", "_")
+                get_db().collection("scraped_cache").document(cache_key).set({
+                    "url":        surl,
+                    "text":       combined,
+                    "source":     "serper_snippet",
+                    "tech_stack": [],
+                    "emails":     [],
+                    "phones":     [],
+                }, merge=True)
+            except Exception as exc:
+                log.warning("snippet_persist_failed", url=surl, error=str(exc))
+
+    # ------------------------------------------------------------------
+    # Social-aware global deduplication
+    # ------------------------------------------------------------------
+    existing_ids: set[str] = set()
+    try:
+        known_docs = (
+            get_db().collection("leads")
+            .where("tenant_id", "==", tenant_id)
+            .select(["url"])
+            .stream()
+        )
+        for doc in known_docs:
+            u = (doc.to_dict() or {}).get("url", "")
+            if u:
+                d_is_social = any(
+                    extract_root_domain(u).endswith(s)
+                    for s in _SOCIAL_DOMAINS_PRODUCER
+                )
+                dedup_key = u if d_is_social else extract_root_domain(u)
+                existing_ids.add(
+                    hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
+                )
+                existing_ids.add(u)
+    except Exception as exc:
+        log.warning("produce_dedup_query_failed", error=str(exc))
+
+    fresh_urls: list[str] = []
+    for url in raw_urls:
+        f_is_social = any(
+            extract_root_domain(url).endswith(s)
+            for s in _SOCIAL_DOMAINS_PRODUCER
+        )
+        dedup_key = url if f_is_social else extract_root_domain(url)
+        lead_hash = hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
+        if lead_hash not in existing_ids and url not in existing_ids:
+            fresh_urls.append(url)
+
+    duped_count  = fetched_count - len(fresh_urls)
+    queued_count = len(fresh_urls)
+    log.info(
+        "produce_dedup_complete",
+        campaign_id=campaign_id,
+        fetched=fetched_count,
+        deduplicated=duped_count,
+        queued=queued_count,
+    )
+
+    # ------------------------------------------------------------------
+    # Write to unprocessed_queue (additive merge, cap at 200)
+    # ------------------------------------------------------------------
+    current_queue = campaign.get("unprocessed_queue", [])
+    combined_queue = list(dict.fromkeys(current_queue + fresh_urls))[:200]
+
+    try:
+        campaign_ref.update({
+            "unprocessed_queue": combined_queue,
+            "last_produced_at":  firestore.SERVER_TIMESTAMP,
+        })
+    except Exception as exc:
+        log.critical(
+            "produce_queue_write_failed",
+            campaign_id=campaign_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        return jsonify({"error": "Queue write failed", "details": str(exc)}), 500
+
+    log.info("TRACE-DONE: produce() complete.",
+             campaign_id=campaign_id, queue_depth=len(combined_queue))
+
     return jsonify({
-        "status":  "circuit_breaker_ok",
-        "message": "Proof-of-life: infrastructure is clear. Pipeline logic is stubbed.",
-        "queue":   queue_name,
+        "status":        "produced",
+        "fetched":       fetched_count,
+        "deduplicated":  duped_count,
+        "queued":        queued_count,
+        "queue_depth":   len(combined_queue),
     }), 200
