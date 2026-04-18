@@ -34,7 +34,7 @@ from google.cloud.firestore_v1.transaction import transactional as _firestore_tr
 
 from core.config import (  # type: ignore[import]
     PROJECT_ID, LOCATION, QUEUE, ORCHESTRATOR_URL, SCRAPER_HEAVY_URL,
-    SERPER_API_KEY_NAME, VELOCITY_THRESHOLD,
+    SERPER_API_KEY_NAME, VELOCITY_THRESHOLD, ORCHESTRATOR_SA_EMAIL,
 )
 from core.clients import get_db, get_tasks_client, get_sm_client, get_serper_key  # type: ignore[import]
 from core.logging import get_logger                                 # type: ignore[import]
@@ -98,10 +98,19 @@ def _acquire_lead_lock(transaction, lock_ref, now_utc):
 
 def _settle_credit(tenant_id: str, outcome: str, count: int = 1, lead_id: str = ""):
     """
-    Non-blocking credit settlement via Cloud Task.
+    Non-blocking credit settlement via Cloud Task to orchestrator.
     lead_id is the idempotency key — the orchestrator atomically stamps
     credit_settled=True before applying the wallet Increment.
     Falls back to direct shard write if ORCHESTRATOR_URL is unset.
+
+    SF-012 FIX: Added OIDC_token to the Cloud Task http_request.
+    The orchestrator's /api/internal/credits/settle is protected by
+    @require_tasks_oidc which cryptographically verifies a Google-signed JWT.
+    Without OIDC_token, the orchestrator returns HTTP 401 and the credit
+    task fails silently (non-fatal catch) — wallet never increments.
+    With OIDC_token, Cloud Tasks mints a fresh OIDC JWT signed by
+    ORCHESTRATOR_SA_EMAIL and attaches it as the Authorization: Bearer header
+    before dispatching the HTTP request to the orchestrator.
     """
     if not ORCHESTRATOR_URL:
         try:
@@ -115,7 +124,7 @@ def _settle_credit(tenant_id: str, outcome: str, count: int = 1, lead_id: str = 
         return
 
     try:
-        from google.cloud import tasks_v2 as _tv2  # static import — no dynamic __import__
+        from google.cloud import tasks_v2 as _tv2
         tc         = get_tasks_client()
         queue_path = tc.queue_path(PROJECT_ID, LOCATION, QUEUE)
         body       = json.dumps({
@@ -124,16 +133,38 @@ def _settle_credit(tenant_id: str, outcome: str, count: int = 1, lead_id: str = 
             "count":     count,
             "lead_id":   lead_id,
         }).encode()
-        tc.create_task(parent=queue_path, task={
-            "http_request": {
-                "http_method": _tv2.HttpMethod.POST,
-                "url":         f"{ORCHESTRATOR_URL}/api/internal/credits/settle",
-                "headers":     {"Content-Type": "application/json"},
-                "body":        body,
+
+        # Build the http_request dict
+        settle_url = f"{ORCHESTRATOR_URL}/api/internal/credits/settle"
+        http_req: dict = {
+            "http_method": _tv2.HttpMethod.POST,
+            "url":         settle_url,
+            "headers":     {"Content-Type": "application/json"},
+            "body":        body,
+        }
+
+        # SF-012 FIX: Attach OIDC token so orchestrator @require_tasks_oidc passes.
+        # ORCHESTRATOR_SA_EMAIL must be the service account that has Cloud Run
+        # Invoker permissions on the orchestrator service. If not configured,
+        # we log a warning but still enqueue (task will 401 at orchestrator but
+        # won't crash the pipeline).
+        if ORCHESTRATOR_SA_EMAIL:
+            http_req["oidc_token"] = {
+                "service_account_email": ORCHESTRATOR_SA_EMAIL,
+                "audience":              settle_url,
             }
-        })
+        else:
+            log.warning(
+                "settle_credit_oidc_missing",
+                tenant_id=tenant_id,
+                note="ORCHESTRATOR_SA_EMAIL not set. Cloud Task will deliver without "
+                     "OIDC token. Orchestrator will reject with 401 if OIDC enforced."
+            )
+
+        tc.create_task(parent=queue_path, task={"http_request": http_req})
         log.info("settle_credit_enqueued", tenant_id=tenant_id,
-                 outcome=outcome, lead_id=(lead_id[:12] if lead_id else "N/A"))
+                 outcome=outcome, lead_id=(lead_id[:12] if lead_id else "N/A"),
+                 oidc_configured=bool(ORCHESTRATOR_SA_EMAIL))
     except Exception as e:
         log.warning("settle_credit_enqueue_failed", tenant_id=tenant_id,
                     error=str(e), note="Non-fatal — pipeline continues.")

@@ -254,16 +254,26 @@ def produce():
     # ------------------------------------------------------------------
     existing_ids: set[str] = set()
     try:
-        # BUG-PR1 FIX: Deprecated positional .where() → FieldFilter.
-        # Positional where() is deprecated in google-cloud-firestore >= 2.13.
-        # Also: no limit on this query — could scan entire leads collection for busy
-        # tenants. Consider pagination if leads grow beyond 10k.
-        known_docs = (
+        # SF-005 FIX: Added .limit(500) to prevent full leads collection scan.
+        # For tenants with >500 leads, only the 500 most recently indexed URLs
+        # are checked. Fresh URLs beyond the 500-doc window may be re-queued.
+        # Acceptable trade-off: occasional re-scrape of an old URL is far safer
+        # than a minutes-long Firestore scan that blocks the producer worker.
+        # TODO(SF-005): Implement cursor-based pagination when tenant leads > 5000.
+        _DEDUP_SCAN_LIMIT = 500
+        known_docs = list(
             get_db().collection("leads")
             .where(filter=FieldFilter("tenant_id", "==", tenant_id))
             .select(["url"])
+            .limit(_DEDUP_SCAN_LIMIT)
             .stream()
         )
+        if len(known_docs) == _DEDUP_SCAN_LIMIT:
+            log.warning("produce_dedup_scan_cap_hit",
+                        tenant_id=tenant_id,
+                        limit=_DEDUP_SCAN_LIMIT,
+                        note="Dedup scan capped. Tenant may have >500 leads. "
+                             "Implement cursor pagination (SF-005) to prevent re-scrape.")
         for doc in known_docs:
             u = (doc.to_dict() or {}).get("url", "")
             if u:

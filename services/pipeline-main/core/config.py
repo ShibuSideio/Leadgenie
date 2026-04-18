@@ -22,6 +22,10 @@ LOCATION: str = os.environ.get("LOCATION", "asia-south1")
 # ---------------------------------------------------------------------------
 QUEUE: str = os.environ.get("QUEUE", "lead-pipeline-queue")
 ORCHESTRATOR_URL: str = os.environ.get("ORCHESTRATOR_URL", "")
+# SF-012: Service account email the pipeline uses to mint OIDC tokens
+# when calling the orchestrator's /credits/settle endpoint via Cloud Tasks.
+# Must match the Cloud Run invoker service account bound to the orchestrator.
+ORCHESTRATOR_SA_EMAIL: str = os.environ.get("ORCHESTRATOR_SA_EMAIL", "")
 SCRAPER_HEAVY_URL: str = os.environ.get(
     "SCRAPER_HEAVY_URL",
     "https://scraper-heavy-abc.a.run.app/scrape",
