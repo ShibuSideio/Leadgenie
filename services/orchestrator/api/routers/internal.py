@@ -531,27 +531,58 @@ def cron_sweep():
                     audit_trail.append(
                         f"⏸ CONSUMER skipped {campaign_id}: queue empty — drip timer advancing"
                     )
+                    # Queue is empty — safe to advance clock (no task was dispatched,
+                    # so there is nothing to lose by advancing to the next interval).
+                    _dispatch_ok = True  # treat empty-queue skip as success for clock gate
                 else:
-                    jitter  = random.randint(1, 290)
-                    sched_t = ts_pb2.Timestamp()
-                    sched_t.FromDatetime(now_utc + datetime.timedelta(seconds=jitter))
-                    task    = _oidc_task(consume_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
-                    task["schedule_time"] = sched_t
-                    tasks_client.create_task(request={"parent": queue_path, "task": task})
-                    consume_dispatched += 1
-                    log.info("consume_task_dispatched",
-                             campaign_id=campaign_id, tenant_id=tenant_id,
-                             queue_depth=queue_depth, jitter_s=jitter)
-                    audit_trail.append(f"⚙️ CONSUMER queued for {campaign_id} (depth={queue_depth})")
+                    _dispatch_ok = False  # tracks whether create_task() succeeded
+                    try:
+                        jitter  = random.randint(1, 290)
+                        sched_t = ts_pb2.Timestamp()
+                        sched_t.FromDatetime(now_utc + datetime.timedelta(seconds=jitter))
+                        task    = _oidc_task(consume_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
+                        task["schedule_time"] = sched_t
+                        tasks_client.create_task(request={"parent": queue_path, "task": task})
+                        _dispatch_ok = True
+                        consume_dispatched += 1
+                        log.info("consume_task_dispatched",
+                                 campaign_id=campaign_id, tenant_id=tenant_id,
+                                 queue_depth=queue_depth, jitter_s=jitter)
+                        audit_trail.append(f"⚙️ CONSUMER queued for {campaign_id} (depth={queue_depth})")
+                    except Exception as drip_task_err:
+                        # ── S5.4 AMENDMENT (consumer path — 2026-04-19) ─────────────────
+                        # Previously: finally: block advanced next_drip_due unconditionally.
+                        # Bug: Cloud Tasks 429/503/PermissionDenied → clock advanced anyway
+                        # → 4-hour silent data loss window (mirror of producer bug S5.4).
+                        # Fix: _dispatch_ok=False holds the clock. Campaign retries in 5 min.
+                        log.error(
+                            "consumer_dispatch_failed",
+                            campaign_id=campaign_id,
+                            tenant_id=tenant_id,
+                            error=str(drip_task_err),
+                            exc_info=True,
+                            consume_url=consume_url,
+                            queue_depth=queue_depth,
+                            action="Clock NOT advanced. Campaign will retry on next sweep.",
+                        )
+                        audit_trail.append(f"❌ CONSUMER DISPATCH ERROR {campaign_id}: {drip_task_err}")
+
+            else:
+                _dispatch_ok = False  # drip not due — clock must not advance
 
         except Exception as drip_err:
-            log.error("consumer_dispatch_failed", campaign_id=campaign_id,
+            _dispatch_ok = False
+            log.error("consumer_sweep_error", campaign_id=campaign_id,
                       tenant_id=tenant_id, error=str(drip_err), exc_info=True)
-            audit_trail.append(f"❌ CONSUMER ERROR {campaign_id}: {drip_err}")
-        finally:
-            # Clock MUST advance regardless of any exception above.
-            # datetime → ISO-8601 string: Firestore-safe across all SDK versions.
-            # This finally: is now bulletproof — nothing above can skip it.
+            audit_trail.append(f"❌ CONSUMER SWEEP ERROR {campaign_id}: {drip_err}")
+
+        # ── Clock advance: ONLY on successful dispatch (S5.4 consumer amendment) ──
+        # ARCHITECTURE FIX (S5.4 — consumer path — 2026-04-19):
+        #   Previously a finally: block advanced next_drip_due unconditionally,
+        #   identical to the producer bug fixed in commit f714b3c.
+        #   Fix: _dispatch_ok gates the write. On failure, clock is held at its
+        #   current value — the next 5-minute sweep retries dispatch.
+        if drip_due and _dispatch_ok:
             try:
                 _next_drip = (now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H)).isoformat()
                 camp_doc.reference.update({
@@ -563,6 +594,13 @@ def cron_sweep():
             except Exception as ts_err:
                 log.error("drip_timestamp_update_failed", campaign_id=campaign_id,
                           error=str(ts_err), exc_info=True)
+        elif drip_due and not _dispatch_ok:
+            log.warning(
+                "drip_clock_held",
+                campaign_id=campaign_id,
+                reason="consumer task dispatch failed — clock intentionally NOT advanced",
+                action="Campaign will be retried by the next scheduled sweep.",
+            )
 
 
     # ── Zombie Lead Recovery ─────────────────────────────────────────────────
