@@ -1,8 +1,11 @@
 # =============================================================================
-# Pipeline-main — Direct-dependency pins only (V23 final 2026-04-17)
-# Base image: python:3.10-slim
+# Pipeline-main — Direct-dependency pins only (V23 final 2026-04-18)
+# Base image: python:3.11-slim
 #
-# Same philosophy as orchestrator/requirements.txt.
+# V23 additions (2026-04-18):
+#   + google-auth: required by middleware/oidc.py for JWT decode + certs fetch
+#   + requests: google-auth transport dependency (HTTP cert fetch)
+#   + vertexai: explicit alias for google-cloud-aiplatform (resolves 'import vertexai')
 # =============================================================================
 
 # ── Web framework ──────────────────────────────────────────────────────────────
@@ -21,7 +24,8 @@ google-cloud-storage>=2.14.0
 google-cloud-secret-manager>=2.16.2
 google-cloud-tasks>=2.16.3
 
-# ── Vertex AI ─────────────────────────────────────────────────────────────────
+# —— Vertex AI —————————————————————————————————————————————————————————————————————————————————
+vertexai>=1.49.0
 google-cloud-aiplatform>=1.45.0
 
 # ── gRPC — floor only ─────────────────────────────────────────────────────────
@@ -31,7 +35,11 @@ grpcio>=1.60.0
 httpx>=0.26.0
 beautifulsoup4>=4.12.0
 
-# ── Crypto ────────────────────────────────────────────────────────────────────
+# —— Auth (OIDC middleware — V23 Zero-Trust) —————————————————————————————————————————————————
+requests>=2.31.0
+google-auth>=2.28.0
+
+# —— Crypto —————————————————————————————————————————————————————————————————————————————————
 cryptography>=38.0.0
 
 # ── Data validation ───────────────────────────────────────────────────────────

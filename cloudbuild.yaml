@@ -1,10 +1,12 @@
 # =============================================================================
 # cloudbuild.yaml — Sideio Leads V23 Enterprise Build Pipeline
-# Deploy trigger: 2026-04-17 | V23 Modular Refactor
+# Deploy trigger: 2026-04-18 | V23 Production Cutover (commit 337f091)
 # Changes from V22:
-#   + Phase 0b: Python V23 smoke test gate (50 tests must pass before build)
+#   + Phase 0b: Python V23 smoke test gate (66 tests must pass before build)
 #   + Phase 3b': orchestrator v23-preview --no-traffic revision deploy
-#   + requirements.txt: flask-cors, gunicorn 22, cryptography 42, vertexai alias
+#   + Phase 3b'': pipeline-main v23-preview --no-traffic revision deploy (NEW)
+#   + requirements.txt: vertexai alias, google-auth, requests (OIDC middleware)
+#   + deploy-pipeline-main: PIPELINE_MAIN_URL + PIPELINE_SA_EMAIL env vars injected
 # =============================================================================
 # Architecture:
 #   Phase 0a: Frontend JS syntax gate
@@ -102,7 +104,10 @@ steps:
   - |
     set -eo pipefail
     echo "[GATE PY] Installing test dependencies..."
-    pip install --no-cache-dir --prefer-binary cryptography flask --quiet
+    pip install --no-cache-dir --prefer-binary \
+      cryptography flask flask-cors \
+      google-auth requests \
+      --quiet
 
     # Generate a fresh, disposable Fernet key ONLY for the smoke-test run.
     # This is NOT the production key. The real key lives in Secret Manager
@@ -116,10 +121,10 @@ steps:
     export PROJECT_ID="$PROJECT_ID"
     export LOCATION="asia-south1"
     export PYTHONIOENCODING=utf-8
-    echo "[GATE PY] Running V23 local smoke tests (50 cases)..."
+    echo "[GATE PY] Running V23 local smoke tests (66 cases)..."
     cd services/orchestrator
     python local_smoke_tests.py
-    echo "[GATE PY] All 50 smoke tests PASSED. Build proceeding."
+    echo "[GATE PY] All 66 smoke tests PASSED. Build proceeding."
 
 # Barrier step: both gates must pass before any Docker build starts
 - id: 'gate-passed'
@@ -401,8 +406,44 @@ steps:
   - --timeout=540
   - --no-allow-unauthenticated
   - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
-  - --update-env-vars=PROJECT_ID=$PROJECT_ID,GCS_FIREHOSE_BUCKET=sideio-raw-firehose-lake
+  # V23 OIDC env vars: PIPELINE_MAIN_URL is the service's own URL (audience for JWT).
+  # PIPELINE_SA_EMAIL is the Cloud Tasks SA email the OIDC middleware validates.
+  # These are injected here so the v23-preview revision picks them up on cold start.
+  - --update-env-vars=PROJECT_ID=$PROJECT_ID,LOCATION=asia-south1,CB_WINDOW_MINUTES=15,PIPELINE_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,PIPELINE_MAIN_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app
   - --quiet
+
+# =============================================================================
+# PHASE 3b'': V23 PREVIEW DEPLOY — lead-pipeline-main (NO TRAFFIC)
+# Deploys the V23 modular pipeline using main_v23:app (already the Dockerfile CMD).
+# Tagged v23-preview so UAT Cloud Tasks can be routed to exact revision URL.
+# Traffic shift: gcloud run services update-traffic lead-pipeline-main --to-tags=v23-preview=100
+# =============================================================================
+
+- id: 'deploy-pipeline-main-v23-preview'
+  waitFor: ['deploy-pipeline-main']
+  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+  entrypoint: bash
+  args:
+  - '-c'
+  - |
+    set -eo pipefail
+    echo "[V23-PREVIEW] Deploying pipeline-main v23-preview revision (no traffic)..."
+    gcloud run deploy lead-pipeline-main \
+      --image=gcr.io/$PROJECT_ID/lead-pipeline-main:$COMMIT_SHA \
+      --region=asia-south1 \
+      --platform=managed \
+      --no-traffic \
+      --tag=v23-preview \
+      --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com \
+      --update-env-vars=PROJECT_ID=$PROJECT_ID,LOCATION=asia-south1,CB_WINDOW_MINUTES=15,PIPELINE_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,PIPELINE_MAIN_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app \
+      --quiet
+    PREVIEW_URL=$(gcloud run services describe lead-pipeline-main \
+      --region=asia-south1 --project=$PROJECT_ID \
+      --format='value(status.traffic[].url)' 2>/dev/null | grep v23-preview || echo 'check Cloud Console')
+    echo "[V23-PREVIEW] lead-pipeline-main preview tagged. URL: $$PREVIEW_URL"
+    echo "[V23-PREVIEW] After UAT gates pass, run:"
+    echo "  gcloud run services update-traffic lead-pipeline-main --to-tags=v23-preview=100 --region=asia-south1"
+    echo "[V23-PREVIEW] Commit: $COMMIT_SHA"
 
 - id: 'deploy-scraper-heavy'
   waitFor: ['push-scraper-heavy']
