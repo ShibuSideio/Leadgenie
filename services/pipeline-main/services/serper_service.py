@@ -24,7 +24,7 @@ from tenacity import (
 
 from core.logging import get_logger   # type: ignore[import]
 from core.config import SERPER_API_KEY_NAME  # type: ignore[import]
-from core.clients import get_sm_client  # type: ignore[import]
+from core.clients import get_sm_client, get_serper_key  # type: ignore[import]
 
 log = get_logger("pipeline.serper")
 
@@ -89,17 +89,13 @@ def filter_serper_noise(serper_results: list) -> list:
 
 
 def _get_serper_api_key() -> str:
-    """Fetch Serper API key from Secret Manager (lazy, thread-safe via get_sm_client)."""
-    response = get_sm_client().access_secret_version(
-        request={"name": SERPER_API_KEY_NAME}
-    )
-    key = response.payload.data.decode("UTF-8").strip()
-    if not key:
-        raise ValueError(
-            f"CRITICAL: SERPER_API_KEY resolved to empty string from "
-            f"'{SERPER_API_KEY_NAME}'. Verify secret exists in GCP Secret Manager."
-        )
-    return key
+    """Fetch Serper API key — uses process-lifetime cache from core.clients.
+
+    SF-004 fix: previously called Secret Manager on every invocation.
+    get_serper_key() caches the result for the lifetime of the container,
+    eliminating 40+ Secret Manager RPCs per dispatch task batch.
+    """
+    return get_serper_key(SERPER_API_KEY_NAME)
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,9 @@ log = get_logger("pipeline.gemini")
 # Core Gemini caller
 # ---------------------------------------------------------------------------
 
+_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+
 def call_gemini_2_5(
     prompt: str,
     expect_json: bool = True,
@@ -58,7 +61,7 @@ def call_gemini_2_5(
     from google.api_core.exceptions import ResourceExhausted  # type: ignore[import]
 
     model = GenerativeModel(
-        "gemini-2.5-flash",
+        _GEMINI_MODEL,  # SF-014: configurable via GEMINI_MODEL env var
         system_instruction=system_instruction,
     )
     config = (
@@ -154,8 +157,18 @@ Snippets: {json.dumps(snippets)}"""
         if not isinstance(tiered, list):
             raise ValueError("Expected list from tiering gate")
     except Exception as exc:
-        log.warning("pre_filter_gemini_failed", error=str(exc))
-        return {"High": [], "Medium": []}
+        # SF-010 FIX: Fail-open — treat ALL URLs as High-tier.
+        # Previously returned {"High": [], "Medium": []} which caused the
+        # dispatch.py outer try/except to miss the failure (no raise) and
+        # silently drop the entire batch after the destructive queue pop.
+        log.warning(
+            "pre_filter_gemini_failed_fail_open",
+            error=str(exc),
+            url_count=len(snippets),
+            action="Treating all URLs as High-tier to prevent silent batch drop.",
+        )
+        return {"High": [s.get("link", "") for s in snippets if s.get("link", "").startswith("http")],
+                "Medium": []}
 
     output: dict[str, list] = {"High": [], "Medium": []}
     for item in tiered:

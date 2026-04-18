@@ -40,10 +40,19 @@ from core.logging import get_logger  # type: ignore[import]
 log = get_logger("pipeline.middleware.oidc")
 
 # ---------------------------------------------------------------------------
-# Environment configuration
+# Environment configuration — read LAZILY at request time, not at import time.
+# Module-level os.environ.get() is evaluated ONCE when gunicorn imports the
+# module.  If Cloud Run injects env vars after worker fork, the values are
+# empty strings and every request returns HTTP 401.
+# Solution: read from os.environ inside the request path.
 # ---------------------------------------------------------------------------
-_PIPELINE_SA_EMAIL: str = os.environ.get("PIPELINE_SA_EMAIL", "")
-_PIPELINE_MAIN_URL: str = os.environ.get("PIPELINE_MAIN_URL", "")
+def _pipeline_main_url() -> str:
+    """Return PIPELINE_MAIN_URL, read lazily at request time."""
+    return os.environ.get("PIPELINE_MAIN_URL", "")
+
+def _pipeline_sa_email() -> str:
+    """Return PIPELINE_SA_EMAIL, read lazily at request time."""
+    return os.environ.get("PIPELINE_SA_EMAIL", "")
 
 # ---------------------------------------------------------------------------
 # Token verification
@@ -64,7 +73,8 @@ def _verify_token(token: str) -> tuple[bool, str]:
         ``(True, "")`` on success.
         ``(False, reason_string)`` on any failure.
     """
-    if not _PIPELINE_MAIN_URL:
+    audience = _pipeline_main_url()
+    if not audience:
         log.critical(
             "oidc_audience_missing",
             message="PIPELINE_MAIN_URL env var not set — cannot validate OIDC audience.",
@@ -77,7 +87,7 @@ def _verify_token(token: str) -> tuple[bool, str]:
         from google.auth.transport import requests as _g_requests  # type: ignore[import]
 
         request_obj = _g_requests.Request()
-        claims = _id_token.verify_oauth2_token(token, request_obj, _PIPELINE_MAIN_URL)
+        claims = _id_token.verify_oauth2_token(token, request_obj, audience)
 
         # Validate issuer
         if claims.get("iss") not in (
@@ -87,12 +97,13 @@ def _verify_token(token: str) -> tuple[bool, str]:
             return False, f"Invalid issuer: {claims.get('iss')}"
 
         # Validate service account email (if configured)
-        if _PIPELINE_SA_EMAIL:
+        sa_email = _pipeline_sa_email()
+        if sa_email:
             token_email = claims.get("email", "")
-            if token_email != _PIPELINE_SA_EMAIL:
+            if token_email != sa_email:
                 log.warning(
                     "oidc_wrong_service_account",
-                    expected=_PIPELINE_SA_EMAIL,
+                    expected=sa_email,
                     received=token_email,
                 )
                 return False, f"Wrong service account: {token_email}"

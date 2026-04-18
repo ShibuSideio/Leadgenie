@@ -109,6 +109,7 @@ def _settle_credit(tenant_id: str, outcome: str, count: int = 1, lead_id: str = 
         return
 
     try:
+        from google.cloud import tasks_v2 as _tv2  # static import — no dynamic __import__
         tc         = get_tasks_client()
         queue_path = tc.queue_path(PROJECT_ID, LOCATION, QUEUE)
         body       = json.dumps({
@@ -119,7 +120,7 @@ def _settle_credit(tenant_id: str, outcome: str, count: int = 1, lead_id: str = 
         }).encode()
         tc.create_task(parent=queue_path, task={
             "http_request": {
-                "http_method": __import__("google.cloud.tasks_v2", fromlist=["HttpMethod"]).HttpMethod.POST,
+                "http_method": _tv2.HttpMethod.POST,
                 "url":         f"{ORCHESTRATOR_URL}/api/internal/credits/settle",
                 "headers":     {"Content-Type": "application/json"},
                 "body":        body,

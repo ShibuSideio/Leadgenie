@@ -271,8 +271,13 @@ def cron_sweep():
             f"⚡ Circuit breaker ACTIVE: {sorted(blocked_vectors)} blocked. "
             f"Serper={serper_rate*100:.1f}% | Scraper={scraper_rate*100:.1f}%"
         )
-    tasks_client  = tv2.CloudTasksClient()
-    queue_path    = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+    # SF-009 FIX: Use DCL singleton instead of constructing a new CloudTasksClient
+    # on every sweep invocation. New clients = new gRPC channels = FD leak.
+    # After 144 sweeps (12h), the container's FD limit (~1024) is breached and
+    # create_task() fails with OSError: Too many open files.
+    from core.clients import get_tasks_client as _get_tasks_client
+    tasks_client = _get_tasks_client()
+    queue_path   = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
 
     produce_url = f"{base_url}/produce"
     consume_url = f"{base_url}/dispatch"

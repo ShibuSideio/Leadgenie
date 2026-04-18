@@ -200,5 +200,7 @@ def init_vertex() -> None:
     if not _vertex_initialised:
         with _vertex_lock:
             if not _vertex_initialised:
-                vertexai.init(location="us-central1")
+                _project  = os.environ.get("PROJECT_ID", "trendpulse-app-2025")
+                _location = os.environ.get("LOCATION", "asia-south1")
+                vertexai.init(project=_project, location=_location)
                 _vertex_initialised = True
