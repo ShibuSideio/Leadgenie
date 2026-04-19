@@ -17,6 +17,7 @@ Routes:
 from __future__ import annotations
 
 import datetime
+import math
 
 from flask import Blueprint, jsonify, request
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -26,7 +27,12 @@ from core.config import PROJECT_ID  # type: ignore[import]
 from core.auth import require_auth, require_super_admin  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
 
-db = get_db()
+# ── Lazy DB accessor ────────────────────────────────────────────────────────────
+# HOTFIX: do NOT call get_db() at module scope — it fires gRPC client init
+# before Gunicorn forks workers, causing mutex corruption in child processes.
+# All route handlers and _sanitize use _db() which initialises lazily.
+def _db():
+    return get_db()
 
 bp = Blueprint("l0_admin", __name__)
 log = get_logger("orchestrator.v23.l0_admin")
@@ -41,13 +47,39 @@ except ImportError:
     _OPS_CACHE_TTL = 300
 
 
+def _safe_val(v):
+    """Recursively make a Firestore field value JSON-safe.
+
+    Handles:
+      - DatetimeWithNanoseconds / datetime  -> ISO-8601 str
+      - float NaN / Infinity               -> None  (JSON has no NaN)
+      - dict / list                        -> recurse
+      - everything else                    -> pass-through
+    """
+    if v is None:
+        return None
+    if isinstance(v, datetime.datetime):
+        return v.isoformat()
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+    if isinstance(v, dict):
+        return {k2: _safe_val(v2) for k2, v2 in v.items()}
+    if isinstance(v, list):
+        return [_safe_val(i) for i in v]
+    # Firestore GeoPoint, DocumentReference, etc. → stringify
+    if hasattr(v, 'isoformat'):
+        return v.isoformat()
+    return v
+
+
 def _sanitize(doc) -> dict:
-    data = doc.to_dict() or {}
-    data["id"] = doc.id
-    for k, v in data.items():
-        if hasattr(v, "timestamp"):
-            data[k] = v.isoformat()
-    return data
+    """Convert a Firestore DocumentSnapshot to a JSON-safe dict."""
+    raw = doc.to_dict() or {}
+    raw["id"] = doc.id
+    # Build a new dict (do NOT mutate while iterating)
+    return {k: _safe_val(v) for k, v in raw.items()}
 
 
 # =============================================================================
@@ -58,6 +90,7 @@ def _sanitize(doc) -> dict:
 @require_super_admin
 def get_l0_telemetry(uid, tenant_id, user_role):
     from google.cloud import firestore  # noqa: F401 (used for Query)
+    db = _db()
     macro_totals: dict = {}
     for st in ["new", "contacted", "ignored", "failed", "processing", "completed"]:
         res = db.collection("leads").where(filter=FieldFilter("status", "==", st)).count().get()
@@ -69,12 +102,11 @@ def get_l0_telemetry(uid, tenant_id, user_role):
         u_data = user_doc.to_dict() or {}
         t_id   = u_data.get("tenant_id", user_doc.id)
         leads_count = db.collection("leads").where(filter=FieldFilter("tenant_id", "==", t_id)).count().get()[0][0].value
-        wallet    = u_data.get("wallet", {})
+        wallet    = u_data.get("wallet", {}) or {}
         shard_sum = sum(
             s.to_dict().get("consumed_credits", 0)
             for s in db.collection("users").document(t_id).collection("wallet_shards").stream()
         )
-        # Serialize only JSON-safe scalars — raw Timestamps crash jsonify
         t_info = {
             "tenant_id":              t_id,
             "email":                  u_data.get("email", ""),
@@ -101,11 +133,12 @@ def get_l0_telemetry(uid, tenant_id, user_role):
 @require_auth
 @require_super_admin
 def get_l0_trends(uid, tenant_id, user_role):
+    db = _db()
     users_stream = db.collection("users").stream()
-    user_map = {u.id: u.to_dict().get("email", "Unknown") for u in users_stream}
+    user_map = {u.id: (u.to_dict() or {}).get("email", "Unknown") for u in users_stream}
     trends = []
     for camp in db.collection("campaigns").stream():
-        c = camp.to_dict()
+        c = camp.to_dict() or {}
         t_id = c.get("tenant_id")
         if not t_id or c.get("status", "paused") != "active":
             continue
@@ -128,11 +161,12 @@ def get_l0_trends(uid, tenant_id, user_role):
 @require_auth
 @require_super_admin
 def get_l0_users(uid, tenant_id, user_role):
+    db = _db()
     docs = db.collection("users").limit(100).stream()
     results = [_sanitize(doc) for doc in docs]
     for res in results:
         usage_doc = db.collection("usage_metrics").document(res.get("tenant_id", "")).get()
-        res["usage_metrics"] = usage_doc.to_dict() if usage_doc.exists else {}
+        res["usage_metrics"] = {k: _safe_val(v) for k, v in (usage_doc.to_dict() or {}).items()} if usage_doc.exists else {}
     return jsonify({"status": "success", "data": results}), 200
 
 
@@ -148,7 +182,7 @@ def suspend_user(uid, tenant_id, user_role):
     target_state = data.get("is_active", False)
     if not target_uid:
         return jsonify({"error": "Missing uid"}), 400
-    db.collection("users").document(target_uid).update({"is_active": target_state})
+    _db().collection("users").document(target_uid).update({"is_active": target_state})
     return jsonify({"status": "success", "message": "Suspension toggled."}), 200
 
 
@@ -163,7 +197,7 @@ def mint_credits(uid, tenant_id, user_role, target_tenant):
     amount = float(request.json.get("amount", 0)) if request.json else 0
     if amount <= 0:
         return jsonify({"error": "Invalid mint amount"}), 400
-    db.collection("users").document(target_tenant).update(
+    _db().collection("users").document(target_tenant).update(
         {"wallet.allocated_credits": firestore.Increment(int(amount))}
     )
     log.info("credits_minted", target=target_tenant, amount=int(amount))
@@ -182,7 +216,7 @@ def approve_user(uid, tenant_id, user_role, target_tenant):
     amount  = int(payload.get("amount", 20000))
     days    = int(payload.get("days", 180))
     expiry  = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
-    db.collection("users").document(target_tenant).update({
+    _db().collection("users").document(target_tenant).update({
         "approval_status":         "approved",
         "beta_expiry":             expiry,
         "wallet.allocated_credits": firestore.Increment(amount),
@@ -267,59 +301,72 @@ def get_system_health(uid, tenant_id, user_role):
 @require_super_admin
 def get_shadow_ledger(uid, tenant_id, user_role):
     """
-    Returns the most recent rejected leads for L0 review.
+    Returns rejected leads for L0 RLHF review.
 
-    Fix notes:
-      - Removed .order_by("updatedAt") from the Firestore query to avoid
-        the composite-index requirement (status + updatedAt index not deployed).
-        Results are sorted Python-side after fetch instead.
-      - All dict field accesses use .get() with safe defaults to handle
-        legacy lead documents that predate field standardization (KeyError fix).
+    Hardening notes (V23.3):
+      - Uses _db() lazy accessor (no pre-fork gRPC init).
+      - Queries BOTH status=="rejected" AND status=="ignored" because
+        the dispatcher may write either value depending on the rejection path.
+      - Uses _safe_val() to guarantee all Firestore types are JSON-serializable
+        (DatetimeWithNanoseconds, NaN floats, nested dicts all handled).
+      - No server-side ORDER BY — avoids composite index requirement.
+        Python-side sort on updatedAt instead.
     """
     limit = min(int(request.args.get("limit", 200)), 500)
+    db = _db()
     try:
-        # Fetch without server-side sort to avoid composite index requirement.
-        # Python-side sort on updatedAt (with None-safe key) is equivalent.
-        rej_docs = list(
-            db.collection("leads")
-              .where(filter=FieldFilter("status", "==", "rejected"))
-              .limit(limit)
-              .stream()
-        )
+        # Query rejected leads. Some pipelines write "ignored" instead of
+        # "rejected" — fetch both and merge to guarantee coverage.
+        def _fetch_status(status, lim):
+            return list(
+                db.collection("leads")
+                  .where(filter=FieldFilter("status", "==", status))
+                  .limit(lim)
+                  .stream()
+            )
+
+        rej_docs  = _fetch_status("rejected", limit)
+        # If the rejected bucket is empty, also try "ignored" (alternative status)
+        if not rej_docs:
+            rej_docs = _fetch_status("ignored", limit)
+        else:
+            # Top up with ignored leads if capacity remains
+            remaining = limit - len(rej_docs)
+            if remaining > 0:
+                rej_docs += _fetch_status("ignored", remaining)
 
         leads_out = []
         for doc in rej_docs:
             d = doc.to_dict() or {}
 
-            # Safe Timestamp serialization — field may be absent on legacy docs
-            updated_raw = d.get("updatedAt")
-            created_raw = d.get("createdAt")
-            updated_iso = updated_raw.isoformat() if updated_raw and hasattr(updated_raw, "isoformat") else None
-            created_iso = created_raw.isoformat() if created_raw and hasattr(created_raw, "isoformat") else None
+            # Use _safe_val() for all fields — handles Timestamps, NaN, nested dicts
+            raw_score = d.get("score")
+            score     = _safe_val(raw_score)  # NaN/Inf → None; Timestamp → ISO str
 
             leads_out.append({
                 "id":                  doc.id,
-                "source_url":          d.get("source_url") or d.get("url") or "",
-                "base_path":           d.get("base_path", ""),
-                "company_domain":      d.get("company_domain", ""),
-                "domain":              d.get("domain", ""),
-                "score":               d.get("score"),
-                "tenant_id":           d.get("tenant_id", ""),
-                "campaign_id":         d.get("campaign_id", ""),
-                "rejection_reason":    d.get("rejection_reason", ""),
-                "ai_rejection_reason": d.get("ai_rejection_reason") or d.get("rejection_signal", ""),
-                "status":              d.get("status", "rejected"),
-                "updatedAt":           updated_iso,
-                "createdAt":           created_iso,
+                "source_url":          str(d.get("source_url") or d.get("url") or ""),
+                "base_path":           str(d.get("base_path") or ""),
+                "company_domain":      str(d.get("company_domain") or ""),
+                "domain":              str(d.get("domain") or ""),
+                "score":               score,
+                "tenant_id":           str(d.get("tenant_id") or ""),
+                "campaign_id":         str(d.get("campaign_id") or ""),
+                "rejection_reason":    str(d.get("rejection_reason") or ""),
+                "ai_rejection_reason": str(d.get("ai_rejection_reason") or d.get("rejection_signal") or ""),
+                "status":              str(d.get("status") or "rejected"),
+                "updatedAt":           _safe_val(d.get("updatedAt")),
+                "createdAt":           _safe_val(d.get("createdAt")),
             })
 
         # Python-side sort: most recently updated first, None timestamps go last
         leads_out.sort(key=lambda x: x["updatedAt"] or "", reverse=True)
 
+        log.info("shadow_ledger_ok", count=len(leads_out))
         return jsonify({"status": "success", "leads": leads_out, "count": len(leads_out)}), 200
 
     except Exception as e:
-        log.error("shadow_ledger_failed", error=str(e))
+        log.error("shadow_ledger_failed", error=str(e), exc_type=type(e).__name__)
         return jsonify({"error": "Shadow Ledger query failed", "message": str(e)}), 500
 
 
@@ -339,6 +386,7 @@ def get_ops_telemetry(uid, tenant_id, user_role):
         return jsonify({"status": "success", "cache_hit": True,
                         "cached_at": cached["cached_at"].isoformat(), "data": cached["data"]}), 200
 
+    db = _db()
     # 1. Firestore geo primary
     geo_heatmap: list = []
     try:
