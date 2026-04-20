@@ -1447,7 +1447,13 @@ def produce():
             search_query = f"{kw} AND {clean_location}"
         else:
             search_query = kw
-        raw_results  = search_serper(search_query, location=clean_location or None, gl=gl or None)
+        raw_results  = search_serper(
+            search_query,
+            location=clean_location or None,
+            gl=gl or None,
+            campaign_id=campaign_id,
+            tenant_id=tenant_id,
+        )
         # V18: Async GCS Firehose Dump — pre-filter raw Swarm noise → sideio-raw-firehose-lake
         _async_gcs_dump({
             "query":          search_query,

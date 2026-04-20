@@ -211,6 +211,8 @@ def produce():
             search_query,
             location=clean_location or None,
             gl=gl or None,
+            campaign_id=campaign_id,
+            tenant_id=tenant_id,
         )
 
         update_circuit_telemetry("serper_call")
