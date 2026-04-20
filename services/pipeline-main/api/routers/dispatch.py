@@ -3,7 +3,7 @@ Pipeline-Main V23 — /dispatch + /finalize Blueprint (FULL IMPLEMENTATION).
 
 THE CONSUMER — 4-Hour Drip Processor.
 ======================================
-Pops exactly 10 URLs from campaigns/{id}.unprocessed_queue (destructive read).
+Pops exactly 5 URLs from campaigns/{id}.unprocessed_queue (destructive read).
 Runs the PRISM engine (mode-routing → scrape → Gemini gate → DM generation).
 Triggers credit settlement via Cloud Task to orchestrator.
 Does NOT call Serper. If queue is empty, exits gracefully.
@@ -287,7 +287,13 @@ def dispatch():
                  campaign_id=campaign_id)
         return jsonify({"status": "queue_empty", "processed": 0}), 200
 
-    BATCH_SIZE = 10
+    # DRIP FLOOD FIX: Capped from 10 → 5 per drip window.
+    # With DRIP_INTERVAL_H=4 in internal.py, a campaign with 50 queued URLs would
+    # previously process all 50 in 5 dispatches over 20 hours — too fast, flooding
+    # the CEO dashboard with stale-looking batch leads.
+    # At 5/dispatch × 4h intervals = max 30 leads/day per campaign — controlled drip
+    # that preserves the "fresh intelligence" UX the platform promises.
+    BATCH_SIZE = 5
     batch_urls = current_queue[:BATCH_SIZE]
     remaining  = current_queue[BATCH_SIZE:]
 

@@ -445,6 +445,11 @@ async function loadLeads() {
             .collection('leads')
             .where('tenant_id', '==', user.uid)
             .where('is_in_crm', '==', false)
+            // Server-side sort: newest leads first. Requires composite index on
+            // (tenant_id ASC, is_in_crm ASC, createdAt DESC) — auto-built by
+            // firestore.indexes.json or on first query with the Firestore console link.
+            .orderBy('createdAt', 'desc')
+            .limit(200)
             .onSnapshot((snapshot) => {
                 rawLeadsCache = [];
                 snapshot.forEach(doc => {
@@ -453,7 +458,14 @@ async function loadLeads() {
                     rawLeadsCache.push(data);
                 });
                 if (rawLeadsCache.length === 0) { renderLeads(); return; }
-                rawLeadsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
+                // Client-side tiebreaker: highest score wins when createdAt is equal.
+                // Primary sort is already chronological desc from Firestore.
+                rawLeadsCache.sort((a, b) => {
+                    const tA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+                    const tB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+                    if (tB !== tA) return tB - tA;          // newest first
+                    return (b.score || 0) - (a.score || 0); // score tiebreaker
+                });
                 let cNew = 0, cContact = 0, cConvert = 0;
                 let cDiscovered = rawLeadsCache.length, cActionable = 0, cIgnored = 0;
                 rawLeadsCache.forEach(l => {
@@ -598,7 +610,7 @@ window.pushToCRM = async function(docId, leadStr) {
             const cardEl = document.getElementById(docId);
             if (cardEl) { virtualObserver.unobserve(cardEl); cardEl.remove(); }
             rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
-            showToast('Lead filed in CRM — navigate to CRM tab to manage it.', 'success');
+            showToast('✅ Lead saved to CRM pipeline — view it in the CRM sidebar.', 'success');
             const userUrl = window.currentUserData?.crm_webhook_url;
             if (userUrl) {
                 try {
