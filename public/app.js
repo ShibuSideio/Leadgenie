@@ -2936,7 +2936,8 @@ window.dtStartAnalysis = async function() {
     const animDone = new Promise(resolve => setTimeout(resolve, 5800));
 
     let personaData = null;
-    let apiError = null;
+    let apiError    = null;
+    let wafBlocked  = false;
 
     try {
         const user = firebase.auth().currentUser;
@@ -2953,8 +2954,19 @@ window.dtStartAnalysis = async function() {
         if (resp.ok) {
             const payload = await resp.json();
             personaData = payload.data || null;
-        } else if (resp.status === 404 || resp.status === 501 || resp.status === 422) {
-            // 422 = insufficient data from backend
+        } else if (resp.status === 422) {
+            // Inspect the JSON body to distinguish WAF_BLOCKED from generic 422
+            try {
+                const errPayload = await resp.json();
+                if (errPayload.code === 'WAF_BLOCKED') {
+                    wafBlocked = true;
+                } else {
+                    apiError = 'not_ready';
+                }
+            } catch (_) {
+                apiError = 'not_ready';
+            }
+        } else if (resp.status === 404 || resp.status === 501) {
             apiError = 'not_ready';
         } else {
             apiError = 'api_error';
@@ -2965,15 +2977,46 @@ window.dtStartAnalysis = async function() {
         await animDone;
     }
 
-    // Handle result
+    // ── Handle result ──────────────────────────────────────────────────────────
     if (personaData) {
         dtPopulatePersonas(personaData, url);
+
+    } else if (wafBlocked) {
+        // WAF_BLOCKED — polite notification + seamless auto-transition to manual entry
+        // Stop the progress bar immediately and show the explanation inside view-b
+        const progressEl = document.getElementById('dt-progress-fill');
+        const statusEl   = document.getElementById('dt-status-text');
+        if (progressEl) progressEl.style.background = 'linear-gradient(90deg, #f59e0b, #ef4444)';
+        if (statusEl)   statusEl.textContent = 'Security firewall detected ⚠️';
+
+        // Inject polite inline notice
+        const viewB = document.getElementById('dt-view-b');
+        if (viewB && !viewB.querySelector('.dt-waf-notice')) {
+            const notice = document.createElement('div');
+            notice.className = 'dt-waf-notice';
+            notice.style.cssText = [
+                'margin:18px auto 0', 'max-width:380px', 'padding:14px 18px',
+                'background:rgba(245,158,11,0.12)', 'border:1px solid rgba(245,158,11,0.4)',
+                'border-radius:10px', 'color:#fbbf24', 'font-size:13.5px',
+                'line-height:1.55', 'text-align:left'
+            ].join(';');
+            notice.innerHTML =
+                '<strong style="display:block;margin-bottom:4px">🛡️ Website security blocked our AI reader</strong>' +
+                'The target site\'s firewall (e.g. Cloudflare) blocked our automated scan. ' +
+                'No problem — switching to <strong>Manual Entry</strong> so you can paste your offering directly.';
+            viewB.appendChild(notice);
+        }
+
+        // Auto-transition to Manual Entry (dt-view-d) after 2.5 s
+        setTimeout(() => { dtSwitchView('dt-view-d'); }, 2500);
+
     } else if (apiError === 'not_ready' && _dtIsLocal) {
         // DEV-ONLY mock — never runs in production
         console.warn('[DT] Using mock persona data — localhost only');
         dtPopulatePersonas(dtMockPersona(url), url);
+
     } else {
-        // Production graceful failure
+        // All other production failures — reset to view-A with toast
         dtSwitchView('dt-view-a');
         showToast('Digital Twin engine is currently provisioning. Please use manual entry.', 'error');
     }

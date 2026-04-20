@@ -143,6 +143,31 @@ def extract_kb(uid, tenant_id, user_role):
 # =============================================================================
 # POST /api/analyze-website  (V18 Digital Twin Onboarding)
 # =============================================================================
+
+# WAF tarpit fingerprints — pages that look like content but are bot-challenges.
+_WAF_FINGERPRINTS = [
+    "just a moment",
+    "enable javascript and cookies to continue",
+    "checking if the site connection is secure",
+    "please wait while we check your browser",
+    "attention required",
+    "cloudflare ray id",
+    "datadome",
+    "please verify you are human",
+    "access denied",
+    "403 forbidden",
+    "bot detection",
+    "please turn javascript on",
+]
+
+def _is_waf_response(html: str, status_code: int) -> bool:
+    """Returns True if the response looks like a WAF/anti-bot challenge page."""
+    if status_code in (403, 429, 503):
+        return True
+    lowered = html[:8000].lower()
+    return any(fp in lowered for fp in _WAF_FINGERPRINTS)
+
+
 @bp.route("/api/analyze-website", methods=["POST"])
 @require_auth
 def analyze_website(uid, tenant_id, user_role):
@@ -158,9 +183,29 @@ def analyze_website(uid, tenant_id, user_role):
     log.info("analyze_website_start", url=url, tenant_id=tenant_id)
 
     try:
-        r        = httpx.get(url, timeout=10, follow_redirects=True,
-                             headers={"User-Agent": "Mozilla/5.0 (compatible; Sideio/1.0; +https://sideio.com)"})
+        # Fail-fast: 7s timeout (down from 10s) to avoid 504s.
+        # Enterprise WAFs (Cloudflare, DataDome) tarpits can hold connections
+        # open for 10–30 s before returning a challenge page.
+        r = httpx.get(
+            url,
+            timeout=httpx.Timeout(connect=4.0, read=7.0, write=4.0, pool=1.0),
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; Sideio/1.0; +https://sideio.com)",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
         raw_html = r.text[:25000]
+
+        # WAF/anti-bot trap detection — return before stripping HTML
+        if _is_waf_response(raw_html, r.status_code):
+            log.info("analyze_website_waf_blocked", url=url,
+                     status=r.status_code, tenant_id=tenant_id)
+            return jsonify({
+                "error": "The target website's security firewall blocked our automated reader.",
+                "code":  "WAF_BLOCKED",
+            }), 422
+
         clean    = re.sub(r"<[^>]+>", " ", raw_html)
         clean    = re.sub(r"\s+", " ", clean).strip()[:4000]
 

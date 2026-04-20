@@ -289,6 +289,31 @@ _META_DESC_RE2  = re.compile(
     re.IGNORECASE
 )
 
+
+# WAF tarpit fingerprints shared with orchestrator settings.py
+_WAF_FINGERPRINTS = [
+    "just a moment",
+    "enable javascript and cookies to continue",
+    "checking if the site connection is secure",
+    "please wait while we check your browser",
+    "attention required",
+    "cloudflare ray id",
+    "datadome",
+    "please verify you are human",
+    "access denied",
+    "403 forbidden",
+    "bot detection",
+    "please turn javascript on",
+]
+
+def _is_waf_page(html: str, status_code: int = 200) -> bool:
+    """Returns True if the response looks like a WAF/anti-bot challenge page."""
+    if status_code in (403, 429, 503):
+        return True
+    lowered = html[:8000].lower()
+    return any(fp in lowered for fp in _WAF_FINGERPRINTS)
+
+
 def _httpx_meta_fallback(root_domain: str) -> str:
     """
     Lightweight HEAD+GET to extract just the page title and meta description.
@@ -307,6 +332,12 @@ def _httpx_meta_fallback(root_domain: str) -> str:
             return ""
 
         html = resp.text[:30_000]   # only first 30 KB — enough for <head>
+
+        # WAF tarpit check — return sentinel so caller can 422 immediately
+        if _is_waf_page(html, resp.status_code):
+            print(f"[FALLBACK] WAF detected on {root_domain} (status={resp.status_code})")
+            return "__WAF_BLOCKED__"
+
         parts: list[str] = []
 
         title_m = _TITLE_RE.search(html)
@@ -507,6 +538,14 @@ def analyze_website():
     if len(combined_text.strip()) < 50:
         print(f"[DT] Serper insufficient (<50 chars). Running httpx meta fallback...")
         fallback_text = _httpx_meta_fallback(root_domain)
+        if fallback_text == "__WAF_BLOCKED__":
+            # httpx fallback hit a WAF challenge page — fail fast with polite error
+            print(f"[DT] WAF detected on {root_domain} via httpx fallback — returning WAF_BLOCKED")
+            return jsonify({
+                "success": False,
+                "error": "The target website's security firewall blocked our automated reader.",
+                "code":  "WAF_BLOCKED",
+            }), 422
         if fallback_text:
             combined_text = f"{combined_text} {fallback_text}".strip()
         print(f"[DT] Post-fallback text length: {len(combined_text)} chars")
