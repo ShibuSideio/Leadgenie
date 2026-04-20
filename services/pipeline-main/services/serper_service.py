@@ -9,10 +9,20 @@ V23 changes:
   - ``search_serper()`` emits structured JSON logs via ``core.logging`` instead
     of ``print()``.
   - ``_update_circuit_telemetry()`` calls are preserved (imported from telemetry).
+
+V23.4 changes (Serper Audit Telemetry):
+  - ``search_serper()`` now accepts optional ``campaign_id`` and ``tenant_id``
+    kwargs.  After each successful call it fires a background audit row to the
+    orchestrator broker (POST /api/internal/telemetry/serper-audit) via a daemon
+    thread — **zero latency** added to the active scraping loop.
+  - The audit payload captures: raw_query, serper_parameters, result_count,
+    credit_cost, and engine (always 'search' for this function).
 """
 from __future__ import annotations
 
 import json
+import os
+import threading
 import concurrent.futures as _cf
 from urllib.parse import urlparse
 from typing import Optional
@@ -100,6 +110,63 @@ def _get_serper_api_key() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Serper Audit Telemetry — async fire-and-forget (V23.4)
+# ---------------------------------------------------------------------------
+_ORCHESTRATOR_URL: str = os.environ.get("ORCHESTRATOR_URL", "").rstrip("/")
+
+
+def _push_serper_audit(
+    campaign_id: str,
+    tenant_id: str,
+    raw_query: str,
+    serper_parameters: dict,
+    result_count: int,
+    status_code: int = 200,
+    error_message: str = "",
+    engine: str = "search",
+) -> None:
+    """Push one audit row to the orchestrator's BQ broker.
+
+    Runs in a daemon thread — never blocks the calling scrape loop.
+    Silently swallowed on any exception (non-critical telemetry path).
+    """
+    if not _ORCHESTRATOR_URL:
+        return  # env var not set — skip silently (local/dev environments)
+    try:
+        import datetime as _dt
+        payload = {
+            "table":              "serper_audit_logs",  # broker routing key
+            "campaign_id":        campaign_id or "",
+            "tenant_id":          tenant_id   or "",
+            "raw_query":          raw_query,
+            "serper_parameters":  serper_parameters,
+            "result_count":       result_count,
+            "credit_cost":        1,
+            "engine":             engine,
+            "serper_status_code": status_code,
+            "error_message":      error_message or None,
+            "timestamp":          _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        httpx.post(
+            f"{_ORCHESTRATOR_URL}/api/internal/telemetry/serper-audit",
+            json=payload,
+            timeout=5,
+        )
+    except Exception as _te:
+        # Non-critical — never crash the scraping loop over telemetry
+        log.debug("serper_audit_push_failed", error=str(_te))
+
+
+def _async_serper_audit(**kwargs) -> None:
+    """Fire-and-forget wrapper: launches _push_serper_audit in a daemon thread."""
+    try:
+        t = threading.Thread(target=_push_serper_audit, kwargs=kwargs, daemon=True)
+        t.start()
+    except Exception:
+        pass  # never crash the scraping loop
+
+
+# ---------------------------------------------------------------------------
 # Primary search function
 # ---------------------------------------------------------------------------
 
@@ -107,18 +174,24 @@ def search_serper(
     query: str,
     location: Optional[str] = None,
     gl: Optional[str] = None,
+    *,
+    campaign_id: str = "",
+    tenant_id: str = "",
 ) -> list:
     """Execute a Serper Google Search query with tenacity 429-retry.
 
     Uses a 4-attempt exponential backoff targeting only HTTP 429 responses.
     Auth failures (401/403) and server errors (5xx) are not retried.
 
-    On all-retries-exhausted: emits circuit telemetry and returns [].
+    On all-retries-exhausted: emits circuit telemetry, fires a failed audit
+    row, and returns [].
 
     Args:
-        query:    Full search query string (may include site: operators).
-        location: Serper ``location`` field (optional, e.g. ``"India"``).
-        gl:       Serper ``gl`` field / ISO country code (optional).
+        query:       Full search query string (may include site: operators).
+        location:    Serper ``location`` field (optional, e.g. ``"India"``).
+        gl:          Serper ``gl`` field / ISO country code (optional).
+        campaign_id: Campaign context for BQ audit telemetry (optional).
+        tenant_id:   Tenant context for BQ audit telemetry (optional).
 
     Returns:
         List of organic result dicts from Serper.  Empty on any failure.
@@ -160,10 +233,32 @@ def search_serper(
         return []
 
     try:
-        return _do_post()
+        results = _do_post()
+        # ── V23.4: Async audit telemetry — zero-latency fire-and-forget ──────
+        _async_serper_audit(
+            campaign_id       = campaign_id,
+            tenant_id         = tenant_id,
+            raw_query         = query,
+            serper_parameters = payload_dict,
+            result_count      = len(results),
+            status_code       = 200,
+            engine            = "search",
+        )
+        return results
     except Exception as exc:
         log.error("serper_all_retries_exhausted", query=query[:60], error=str(exc))
         update_circuit_telemetry("serper_429")
+        # ── Audit row for failed call ─────────────────────────────────────────
+        _async_serper_audit(
+            campaign_id       = campaign_id,
+            tenant_id         = tenant_id,
+            raw_query         = query,
+            serper_parameters = payload_dict,
+            result_count      = 0,
+            status_code       = 429,
+            error_message     = str(exc)[:500],
+            engine            = "search",
+        )
         return []
 
 

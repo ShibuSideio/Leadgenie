@@ -46,6 +46,7 @@ from api.routers.personas import bp as personas_bp      # type: ignore[import]
 from api.routers.l0_admin import bp as l0_admin_bp      # type: ignore[import]
 from api.routers.internal import bp as internal_bp      # type: ignore[import]
 from api.routers.settings import bp as settings_bp      # type: ignore[import]
+from api.routers.serper_telemetry import bp as serper_telemetry_bp  # type: ignore[import]
 
 log = get_logger("orchestrator.v23")
 
@@ -95,6 +96,7 @@ def create_app() -> Flask:
     app.register_blueprint(l0_admin_bp)
     app.register_blueprint(internal_bp)
     app.register_blueprint(settings_bp)
+    app.register_blueprint(serper_telemetry_bp)
 
     @app.errorhandler(Exception)
     def handle_unhandled(exc: Exception):

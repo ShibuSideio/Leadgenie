@@ -100,6 +100,72 @@ def bq_push():
 
 
 # =============================================================================
+# POST /api/internal/telemetry/serper-audit  (V23.4 — Serper Audit Telemetry)
+#
+# Called by pipeline-main serper_service.py after every Serper API call.
+# Unlike bq-push (which requires Cloud Tasks), this route accepts both:
+#   - Direct OIDC Bearer token (from pipeline worker daemon thread)
+#   - X-CloudTasks-QueueName header (if fired via Cloud Tasks in future)
+# Auth: OIDC signature verification OR Cloud Tasks header.
+# No body validation beyond tenant_id presence — non-critical telemetry.
+# =============================================================================
+@bp.route("/api/internal/telemetry/serper-audit", methods=["POST"])
+def serper_audit():
+    """Receive one Serper query audit row and stream-insert it into BigQuery."""
+    # Accept Cloud Tasks header OR OIDC bearer — flexible for both call paths
+    has_cloud_tasks = bool(request.headers.get("X-CloudTasks-QueueName"))
+    if not has_cloud_tasks:
+        ok, err = _verify_oidc(request)
+        if not ok:
+            # Fail open with 200 so the pipeline worker isn't disrupted
+            log.warning("serper_audit_auth_failed", error=err)
+            return jsonify({"ok": False, "reason": "auth_failed"}), 200
+
+    payload = request.json or {}
+    if not payload.get("campaign_id") and not payload.get("tenant_id"):
+        return jsonify({"error": "Missing campaign_id or tenant_id"}), 400
+
+    try:
+        from google.cloud import bigquery as _bq
+        bq        = _bq.Client(project=PROJECT_ID)
+        table_ref = f"{PROJECT_ID}.swarm_analytics.serper_audit_logs"
+
+        # Safely coerce serper_parameters to a JSON string if it's a dict
+        raw_params = payload.get("serper_parameters") or {}
+        params_str = json.dumps(raw_params) if isinstance(raw_params, dict) else str(raw_params)
+
+        row = {
+            "timestamp":          payload.get("timestamp") or datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "campaign_id":        str(payload.get("campaign_id") or ""),
+            "tenant_id":          str(payload.get("tenant_id") or ""),
+            "raw_query":          str(payload.get("raw_query") or ""),
+            "serper_parameters":  params_str,
+            "result_count":       int(payload.get("result_count") or 0),
+            "credit_cost":        int(payload.get("credit_cost") or 1),
+            "engine":             str(payload.get("engine") or "search"),
+            "serper_status_code": int(payload.get("serper_status_code") or 200),
+            "error_message":      payload.get("error_message") or None,
+        }
+
+        errors = bq.insert_rows_json(table_ref, [row])
+        if errors:
+            log.warning("serper_audit_bq_insert_error", errors=str(errors)[:300])
+            return jsonify({"ok": False, "errors": str(errors)[:300]}), 500
+
+        log.info("serper_audit_row_inserted",
+                 campaign_id=row["campaign_id"][:12],
+                 tenant_id=row["tenant_id"][:12],
+                 engine=row["engine"],
+                 result_count=row["result_count"])
+        return jsonify({"ok": True}), 200
+
+    except Exception as e:
+        log.error("serper_audit_insert_failed", error=str(e))
+        # Return 200 so pipeline worker daemon thread isn't alarmed
+        return jsonify({"ok": False, "error": str(e)}), 200
+
+
+# =============================================================================
 # POST /api/internal/credits/settle
 # =============================================================================
 @bp.route("/api/internal/credits/settle", methods=["POST"])

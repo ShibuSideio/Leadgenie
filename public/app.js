@@ -1347,7 +1347,7 @@ window.l0SwitchTab = function(tab) {
         return;
     }
     // Hide all panels, deactivate all tab buttons
-    ['tenants','operations','ledger','health'].forEach(t => {
+    ['tenants','operations','ledger','health','serper'].forEach(t => {
         const panel = document.getElementById(`l0-panel-${t}`);
         const btn   = document.getElementById(`l0-tab-${t}`);
         if (panel) panel.classList.remove('active');
@@ -1364,6 +1364,7 @@ window.l0SwitchTab = function(tab) {
     if (tab === 'operations') fetchGlobalOperations();
     if (tab === 'ledger')     fetchShadowLedger();
     if (tab === 'health')     fetchSystemHealth();
+    if (tab === 'serper')     fetchSerperAuditLogs();
 };
 
 window.l0RefreshCurrentTab = function() {
@@ -1564,6 +1565,227 @@ window.recycleRejectedLead = async function(leadId, btn) {
         btn.disabled = false;
         btn.textContent = '&#9851; Recycle';
         showToast('Recycle failed: ' + err.message, 'error');
+    }
+};
+
+// =============================================================================
+// L0 QUERY AUDIT — Serper Telemetry Tab (V23.4)
+// =============================================================================
+
+/** Lazily inject the Serper panel HTML if it doesn't exist yet. */
+function _ensureSerperPanel() {
+    if (document.getElementById('l0-panel-serper')) return;
+
+    // Find the l0-panel-health to insert after it (sibling panels pattern)
+    const healthPanel = document.getElementById('l0-panel-health');
+    if (!healthPanel) return;
+
+    const panel = document.createElement('div');
+    panel.id        = 'l0-panel-serper';
+    panel.className = 'l0-panel';  // uses same CSS class as other panels
+    panel.style.cssText = 'display:none;';
+    panel.innerHTML = `
+        <div style="margin-bottom:20px;">
+
+            <!-- Summary metric card -->
+            <div id="serper-summary-cards" style="display:flex; gap:16px; margin-bottom:24px; flex-wrap:wrap;">
+                <div style="flex:1; min-width:160px; background:linear-gradient(135deg,#4f46e5,#7c3aed); border-radius:16px; padding:20px 24px; color:#fff; box-shadow:0 4px 24px rgba(79,70,229,0.25);">
+                    <div style="font-size:0.75rem; opacity:0.8; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;">Total Calls Today</div>
+                    <div id="serper-stat-today" style="font-size:2.2rem; font-weight:800; line-height:1;">—</div>
+                    <div style="font-size:0.7rem; opacity:0.65; margin-top:4px;">Serper API queries</div>
+                </div>
+                <div style="flex:1; min-width:160px; background:linear-gradient(135deg,#059669,#10b981); border-radius:16px; padding:20px 24px; color:#fff; box-shadow:0 4px 24px rgba(16,185,129,0.2);">
+                    <div style="font-size:0.75rem; opacity:0.8; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;">Avg Results / Query</div>
+                    <div id="serper-stat-avg" style="font-size:2.2rem; font-weight:800; line-height:1;">—</div>
+                    <div style="font-size:0.7rem; opacity:0.65; margin-top:4px;">organic results returned</div>
+                </div>
+                <div style="flex:1; min-width:160px; background:linear-gradient(135deg,#d97706,#f59e0b); border-radius:16px; padding:20px 24px; color:#fff; box-shadow:0 4px 24px rgba(245,158,11,0.2);">
+                    <div style="font-size:0.75rem; opacity:0.8; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;">Total Credits Used</div>
+                    <div id="serper-stat-credits" style="font-size:2.2rem; font-weight:800; line-height:1;">—</div>
+                    <div style="font-size:0.7rem; opacity:0.65; margin-top:4px;">in date range</div>
+                </div>
+                <div style="flex:1; min-width:160px; background:linear-gradient(135deg,#0ea5e9,#38bdf8); border-radius:16px; padding:20px 24px; color:#fff; box-shadow:0 4px 24px rgba(14,165,233,0.2);">
+                    <div style="font-size:0.75rem; opacity:0.8; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;">Queries in Range</div>
+                    <div id="serper-stat-total" style="font-size:2.2rem; font-weight:800; line-height:1;">—</div>
+                    <div style="font-size:0.7rem; opacity:0.65; margin-top:4px;">rows returned</div>
+                </div>
+            </div>
+
+            <!-- Filter row -->
+            <div style="display:flex; gap:12px; align-items:flex-end; margin-bottom:18px; flex-wrap:wrap; background:#f8fafc; border-radius:12px; padding:14px 18px; border:1px solid #e5e7eb;">
+                <div style="display:flex; flex-direction:column; gap:4px;">
+                    <label style="font-size:0.72rem; font-weight:600; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">From</label>
+                    <input id="serper-filter-from" type="date" style="padding:8px 12px; border:1px solid #d1d5db; border-radius:8px; font-size:0.85rem; color:#111827; background:#fff; cursor:pointer;" />
+                </div>
+                <div style="display:flex; flex-direction:column; gap:4px;">
+                    <label style="font-size:0.72rem; font-weight:600; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">To</label>
+                    <input id="serper-filter-to" type="date" style="padding:8px 12px; border:1px solid #d1d5db; border-radius:8px; font-size:0.85rem; color:#111827; background:#fff; cursor:pointer;" />
+                </div>
+                <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:200px;">
+                    <label style="font-size:0.72rem; font-weight:600; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">Campaign ID</label>
+                    <input id="serper-filter-campaign" type="text" placeholder="Filter by campaign ID (optional)" style="padding:8px 12px; border:1px solid #d1d5db; border-radius:8px; font-size:0.85rem; color:#111827; background:#fff; width:100%;" />
+                </div>
+                <button onclick="fetchSerperAuditLogs()" style="padding:9px 22px; background:#4f46e5; color:#fff; border:none; border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer; white-space:nowrap; transition:background 0.15s;" onmouseover="this.style.background='#4338ca'" onmouseout="this.style.background='#4f46e5'">
+                    &#128269; Apply Filter
+                </button>
+            </div>
+
+            <!-- Top Campaigns mini-list -->
+            <div id="serper-top-campaigns" style="margin-bottom:18px; display:none;">
+                <div style="font-size:0.78rem; font-weight:700; color:#374151; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.08em;">&#127942; Top Campaigns by Call Count</div>
+                <div id="serper-top-campaigns-list" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+            </div>
+
+            <!-- Data table -->
+            <div style="overflow-x:auto; border-radius:12px; border:1px solid #e5e7eb;">
+                <table style="width:100%; border-collapse:collapse; font-size:0.83rem;">
+                    <thead>
+                        <tr style="background:#f9fafb; border-bottom:2px solid #e5e7eb;">
+                            <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151; white-space:nowrap;">&#128197; Date / Time</th>
+                            <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151;">Campaign ID</th>
+                            <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151;">Raw Query</th>
+                            <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151;">Parameters</th>
+                            <th style="padding:11px 10px; text-align:center; font-weight:700; color:#374151;">Results</th>
+                            <th style="padding:11px 10px; text-align:center; font-weight:700; color:#374151;">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="serper-audit-table">
+                        <tr><td colspan="6" style="padding:24px; text-align:center; color:#9ca3af;">Select a date range and click Apply Filter.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
+    healthPanel.insertAdjacentElement('afterend', panel);
+
+    // Inject tab button if the tab bar exists
+    const tabBar = document.getElementById('l0-tab-health')?.closest('div');
+    if (tabBar && !document.getElementById('l0-tab-serper')) {
+        const btn = document.createElement('button');
+        btn.id        = 'l0-tab-serper';
+        btn.className = 'l0-tab-btn';
+        btn.textContent = '🔍 Query Audit';
+        btn.onclick   = () => l0SwitchTab('serper');
+        btn.style.cssText = 'padding:8px 18px; border:none; background:transparent; cursor:pointer; font-weight:600; border-radius:8px; transition:all 0.2s;';
+        tabBar.appendChild(btn);
+    }
+}
+
+/** Set default date-range inputs to last 7 days. */
+function _initSerperDateDefaults() {
+    const from = document.getElementById('serper-filter-from');
+    const to   = document.getElementById('serper-filter-to');
+    if (!from || !to || from.value) return;  // already set
+    const now  = new Date();
+    const ago7 = new Date(now);  ago7.setDate(ago7.getDate() - 7);
+    const fmt  = d => d.toISOString().slice(0, 10);
+    from.value = fmt(ago7);
+    to.value   = fmt(now);
+}
+
+window.fetchSerperAuditLogs = async function() {
+    _ensureSerperPanel();
+    _initSerperDateDefaults();
+
+    const tbody    = document.getElementById('serper-audit-table');
+    const statToday   = document.getElementById('serper-stat-today');
+    const statAvg     = document.getElementById('serper-stat-avg');
+    const statCredits = document.getElementById('serper-stat-credits');
+    const statTotal   = document.getElementById('serper-stat-total');
+    const topDiv      = document.getElementById('serper-top-campaigns');
+    const topList     = document.getElementById('serper-top-campaigns-list');
+
+    if (tbody) tbody.innerHTML = '<tr><td colspan="6" style="padding:24px; text-align:center; color:#9ca3af;">⏳ Loading query audit logs…</td></tr>';
+    if (statToday)   statToday.textContent   = '…';
+    if (statAvg)     statAvg.textContent     = '…';
+    if (statCredits) statCredits.textContent = '…';
+    if (statTotal)   statTotal.textContent   = '…';
+
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) throw new Error('Not authenticated');
+        const token = await user.getIdToken(true);
+
+        const dateFrom = document.getElementById('serper-filter-from')?.value || '';
+        const dateTo   = document.getElementById('serper-filter-to')?.value   || '';
+        const campId   = document.getElementById('serper-filter-campaign')?.value.trim() || '';
+
+        let url = `${API_BASE}/api/admin/telemetry/serper-logs?limit=500`;
+        if (dateFrom) url += `&date_from=${encodeURIComponent(dateFrom)}`;
+        if (dateTo)   url += `&date_to=${encodeURIComponent(dateTo)}`;
+        if (campId)   url += `&campaign_id=${encodeURIComponent(campId)}`;
+        url += `&rt=${Date.now()}`;
+
+        const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json = await resp.json();
+
+        const logs    = json.logs    || [];
+        const summary = json.summary || {};
+
+        // Update metric cards
+        if (statToday)   statToday.textContent   = (summary.total_today   ?? 0).toLocaleString();
+        if (statAvg)     statAvg.textContent      = (summary.avg_results   ?? 0).toFixed(1);
+        if (statCredits) statCredits.textContent  = (summary.total_credits ?? 0).toLocaleString();
+        if (statTotal)   statTotal.textContent    = (summary.total_queries ?? 0).toLocaleString();
+
+        // Top campaigns
+        const topCamps = summary.top_campaigns || [];
+        if (topDiv && topList && topCamps.length > 0) {
+            topDiv.style.display = 'block';
+            topList.innerHTML = topCamps.map(c =>
+                `<span style="background:#ede9fe; color:#4f46e5; border-radius:20px; padding:5px 14px; font-size:0.78rem; font-weight:700;">${c.campaign_id.slice(0,12)}… <span style="opacity:0.7;">${c.calls} calls</span></span>`
+            ).join('');
+        } else if (topDiv) {
+            topDiv.style.display = 'none';
+        }
+
+        if (!tbody) return;
+
+        if (logs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="padding:24px; text-align:center; color:#9ca3af;">No queries found for the selected date range.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = logs.map(row => {
+            const ts      = row.timestamp ? row.timestamp.replace('T', ' ').slice(0, 19) : '—';
+            const campShort = (row.campaign_id || '—').slice(0, 14);
+            const query   = (row.raw_query || '').length > 80
+                ? `<span title="${(row.raw_query||'').replace(/"/g,'&quot;')}">${(row.raw_query||'').slice(0,80)}&hellip;</span>`
+                : (row.raw_query || '—');
+            // Parse serper_parameters (JSON string from BQ)
+            let params = '—';
+            try {
+                const p = typeof row.serper_parameters === 'string'
+                    ? JSON.parse(row.serper_parameters)
+                    : (row.serper_parameters || {});
+                params = Object.entries(p)
+                    .filter(([k]) => k !== 'q')  // 'q' is the raw_query itself
+                    .map(([k, v]) => `<span style="background:#f3f4f6; border-radius:4px; padding:2px 6px; font-size:0.72rem;">${k}=${v}</span>`)
+                    .join(' ') || '<span style="color:#9ca3af;">none</span>';
+            } catch(_) {}
+
+            const yield_ = row.result_count != null
+                ? `<span style="font-weight:700; color:${row.result_count >= 10 ? '#10b981' : row.result_count >= 5 ? '#f59e0b' : '#ef4444'}">${row.result_count}</span>`
+                : '—';
+            const status  = row.serper_status_code === 200
+                ? `<span style="background:#d1fae5; color:#065f46; border-radius:20px; padding:2px 10px; font-size:0.72rem; font-weight:700;">200 OK</span>`
+                : `<span style="background:#fee2e2; color:#991b1b; border-radius:20px; padding:2px 10px; font-size:0.72rem; font-weight:700;">${row.serper_status_code || '?'}</span>`;
+
+            return `<tr style="border-bottom:1px solid #f3f4f6; transition:background 0.12s;" onmouseover="this.style.background='#fafafa'" onmouseout="this.style.background=''">
+                <td style="padding:10px 14px; white-space:nowrap; color:#6b7280; font-size:0.78rem;">${ts}</td>
+                <td style="padding:10px 14px; font-family:monospace; font-size:0.78rem; color:#4f46e5;" title="${row.campaign_id||''}">${campShort}</td>
+                <td style="padding:10px 14px; max-width:300px;">${query}</td>
+                <td style="padding:10px 14px; max-width:200px;">${params}</td>
+                <td style="padding:10px 10px; text-align:center;">${yield_}</td>
+                <td style="padding:10px 10px; text-align:center;">${status}</td>
+            </tr>`;
+        }).join('');
+
+    } catch(err) {
+        console.error('[Serper Audit]', err);
+        if (tbody) tbody.innerHTML = `<tr><td colspan="6" style="padding:16px; text-align:center; color:#ef4444;">Error: ${err.message}</td></tr>`;
+        if (statToday) statToday.textContent = 'ERR';
     }
 };
 
