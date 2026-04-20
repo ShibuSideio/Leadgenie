@@ -1,21 +1,28 @@
 """
-Sideio Lead Sniper — Orchestrator V23 Entrypoint (Phase 3 — Complete).
+Sideio Lead Sniper — Orchestrator V23.4 Entrypoint.
 
 All routes are served by V23 Blueprints. main_legacy.py is permanently retired.
 
+V23.4 additions (2026-04-20):
+  + POST /api/internal/telemetry/serper-audit  → internal.py  (BQ telemetry broker)
+  + GET  /api/admin/telemetry/serper-logs      → serper_telemetry.py  (audit read)
+  + POST /api/analyze-website: WAF fail-fast   → settings.py  (httpx 7s + 422 WAF_BLOCKED)
+  + GET  /api/l0/shadow-ledger: 500 fixed      → IAM: roles/bigquery.dataViewer granted
+
 Blueprint Registry:
-  /api/me, /health            -> api/routers/me.py
-  /api/analytics/*            -> api/routers/analytics.py
-  /api/campaigns* (GET)       -> api/routers/data_reads.py
-  /api/tenant_profiles (GET)  -> api/routers/data_reads.py
+  /api/me, /health                      -> api/routers/me.py
+  /api/analytics/*                      -> api/routers/analytics.py
+  /api/campaigns* (GET)                 -> api/routers/data_reads.py
+  /api/tenant_profiles (GET)            -> api/routers/data_reads.py
   /api/campaigns* (POST/PUT/DELETE/ignite/consume/run)
-                              -> api/routers/campaigns.py
-  /api/leads/<id> (PUT)       -> api/routers/leads.py
-  /api/personas*              -> api/routers/personas.py
-  /api/l0/*                   -> api/routers/l0_admin.py
-  /api/internal/*             -> api/routers/internal.py
+                                        -> api/routers/campaigns.py
+  /api/leads/<id> (PUT)                 -> api/routers/leads.py
+  /api/personas*                        -> api/routers/personas.py
+  /api/l0/*                             -> api/routers/l0_admin.py
+  /api/internal/*                       -> api/routers/internal.py
+  /api/admin/telemetry/serper-logs      -> api/routers/serper_telemetry.py
   /api/settings, /api/tenant_profiles (POST), /api/analyze-website
-                              -> api/routers/settings.py
+                                        -> api/routers/settings.py
 """
 from __future__ import annotations
 
@@ -82,7 +89,7 @@ def create_app() -> Flask:
     @app.route("/", methods=["GET"])
     @app.route("/health", methods=["GET"])
     def health():
-        return jsonify({"status": "healthy", "version": "23.2.0", "arch": "modular-v23-phase3"}), 200
+        return jsonify({"status": "healthy", "version": "23.4.0", "arch": "modular-v23.4-serper-telemetry"}), 200
 
     # ── Phase 1 ───────────────────────────────────────────────────────────────
     app.register_blueprint(me_bp)
@@ -103,7 +110,7 @@ def create_app() -> Flask:
         log.error("unhandled_exception", error=str(exc), exc_type=type(exc).__name__)
         return jsonify({"error": "Internal Server Error", "message": str(exc)}), 500
 
-    log.info("orchestrator_v23_started", version="23.2.0", phase="phase3-complete")
+    log.info("orchestrator_v23_started", version="23.4.0", phase="v23.4-serper-telemetry-waf-hardening")
     return app
 
 

@@ -42,8 +42,8 @@ def create_app() -> Flask:
     def health():
         return jsonify({
             "status":  "healthy",
-            "version": "23.3.0",
-            "arch":    "modular-v23-production-cutover",
+            "version": "23.4.0",
+            "arch":    "modular-v23.4-serper-telemetry",
         }), 200
 
     app.register_blueprint(produce_bp)
@@ -54,7 +54,7 @@ def create_app() -> Flask:
         log.error("unhandled_pipeline_exception", error=str(exc), exc_info=True)
         return jsonify({"error": "Internal Server Error"}), 500
 
-    log.info("pipeline_started", version="23.3.0", phase="production-cutover-gcs-purge")
+    log.info("pipeline_started", version="23.4.0", phase="v23.4-serper-telemetry-waf-hardening")
     return app
 
 
