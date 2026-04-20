@@ -187,7 +187,7 @@ def get_secret(secret_name):
     response = get_sm_client().access_secret_version(request={"name": secret_name})
     return response.payload.data.decode("UTF-8")
 
-def search_serper(query, location=None, gl=None):
+def search_serper(query, location=None, gl=None, *, campaign_id="", tenant_id=""):
     """
     FIX 3: Serper Resilience — 429-specific tenacity retry with exponential backoff.
     Thundering herd: 50 concurrent workers can saturate Serper's concurrency limit.
@@ -195,6 +195,11 @@ def search_serper(query, location=None, gl=None):
     and server errors (5xx) are not retried to avoid burning the backoff budget.
     4 attempts: immediate + 4s + 8s + 16s = up to ~30s total, still within
     Cloud Tasks' default 10-minute task deadline.
+
+    V23.4: campaign_id and tenant_id accepted (keyword-only) for call-site
+    compatibility with serper_service.search_serper(). Telemetry is handled
+    by serper_service.py in the V23 Blueprint path; this legacy monolith
+    function accepts the kwargs silently to avoid TypeError.
     """
     api_key = get_secret(SERPER_API_KEY_NAME).strip()
     if not api_key:
