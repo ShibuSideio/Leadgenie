@@ -1,12 +1,17 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V23 Enterprise Build Pipeline
-# Deploy trigger: 2026-04-18 | V23 Production Cutover (commit 337f091)
-# Changes from V22:
-#   + Phase 0b: Python V23 smoke test gate (66 tests must pass before build)
-#   + Phase 3b': orchestrator v23-preview --no-traffic revision deploy
-#   + Phase 3b'': pipeline-main v23-preview --no-traffic revision deploy (NEW)
-#   + requirements.txt: vertexai alias, google-auth, requests (OIDC middleware)
-#   + deploy-pipeline-main: PIPELINE_MAIN_URL + PIPELINE_SA_EMAIL env vars injected
+# cloudbuild.yaml — Sideio Leads V23.4 Enterprise Build Pipeline
+# Deploy trigger: 2026-04-20 | V23.4 Serper Telemetry + WAF Hardening
+# Changes from V23.3:
+#   + Serper audit telemetry loop (serper_service.py, internal.py,
+#     serper_telemetry.py, main_v23.py, app.js — BQ: swarm_analytics.serper_audit_logs)
+#   + ORCHESTRATOR_URL injected into deploy-pipeline-main (was console-only)
+#   + WAF fail-fast: settings.py + digital-twin-engine/main.py (httpx timeout
+#     7s, 12-fingerprint detection, 422 WAF_BLOCKED payload)
+#   + Frontend: dtStartAnalysis() WAF_BLOCKED branch — amber notice + auto
+#     transition to Manual Entry (dt-view-d) in 2.5s
+#   + digital-twin-engine: --timeout raised 30s→60s (WAF detection is
+#     non-blocking but Gemini 2.5 Flash can use up to 15s on cold paths)
+#   + legacy main.py archived to archive/legacy-pipeline-main-monolith branch
 # =============================================================================
 # Architecture:
 #   Phase 0a: Frontend JS syntax gate
@@ -409,10 +414,9 @@ steps:
   - --timeout=540
   - --no-allow-unauthenticated
   - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
-  # V23 OIDC env vars: PIPELINE_MAIN_URL is the service's own URL (audience for JWT).
-  # PIPELINE_SA_EMAIL is the Cloud Tasks SA email the OIDC middleware validates.
-  # These are injected here so the v23-preview revision picks them up on cold start.
-  - --update-env-vars=PROJECT_ID=$PROJECT_ID,LOCATION=asia-south1,CB_WINDOW_MINUTES=15,PIPELINE_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,PIPELINE_MAIN_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app
+  # V23.4: ORCHESTRATOR_URL added to CI/CD inject (previously console-only).
+  # Enables serper_service.py telemetry push on every fresh deploy.
+  - --update-env-vars=PROJECT_ID=$PROJECT_ID,LOCATION=asia-south1,CB_WINDOW_MINUTES=15,PIPELINE_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,PIPELINE_MAIN_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL
   - --quiet
 
 # =============================================================================
@@ -534,7 +538,10 @@ steps:
   - --min-instances=0
   - --max-instances=5
   - --concurrency=4
-  - --timeout=30
+  # V23.4: Raised from 30s to 60s.
+  # WAF detection returns fast (~7s), but Gemini 2.5 Flash can take 12-15s
+  # on cold invocations. 30s was a hard ceiling hit by enterprise domains.
+  - --timeout=60
   - --allow-unauthenticated
   - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
   - --update-env-vars=PROJECT_ID=$PROJECT_ID,LOCATION=asia-south1

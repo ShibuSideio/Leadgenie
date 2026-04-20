@@ -1,8 +1,13 @@
 # =============================================================================
-# Pipeline-main — Direct-dependency pins only (V23 final 2026-04-18)
+# Pipeline-main — Direct-dependency pins only (V23.4 final 2026-04-20)
 # Base image: python:3.11-slim
 #
-# V23 additions (2026-04-18):
+# V23.4 additions (2026-04-20):
+#   + No new pip deps. Serper audit telemetry (serper_service.py) uses
+#     only threading, os (stdlib) + httpx (already pinned) for the
+#     daemon-threaded broker POST to ORCHESTRATOR_URL.
+#
+# V23.3 additions (2026-04-18):
 #   + google-auth: required by middleware/oidc.py for JWT decode + certs fetch
 #   + requests: google-auth transport dependency (HTTP cert fetch)
 #   + vertexai: explicit alias for google-cloud-aiplatform (resolves 'import vertexai')

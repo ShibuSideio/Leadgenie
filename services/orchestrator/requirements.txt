@@ -1,6 +1,12 @@
 # =============================================================================
-# Orchestrator — Direct-dependency pins only (V23 final 2026-04-17)
+# Orchestrator — Direct-dependency pins only (V23.4 final 2026-04-20)
 # Base image: python:3.10-slim
+#
+# V23.4 additions (2026-04-20):
+#   + No new pip deps. Serper audit telemetry (internal.py, serper_telemetry.py)
+#     uses only threading, datetime, json, os (all stdlib).
+#     httpx (already pinned) handles the broker POST in serper_service.py.
+#     WAF hardening in settings.py uses only httpx (already pinned).
 #
 # PINNING PHILOSOPHY (learned from 4 failed builds):
 #   Only pin packages your code DIRECTLY imports. Pinning transitive deps
