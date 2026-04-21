@@ -1675,10 +1675,9 @@ function _ensureSerperPanel() {
     if (tabBar && !document.getElementById('l0-tab-serper')) {
         const btn = document.createElement('button');
         btn.id        = 'l0-tab-serper';
-        btn.className = 'l0-tab-btn';
+        btn.className = 'l0-tab';           // was 'l0-tab-btn' — must match .l0-tab CSS class
         btn.textContent = '🔍 Query Audit';
         btn.onclick   = () => l0SwitchTab('serper');
-        btn.style.cssText = 'padding:8px 18px; border:none; background:transparent; cursor:pointer; font-weight:600; border-radius:8px; transition:all 0.2s;';
         tabBar.appendChild(btn);
     }
 }
