@@ -234,6 +234,7 @@ def approve_user(uid, tenant_id, user_role, target_tenant):
 def get_system_health(uid, tenant_id, user_role):
     now_h  = datetime.datetime.now(datetime.timezone.utc)
     health: dict = {}
+    db = _db()   # V23 lazy accessor — never call get_db() at module scope
 
     # Circuit breaker state
     try:
@@ -256,6 +257,7 @@ def get_system_health(uid, tenant_id, user_role):
             "last_open_reason": cb_data.get("last_open_reason", ""),
         }
     except Exception as cb_e:
+        log.error("system_health_cb_failed", error=str(cb_e))
         health["circuit_breaker"] = {"state": "UNKNOWN", "error": str(cb_e)}
 
     # Lead velocity (24h)
@@ -264,7 +266,8 @@ def get_system_health(uid, tenant_id, user_role):
         health["leads_last_24h"] = len(list(
             db.collection("leads").where(filter=FieldFilter("createdAt", ">=", cutoff)).limit(500).stream()
         ))
-    except Exception:
+    except Exception as v_e:
+        log.warning("system_health_velocity_failed", error=str(v_e))
         health["leads_last_24h"] = None
 
     # Active campaigns
@@ -272,7 +275,8 @@ def get_system_health(uid, tenant_id, user_role):
         health["active_campaigns"] = len(list(
             db.collection("campaigns").where(filter=FieldFilter("status", "==", "active")).limit(500).stream()
         ))
-    except Exception:
+    except Exception as ac_e:
+        log.warning("system_health_campaigns_failed", error=str(ac_e))
         health["active_campaigns"] = None
 
     # Rejected lead count
@@ -280,13 +284,15 @@ def get_system_health(uid, tenant_id, user_role):
         health["total_rejected"] = len(list(
             db.collection("leads").where(filter=FieldFilter("status", "==", "rejected")).limit(500).stream()
         ))
-    except Exception:
+    except Exception as rj_e:
+        log.warning("system_health_rejected_failed", error=str(rj_e))
         health["total_rejected"] = None
 
     # Ontology map size
     try:
         health["ontology_domains"] = len(list(db.collection("ontology_map").limit(200).stream()))
-    except Exception:
+    except Exception as ont_e:
+        log.warning("system_health_ontology_failed", error=str(ont_e))
         health["ontology_domains"] = None
 
     health["generated_at"] = now_h.isoformat()
