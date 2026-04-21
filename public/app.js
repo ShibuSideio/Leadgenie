@@ -1871,7 +1871,7 @@ function renderKanban() {
     });
 
     // Health widget
-    const fmt = v => `â‚¹${Number(v || 0).toLocaleString('en-IN')}`;
+    const fmt = v => `\u20B9${Number(v || 0).toLocaleString('en-IN')}`;
     const negotiating = grouped['negotiating'].reduce((a, l) => a + (l.estimated_value || 0), 0);
     const won         = grouped['won'].reduce((a, l) => a + (l.estimated_value || 0), 0);
     const el1 = document.getElementById('crm-negotiating-sum'); if (el1) el1.textContent = fmt(negotiating);
@@ -1899,7 +1899,7 @@ function buildKanbanCard(lead, now) {
 
     const domain   = (() => { try { return new URL(lead.url || 'https://unknown').hostname.replace('www.', ''); } catch(_) { return lead.url || 'Unknown'; } })();
     const signal   = lead.intent_signal || lead.pain_point || '';
-    const value    = lead.estimated_value ? `ðŸ’° â‚¹${Number(lead.estimated_value).toLocaleString('en-IN')}` : '';
+    const value    = lead.estimated_value ? `\uD83D\uDCB0 \u20B9${Number(lead.estimated_value).toLocaleString('en-IN')}` : '';
 
     card.innerHTML = `
         <div class="card-domain">${domain}${fueBadge}</div>
@@ -2033,7 +2033,7 @@ window.openCrmPanel = function(lead) {
 
         <!-- Estimated Value -->
         <div class="crm-panel-section">
-            <div class="crm-panel-label">Estimated Deal Value (â‚¹)</div>
+            <div class="crm-panel-label">Estimated Deal Value (\u20B9)</div>
             <input type="number" id="crm-est-value" class="crm-input" value="${lead.estimated_value || 0}" placeholder="e.g. 50000" min="0">
             <button class="crm-save-btn" onclick="saveCrmValue('${id}')">Save Value</button>
         </div>

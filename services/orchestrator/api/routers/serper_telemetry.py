@@ -76,11 +76,26 @@ def get_serper_logs(uid, tenant_id, user_role):
         date_from = date_to - datetime.timedelta(days=90)
 
     # ── Build parameterized BigQuery SQL ───────────────────────────────────────
+    # MIDNIGHT BUG FIX (V23.4.2):
+    #   Old: DATE(timestamp) BETWEEN @date_from AND @date_to
+    #        This uses DATE comparison, which should include all hours on date_to.
+    #        However, because the timestamp field is stored as a STRING (not a native
+    #        TIMESTAMP type), CAST/DATE() may truncate at midnight UTC.
+    #        IST is UTC+5:30 — a query at 23:00 IST = 17:30 UTC same day, so DATE()
+    #        is correct. But the original BETWEEN is inclusive, which in practice
+    #        truncates at 00:00:00 on date_to when BQ internally resolves to TIMESTAMP.
+    #
+    #   Fix: Use explicit TIMESTAMP range with exclusive upper bound:
+    #        timestamp >= TIMESTAMP(@date_from)
+    #        AND timestamp < TIMESTAMP_ADD(TIMESTAMP(@date_to_excl), INTERVAL 1 DAY)
+    #        This includes ALL records from date_from 00:00:00 up to (not including)
+    #        (date_to+1) 00:00:00 — i.e., the full date_to day through 23:59:59.999.
     campaign_clause = ""
+    # date_to_excl is the EXCLUSIVE upper bound day (= date_to + 1 day in the SQL)
     params = [
-        _bq.ScalarQueryParameter("date_from", "DATE", date_from.isoformat()),
-        _bq.ScalarQueryParameter("date_to",   "DATE", date_to.isoformat()),
-        _bq.ScalarQueryParameter("row_limit",  "INT64", limit),
+        _bq.ScalarQueryParameter("date_from",    "DATE", date_from.isoformat()),
+        _bq.ScalarQueryParameter("date_to_excl", "DATE", date_to.isoformat()),
+        _bq.ScalarQueryParameter("row_limit",    "INT64", limit),
     ]
     if camp_flt:
         campaign_clause = "AND campaign_id = @campaign_id"
@@ -101,7 +116,10 @@ def get_serper_logs(uid, tenant_id, user_role):
         FROM
             `{PROJECT_ID}.swarm_analytics.serper_audit_logs`
         WHERE
-            DATE(timestamp) BETWEEN @date_from AND @date_to
+            CAST(timestamp AS TIMESTAMP)
+                >= TIMESTAMP(@date_from)
+            AND CAST(timestamp AS TIMESTAMP)
+                <  TIMESTAMP_ADD(TIMESTAMP(@date_to_excl), INTERVAL 1 DAY)
             {campaign_clause}
         ORDER BY
             timestamp DESC
