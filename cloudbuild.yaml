@@ -142,15 +142,26 @@ steps:
   args: ['[BARRIER] Both QA gates passed. Initiating parallel Docker builds.']
 
 # =============================================================================
-# NOTE: BigQuery IAM grant for L0 geo heatmap
+# NOTE: BigQuery IAM grants for lead-pipeline-sa
 # The Cloud Build SA lacks resourcemanager.projects.setIamPolicy so IAM
 # grants cannot be run inside Cloud Build steps.
 #
-# Run this ONE TIME manually from a terminal with Owner/IAM Admin rights:
+# Run these TWO commands ONE TIME manually from a terminal with Owner/IAM
+# Admin rights BEFORE the first Serper telemetry write:
 #
+#   # 1. Job execution rights (already granted — kept for reference)
 #   gcloud projects add-iam-policy-binding lead-sniper-prod \
 #     --member="serviceAccount:lead-pipeline-sa@lead-sniper-prod.iam.gserviceaccount.com" \
 #     --role="roles/bigquery.jobUser" \
+#     --condition=None
+#
+#   # 2. Stream-insert rights on swarm_analytics dataset (V23.4.1 — NEW)
+#   #    Required for: insert_rows_json() into serper_audit_logs,
+#   #                  rlhf_events, and Negative_Signals tables.
+#   #    Without this, BQ returns PERMISSION_DENIED even with a valid OIDC token.
+#   gcloud projects add-iam-policy-binding lead-sniper-prod \
+#     --member="serviceAccount:lead-pipeline-sa@lead-sniper-prod.iam.gserviceaccount.com" \
+#     --role="roles/bigquery.dataEditor" \
 #     --condition=None
 #
 # Until then the geo heatmap uses Firestore as its data source (always works).

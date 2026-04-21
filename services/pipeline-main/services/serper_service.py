@@ -110,9 +110,86 @@ def _get_serper_api_key() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Serper Audit Telemetry — async fire-and-forget (V23.4)
+# Serper Audit Telemetry — async fire-and-forget (V23.4.1 — Zero-Trust OIDC)
 # ---------------------------------------------------------------------------
 _ORCHESTRATOR_URL: str = os.environ.get("ORCHESTRATOR_URL", "").rstrip("/")
+
+# ── OIDC token cache (thread-safe, 55-min TTL) ─────────────────────────────
+# GCE metadata server tokens expire after 60 minutes.  55-min TTL absorbs
+# clock-skew and gives the refresh a 5-minute safety margin.
+import threading as _th_oidc
+_OIDC_CACHE_LOCK    = _th_oidc.Lock()
+_oidc_token_value:  str   = ""
+_oidc_token_expiry: float = 0.0  # monotonic timestamp
+
+
+def _get_oidc_token(audience: str) -> str:
+    """Return a valid Google OIDC identity token for *audience*.
+
+    Fetches from the GCE instance metadata server — always available on
+    Cloud Run, GKE, and GCE.  Result is cached for 55 minutes.
+
+    Falls back to google-auth library (ADC / key file) if the metadata
+    server is unavailable (e.g. local dev with GOOGLE_APPLICATION_CREDENTIALS).
+    Returns "" on all failures so callers degrade gracefully.
+
+    Args:
+        audience: Base URL of the target service, e.g.
+                  "https://orchestrator-xyz-uc.a.run.app".  Must exactly
+                  match the audience the orchestrator validates against.
+    """
+    import time as _time
+
+    global _oidc_token_value, _oidc_token_expiry
+
+    # Fast path — no lock needed if cache is warm
+    _now = _time.monotonic()
+    if _oidc_token_value and _now < _oidc_token_expiry:
+        return _oidc_token_value
+
+    with _OIDC_CACHE_LOCK:
+        # Double-checked locking: re-test after acquiring
+        _now = _time.monotonic()
+        if _oidc_token_value and _now < _oidc_token_expiry:
+            return _oidc_token_value
+
+        try:
+            # Primary: GCE metadata server (always present on Cloud Run)
+            import urllib.request as _url_req
+            _meta_url = (
+                "http://metadata.google.internal/computeMetadata/v1/instance"
+                f"/service-accounts/default/identity"
+                f"?audience={audience}&format=full"
+            )
+            _req = _url_req.Request(_meta_url, headers={"Metadata-Flavor": "Google"})
+            with _url_req.urlopen(_req, timeout=3) as _resp:
+                _token = _resp.read().decode("utf-8").strip()
+            _oidc_token_value  = _token
+            _oidc_token_expiry = _time.monotonic() + (55 * 60)
+            log.debug("oidc_token_refreshed_metadata", audience=audience[:50])
+            return _oidc_token_value
+
+        except Exception as _meta_err:
+            # Fallback: google-auth ADC (key file / workload identity)
+            try:
+                import google.auth as _gauth
+                from google.auth.transport import requests as _gauth_req
+                _creds, _ = _gauth.default(scopes=["openid"])
+                _creds.refresh(_gauth_req.Request())
+                _token = getattr(_creds, "id_token", None) or getattr(_creds, "token", "")
+                if _token:
+                    _oidc_token_value  = _token
+                    _oidc_token_expiry = _time.monotonic() + (55 * 60)
+                    log.debug("oidc_token_refreshed_adc", audience=audience[:50])
+                    return _oidc_token_value
+            except Exception as _adc_err:
+                log.warning(
+                    "oidc_token_fetch_failed",
+                    metadata_err=str(_meta_err)[:120],
+                    adc_err=str(_adc_err)[:120],
+                    action="Telemetry will be dropped — check lead-pipeline-sa IAM."
+                )
+            return ""
 
 
 def _push_serper_audit(
@@ -125,10 +202,21 @@ def _push_serper_audit(
     error_message: str = "",
     engine: str = "search",
 ) -> None:
-    """Push one audit row to the orchestrator's BQ broker.
+    """Push one audit row to the orchestrator BQ broker via Zero-Trust OIDC.
 
     Runs in a daemon thread — never blocks the calling scrape loop.
     Silently swallowed on any exception (non-critical telemetry path).
+
+    V23.4 bug (fixed in V23.4.1):
+        Previously called httpx.post() with no Authorization header.
+        The orchestrator's _verify_oidc() silently returned HTTP 200 with
+        {"ok": false, "reason": "auth_failed"}, so zero rows reached BigQuery.
+
+    V23.4.1 fix:
+        Fetches a Google OIDC identity token from the GCE metadata server
+        (audience = ORCHESTRATOR_URL), caches it for 55 minutes, and attaches
+        it as "Authorization: Bearer <token>".  _verify_oidc() validates the
+        token signature via Google public certs and admits the request.
     """
     if not _ORCHESTRATOR_URL:
         return  # env var not set — skip silently (local/dev environments)
@@ -147,9 +235,23 @@ def _push_serper_audit(
             "error_message":      error_message or None,
             "timestamp":          _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+
+        # ── Zero-Trust OIDC — attach identity token ──────────────────────────
+        _headers: dict = {"Content-Type": "application/json"}
+        _token = _get_oidc_token(_ORCHESTRATOR_URL)
+        if _token:
+            _headers["Authorization"] = f"Bearer {_token}"
+        else:
+            log.warning(
+                "serper_audit_no_oidc_token",
+                orchestrator=_ORCHESTRATOR_URL[:50],
+                action="Row will be rejected by orchestrator auth — check SA.",
+            )
+
         httpx.post(
             f"{_ORCHESTRATOR_URL}/api/internal/telemetry/serper-audit",
             json=payload,
+            headers=_headers,
             timeout=5,
         )
     except Exception as _te:
