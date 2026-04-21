@@ -1947,6 +1947,26 @@ async function handleKanbanDrop(e, col) {
 }
 
 // â”€â”€ openCrmPanel / closeCrmPanel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── PLATFORM_META ─────────────────────────────────────────────────────────────
+// Maps contact_endpoints[].platform -> { icon, label } for the CRM slide-out.
+// Defined here because openCrmPanel() references it directly.
+// NOTE: _PRISM_PLATFORM_META (below) is domain-keyed (for copilot labels);
+//       this map is platform-name-keyed (for CRM panel Smart Action buttons).
+const PLATFORM_META = {
+    linkedin:  { icon: '&#x1F4BC;', label: 'Open LinkedIn'    },
+    email:     { icon: '&#x2709;',  label: 'Send Email'        },
+    twitter:   { icon: '&#x1F426;', label: 'Open X / Twitter' },
+    x:         { icon: '&#x1F426;', label: 'Open X'           },
+    instagram: { icon: '&#x1F4F7;', label: 'Open Instagram'   },
+    facebook:  { icon: '&#x1F4AC;', label: 'Open Facebook'    },
+    reddit:    { icon: '&#x1F47E;', label: 'Open Reddit'      },
+    quora:     { icon: '&#x1F4AC;', label: 'Open Quora'       },
+    phone:     { icon: '&#x1F4DE;', label: 'Call'             },
+    whatsapp:  { icon: '&#x1F4AC;', label: 'WhatsApp'         },
+    website:   { icon: '&#x1F310;', label: 'Visit Website'    },
+    other:     { icon: '&#x1F4CB;', label: 'Contact'          },
+};
+
 window.openCrmPanel = function(lead) {
     crmActiveLead = lead;
     const panel = document.getElementById('crm-side-panel');
