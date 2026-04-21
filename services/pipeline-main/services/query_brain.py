@@ -104,7 +104,9 @@ def generate_smart_query(
     import json
 
     # ── Step 1: RLHF history (Firestore read) ─────────────────────────────────
-    pain_points: list[str] = []
+    pain_points:      list[str] = []
+    neg_domains:      list[str] = []   # domains from rejected/low-score leads
+    neg_title_frags:  list[str] = []   # title patterns (job boards, directories)
     try:
         from google.cloud.firestore_v1.base_query import FieldFilter as _FF  # noqa: PLC0415
         # BUG-QB1 FIX: Deprecated positional .where() → FieldFilter.
@@ -125,6 +127,64 @@ def generate_smart_query(
         ]
     except Exception as exc:
         log.warning("query_brain_rlhf_fetch_failed", error=str(exc))
+
+    # ── Step 1b: Negative RLHF — Shadow Ledger rejection footprints ───────────
+    # Query rejected / low-score leads for this tenant and extract common
+    # junk footprints (domain = N/A, job board titles, directory patterns).
+    # These become dynamic Google Search exclusion operators: -site:X, -intitle:"Y".
+    try:
+        from google.cloud.firestore_v1.base_query import FieldFilter as _FF2  # noqa: PLC0415
+        import concurrent.futures as _cf
+
+        def _fetch_rejections():
+            _db  = get_db()
+            # Primary: explicit rejections
+            q_rej = (
+                _db.collection("leads")
+                .where(filter=_FF2("tenant_id", "==", tenant_id))
+                .where(filter=_FF2("status", "==", "rejected"))
+                .limit(30)
+            )
+            docs_rej  = list(q_rej.stream())
+            _domains:      list[str] = []
+            _title_frags:  list[str] = []
+            JUNK_TITLE_PATTERNS = [
+                "jobs", "careers", "hiring", "directory", "listing",
+                "aggregator", "yellow pages", "just dial",
+            ]
+            for d in docs_rej:
+                dd = d.to_dict() or {}
+                # Extract domain from target_url or target_domain
+                domain = (
+                    dd.get("target_domain")
+                    or dd.get("domain")
+                    or ""
+                ).strip().lower()
+                score = dd.get("score", 10)
+                # Skip N/A domains and already-blacklisted generics
+                if domain and domain not in ("n/a", "unknown", "") and "." in domain:
+                    _domains.append(domain)
+                # Extract title for junk pattern detection
+                title = (dd.get("title") or dd.get("raw_query") or "").lower()
+                for pattern in JUNK_TITLE_PATTERNS:
+                    if pattern in title and pattern not in _title_frags:
+                        _title_frags.append(pattern)
+            return _domains, _title_frags
+
+        with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+            _fut = _pool.submit(_fetch_rejections)
+            neg_domains, neg_title_frags = _fut.result(timeout=2.0)
+
+        if neg_domains or neg_title_frags:
+            log.info(
+                "query_brain_neg_rlhf_loaded",
+                domains=len(neg_domains),
+                title_frags=len(neg_title_frags),
+                tenant_id=tenant_id[:10],
+            )
+    except Exception as _neg_exc:
+        # Non-critical — never block the query pipeline over negative RLHF
+        log.debug("query_brain_neg_rlhf_failed", error=str(_neg_exc))
 
 
     _p_cat = (persona_category or "general").strip() or "general"
@@ -280,7 +340,7 @@ Return ONLY the JSON object. No explanation, no markdown."""
     # ── Step 4: Assemble Serper query strings ──────────────────────────────────
     blacklist = _DEFAULT_BLACKLIST
 
-    # Negative Signal Shield injection
+    # Negative Signal Shield injection (static Neo4j-style exclusion list from Shadow Ledger)
     try:
         shield_domains, shield_entities = fetch_neg_shield(tenant_id)
         if shield_domains:
@@ -292,6 +352,19 @@ Return ONLY the JSON object. No explanation, no markdown."""
                      domains=len(shield_domains), entities=len(shield_entities))
     except Exception as exc:
         log.warning("neg_shield_injection_failed", error=str(exc))
+
+    # Negative RLHF dorking — dynamic exclusion from rejection footprints (V23.5)
+    # Appends -site: and -intitle: operators derived from leads the campaign rejected,
+    # steering Serper away from historically junk sources (job boards, dirs, thin pages).
+    if neg_domains:
+        # Cap at 10 to avoid query string overflow (~2048 char Google limit)
+        _excl_sites = " ".join(f"-site:{d}" for d in neg_domains[:10] if d)
+        blacklist += " " + _excl_sites
+        log.info("neg_rlhf_sites_injected", count=len(neg_domains[:10]))
+    if neg_title_frags:
+        _excl_titles = " ".join(f'-intitle:"{t}"' for t in neg_title_frags[:5] if t)
+        blacklist += " " + _excl_titles
+        log.info("neg_rlhf_titles_injected", count=len(neg_title_frags[:5]))
 
     historical_str = ""
     if historical_phrases:

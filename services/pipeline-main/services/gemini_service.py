@@ -339,6 +339,13 @@ DETECTED TECH STACK:
         "For COMPANY WEBSITE: elite B2B profiler — demand formal signals, extract decision-makers. "
         "For SOCIAL/FORUM POST: community intelligence analyst — score purely on pain intensity, "
         "draft empathetic conversation-starters. Never hallucinate contacts."
+        "\n\nCRITICAL RULE — DATA COMPLETENESS PENALTY (NON-NEGOTIABLE): "
+        "If the extracted target lacks a verifiable company domain (domain is empty, 'N/A', "
+        "or cannot be resolved to a real business), OR if the extracted context is too sparse "
+        "to generate a personalized 3-sentence opening message with at least one specific detail "
+        "about the prospect's situation, you MUST cap the final raw_score at a maximum of 3. "
+        "Do not assign high scores to uncontactable fragments, anonymous posts, or thin-content "
+        "pages. Incomplete leads that cannot be reached are worthless regardless of intent signal strength."
     )
 
     try:

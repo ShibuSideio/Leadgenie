@@ -2583,7 +2583,7 @@ window.lcToggleExpand = function(docId) {
     if (!panel) return;
     const isOpen = panel.classList.contains('open');
     panel.classList.toggle('open', !isOpen);
-    if (icon) icon.textContent = isOpen ? 'â†“' : 'â†‘';
+    if (icon) icon.textContent = isOpen ? '\u2193' : '\u2191';
 };
 
 // Overflow menu toggle
