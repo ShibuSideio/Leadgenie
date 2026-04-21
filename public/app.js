@@ -1073,6 +1073,10 @@ window.switchTab = function(tabName) {
         const isAdmin = window.currentUserData?.role === 'super_admin';
         if (!isAdmin) { showToast('CRM module is restricted to L0 administrators.', 'error'); return; }
         show('view-crm-test');
+        // Activate both the hidden cmd-btn and ensure no other tab is active
+        document.querySelectorAll('.cmd-btn').forEach(b => b.classList.remove('active'));
+        const crmBtn = document.getElementById('tab-crm');
+        if (crmBtn) crmBtn.classList.add('active');
         loadCrmBoard();
     } else if (tabName === 'persona-vault') {
         show('view-persona-vault');
@@ -1122,7 +1126,14 @@ window.fetchL0Telemetry = async function() {
         });
         
         if (response.status === 200) {
-            document.getElementById('tab-l0-admin').classList.remove('hidden');
+            // Reveal admin tab — uses style="display:none" (not hidden class)
+            const adminTabEl = document.getElementById('tab-l0-admin');
+            if (adminTabEl) adminTabEl.style.display = '';
+            // Reveal CRM tab for super_admin
+            if (window.currentUserData?.role === 'super_admin') {
+                const crmTabEl = document.getElementById('tab-crm');
+                if (crmTabEl) crmTabEl.style.display = '';
+            }
             const payload = await response.json();
             window.l0TelemetryCache.macro = payload.data.macro || {};
             window.l0TelemetryCache.tenants = payload.data.tenants || [];
@@ -1584,105 +1595,14 @@ window.recycleRejectedLead = async function(leadId, btn) {
 // L0 QUERY AUDIT — Serper Telemetry Tab (V23.4)
 // =============================================================================
 
-/** Lazily inject the Serper panel HTML if it doesn't exist yet. */
+/** _ensureSerperPanel — no-op: panel now exists statically in index.html.
+ *  Kept as a stub so existing fetchSerperAuditLogs() call doesn't error. */
 function _ensureSerperPanel() {
-    if (document.getElementById('l0-panel-serper')) return;
-
-    // Find the l0-panel-health to insert after it (sibling panels pattern)
-    const healthPanel = document.getElementById('l0-panel-health');
-    if (!healthPanel) return;
-
-    const panel = document.createElement('div');
-    panel.id        = 'l0-panel-serper';
-    panel.className = 'l0-panel';  // uses same CSS class as other panels
-    panel.style.cssText = 'display:none;';
-    panel.innerHTML = `
-        <div style="margin-bottom:20px;">
-
-            <!-- Summary metric card -->
-            <div id="serper-summary-cards" style="display:flex; gap:16px; margin-bottom:24px; flex-wrap:wrap;">
-                <div style="flex:1; min-width:160px; background:linear-gradient(135deg,#4f46e5,#7c3aed); border-radius:16px; padding:20px 24px; color:#fff; box-shadow:0 4px 24px rgba(79,70,229,0.25);">
-                    <div style="font-size:0.75rem; opacity:0.8; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;">Total Calls Today</div>
-                    <div id="serper-stat-today" style="font-size:2.2rem; font-weight:800; line-height:1;">—</div>
-                    <div style="font-size:0.7rem; opacity:0.65; margin-top:4px;">Serper API queries</div>
-                </div>
-                <div style="flex:1; min-width:160px; background:linear-gradient(135deg,#059669,#10b981); border-radius:16px; padding:20px 24px; color:#fff; box-shadow:0 4px 24px rgba(16,185,129,0.2);">
-                    <div style="font-size:0.75rem; opacity:0.8; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;">Avg Results / Query</div>
-                    <div id="serper-stat-avg" style="font-size:2.2rem; font-weight:800; line-height:1;">—</div>
-                    <div style="font-size:0.7rem; opacity:0.65; margin-top:4px;">organic results returned</div>
-                </div>
-                <div style="flex:1; min-width:160px; background:linear-gradient(135deg,#d97706,#f59e0b); border-radius:16px; padding:20px 24px; color:#fff; box-shadow:0 4px 24px rgba(245,158,11,0.2);">
-                    <div style="font-size:0.75rem; opacity:0.8; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;">Total Credits Used</div>
-                    <div id="serper-stat-credits" style="font-size:2.2rem; font-weight:800; line-height:1;">—</div>
-                    <div style="font-size:0.7rem; opacity:0.65; margin-top:4px;">in date range</div>
-                </div>
-                <div style="flex:1; min-width:160px; background:linear-gradient(135deg,#0ea5e9,#38bdf8); border-radius:16px; padding:20px 24px; color:#fff; box-shadow:0 4px 24px rgba(14,165,233,0.2);">
-                    <div style="font-size:0.75rem; opacity:0.8; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:6px;">Queries in Range</div>
-                    <div id="serper-stat-total" style="font-size:2.2rem; font-weight:800; line-height:1;">—</div>
-                    <div style="font-size:0.7rem; opacity:0.65; margin-top:4px;">rows returned</div>
-                </div>
-            </div>
-
-            <!-- Filter row -->
-            <div style="display:flex; gap:12px; align-items:flex-end; margin-bottom:18px; flex-wrap:wrap; background:#f8fafc; border-radius:12px; padding:14px 18px; border:1px solid #e5e7eb;">
-                <div style="display:flex; flex-direction:column; gap:4px;">
-                    <label style="font-size:0.72rem; font-weight:600; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">From</label>
-                    <input id="serper-filter-from" type="date" style="padding:8px 12px; border:1px solid #d1d5db; border-radius:8px; font-size:0.85rem; color:#111827; background:#fff; cursor:pointer;" />
-                </div>
-                <div style="display:flex; flex-direction:column; gap:4px;">
-                    <label style="font-size:0.72rem; font-weight:600; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">To</label>
-                    <input id="serper-filter-to" type="date" style="padding:8px 12px; border:1px solid #d1d5db; border-radius:8px; font-size:0.85rem; color:#111827; background:#fff; cursor:pointer;" />
-                </div>
-                <div style="display:flex; flex-direction:column; gap:4px; flex:1; min-width:200px;">
-                    <label style="font-size:0.72rem; font-weight:600; color:#6b7280; text-transform:uppercase; letter-spacing:0.05em;">Campaign ID</label>
-                    <input id="serper-filter-campaign" type="text" placeholder="Filter by campaign ID (optional)" style="padding:8px 12px; border:1px solid #d1d5db; border-radius:8px; font-size:0.85rem; color:#111827; background:#fff; width:100%;" />
-                </div>
-                <button onclick="fetchSerperAuditLogs()" style="padding:9px 22px; background:#4f46e5; color:#fff; border:none; border-radius:8px; font-weight:600; font-size:0.85rem; cursor:pointer; white-space:nowrap; transition:background 0.15s;" onmouseover="this.style.background='#4338ca'" onmouseout="this.style.background='#4f46e5'">
-                    &#128269; Apply Filter
-                </button>
-            </div>
-
-            <!-- Top Campaigns mini-list -->
-            <div id="serper-top-campaigns" style="margin-bottom:18px; display:none;">
-                <div style="font-size:0.78rem; font-weight:700; color:#374151; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.08em;">&#127942; Top Campaigns by Call Count</div>
-                <div id="serper-top-campaigns-list" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
-            </div>
-
-            <!-- Data table -->
-            <div style="overflow-x:auto; border-radius:12px; border:1px solid #e5e7eb;">
-                <table style="width:100%; border-collapse:collapse; font-size:0.83rem;">
-                    <thead>
-                        <tr style="background:#f9fafb; border-bottom:2px solid #e5e7eb;">
-                            <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151; white-space:nowrap;">&#128197; Date / Time</th>
-                            <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151;">Campaign ID</th>
-                            <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151;">Raw Query</th>
-                            <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151;">Parameters</th>
-                            <th style="padding:11px 10px; text-align:center; font-weight:700; color:#374151;">Results</th>
-                            <th style="padding:11px 10px; text-align:center; font-weight:700; color:#374151;">Status</th>
-                        </tr>
-                    </thead>
-                    <tbody id="serper-audit-table">
-                        <tr><td colspan="6" style="padding:24px; text-align:center; color:#9ca3af;">Select a date range and click Apply Filter.</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    `;
-    healthPanel.insertAdjacentElement('afterend', panel);
-
-    // Inject tab button if the tab bar exists
-    const tabBar = document.getElementById('l0-tab-health')?.closest('div');
-    if (tabBar && !document.getElementById('l0-tab-serper')) {
-        const btn = document.createElement('button');
-        btn.id        = 'l0-tab-serper';
-        btn.className = 'l0-tab';           // was 'l0-tab-btn' — must match .l0-tab CSS class
-        btn.textContent = '🔍 Query Audit';
-        btn.onclick   = () => l0SwitchTab('serper');
-        tabBar.appendChild(btn);
-    }
+    // Panel (#l0-panel-serper) is now a static HTML sibling of the other l0-panels.
+    // Tab button (#l0-tab-serper) is also static. Dynamic injection no longer needed.
+    return;
 }
 
-/** Set default date-range inputs to last 7 days. */
 function _initSerperDateDefaults() {
     const from = document.getElementById('serper-filter-from');
     const to   = document.getElementById('serper-filter-to');
@@ -2602,6 +2522,9 @@ window.createLeadCardV2 = function(docId, lead) {
             if (!docId || btn.disabled) return;
             var lead = _leadsMap.get(docId);
             if (!lead) { showToast('Lead data unavailable. Please refresh.', 'error'); return; }
+            // Open the CRM slide-out dossier panel immediately (visual confirmation)
+            window.openCrmPanel(lead);
+            // Also save to CRM pipeline in background (marks is_in_crm=true)
             window.pushToCRM(docId, encodeURIComponent(JSON.stringify(lead)));
 
         } else if (action === 'expand') {

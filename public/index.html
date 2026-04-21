@@ -224,6 +224,7 @@
             <button class="cmd-btn" id="tab-personas" onclick="switchTab('persona-vault')">&#127918; Personas</button>
             <button class="cmd-btn" id="tab-reports" onclick="switchTab('reports')">Reports</button>
             <button class="cmd-btn" id="tab-l0-admin" style="display:none;" onclick="switchTab('l0-admin')">Admin</button>
+            <button class="cmd-btn" id="tab-crm" style="display:none;" onclick="switchTab('crm-test')">&#128203; CRM</button>
         </div>
         <div class="user-pill-wrap">
             <button class="user-pill" id="user-pill-btn" onclick="toggleUserDropdown()">
@@ -478,6 +479,7 @@
                 <button class="l0-tab"        id="l0-tab-operations"  onclick="l0SwitchTab('operations')">&#127758; Global Operations</button>
                 <button class="l0-tab"        id="l0-tab-ledger"      onclick="l0SwitchTab('ledger')">&#128203; Shadow Ledger</button>
                 <button class="l0-tab"        id="l0-tab-health"      onclick="l0SwitchTab('health')">&#128200; System Health</button>
+                <button class="l0-tab"        id="l0-tab-serper"      onclick="l0SwitchTab('serper')">&#128269; Query Audit</button>
             </div>
 
             <!-- Tab: Tenants (existing content) -->
@@ -583,6 +585,64 @@
                     <button class="primary-btn" onclick="fetchSystemHealth()" style="min-height:44px;">&#8635; Load System Telemetry</button>
                 </div>
             </div>
+
+            <!-- Tab: Serper Query Audit (static shell — JS populates tbody on l0SwitchTab('serper')) -->
+            <div id="l0-panel-serper" class="l0-panel">
+                <!-- Stat cards -->
+                <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:14px; margin-bottom:20px;">
+                    <div class="stats-box" style="background:#fff; text-align:center;">
+                        <div style="font-size:2rem;">&#128269;</div>
+                        <div style="font-weight:700;">Queries Today</div>
+                        <div id="serper-stat-today" style="font-size:1.4rem; font-weight:800; color:var(--primary); margin-top:4px;">—</div>
+                    </div>
+                    <div class="stats-box" style="background:#fff; text-align:center;">
+                        <div style="font-size:2rem;">&#128202;</div>
+                        <div style="font-weight:700;">Avg Results</div>
+                        <div id="serper-stat-avg" style="font-size:1.4rem; font-weight:800; color:#059669; margin-top:4px;">—</div>
+                    </div>
+                    <div class="stats-box" style="background:#fff; text-align:center;">
+                        <div style="font-size:2rem;">&#9889;</div>
+                        <div style="font-weight:700;">Credits Est.</div>
+                        <div id="serper-stat-credits" style="font-size:1.4rem; font-weight:800; color:#d97706; margin-top:4px;">—</div>
+                    </div>
+                    <div class="stats-box" style="background:#fff; text-align:center;">
+                        <div style="font-size:2rem;">&#128203;</div>
+                        <div style="font-weight:700;">Total Logs</div>
+                        <div id="serper-stat-total" style="font-size:1.4rem; font-weight:800; color:var(--text-main); margin-top:4px;">—</div>
+                    </div>
+                </div>
+                <!-- Filters -->
+                <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:16px;">
+                    <input type="date" id="serper-filter-from" class="crm-input" style="width:160px;">
+                    <span style="color:var(--text-muted); font-size:0.85rem;">to</span>
+                    <input type="date" id="serper-filter-to"   class="crm-input" style="width:160px;">
+                    <input type="text" id="serper-filter-campaign" class="crm-input" style="flex:1; min-width:180px;" placeholder="Filter by campaign ID (optional)">
+                    <button class="primary-btn" onclick="fetchSerperAuditLogs()" style="padding:9px 22px; min-height:40px;">&#9654; Apply Filter</button>
+                </div>
+                <!-- Top campaigns -->
+                <div id="serper-top-campaigns" style="display:none; margin-bottom:16px;">
+                    <div style="font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:8px;">&#127942; Top Campaigns by Query Volume</div>
+                    <div id="serper-top-campaigns-list" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
+                </div>
+                <!-- Log table -->
+                <div style="overflow-x:auto; border-radius:12px; border:1px solid var(--glass-border);">
+                    <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+                        <thead>
+                            <tr style="background:#f9fafb; border-bottom:2px solid #e5e7eb;">
+                                <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151; white-space:nowrap;">&#128197; Date / Time</th>
+                                <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151;">Campaign ID</th>
+                                <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151;">Raw Query</th>
+                                <th style="padding:11px 14px; text-align:left; font-weight:700; color:#374151;">Parameters</th>
+                                <th style="padding:11px 10px; text-align:center; font-weight:700; color:#374151;">Results</th>
+                                <th style="padding:11px 10px; text-align:center; font-weight:700; color:#374151;">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="serper-audit-table">
+                            <tr><td colspan="6" style="padding:32px; text-align:center; color:#9ca3af;">Select a date range and click Apply Filter.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div><!-- /l0-panel-serper -->
 
         </section>
 
@@ -1165,6 +1225,6 @@
         });
     }
 </script>
-<script src="app.js?v=68"></script>
+<script src="app.js?v=69"></script>
 </body>
 </html>
