@@ -1903,7 +1903,7 @@ function buildKanbanCard(lead, now) {
 
     card.innerHTML = `
         <div class="card-domain">${domain}${fueBadge}</div>
-        <div class="card-score">Score: ${lead.score || 'N/A'}/10 Â· ${(lead.confidence_tier || 'High')}</div>
+        <div class="card-score">Score: ${lead.score || 'N/A'}/10 · ${(lead.confidence_tier || 'High')}</div>
         ${signal ? `<div class="card-signal">${signal}</div>` : ''}
         ${value ? `<div class="card-value">${value}</div>` : ''}
     `;
@@ -2210,7 +2210,7 @@ function fcBuildCampaignName(who, where) {
     const year  = now.getFullYear();
     // Take first 35 chars of who
     const base = who.length > 35 ? who.substring(0, 35).trim() + 'â€¦' : who;
-    return where ? `${base} Â· ${where} Â· ${month} ${year}` : `${base} Â· ${month} ${year}`;
+    return where ? `${base} · ${where} · ${month} ${year}` : `${base} · ${month} ${year}`;
 }
 
 // --- Relative time helper ---
