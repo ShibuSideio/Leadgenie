@@ -86,15 +86,23 @@ def generate_smart_query(
     bio: str,
     sourcing_vector: Optional[str] = None,
     persona_category: Optional[str] = None,
+    targeting_signals: Optional[list] = None,
 ) -> list[str]:
     """Generate Serper query strings via statistical router or Gemini fallback.
 
     Args:
-        user_keywords:    List of campaign keyword strings.
-        tenant_id:        Tenant UID for BQ scoping.
-        bio:              Effective campaign bio.
-        sourcing_vector:  Campaign sourcing vector label ("Classic B2B", etc.).
-        persona_category: Persona category for BQ intent confidence query.
+        user_keywords:      List of campaign keyword strings.
+        tenant_id:          Tenant UID for BQ scoping.
+        bio:                Effective campaign bio.
+        sourcing_vector:    Campaign sourcing vector label ("Classic B2B", etc.).
+        persona_category:   Persona category for BQ intent confidence query.
+        targeting_signals:  List of Persona targeting signal strings.  Any
+                            entry starting with "NOT " (case-insensitive) is
+                            parsed into a Serper exclusion operator:
+                              "NOT digital marketing agency"
+                              --> -\"digital marketing agency\"
+                            Positive signals (no NOT prefix) are reserved for
+                            future intent-boosting (currently a no-op).
 
     Returns:
         List of ready-to-use Serper query strings (may be empty on error).
@@ -339,6 +347,32 @@ Return ONLY the JSON object. No explanation, no markdown."""
 
     # ── Step 4: Assemble Serper query strings ──────────────────────────────────
     blacklist = _DEFAULT_BLACKLIST
+
+    # ── Pre-emptive Persona exclusions: "NOT <phrase>" targeting signals (V23.5) ─
+    # These are injected FIRST — before Shadow Ledger or neg_shield — so they
+    # are guaranteed to appear in every generated Serper query string.
+    #
+    # Parsing rule (case-insensitive):
+    #   "NOT digital marketing agency"  →  -"digital marketing agency"
+    #   "NOT site:linkedin.com/jobs"    →  -"site:linkedin.com/jobs"
+    #
+    # Positive signals (no "NOT " prefix) are a no-op here; reserved for
+    # future intent-weight boosting in the statistical RLHF path.
+    _pre_exclusions: list[str] = []
+    for _sig in (targeting_signals or []):
+        _sig_clean = (_sig or "").strip()
+        if _sig_clean.upper().startswith("NOT "):
+            _phrase = _sig_clean[4:].strip()   # strip the 4-char "NOT " prefix
+            if _phrase:
+                _pre_exclusions.append(f'-"{_phrase}"')
+
+    if _pre_exclusions:
+        blacklist += " " + " ".join(_pre_exclusions)
+        log.info(
+            "persona_neg_signals_injected",
+            count=len(_pre_exclusions),
+            sample=_pre_exclusions[:3],
+        )
 
     # Negative Signal Shield injection (static Neo4j-style exclusion list from Shadow Ledger)
     try:

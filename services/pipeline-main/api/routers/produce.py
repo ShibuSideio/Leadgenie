@@ -161,6 +161,17 @@ def produce():
         sourcing_vector=sourcing_vector,
     )
 
+    # Persona negative targeting signals ("NOT <phrase>" → Serper exclusion operators)
+    _targeting_signals: list[str] = campaign.get("persona_targeting_signals") or []
+    if _targeting_signals:
+        neg_count = sum(1 for s in _targeting_signals if s.upper().startswith("NOT "))
+        log.info(
+            "persona_targeting_signals_loaded",
+            total=len(_targeting_signals),
+            negative=neg_count,
+            campaign_id=campaign_id,
+        )
+
     # ------------------------------------------------------------------
     # TRACE-7: Query Brain (Intent Translation)
     # ------------------------------------------------------------------
@@ -173,6 +184,7 @@ def produce():
         smart_keywords = generate_smart_query(
             keywords, tenant_id, bio, sourcing_vector,
             persona_category=_persona_cat,
+            targeting_signals=_targeting_signals,
         )
     except Exception as exc:
         log.critical(

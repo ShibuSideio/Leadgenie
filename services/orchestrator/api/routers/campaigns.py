@@ -171,12 +171,14 @@ def create_campaign(uid, tenant_id, user_role):
             )
             if p_snap.exists:
                 p_data = p_snap.to_dict() or {}
-                data["persona_bio"]      = p_data.get("bio", "")
-                data["persona_keywords"] = p_data.get("keywords", "")
-                data["persona_name"]     = p_data.get("name", "")
+                data["persona_bio"]               = p_data.get("bio", "")
+                data["persona_keywords"]          = p_data.get("keywords", "")
+                data["persona_name"]              = p_data.get("name", "")
+                data["persona_targeting_signals"] = p_data.get("targeting_signals", [])
                 if not data.get("bio"):
                     data["bio"] = data["persona_bio"]
-                log.info("persona_linked", persona=p_data.get("name"), campaign_todo=True)
+                log.info("persona_linked", persona=p_data.get("name"),
+                         negative_signals=len(data["persona_targeting_signals"]))
         except Exception as p_err:
             log.warning("persona_denormalise_error", error=str(p_err))
 

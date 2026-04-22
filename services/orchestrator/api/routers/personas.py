@@ -42,10 +42,11 @@ def list_personas(uid, tenant_id, user_role):
         for doc in p_docs:
             d = doc.to_dict() or {}
             out.append({
-                "id":        doc.id,
-                "name":      d.get("name", ""),
-                "bio":       d.get("bio", ""),
-                "keywords":  d.get("keywords", ""),
+                "id":                doc.id,
+                "name":              d.get("name", ""),
+                "bio":               d.get("bio", ""),
+                "keywords":          d.get("keywords", ""),
+                "targeting_signals": d.get("targeting_signals", []),
                 "createdAt": d["createdAt"].isoformat() if d.get("createdAt") and hasattr(d["createdAt"], "isoformat") else None,
                 "updatedAt": d["updatedAt"].isoformat() if d.get("updatedAt") and hasattr(d["updatedAt"], "isoformat") else None,
             })
@@ -61,10 +62,15 @@ def list_personas(uid, tenant_id, user_role):
 @require_auth
 def create_persona(uid, tenant_id, user_role):
     from google.cloud import firestore
-    data   = request.json or {}
-    p_name = (data.get("name") or "").strip()
-    p_bio  = (data.get("bio")  or "").strip()
-    p_keys = (data.get("keywords") or "").strip()
+    data     = request.json or {}
+    p_name   = (data.get("name") or "").strip()
+    p_bio    = (data.get("bio")  or "").strip()
+    p_keys   = (data.get("keywords") or "").strip()
+    # targeting_signals: list of strings. "NOT <phrase>" entries become Serper exclusion operators.
+    p_signals = [
+        s.strip() for s in (data.get("targeting_signals") or [])
+        if isinstance(s, str) and s.strip()
+    ]
     if not p_name or not p_bio:
         return jsonify({"error": "name and bio are required"}), 400
     _, p_ref = (
@@ -73,12 +79,14 @@ def create_persona(uid, tenant_id, user_role):
           .collection("personas")
           .add({
               "name": p_name, "bio": p_bio, "keywords": p_keys,
+              "targeting_signals": p_signals,
               "tenant_id": tenant_id,
               "createdAt": firestore.SERVER_TIMESTAMP,
               "updatedAt": firestore.SERVER_TIMESTAMP,
           })
     )
-    log.info("persona_created", persona_id=p_ref.id, name=p_name, tenant_id=tenant_id)
+    log.info("persona_created", persona_id=p_ref.id, name=p_name,
+             signals=len(p_signals), tenant_id=tenant_id)
     return jsonify({"status": "success", "id": p_ref.id}), 201
 
 
@@ -89,10 +97,14 @@ def create_persona(uid, tenant_id, user_role):
 @require_auth
 def update_persona(uid, tenant_id, user_role, persona_id):
     from google.cloud import firestore
-    data   = request.json or {}
-    p_name = (data.get("name") or "").strip()
-    p_bio  = (data.get("bio")  or "").strip()
-    p_keys = (data.get("keywords") or "").strip()
+    data     = request.json or {}
+    p_name   = (data.get("name") or "").strip()
+    p_bio    = (data.get("bio")  or "").strip()
+    p_keys   = (data.get("keywords") or "").strip()
+    p_signals = [
+        s.strip() for s in (data.get("targeting_signals") or [])
+        if isinstance(s, str) and s.strip()
+    ]
     if not p_name or not p_bio:
         return jsonify({"error": "name and bio are required"}), 400
 
@@ -103,10 +115,12 @@ def update_persona(uid, tenant_id, user_role, persona_id):
           .document(persona_id)
     )
     p_ref.set({"name": p_name, "bio": p_bio, "keywords": p_keys,
+               "targeting_signals": p_signals,
                "tenant_id": tenant_id, "updatedAt": firestore.SERVER_TIMESTAMP}, merge=True)
-    log.info("persona_updated", persona_id=persona_id, name=p_name)
+    log.info("persona_updated", persona_id=persona_id, name=p_name,
+             signals=len(p_signals))
 
-    # Surgical cache invalidation
+    # Surgical cache invalidation — also propagate targeting_signals to linked campaigns
     linked_camps: list = []
     try:
         linked_camps = list(
@@ -130,9 +144,10 @@ def update_persona(uid, tenant_id, user_role, persona_id):
                 batch.commit()
             wiped += len(cache_docs)
             camp_doc.reference.update({
-                "persona_bio":      p_bio,
-                "persona_keywords": p_keys,
-                "updatedAt":        firestore.SERVER_TIMESTAMP,
+                "persona_bio":               p_bio,
+                "persona_keywords":          p_keys,
+                "persona_targeting_signals": p_signals,  # propagate negatives to campaign
+                "updatedAt":                 firestore.SERVER_TIMESTAMP,
             })
         log.info("persona_cache_invalidated", wiped=wiped, campaigns=len(linked_camps))
     except Exception as inv_err:
