@@ -1,17 +1,36 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V23.4 Enterprise Build Pipeline
-# Deploy trigger: 2026-04-20 | V23.4 Serper Telemetry + WAF Hardening
-# Changes from V23.3:
-#   + Serper audit telemetry loop (serper_service.py, internal.py,
-#     serper_telemetry.py, main_v23.py, app.js — BQ: swarm_analytics.serper_audit_logs)
-#   + ORCHESTRATOR_URL injected into deploy-pipeline-main (was console-only)
-#   + WAF fail-fast: settings.py + digital-twin-engine/main.py (httpx timeout
-#     7s, 12-fingerprint detection, 422 WAF_BLOCKED payload)
-#   + Frontend: dtStartAnalysis() WAF_BLOCKED branch — amber notice + auto
-#     transition to Manual Entry (dt-view-d) in 2.5s
-#   + digital-twin-engine: --timeout raised 30s→60s (WAF detection is
-#     non-blocking but Gemini 2.5 Flash can use up to 15s on cold paths)
-#   + legacy main.py archived to archive/legacy-pipeline-main-monolith branch
+# cloudbuild.yaml — Sideio Leads V23.4.2 Enterprise Build Pipeline
+# Deploy trigger: 2026-04-23 | BQ Telemetry Fix + Backlog Closures
+#
+# Changes from V23.4 (2026-04-20):
+#
+#   V23.4.1 (2026-04-22):
+#   + query_brain.py: "NOT <phrase>" persona signals → pre-emptive Serper
+#     exclusion operators (-"phrase") injected at query-assembly time.
+#   + serper_service.py: Zero-Trust OIDC for serper-audit broker POST
+#     (GCE metadata server token, 55-min cache, DCL lock).
+#   + dispatch.py: Neg-RLHF dorking — -site: / -intitle: from rejection footprints.
+#   + app.js/styles.css: CRM Kanban horizontal overflow + column-width fix.
+#
+#   V23.4.2 (2026-04-23):
+#   + SF-011 CLOSED: infra/monitoring_alert_trace9_timeout.yaml — Cloud Monitoring
+#     log-based alert for dispatch_url_timeout events (>=3 per 10 min window).
+#   + SF-013 CLOSED: dispatch.py _shadow_track_bq() — fire-and-forget daemon
+#     thread writes qualified lead signals to swarm_analytics.shadow_track_events.
+#     New DDL: infra/bq_shadow_track_events_schema.sql.
+#   + BQ TELEMETRY FIX (internal.py serper_audit() — 4 silent bugs resolved):
+#     BUG-1: Auth fail returned 200 OK → now returns 401 (triggers OIDC refresh).
+#     BUG-2: serper_parameters json.dumps'd to str → now passes native dict
+#            (BQ JSON column requires dict; string caused silent schema rejection).
+#     BUG-3: insert_rows_json errors logged at WARNING + returned 200 OK →
+#            now log.critical() with full BQ rejection payload + returns 500
+#            so Cloud Tasks retries the delivery.
+#     BUG-4: Timestamp validation — ensures RFC 3339 "Z"-suffix format always.
+#
+# NOTE: No new pip dependencies in V23.4.1 or V23.4.2.
+#       google-cloud-bigquery already pinned in both requirements.txt files.
+#       infra/ files (alert YAML, BQ DDL) are provisioned manually — see inline
+#       gcloud commands in each file header.
 # =============================================================================
 # Architecture:
 #   Phase 0a: Frontend JS syntax gate
