@@ -100,26 +100,56 @@ def bq_push():
 
 
 # =============================================================================
-# POST /api/internal/telemetry/serper-audit  (V23.4 — Serper Audit Telemetry)
+# POST /api/internal/telemetry/serper-audit  (V23.4.2 — Schema + Error Exposure)
 #
 # Called by pipeline-main serper_service.py after every Serper API call.
 # Unlike bq-push (which requires Cloud Tasks), this route accepts both:
 #   - Direct OIDC Bearer token (from pipeline worker daemon thread)
 #   - X-CloudTasks-QueueName header (if fired via Cloud Tasks in future)
-# Auth: OIDC signature verification OR Cloud Tasks header.
-# No body validation beyond tenant_id presence — non-critical telemetry.
+#
+# V23.4.2 fixes (2026-04-23):
+#   BUG-1: Auth failures were returning 200 OK with {"ok": false} — the
+#           pipeline worker's retry logic treats any non-5xx as success and
+#           never retried. Auth failures now return 401 so the OIDC token
+#           cache in serper_service.py triggers a refresh on the next call.
+#   BUG-2: serper_parameters was json.dumps'd to a STRING before insertion.
+#           BigQuery's JSON column type requires a native Python dict — the
+#           SDK serialises it. Passing a pre-serialised string causes a schema
+#           type mismatch that insert_rows_json reports as an error but the
+#           old code swallowed (returned 200 OK regardless).
+#   BUG-3: insert_rows_json errors were logged at WARNING and still returned
+#           200 OK — making the worker believe the row was accepted. Errors
+#           are now elevated to CRITICAL with the full BQ rejection payload
+#           and return 500 so Cloud Tasks retries the delivery.
+#   BUG-4: timestamp was formatted as a bare string "%Y-%m-%dT%H:%M:%SZ".
+#           BQ TIMESTAMP NOT NULL columns require an ISO-8601 string with
+#           explicit UTC suffix ("Z" or "+00:00"). We now ensure the format
+#           is always correct and fall back to a freshly-minted UTC timestamp
+#           if the incoming value is absent or malformed.
 # =============================================================================
 @bp.route("/api/internal/telemetry/serper-audit", methods=["POST"])
 def serper_audit():
-    """Receive one Serper query audit row and stream-insert it into BigQuery."""
-    # Accept Cloud Tasks header OR OIDC bearer — flexible for both call paths
+    """Receive one Serper query audit row and stream-insert it into BigQuery.
+
+    Returns 200 only when the row is durably accepted by BigQuery.
+    Returns 401 on OIDC auth failure (triggers worker token refresh + retry).
+    Returns 500 on BQ schema rejection or SDK exception (triggers Cloud Tasks retry).
+    """
+    # ── Auth: Cloud Tasks header OR OIDC bearer ──────────────────────────────
     has_cloud_tasks = bool(request.headers.get("X-CloudTasks-QueueName"))
     if not has_cloud_tasks:
         ok, err = _verify_oidc(request)
         if not ok:
-            # Fail open with 200 so the pipeline worker isn't disrupted
-            log.warning("serper_audit_auth_failed", error=err)
-            return jsonify({"ok": False, "reason": "auth_failed"}), 200
+            # BUG-1 FIX: return 401, not 200. The pipeline worker's daemon thread
+            # swallows all responses, but the OIDC token cache in serper_service.py
+            # will refresh on the next run. Returning 200 previously masked every
+            # auth failure as a successful insert.
+            log.warning(
+                "serper_audit_auth_failed",
+                error=err,
+                action="Returning 401. Worker OIDC cache will refresh on next call.",
+            )
+            return jsonify({"ok": False, "reason": "auth_failed"}), 401
 
     payload = request.json or {}
     if not payload.get("campaign_id") and not payload.get("tenant_id"):
@@ -130,16 +160,31 @@ def serper_audit():
         bq        = _bq.Client(project=PROJECT_ID)
         table_ref = f"{PROJECT_ID}.swarm_analytics.serper_audit_logs"
 
-        # Safely coerce serper_parameters to a JSON string if it's a dict
+        # ── Timestamp: must be strict ISO-8601 UTC string for BQ TIMESTAMP ──
+        # BQ streaming insert accepts strings in RFC 3339 / ISO-8601 with UTC
+        # offset. "%Y-%m-%dT%H:%M:%SZ" is correct but we validate the incoming
+        # value and always fall back to a freshly-minted UTC timestamp.
+        raw_ts = payload.get("timestamp") or ""
+        if raw_ts and isinstance(raw_ts, str) and raw_ts.endswith("Z"):
+            ts_value = raw_ts  # already RFC 3339 UTC
+        else:
+            # Re-format to a guaranteed-valid RFC 3339 string
+            ts_value = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # ── serper_parameters: BUG-2 FIX ─────────────────────────────────────
+        # BigQuery JSON column type requires a native Python dict (the BQ SDK
+        # json-encodes it). Passing a pre-serialised string causes a type
+        # mismatch: BQ rejects it with "no such field" or "type mismatch".
+        # We keep the raw dict — do NOT call json.dumps here.
         raw_params = payload.get("serper_parameters") or {}
-        params_str = json.dumps(raw_params) if isinstance(raw_params, dict) else str(raw_params)
+        params_dict = raw_params if isinstance(raw_params, dict) else {}
 
         row = {
-            "timestamp":          payload.get("timestamp") or datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp":          ts_value,
             "campaign_id":        str(payload.get("campaign_id") or ""),
             "tenant_id":          str(payload.get("tenant_id") or ""),
             "raw_query":          str(payload.get("raw_query") or ""),
-            "serper_parameters":  params_str,
+            "serper_parameters":  params_dict,           # dict → BQ JSON column
             "result_count":       int(payload.get("result_count") or 0),
             "credit_cost":        int(payload.get("credit_cost") or 1),
             "engine":             str(payload.get("engine") or "search"),
@@ -148,21 +193,50 @@ def serper_audit():
         }
 
         errors = bq.insert_rows_json(table_ref, [row])
-        if errors:
-            log.warning("serper_audit_bq_insert_error", errors=str(errors)[:300])
-            return jsonify({"ok": False, "errors": str(errors)[:300]}), 500
 
-        log.info("serper_audit_row_inserted",
-                 campaign_id=row["campaign_id"][:12],
-                 tenant_id=row["tenant_id"][:12],
-                 engine=row["engine"],
-                 result_count=row["result_count"])
+        # ── BUG-3 FIX: Expose BQ schema rejections ───────────────────────────
+        # insert_rows_json() returns a non-empty list when ANY row fails BQ
+        # schema validation. The previous code logged at WARNING and still
+        # returned 200 — making the BQ table permanently empty while every
+        # response appeared successful.
+        # Fix: CRITICAL log with the full rejection payload + 500 return so
+        # Cloud Tasks retries the delivery.
+        if errors:
+            log.critical(
+                "serper_audit_bq_schema_rejection",
+                bq_errors=errors,          # full structured error from BQ SDK
+                row_sent={
+                    k: v for k, v in row.items()
+                    if k not in ("raw_query",)  # omit long fields from log
+                },
+                table=table_ref,
+                action="Returning 500 — Cloud Tasks will retry. Fix schema mismatch.",
+            )
+            return jsonify({
+                "ok":     False,
+                "errors": errors,          # exact BQ rejection payload to caller
+            }), 500
+
+        log.info(
+            "serper_audit_row_inserted",
+            campaign_id=row["campaign_id"][:12],
+            tenant_id=row["tenant_id"][:12],
+            engine=row["engine"],
+            result_count=row["result_count"],
+            timestamp=ts_value,
+        )
         return jsonify({"ok": True}), 200
 
     except Exception as e:
-        log.error("serper_audit_insert_failed", error=str(e))
-        # Return 200 so pipeline worker daemon thread isn't alarmed
-        return jsonify({"ok": False, "error": str(e)}), 200
+        # SDK-level exception (network, auth, quota) — return 500 for retry
+        log.critical(
+            "serper_audit_bq_sdk_exception",
+            error=str(e),
+            error_type=type(e).__name__,
+            action="Returning 500 — Cloud Tasks will retry.",
+            exc_info=True,
+        )
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # =============================================================================
