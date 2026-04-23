@@ -1,0 +1,85 @@
+# ===========================================================================
+# SF-011: Cloud Monitoring Alert Policy — TRACE-9 Vertex AI Timeout
+# ===========================================================================
+#
+# Purpose:
+#   Alert the on-call team when the pipeline-main consumer encounters
+#   Vertex AI timeouts in the TRACE-9 scoring step.  TRACE-9 timeouts
+#   mean leads are passing the PRISM gate but being dropped before a DM
+#   is generated — silent quality loss invisible in the dashboard.
+#
+# Metric:
+#   Log-based metric "pipeline_trace9_timeout_count" (created below).
+#   Fires when any "dispatch_url_timeout" or "failed_vertex_timeout"
+#   structured log entry appears in cloud-run/pipeline-main.
+#
+# Deploy:
+#   1. Create the log-based metric (once, idempotent):
+#      gcloud logging metrics create pipeline_trace9_timeout_count \
+#        --project=lead-sniper-prod \
+#        --description="Count of TRACE-9 Vertex AI / URL timeouts in pipeline-main dispatch" \
+#        --log-filter='
+#          resource.type="cloud_run_revision"
+#          resource.labels.service_name="pipeline-main"
+#          (
+#            jsonPayload.message=~"dispatch_url_timeout"
+#            OR jsonPayload.message=~"failed_vertex_timeout"
+#          )
+#        '
+#
+#   2. Apply this alert policy:
+#      gcloud alpha monitoring policies create \
+#        --project=lead-sniper-prod \
+#        --policy-from-file=infra/monitoring_alert_trace9_timeout.yaml
+#
+# ===========================================================================
+
+displayName: "pipeline-main | TRACE-9 Timeout Spike"
+documentation:
+  content: |
+    **Alert: TRACE-9 consumer timeouts detected in pipeline-main.**
+
+    This alert fires when ≥ 3 TRACE-9 Vertex AI or URL timeouts occur
+    within a 10-minute window.  Each timeout means a qualified lead URL
+    cleared the PRISM gate but was silently dropped before the DM was
+    generated.
+
+    **Triage checklist:**
+    1. Open Cloud Run logs → filter `jsonPayload.message=~"TRACE-9|dispatch_url_timeout"`
+    2. Check Vertex AI quota page for `us-central1` (gemini-2.5-flash-preview)
+    3. If Vertex quotas are healthy, the bottleneck may be `_process_single_url()`
+       exceeding its 25 s per-URL ceiling under concurrent load.
+    4. Escalate to pipeline-main SRE if > 5 timeouts/hour for > 2 consecutive hours.
+
+    **Runbook:** https://sideio.internal/runbooks/pipeline-main-trace9-timeout
+  mimeType: text/markdown
+
+conditions:
+  - displayName: "TRACE-9 timeouts ≥ 3 in 10 min"
+    conditionThreshold:
+      filter: >
+        resource.type = "cloud_run_revision"
+        AND resource.labels.service_name = "pipeline-main"
+        AND metric.type = "logging.googleapis.com/user/pipeline_trace9_timeout_count"
+      aggregations:
+        - alignmentPeriod: 600s          # 10-minute window
+          perSeriesAligner: ALIGN_RATE
+          crossSeriesReducer: REDUCE_SUM
+          groupByFields:
+            - resource.label.service_name
+      comparison: COMPARISON_GT
+      thresholdValue: 3
+      duration: 0s                        # fire immediately when threshold crossed
+      trigger:
+        count: 1
+
+alertStrategy:
+  autoClose: 1800s                        # auto-resolve after 30 min of clean data
+
+combiner: OR
+
+notificationChannels: []                  # populate with your PagerDuty / Slack channel IDs
+                                          # gcloud alpha monitoring channels list --project=lead-sniper-prod
+
+enabled: true
+severity: WARNING

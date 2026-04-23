@@ -16,6 +16,12 @@ V23 Extraction (2026-04-18):
 - All vertex calls via init_vertex() lazy accessor.
 - Structured TRACE-1..TRACE-10 logs replacing print() statements.
 - _settle_credit() re-wired to use get_tasks_client() DCL accessor.
+
+SF-013 FIX (2026-04-23):
+- _shadow_track_bq() wired into _process_single_url() after a lead passes
+  the score gate. Pushes one BQ row to swarm_analytics.shadow_track_events
+  (lead quality signal) via a daemon thread — zero latency added to the
+  scraping loop. Mirrors the produce-side BQ pattern for completeness.
 """
 from __future__ import annotations
 
@@ -602,6 +608,19 @@ def dispatch():
                 }
                 doc_ref.set(lead_payload, merge=True)
                 _settle_credit(tenant_id, "success", lead_id=lead_id)
+                # SF-013 FIX: Shadow Track BQ write — fire-and-forget, zero latency.
+                # Pushes lead quality signal to swarm_analytics.shadow_track_events
+                # so the statistical RLHF router can learn from dispatch outcomes.
+                _shadow_track_bq(
+                    tenant_id=tenant_id,
+                    campaign_id=campaign_id,
+                    lead_id=lead_id,
+                    url=url,
+                    score=score,
+                    sourcing_vector=sourcing_vector,
+                    pain_point=evaluation.get("pain_point", ""),
+                    prism_mode=prism_mode,
+                )
                 if score >= 8:
                     _maybe_notify_whatsapp(tenant_id, url, lead_id, score, evaluation)
                 return {"url": url, "score": score, "status": "success"}
@@ -746,6 +765,65 @@ def finalize():
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _shadow_track_bq(
+    tenant_id: str,
+    campaign_id: str,
+    lead_id: str,
+    url: str,
+    score: int,
+    sourcing_vector: str,
+    pain_point: str,
+    prism_mode: str,
+) -> None:
+    """Fire-and-forget BigQuery write for qualified dispatch leads.
+
+    SF-013 FIX: The monolith's /produce route pushed shadow-track rows to
+    BigQuery but /dispatch never did — the consumer's qualitative outcomes
+    (score, pain_point, prism_mode) were never fed back into the swarm
+    analytics dataset, starving the RLHF statistical router of the richest
+    signal source (leads that actually passed the Gemini score gate).
+
+    This function runs in a daemon thread so it never blocks the scraping loop.
+    All exceptions are swallowed — BQ telemetry must never crash a lead write.
+
+    Target table: lead-sniper-prod.swarm_analytics.shadow_track_events
+    (one row per qualified dispatch lead).
+    """
+    def _write() -> None:
+        try:
+            import datetime as _dt
+            from core.clients import get_bq_client  # type: ignore[import]
+            from google.cloud import bigquery as _bq  # type: ignore[import]
+
+            row = {
+                "tenant_id":       tenant_id,
+                "campaign_id":     campaign_id,
+                "lead_id":         lead_id,
+                "url":             url[:500],
+                "score":           score,
+                "sourcing_vector": sourcing_vector,
+                "pain_point":      (pain_point or "")[:1000],
+                "prism_mode":      prism_mode,
+                "stage":           "dispatch",  # differentiates from produce-side rows
+                "timestamp":       _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            errors = get_bq_client().insert_rows_json(
+                "lead-sniper-prod.swarm_analytics.shadow_track_events",
+                [row],
+            )
+            if errors:
+                log.warning("shadow_track_bq_insert_errors",
+                            errors=str(errors)[:200], lead_id=lead_id[:16])
+            else:
+                log.debug("shadow_track_bq_ok", lead_id=lead_id[:16], score=score)
+        except Exception as _bq_err:
+            # Non-critical — never surface to scraping loop
+            log.debug("shadow_track_bq_failed", error=str(_bq_err)[:120])
+
+    import threading as _th
+    _th.Thread(target=_write, daemon=True).start()
 
 def _defer_to_scraper_heavy(url: str, lead_id: str, tenant_id: str,
                              campaign_id: str, bio: str, target_domain: str,
