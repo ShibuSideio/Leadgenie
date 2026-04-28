@@ -4,6 +4,43 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sideio &mdash; AI-Native Lead Intelligence</title>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         PRODUCTION CONSOLE SILENCER — must be the FIRST script in <head>.
+         Runs synchronously before Firebase SDK, app.js, or any other JS.
+
+         Security rationale:
+           Internal state (wallet balances, tenant IDs, RLHF payloads) logged
+           during development was leaking to the production browser console,
+           creating an information disclosure risk for any user with DevTools open.
+
+         Behaviour:
+           - Production (*.web.app / *.firebaseapp.com / custom domain):
+               console.log, console.info, console.debug → silenced (no-op).
+               console.warn, console.error               → preserved.
+               (Genuine browser/network errors must remain visible for incident triage.)
+           - Local development (localhost / 127.0.0.1 / file://):
+               All console methods pass through unchanged.
+    ═══════════════════════════════════════════════════════════════ -->
+    <script>
+    (function() {
+        var _host = window.location.hostname;
+        var _isProd = (
+            _host.endsWith('.web.app')        ||
+            _host.endsWith('.firebaseapp.com') ||
+            (_host !== 'localhost' && _host !== '127.0.0.1' && _host !== '' && !_host.startsWith('192.168.'))
+        );
+        if (_isProd) {
+            var _noop = function() {};
+            console.log   = _noop;
+            console.info  = _noop;
+            console.debug = _noop;
+            // console.warn and console.error are intentionally NOT silenced.
+            // They surface genuine browser exceptions and network failures
+            // needed for production incident response.
+        }
+    })();
+    </script>
     <meta name="description" content="Grow your business pipeline on autopilot. Sideio's AI discovers and qualifies leads 24/7.">
     <link rel="manifest" href="manifest.json">
     <meta name="theme-color" content="#4f46e5">

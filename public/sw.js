@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sideio-v11'; // Bumped: forces SW update on all PWA clients (iOS Safari NetworkOnly fix)
+const CACHE_NAME = 'sideio-v12'; // v12: evict broken manifest.json cache from v23.5 deploy
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',

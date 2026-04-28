@@ -1,28 +1,25 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V23.5 Enterprise Build Pipeline
-# Deploy trigger: 2026-04-28 | BQ Regionality Fix + PWA Manifest Fix
+# cloudbuild.yaml — Sideio Leads V23.5.1 Enterprise Build Pipeline
+# Deploy trigger: 2026-04-28 | Console Silencer + manifest.json 404 Hotfix
 #
-# Changes from V23.4.2 (2026-04-23):
+# Changes from V23.5 (2026-04-28 earlier):
 #
-#   V23.5 (2026-04-28):
-#   + BQ REGIONALITY FIX — enforced location='asia-south1' on EVERY BigQuery
-#     Client instantiation and every bq.query() call across the codebase:
-#       orchestrator/core/clients.py  get_bq_client() singleton
-#       orchestrator/core/helpers.py  _handle_bq_push_task(), _do_neg_signal_insert(),
-#                                     _do_shadow_track() (client + query)
-#       orchestrator/api/routers/internal.py  serper_audit() inline client
-#       orchestrator/api/routers/serper_telemetry.py  GET logs client + both QueryJobConfigs
-#       pipeline-main/core/clients.py  get_bq_client() singleton
-#       pipeline-main/services/query_brain.py  _query_confidence(), _fetch_ngrams() queries
-#     Root cause: SDK default location=US caused Code 5 "Not found" for every
-#     swarm_analytics dataset query (dataset is in asia-south1).
+#   V23.5.1 (2026-04-28):
+#   + SECURITY FIX — Production Console Silencer (index.html):
+#     Inline IIFE injected as the FIRST script in <head>, before Firebase SDK
+#     and app.js. Detects production hostname (*.web.app, *.firebaseapp.com,
+#     any non-localhost origin) and replaces console.log/info/debug with no-ops.
+#     console.warn and console.error are preserved for incident response.
+#     Eliminates [WALLET] / internal state information disclosure.
 #
-#   + PWA MANIFEST FIX — firebase.json:
-#     Firebase SPA catch-all rewrite (**→index.html) was intercepting
-#     /manifest.json and returning index.html as JSON, causing a browser
-#     Syntax Error at Line 1. Fixed by:
-#       1. Adding /manifest.json passthrough destination rule before the catch-all.
-#       2. Adding explicit Content-Type: application/manifest+json header.
+#   + MANIFEST 404 HOTFIX (firebase.json + sw.js):
+#     Root cause: The /manifest.json destination rewrite added in V23.5 caused
+#     Firebase Hosting to treat the static file as a rewrite target, breaking
+#     its normal static-file-first evaluation order and producing a 404.
+#     Fix: Removed the erroneous passthrough rewrite. Firebase Hosting always
+#     serves static files before evaluating rewrites — no rewrite needed.
+#     The Content-Type: application/manifest+json header rule is retained.
+#     sw.js bumped to sideio-v12 to force reinstall + evict the broken cache.
 #
 # NOTE: No new pip dependencies. No Cloud Build structural changes.
 # =============================================================================
