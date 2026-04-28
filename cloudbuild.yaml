@@ -1,37 +1,32 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V23.4.2 Enterprise Build Pipeline
-# Deploy trigger: 2026-04-23 | BQ Telemetry Fix + Backlog Closures
+# cloudbuild.yaml — Sideio Leads V23.5 Enterprise Build Pipeline
+# Deploy trigger: 2026-04-28 | BQ Regionality Fix + PWA Manifest Fix
 #
-# Changes from V23.4 (2026-04-20):
+# Changes from V23.4.2 (2026-04-23):
 #
-#   V23.4.1 (2026-04-22):
-#   + query_brain.py: "NOT <phrase>" persona signals → pre-emptive Serper
-#     exclusion operators (-"phrase") injected at query-assembly time.
-#   + serper_service.py: Zero-Trust OIDC for serper-audit broker POST
-#     (GCE metadata server token, 55-min cache, DCL lock).
-#   + dispatch.py: Neg-RLHF dorking — -site: / -intitle: from rejection footprints.
-#   + app.js/styles.css: CRM Kanban horizontal overflow + column-width fix.
+#   V23.5 (2026-04-28):
+#   + BQ REGIONALITY FIX — enforced location='asia-south1' on EVERY BigQuery
+#     Client instantiation and every bq.query() call across the codebase:
+#       orchestrator/core/clients.py  get_bq_client() singleton
+#       orchestrator/core/helpers.py  _handle_bq_push_task(), _do_neg_signal_insert(),
+#                                     _do_shadow_track() (client + query)
+#       orchestrator/api/routers/internal.py  serper_audit() inline client
+#       orchestrator/api/routers/serper_telemetry.py  GET logs client + both QueryJobConfigs
+#       pipeline-main/core/clients.py  get_bq_client() singleton
+#       pipeline-main/services/query_brain.py  _query_confidence(), _fetch_ngrams() queries
+#     Root cause: SDK default location=US caused Code 5 "Not found" for every
+#     swarm_analytics dataset query (dataset is in asia-south1).
 #
-#   V23.4.2 (2026-04-23):
-#   + SF-011 CLOSED: infra/monitoring_alert_trace9_timeout.yaml — Cloud Monitoring
-#     log-based alert for dispatch_url_timeout events (>=3 per 10 min window).
-#   + SF-013 CLOSED: dispatch.py _shadow_track_bq() — fire-and-forget daemon
-#     thread writes qualified lead signals to swarm_analytics.shadow_track_events.
-#     New DDL: infra/bq_shadow_track_events_schema.sql.
-#   + BQ TELEMETRY FIX (internal.py serper_audit() — 4 silent bugs resolved):
-#     BUG-1: Auth fail returned 200 OK → now returns 401 (triggers OIDC refresh).
-#     BUG-2: serper_parameters json.dumps'd to str → now passes native dict
-#            (BQ JSON column requires dict; string caused silent schema rejection).
-#     BUG-3: insert_rows_json errors logged at WARNING + returned 200 OK →
-#            now log.critical() with full BQ rejection payload + returns 500
-#            so Cloud Tasks retries the delivery.
-#     BUG-4: Timestamp validation — ensures RFC 3339 "Z"-suffix format always.
+#   + PWA MANIFEST FIX — firebase.json:
+#     Firebase SPA catch-all rewrite (**→index.html) was intercepting
+#     /manifest.json and returning index.html as JSON, causing a browser
+#     Syntax Error at Line 1. Fixed by:
+#       1. Adding /manifest.json passthrough destination rule before the catch-all.
+#       2. Adding explicit Content-Type: application/manifest+json header.
 #
-# NOTE: No new pip dependencies in V23.4.1 or V23.4.2.
-#       google-cloud-bigquery already pinned in both requirements.txt files.
-#       infra/ files (alert YAML, BQ DDL) are provisioned manually — see inline
-#       gcloud commands in each file header.
+# NOTE: No new pip dependencies. No Cloud Build structural changes.
 # =============================================================================
+
 # Architecture:
 #   Phase 0a: Frontend JS syntax gate
 #   Phase 0b: Python V23 smoke test gate (NEW — blocks build on any failure)

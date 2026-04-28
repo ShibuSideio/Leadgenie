@@ -362,7 +362,8 @@ def _enqueue_bq_telemetry_task(tenant_id: str, lead_dict: dict, status: str):
 def _handle_bq_push_task(payload: dict) -> bool:
     try:
         from google.cloud import bigquery as _bq_lib
-        bq        = _bq_lib.Client(project=PROJECT_ID)
+        # REGIONALITY FIX: explicit location prevents default US routing
+        bq        = _bq_lib.Client(project=PROJECT_ID, location="asia-south1")
         table_ref = f"{PROJECT_ID}.swarm_analytics.rlhf_events"
         row = {
             "event_id":           payload.get("event_id"),
@@ -387,7 +388,8 @@ def _do_neg_signal_insert(entity_name: str, root_domain: str, rejection_reason: 
     try:
         from google.cloud import bigquery as _bq
         import datetime as _dt, uuid as _uuid
-        bq        = _bq.Client(project=PROJECT_ID)
+        # REGIONALITY FIX: explicit location prevents default US routing
+        bq        = _bq.Client(project=PROJECT_ID, location="asia-south1")
         table_ref = f"{PROJECT_ID}.swarm_analytics.Negative_Signals"
         row = {
             "entity_name":      entity_name, "root_domain": root_domain,
@@ -447,7 +449,8 @@ def _do_shadow_track(persona_category: str, pain_point: str, tenant_id: str):
         ngrams = _extract_ngrams(pain_point)
         if not ngrams:
             return
-        bq        = _bq.Client(project=PROJECT_ID)
+        # REGIONALITY FIX: explicit location prevents default US routing
+        bq        = _bq.Client(project=PROJECT_ID, location="asia-south1")
         table_ref = f"`{PROJECT_ID}.swarm_analytics.Intent_Keywords`"
         now_iso   = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
         query     = f"""
@@ -472,8 +475,9 @@ def _do_shadow_track(persona_category: str, pain_point: str, tenant_id: str):
         params = [_bq.ScalarQueryParameter("tenant_id", "STRING", tenant_id),
                   _bq.ScalarQueryParameter("cat", "STRING", persona_category)]
         params += [_bq.ScalarQueryParameter(f"ng_{i}", "STRING", ng) for i, ng in enumerate(ngrams)]
+        # REGIONALITY FIX: location on QueryJobConfig ensures DML runs in asia-south1
         job_cfg = _bq.QueryJobConfig(query_parameters=params)
-        bq.query(query, job_config=job_cfg).result()
+        bq.query(query, job_config=job_cfg, location="asia-south1").result()
     except Exception as e:
         print(f"[SHADOW TRACKER] Error: {e}")
 

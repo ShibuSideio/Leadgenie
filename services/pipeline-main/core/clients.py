@@ -99,10 +99,14 @@ _bq_instance: Optional[bigquery.Client] = None
 
 
 def get_bq_client() -> bigquery.Client:
-    """Return the shared BigQuery client (lazy, thread-safe).
+    """Return the shared BigQuery client (lazy, thread-safe), pinned to asia-south1.
 
     Upgraded from lru_cache to threading.Lock DCL to prevent concurrent
     gRPC constructor races under Gunicorn gthread workers (V23 Amendment 3).
+
+    REGIONALITY FIX (2026-04-28):
+    Without an explicit location the BQ SDK defaults to US, causing
+    "Not found" (Code 5) for datasets provisioned in asia-south1.
 
     Returns:
         :class:`google.cloud.bigquery.Client`
@@ -112,7 +116,8 @@ def get_bq_client() -> bigquery.Client:
         with _bq_lock:
             if _bq_instance is None:
                 _bq_instance = bigquery.Client(
-                    project=os.environ.get("PROJECT_ID", "sideio-leads-v16")
+                    project=os.environ.get("PROJECT_ID", "sideio-leads-v16"),
+                    location="asia-south1",
                 )
     return _bq_instance
 

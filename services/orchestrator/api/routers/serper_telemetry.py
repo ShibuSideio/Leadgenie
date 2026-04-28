@@ -135,7 +135,8 @@ def get_serper_logs(uid, tenant_id, user_role):
     today_params = [_bq.ScalarQueryParameter("today", "DATE", today.isoformat())]
 
     try:
-        bq = _bq.Client(project=PROJECT_ID)
+        # REGIONALITY FIX: explicit location prevents default US routing (Code 5)
+        bq = _bq.Client(project=PROJECT_ID, location="asia-south1")
         cfg = _bq.QueryJobConfig(query_parameters=params)
         rows = list(bq.query(sql, job_config=cfg).result())
 
@@ -154,7 +155,7 @@ def get_serper_logs(uid, tenant_id, user_role):
                 "error_message":      r.error_message,
             })
 
-        # Today's count
+        # Today's count — same region
         today_cfg = _bq.QueryJobConfig(query_parameters=today_params)
         today_row = list(bq.query(today_sql, job_config=today_cfg).result())
         total_today = today_row[0].total_today if today_row else 0

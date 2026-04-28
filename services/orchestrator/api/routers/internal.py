@@ -157,7 +157,8 @@ def serper_audit():
 
     try:
         from google.cloud import bigquery as _bq
-        bq        = _bq.Client(project=PROJECT_ID)
+        # REGIONALITY FIX: explicit location prevents default US routing (Code 5)
+        bq        = _bq.Client(project=PROJECT_ID, location="asia-south1")
         table_ref = f"{PROJECT_ID}.swarm_analytics.serper_audit_logs"
 
         # ── Timestamp: must be strict ISO-8601 UTC string for BQ TIMESTAMP ──

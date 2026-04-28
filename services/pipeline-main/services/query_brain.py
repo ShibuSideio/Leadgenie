@@ -225,6 +225,7 @@ def generate_smart_query(
                         _bq.ScalarQueryParameter("tid", "STRING", tenant_id),
                         _bq.ScalarQueryParameter("cat", "STRING", _p_cat),
                     ]),
+                    location="asia-south1",  # REGIONALITY FIX: never rely on SDK default
                 )
                 rows = list(job.result(timeout=3))
                 return float(rows[0]["total_confidence"]) if rows else 0.0
@@ -267,6 +268,7 @@ def generate_smart_query(
                             _bq.ScalarQueryParameter("tid", "STRING", tenant_id),
                             _bq.ScalarQueryParameter("cat", "STRING", _p_cat),
                         ]),
+                        location="asia-south1",  # REGIONALITY FIX: never rely on SDK default
                     )
                     rows = list(job.result(timeout=3))
                     return [r["n_gram"] for r in rows if r["n_gram"]]

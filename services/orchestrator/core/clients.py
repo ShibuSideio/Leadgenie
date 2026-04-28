@@ -80,13 +80,18 @@ def get_tasks_client() -> tasks_v2.CloudTasksClient:
 
 @functools.lru_cache(maxsize=None)
 def get_bq_client() -> bigquery.Client:
-    """Return the shared BigQuery client.
+    """Return the shared BigQuery client, pinned to asia-south1.
+
+    REGIONALITY FIX (2026-04-28):
+    Without an explicit location the BQ SDK defaults to US, causing
+    "Not found" (Code 5) errors for any dataset provisioned in asia-south1.
+    The location param here fixes ALL queries that route through this singleton.
 
     Returns:
         :class:`google.cloud.bigquery.Client`
     """
     project = os.environ.get("PROJECT_ID", "sideio-leads-v16")
-    return bigquery.Client(project=project)
+    return bigquery.Client(project=project, location="asia-south1")
 
 
 @functools.lru_cache(maxsize=None)

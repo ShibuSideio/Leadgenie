@@ -34,6 +34,13 @@
       {
         "source": "**/*.css",
         "headers": [{ "key": "Content-Type", "value": "text/css; charset=utf-8" }]
+      },
+      {
+        "source": "/manifest.json",
+        "headers": [
+          { "key": "Content-Type",  "value": "application/manifest+json; charset=utf-8" },
+          { "key": "Cache-Control", "value": "no-cache, must-revalidate" }
+        ]
       }
     ],
     "rewrites": [
@@ -50,6 +57,10 @@
           "serviceId": "orchestrator",
           "region": "asia-south1"
         }
+      },
+      {
+        "source": "/manifest.json",
+        "destination": "/manifest.json"
       },
       {
         "source": "**",
