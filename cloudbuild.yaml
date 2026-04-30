@@ -1,25 +1,26 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V23.5.1 Enterprise Build Pipeline
-# Deploy trigger: 2026-04-28 | Console Silencer + manifest.json 404 Hotfix
+# cloudbuild.yaml — Sideio Leads V23.5.2 Enterprise Build Pipeline
+# Deploy trigger: 2026-04-30 | BQ JSON Serialisation Fix + Telemetry Decoupling
 #
-# Changes from V23.5 (2026-04-28 earlier):
+# Changes from V23.5.1 (2026-04-28):
 #
-#   V23.5.1 (2026-04-28):
-#   + SECURITY FIX — Production Console Silencer (index.html):
-#     Inline IIFE injected as the FIRST script in <head>, before Firebase SDK
-#     and app.js. Detects production hostname (*.web.app, *.firebaseapp.com,
-#     any non-localhost origin) and replaces console.log/info/debug with no-ops.
-#     console.warn and console.error are preserved for incident response.
-#     Eliminates [WALLET] / internal state information disclosure.
+#   V23.5.2 (2026-04-30):
+#   + BQ SCHEMA FIX (orchestrator/api/routers/internal.py — serper_audit()):
+#     Root cause: serper_parameters was passed as a native Python dict.
+#     BigQuery insert_rows_json() requires JSON-typed columns to be a JSON-
+#     encoded STRING (json.dumps()), not a raw dict. The previous session's
+#     comment "do NOT call json.dumps" was incorrect — confirmed by Cloud
+#     Logging 500 on 2026-04-30. Fix: params_str = json.dumps(raw_params).
 #
-#   + MANIFEST 404 HOTFIX (firebase.json + sw.js):
-#     Root cause: The /manifest.json destination rewrite added in V23.5 caused
-#     Firebase Hosting to treat the static file as a rewrite target, breaking
-#     its normal static-file-first evaluation order and producing a 404.
-#     Fix: Removed the erroneous passthrough rewrite. Firebase Hosting always
-#     serves static files before evaluating rewrites — no rewrite needed.
-#     The Content-Type: application/manifest+json header rule is retained.
-#     sw.js bumped to sideio-v12 to force reinstall + evict the broken cache.
+#   + WORKER TELEMETRY DECOUPLING (pipeline-main/services/serper_service.py):
+#     _push_serper_audit() now:
+#       - Captures the httpx response object (was fire-and-forget with no check).
+#       - Logs log.warning("serper_audit_broker_non_200") on any non-200
+#         response — previously a 500 was silently discarded (log.debug only).
+#       - Exception handler escalated from log.debug to log.warning so network
+#         failures appear in Cloud Logging at WARNING severity.
+#       - No exception can propagate — daemon thread always exits cleanly.
+#         Vertex AI scoring and Firestore insertion are never blocked.
 #
 # NOTE: No new pip dependencies. No Cloud Build structural changes.
 # =============================================================================

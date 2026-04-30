@@ -172,20 +172,23 @@ def serper_audit():
             # Re-format to a guaranteed-valid RFC 3339 string
             ts_value = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # ── serper_parameters: BUG-2 FIX ─────────────────────────────────────
-        # BigQuery JSON column type requires a native Python dict (the BQ SDK
-        # json-encodes it). Passing a pre-serialised string causes a type
-        # mismatch: BQ rejects it with "no such field" or "type mismatch".
-        # We keep the raw dict — do NOT call json.dumps here.
-        raw_params = payload.get("serper_parameters") or {}
-        params_dict = raw_params if isinstance(raw_params, dict) else {}
+        # ── serper_parameters: SCHEMA FIX ─────────────────────────────────────
+        # The BQ table column is typed JSON (DDL: serper_parameters JSON).
+        # insert_rows_json() serialises the outer row to JSON, but for a JSON-
+        # typed column the cell value must ITSELF be a JSON-encoded string —
+        # i.e. the SDK expects a str produced by json.dumps(), NOT a native dict.
+        # Passing a raw dict causes BQ to reject with a type-mismatch error
+        # (the 500 confirmed in Cloud Logging on 2026-04-30).
+        # Fix: always serialise the dict to a JSON string before handing it to BQ.
+        raw_params  = payload.get("serper_parameters") or {}
+        params_str  = json.dumps(raw_params if isinstance(raw_params, dict) else {})
 
         row = {
             "timestamp":          ts_value,
             "campaign_id":        str(payload.get("campaign_id") or ""),
             "tenant_id":          str(payload.get("tenant_id") or ""),
             "raw_query":          str(payload.get("raw_query") or ""),
-            "serper_parameters":  params_dict,           # dict → BQ JSON column
+            "serper_parameters":  params_str,           # JSON string → BQ JSON column
             "result_count":       int(payload.get("result_count") or 0),
             "credit_cost":        int(payload.get("credit_cost") or 1),
             "engine":             str(payload.get("engine") or "search"),

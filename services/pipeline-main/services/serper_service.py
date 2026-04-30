@@ -248,15 +248,29 @@ def _push_serper_audit(
                 action="Row will be rejected by orchestrator auth — check SA.",
             )
 
-        httpx.post(
+        # ── Non-fatal HTTP POST — telemetry must never crash the scraping loop ────
+        # We capture the response and log at WARNING on failure, but we do NOT
+        # call raise_for_status(). A 500 from the orchestrator means BQ rejected
+        # the row; we log it so the issue is visible in Cloud Logging, then exit
+        # cleanly. The scraping loop continues regardless.
+        _resp = httpx.post(
             f"{_ORCHESTRATOR_URL}/api/internal/telemetry/serper-audit",
             json=payload,
             headers=_headers,
             timeout=5,
         )
+        if _resp.status_code != 200:
+            log.warning(
+                "serper_audit_broker_non_200",
+                status=_resp.status_code,
+                body=_resp.text[:200],
+                action="Telemetry row dropped. BQ schema mismatch or orchestrator error."
+            )
     except Exception as _te:
-        # Non-critical — never crash the scraping loop over telemetry
-        log.debug("serper_audit_push_failed", error=str(_te))
+        # Network-level failure (timeout, DNS, connection refused).
+        # Log at WARNING so failures appear in production Cloud Logging.
+        # Never raise — telemetry is non-critical fire-and-forget.
+        log.warning("serper_audit_push_failed", error=str(_te)[:200])
 
 
 def _async_serper_audit(**kwargs) -> None:
