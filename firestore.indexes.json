@@ -105,6 +105,23 @@
         { "fieldPath": "tenant_id",  "order": "ASCENDING" },
         { "fieldPath": "created_at", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "inbound_signals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "tenant_id",     "order": "ASCENDING" },
+        { "fieldPath": "status",        "order": "ASCENDING" },
+        { "fieldPath": "intent_score",  "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "inbound_signals",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "tenant_id",    "order": "ASCENDING" },
+        { "fieldPath": "created_at",   "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [

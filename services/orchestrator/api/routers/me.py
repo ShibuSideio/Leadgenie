@@ -45,6 +45,9 @@ def me_endpoint(uid: str, tenant_id: str, user_role: str):
             updates["agreed_to_terms"] = fs.SERVER_TIMESTAMP
         if "crm_webhook_url" in payload:
             updates["crm_webhook_url"] = payload["crm_webhook_url"]
+        # V23.5: inbound radar toggle
+        if "inbound_radar_enabled" in payload:
+            updates["inbound_radar.enabled"] = bool(payload["inbound_radar_enabled"])
         if updates:
             db.collection("users").document(uid).update(updates)
             log.info("user_profile_updated", uid=uid[:8], fields=list(updates.keys()))
@@ -62,8 +65,19 @@ def me_endpoint(uid: str, tenant_id: str, user_role: str):
     consumed += get_wallet_shards_total(db, uid)
 
     log.info("user_profile_fetched", uid=uid[:8])
+
+    # Inbound radar status — safe summary only (no keys, no raw config)
+    radar_raw = data.get("inbound_radar") or {}
+    inbound_radar_summary = {
+        "enabled":           radar_raw.get("enabled", False),
+        "last_ran_at":       str(radar_raw.get("last_ran_at") or ""),
+        "signals_this_week": int(radar_raw.get("signals_this_week") or 0),
+        "top_pain_keywords": radar_raw.get("top_pain_keywords") or [],
+    }
+
     return jsonify({
-        "status": "success",
-        "data":   data,
-        "wallet": {"allocated_credits": allocated, "consumed_credits": consumed},
+        "status":        "success",
+        "data":          data,
+        "wallet":        {"allocated_credits": allocated, "consumed_credits": consumed},
+        "inbound_radar": inbound_radar_summary,
     }), 200

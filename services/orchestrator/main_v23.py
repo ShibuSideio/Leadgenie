@@ -3,11 +3,12 @@ Sideio Lead Sniper — Orchestrator V23.4 Entrypoint.
 
 All routes are served by V23 Blueprints. main_legacy.py is permanently retired.
 
-V23.4 additions (2026-04-20):
-  + POST /api/internal/telemetry/serper-audit  → internal.py  (BQ telemetry broker)
-  + GET  /api/admin/telemetry/serper-logs      → serper_telemetry.py  (audit read)
-  + POST /api/analyze-website: WAF fail-fast   → settings.py  (httpx 7s + 422 WAF_BLOCKED)
-  + GET  /api/l0/shadow-ledger: 500 fixed      → IAM: roles/bigquery.dataViewer granted
+V23.5 additions (2026-06-08):
+  + POST /api/internal/inbound-sentiment-run → internal.py (radar cron trigger)
+  + GET  /api/inbound-signals                → leads.py  (signal list)
+  + PUT  /api/inbound-signals/<id>/status    → leads.py  (promote to lead)
+  + GET  /api/me returns inbound_radar stats → me.py (V23.5)
+  + PUT  /api/me accepts inbound_radar_enabled → me.py (V23.5)
 
 Blueprint Registry:
   /api/me, /health                      -> api/routers/me.py
@@ -89,7 +90,7 @@ def create_app() -> Flask:
     @app.route("/", methods=["GET"])
     @app.route("/health", methods=["GET"])
     def health():
-        return jsonify({"status": "healthy", "version": "23.4.0", "arch": "modular-v23.4-serper-telemetry"}), 200
+        return jsonify({"status": "healthy", "version": "23.5.0", "arch": "modular-v23.5-inbound-radar"}), 200
 
     # ── Phase 1 ───────────────────────────────────────────────────────────────
     app.register_blueprint(me_bp)
@@ -110,7 +111,7 @@ def create_app() -> Flask:
         log.error("unhandled_exception", error=str(exc), exc_type=type(exc).__name__)
         return jsonify({"error": "Internal Server Error", "message": str(exc)}), 500
 
-    log.info("orchestrator_v23_started", version="23.4.0", phase="v23.4-serper-telemetry-waf-hardening")
+    log.info("orchestrator_v23_started", version="23.5.0", phase="v23.5-inbound-radar")
     return app
 
 

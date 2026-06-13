@@ -122,12 +122,17 @@ def create_campaign(uid, tenant_id, user_role):
     data["gl"] = _resolve_gl(loc_raw)
 
     # Active campaign cap
-    active_count = len(list(
+    # J-12 FIX: Use server-side .count().get() instead of list(...).stream().
+    # The old approach did a full collection scan across ALL campaigns for this
+    # tenant on every campaign creation, causing slow POSTs for tenants with
+    # many campaigns. .count() performs a server-side aggregate with no doc reads.
+    active_count = (
         db.collection("campaigns")
           .where(filter=FieldFilter("tenant_id", "==", tenant_id))
           .where(filter=FieldFilter("status", "==", "active"))
-          .stream()
-    ))
+          .count()
+          .get()[0][0].value
+    )
     if active_count >= MAX_CHILD_CAMPAIGNS:
         return jsonify({
             "error": f"Maximum of {MAX_CHILD_CAMPAIGNS} active campaigns allowed per tenant."
@@ -159,7 +164,14 @@ def create_campaign(uid, tenant_id, user_role):
     data["updatedAt"] = firestore.SERVER_TIMESTAMP
 
     # Persona Vault: denormalise linked persona
+    # J-9 FIX: Frontend now sends inline persona_bio and persona_keywords in the
+    # payload for child campaigns to guard against Firestore eventual consistency
+    # races. We use Firestore as primary source and fall back to inline fields
+    # if the persona document is not yet replicated at read time.
     persona_id_val = (data.get("persona_id") or "").strip()
+    # Stash inline fallback values before they may be overwritten by Firestore read
+    _inline_persona_bio  = (data.pop("persona_bio",      None) or "").strip()
+    _inline_persona_keys = (data.pop("persona_keywords", None) or "").strip()
     if persona_id_val:
         try:
             p_snap = (
@@ -171,16 +183,29 @@ def create_campaign(uid, tenant_id, user_role):
             )
             if p_snap.exists:
                 p_data = p_snap.to_dict() or {}
-                data["persona_bio"]               = p_data.get("bio", "")
-                data["persona_keywords"]          = p_data.get("keywords", "")
+                data["persona_bio"]               = p_data.get("bio", "") or _inline_persona_bio
+                data["persona_keywords"]          = p_data.get("keywords", "") or _inline_persona_keys
                 data["persona_name"]              = p_data.get("name", "")
                 data["persona_targeting_signals"] = p_data.get("targeting_signals", [])
                 if not data.get("bio"):
                     data["bio"] = data["persona_bio"]
                 log.info("persona_linked", persona=p_data.get("name"),
                          negative_signals=len(data["persona_targeting_signals"]))
+            elif _inline_persona_bio:
+                # J-9 FIX: Persona doc not yet visible (eventual consistency race).
+                # Use the inline fields the frontend pre-attached from its local persona state.
+                data["persona_bio"]      = _inline_persona_bio
+                data["persona_keywords"] = _inline_persona_keys
+                if not data.get("bio"):
+                    data["bio"] = _inline_persona_bio
+                log.warning("persona_denormalise_eventual_consistency_fallback",
+                            persona_id=persona_id_val, used_inline=True)
         except Exception as p_err:
             log.warning("persona_denormalise_error", error=str(p_err))
+            # Non-fatal: apply inline fallback if available
+            if _inline_persona_bio:
+                data["persona_bio"]      = _inline_persona_bio
+                data["persona_keywords"] = _inline_persona_keys
 
     _, doc_ref = db.collection("campaigns").add(data)
 

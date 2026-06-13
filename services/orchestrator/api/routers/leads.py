@@ -210,3 +210,131 @@ def update_lead(uid, tenant_id, user_role, doc_id):
             log.warning("crm_egress_failed", error=str(crm_e))
 
     return jsonify({"status": "success"}), 200
+
+
+# =============================================================================
+# GET /api/inbound-signals
+# V23.5 — Return inbound radar signals for the authenticated tenant
+# =============================================================================
+@bp.route("/api/inbound-signals", methods=["GET"])
+@require_auth
+def list_inbound_signals(uid, tenant_id, user_role):
+    """
+    List inbound sentiment signals for the current tenant.
+
+    Query params:
+      status        (str)   — filter by status: new | reviewed | converted_to_lead | dismissed
+                              default: new
+      intent_label  (str)   — filter by ACTIVE_SEEKING | EXPRESSING_PAIN | COMPETITOR_CHURN | TREND
+      limit         (int)   — max results 1–50, default 20
+    """
+    from google.cloud import firestore as fs
+
+    status       = request.args.get("status", "new")
+    intent_label = request.args.get("intent_label")
+    limit        = min(int(request.args.get("limit", 20)), 50)
+
+    valid_statuses = {"new", "reviewed", "converted_to_lead", "dismissed"}
+    if status not in valid_statuses:
+        return jsonify({"error": f"status must be one of {sorted(valid_statuses)}"}), 400
+
+    query = (
+        db.collection("inbound_signals")
+        .where(filter=fs.FieldFilter("tenant_id", "==", uid))
+        .where(filter=fs.FieldFilter("status",    "==", status))
+        .order_by("intent_score", direction=fs.Query.DESCENDING)
+        .limit(limit)
+    )
+
+    signals = [{"id": d.id, **d.to_dict()} for d in query.stream()]
+
+    # Optional label filter — applied after Firestore fetch (no composite index needed)
+    if intent_label:
+        signals = [s for s in signals if s.get("intent_label") == intent_label]
+
+    return jsonify({"signals": signals, "count": len(signals)}), 200
+
+
+# =============================================================================
+# PUT /api/inbound-signals/<signal_doc_id>/status
+# V23.5 — Update signal status; optionally promote to a full lead
+# =============================================================================
+@bp.route("/api/inbound-signals/<string:signal_doc_id>/status", methods=["PUT"])
+@require_auth
+def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
+    """
+    Transition an inbound signal's status.
+
+    Body:
+      { "status": "reviewed" | "dismissed" | "converted_to_lead" }
+
+    If status == "converted_to_lead":
+      - Creates a new document in the leads collection pre-populated from signal data
+      - Returns the new lead_id in the response
+    """
+    from google.cloud import firestore as fs
+
+    body       = request.get_json(silent=True) or {}
+    new_status = body.get("status", "").strip()
+
+    valid_transitions = {"reviewed", "dismissed", "converted_to_lead"}
+    if new_status not in valid_transitions:
+        return jsonify({"error": f"status must be one of {sorted(valid_transitions)}"}), 400
+
+    # Verify ownership — signal doc_id is {uid}_{signal_id} but we accept full doc_id
+    signal_ref  = db.collection("inbound_signals").document(signal_doc_id)
+    signal_snap = signal_ref.get()
+
+    if not signal_snap.exists:
+        return jsonify({"error": "Signal not found"}), 404
+
+    sig = signal_snap.to_dict() or {}
+    if sig.get("tenant_id") != uid:
+        return jsonify({"error": "Forbidden"}), 403
+
+    # Update signal status
+    signal_ref.update({
+        "status":     new_status,
+        "updated_at": fs.SERVER_TIMESTAMP,
+    })
+
+    lead_id = None
+
+    if new_status == "converted_to_lead":
+        # Promote signal to a full lead document
+        lead_ref = db.collection("leads").document()
+        company  = sig.get("company_name") or "Unknown Company"
+        lead_ref.set({
+            "uid":                uid,
+            "tenant_id":          uid,
+            "url":                sig.get("source_url", ""),
+            "company":            company,
+            "company_name":       company,
+            "summary":            sig.get("snippet", ""),
+            "pain_point":         ", ".join(sig.get("pain_keywords", [])),
+            "score":              round(sig.get("intent_score", 0.5) * 100),
+            "source":             "inbound_radar",
+            "status":             "new",
+            "fit_score":          sig.get("intent_score", 0.5),
+            "intent_label":       sig.get("intent_label", "EXPRESSING_PAIN"),
+            "inbound_signal_id":  sig.get("signal_id", ""),
+            "inbound_platform":   sig.get("source_platform", "web"),
+            "matched_campaigns":  (
+                [sig["matched_campaign_id"]]
+                if sig.get("matched_campaign_id") else []
+            ),
+            "createdAt":          fs.SERVER_TIMESTAMP,
+            "updatedAt":          fs.SERVER_TIMESTAMP,
+        })
+        lead_id = lead_ref.id
+        log.info(
+            "inbound_signal_converted_to_lead",
+            uid=uid[:8],
+            signal_id=sig.get("signal_id", ""),
+            lead_id=lead_id,
+        )
+
+    resp = {"status": new_status}
+    if lead_id:
+        resp["lead_id"] = lead_id
+    return jsonify(resp), 200

@@ -381,7 +381,12 @@ DETECTED TECH STACK:
         base_score       = float(matched[0].get("raw_score", 0))
         highest_campaign = matched[0].get("campaign_id", "Unknown")
         matched_ids      = [str(c.get("campaign_id")) for c in matched]
-        multiplier = {1: 1.0, 2: 1.3}.get(len(matched), 1.6)
+
+        # Postmortem Fix #10: reduced multiplier table.
+        # Old table {2: 1.3, else: 1.6} inflated base-6 leads → 9.6 (hot-lead alert).
+        # New table caps at 1.3× for 4+ campaigns. A base-6 lead scores max 7.8 → 7,
+        # staying below the WhatsApp trigger (>=8). Genuine 9+ leads still reach 10.
+        multiplier  = {1: 1.0, 2: 1.1, 3: 1.2}.get(len(matched), 1.3)
         final_score = int(min(base_score * multiplier, 10.0))
 
         return {

@@ -101,7 +101,14 @@ def get_service_account_email() -> str:
 # QUOTA / WALLET HELPERS
 # =============================================================================
 def check_quota(tenant_id: str):
-    """Return (is_valid: bool, status_code: int, message: str)."""
+    """Return (is_valid: bool, status_code: int, message: str).
+
+    Postmortem Fix #1: Unified dual-accounting-path read.
+    Previously read only `consumed_credits + shard_sum`, while _atomic_settle_txn
+    writes `total_consumed`. These two paths diverged silently over time.
+    Fix: take max(total_consumed, consumed_credits + shard_sum) to cover both
+    schema paths regardless of migration state.
+    """
     user_doc = _db().collection("users").document(tenant_id).get()
     if not user_doc.exists:
         return False, 401, "Unknown identity."
@@ -110,15 +117,20 @@ def check_quota(tenant_id: str):
         return True, 200, "OK"
     if data.get("approval_status") != "approved":
         return False, 403, "Your application is under review. Please wait for L0 approval."
-    wallet    = data.get("wallet", {})
-    credits   = wallet.get("allocated_credits", 0)
-    consumed  = wallet.get("consumed_credits", 0)
+    wallet        = data.get("wallet", {})
+    credits       = wallet.get("allocated_credits", 0)
+    # Path A: new atomic settle path (total_consumed field)
+    total_consumed = int(wallet.get("total_consumed", 0) or 0)
+    # Path B: legacy shard path (consumed_credits field + shard subcollection)
+    legacy_consumed = int(wallet.get("consumed_credits", 0) or 0)
     shard_sum = sum(
         s.to_dict().get("consumed_credits", 0)
         for s in _db().collection("users").document(tenant_id)
                        .collection("wallet_shards").stream()
     )
-    if (credits - consumed - shard_sum) <= 0:
+    # Use whichever path shows higher consumption — prevents over-delivery on drift
+    consumed = max(total_consumed, legacy_consumed + shard_sum)
+    if (credits - consumed) <= 0:
         return False, 402, "Beta quota exhausted. Contact admin to reload."
     return True, 200, "OK"
 
@@ -443,41 +455,43 @@ def _extract_ngrams(text: str, n_min: int = 2, n_max: int = 3, top_k: int = 5) -
 
 
 def _do_shadow_track(persona_category: str, pain_point: str, tenant_id: str):
+    """Stream shadow track n-grams to BigQuery.
+
+    Postmortem Fix #4: The previous implementation used a BigQuery MERGE DML
+    with an UNNEST of inline STRUCT literals:
+        MERGE T USING (SELECT * FROM UNNEST([STRUCT(@tenant_id ... @ng_0 ...)]))
+    This pattern is NOT valid in BQ streaming DML — the UNNEST source must be
+    a named table or CTE, not an inline array of structs. The query failed with
+    'Unrecognised name: ng_0' on every call, swallowed by bare except → print.
+    Result: Intent_Keywords table was permanently empty, RLHF never activated.
+
+    Fix: Replace with streaming insert_rows_json. One row per n-gram per call.
+    The query_brain SUM(yield_weight) threshold correctly aggregates these rows.
+    RLHF now activates after the very first approved lead.
+    """
     try:
         from google.cloud import bigquery as _bq
         import datetime as _dt
         ngrams = _extract_ngrams(pain_point)
         if not ngrams:
             return
-        # REGIONALITY FIX: explicit location prevents default US routing
         bq        = _bq.Client(project=PROJECT_ID, location="asia-south1")
-        table_ref = f"`{PROJECT_ID}.swarm_analytics.Intent_Keywords`"
+        table_ref = f"{PROJECT_ID}.swarm_analytics.Intent_Keywords"
         now_iso   = _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-        query     = f"""
-            MERGE {table_ref} AS T
-            USING (SELECT * FROM UNNEST([{', '.join(
-                f"STRUCT(@tenant_id AS tenant_id, @cat AS persona_category, "
-                f"@ng_{i} AS n_gram, 1 AS occurrence_count, 1.0 AS yield_weight, "
-                f"TIMESTAMP('{now_iso}') AS last_seen)"
-                for i, _ in enumerate(ngrams)
-            )}])) AS S
-            ON T.persona_category = S.persona_category
-               AND T.n_gram = S.n_gram
-               AND T.tenant_id = S.tenant_id
-            WHEN MATCHED THEN
-              UPDATE SET occurrence_count = T.occurrence_count + 1,
-                         yield_weight = T.yield_weight + 1.0,
-                         last_seen = S.last_seen
-            WHEN NOT MATCHED THEN
-              INSERT (tenant_id, persona_category, n_gram, occurrence_count, yield_weight, last_seen)
-              VALUES (S.tenant_id, S.persona_category, S.n_gram, S.occurrence_count, S.yield_weight, S.last_seen)
-        """
-        params = [_bq.ScalarQueryParameter("tenant_id", "STRING", tenant_id),
-                  _bq.ScalarQueryParameter("cat", "STRING", persona_category)]
-        params += [_bq.ScalarQueryParameter(f"ng_{i}", "STRING", ng) for i, ng in enumerate(ngrams)]
-        # REGIONALITY FIX: location on QueryJobConfig ensures DML runs in asia-south1
-        job_cfg = _bq.QueryJobConfig(query_parameters=params)
-        bq.query(query, job_config=job_cfg, location="asia-south1").result()
+        rows = [
+            {
+                "tenant_id":        tenant_id,
+                "persona_category": persona_category,
+                "n_gram":           ng,
+                "occurrence_count": 1,
+                "yield_weight":     1.0,
+                "last_seen":        now_iso,
+            }
+            for ng in ngrams
+        ]
+        errors = bq.insert_rows_json(table_ref, rows)
+        if errors:
+            print(f"[SHADOW TRACKER] BQ insert errors: {errors}")
     except Exception as e:
         print(f"[SHADOW TRACKER] Error: {e}")
 
@@ -521,18 +535,102 @@ def _call_gemini_bounded(prompt: str, config=None, timeout_s: float = 15.0):
 # DPDP DATA ERASURE
 # =============================================================================
 def handle_purge(request):
+    """DPDP-compliant tenant data erasure.
+
+    Postmortem Fix #8: Previous implementation had .limit(100) on every
+    collection query, silently leaving 65k+ leads undeleted while returning
+    a 200 success. Now paginated to handle unlimited document counts.
+    Also erases: global_lead_locks (by lock_entity), scraped_cache,
+    predictive_cache subcollection, autonomous_dedup subcollection.
+    BigQuery rows are NOT erased here (requires a scheduled BQ DELETE job —
+    document in runbook as a separate manual step for BQ row erasure).
+    """
     from flask import jsonify
     data      = request.json or {}
     tenant_id = data.get("tenant_id")
     if not tenant_id:
         return jsonify({"error": "Missing tenant_id"}), 400
-    for doc in _db().collection("campaigns").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream():
-        doc.reference.delete()
-    for doc in _db().collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id).limit(100).stream():
-        ld  = doc.to_dict()
-        url = ld.get("url")
-        if url:
-            _db().collection("scraped_cache").document(url.replace("/", "_")).delete()
-        doc.reference.delete()
-    _db().collection("tenants").document(tenant_id).delete()
-    return jsonify({"message": f"Erased tenant {tenant_id} data."}), 200
+
+    def _paginated_delete(collection_ref, field=None, value=None, batch_size=400):
+        """Delete all documents matching an optional field filter in batches."""
+        deleted = 0
+        while True:
+            if field:
+                query = collection_ref.where(field_path=field, op_string="==", value=value).limit(batch_size)
+            else:
+                query = collection_ref.limit(batch_size)
+            docs  = list(query.stream())
+            if not docs:
+                break
+            for doc in docs:
+                doc.reference.delete()
+                deleted += 1
+        return deleted
+
+    total_erased = 0
+
+    # 1. Campaigns
+    total_erased += _paginated_delete(
+        _db().collection("campaigns"), field="tenant_id", value=tenant_id
+    )
+
+    # 2. Leads — collect lock_entities for step 4, and scraped_cache keys for step 5
+    lock_entities = []
+    cache_keys    = []
+    lead_query = _db().collection("leads").where(field_path="tenant_id", op_string="==", value=tenant_id)
+    while True:
+        batch = list(lead_query.limit(400).stream())
+        if not batch:
+            break
+        for doc in batch:
+            ld = doc.to_dict() or {}
+            if ld.get("lock_entity"):
+                lock_entities.append(ld["lock_entity"])
+            url = ld.get("url") or ld.get("source_url", "")
+            if url:
+                cache_keys.append(url.replace("/", "_"))
+            doc.reference.delete()
+            total_erased += 1
+
+    # 3. global_lead_locks for this tenant's domains
+    for le in lock_entities:
+        try:
+            _db().collection("global_lead_locks").document(le).delete()
+            total_erased += 1
+        except Exception:
+            pass
+
+    # 4. scraped_cache entries
+    for ck in cache_keys:
+        try:
+            _db().collection("scraped_cache").document(ck).delete()
+            total_erased += 1
+        except Exception:
+            pass
+
+    # 5. predictive_cache subcollection
+    pred_col = _db().collection("users").document(tenant_id).collection("predictive_cache")
+    total_erased += _paginated_delete(pred_col)
+
+    # 6. autonomous_dedup subcollection
+    dedup_col = _db().collection("autonomous_dedup")
+    total_erased += _paginated_delete(
+        dedup_col, field="tenant_id", value=tenant_id
+    )
+
+    # 7. wallet_shards
+    shards_col = _db().collection("users").document(tenant_id).collection("wallet_shards")
+    total_erased += _paginated_delete(shards_col)
+
+    # 8. tenant user document itself
+    try:
+        _db().collection("users").document(tenant_id).delete()
+        total_erased += 1
+    except Exception:
+        pass
+
+    return jsonify({
+        "message": f"Erased tenant {tenant_id} data.",
+        "documents_deleted": total_erased,
+        "note": "BigQuery rows require a separate scheduled DELETE job. See runbook.",
+    }), 200

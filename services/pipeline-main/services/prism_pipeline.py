@@ -283,8 +283,13 @@ class WalledGardenHook:
             log.info("walled_garden_thin_payload", url=url[:80], chars=len(combined_text))
 
         # Cache write
+        # Postmortem Fix #12: include expire_at so the Firestore TTL policy
+        # (once enabled in GCP Console on scraped_cache.expire_at) auto-deletes
+        # stale entries. Without TTL: 547k permanent docs accumulate over 12 months.
         if combined_text:
             try:
+                import datetime as _dt
+                _expire = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=30)
                 cache_ref.set({
                     "url":        url,
                     "text":       _safe_truncate(combined_text),
@@ -292,9 +297,11 @@ class WalledGardenHook:
                     "tech_stack": ["Social Platform Snippet"],
                     "emails":     [],
                     "phones":     [],
+                    "expire_at":  _expire,   # TTL field — enable in Firestore Console
                 }, merge=True)
             except Exception as cw:
                 log.warning("walled_garden_cache_write_failed", url=url[:80], error=str(cw))
+
 
         # Serper spend telemetry
         try:

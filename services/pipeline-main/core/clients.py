@@ -29,9 +29,14 @@ from google.cloud import firestore, bigquery, tasks_v2, secretmanager, storage
 import vertexai
 
 # ---------------------------------------------------------------------------
-# Serper API key — module-level cache (Phase 3 M-5 fix)
+# Serper API key — threading.Lock double-checked locking (Postmortem Fix #14)
+#
+# Previously: bare global with no lock — two Gunicorn gthreads could race on
+# cold start, both call Secret Manager simultaneously, defeating the cache.
+# Fix: identical DCL pattern used by get_db(), get_bq_client(), etc.
 # ---------------------------------------------------------------------------
 _serper_key_cache: Optional[str] = None
+_serper_key_lock: threading.Lock  = threading.Lock()
 
 
 def get_serper_key(secret_name: Optional[str] = None) -> str:
@@ -41,6 +46,10 @@ def get_serper_key(secret_name: Optional[str] = None) -> str:
     container process.  This eliminates the per-query RPC that was adding
     latency in the scraping hot loop (M-5 audit finding).
 
+    Postmortem Fix #14: Uses threading.Lock double-checked locking (DCL)
+    so that exactly one Secret Manager RPC is made per container lifetime,
+    even under Gunicorn gthread concurrency.
+
     Args:
         secret_name: Full Secret Manager resource name.  Defaults to
             ``projects/{PROJECT_ID}/secrets/serper_api_key/versions/latest``.
@@ -49,22 +58,26 @@ def get_serper_key(secret_name: Optional[str] = None) -> str:
         Serper API key string.
 
     Raises:
-        SecretManagerError: If the Secret Manager call fails.
+        RuntimeError: If the Secret Manager call fails.
     """
     global _serper_key_cache
+    # Fast path — no lock needed if cache is warm
     if _serper_key_cache is not None:
         return _serper_key_cache
 
-    from core.exceptions import SerperRateLimitError  # noqa: PLC0415 (local import OK here)
-    _project = os.environ.get("PROJECT_ID", "sideio-leads-v16")
-    _name = secret_name or f"projects/{_project}/secrets/serper_api_key/versions/latest"
-    try:
-        sm = get_secret_manager_client()
-        response = sm.access_secret_version(request={"name": _name})
-        _serper_key_cache = response.payload.data.decode("UTF-8").strip()
-        return _serper_key_cache
-    except Exception as exc:
-        raise RuntimeError(f"Failed to fetch Serper key from Secret Manager: {exc}") from exc
+    with _serper_key_lock:
+        # Double-checked inside lock to prevent race on cold start
+        if _serper_key_cache is not None:
+            return _serper_key_cache
+        _project = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+        _name = secret_name or f"projects/{_project}/secrets/serper_api_key/versions/latest"
+        try:
+            sm = get_secret_manager_client()
+            response = sm.access_secret_version(request={"name": _name})
+            _serper_key_cache = response.payload.data.decode("UTF-8").strip()
+            return _serper_key_cache
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch Serper key from Secret Manager: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------

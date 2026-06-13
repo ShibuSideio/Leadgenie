@@ -348,6 +348,19 @@
             </div>
 
 
+            <!-- ── V23.5 INBOUND RADAR BANNER ─────────────────────────────── -->
+            <div id="inbound-radar-banner" style="
+                display:none;
+                background: rgba(255,255,255,0.9);
+                backdrop-filter: blur(12px);
+                border: 1.5px solid #e2e8f0;
+                border-radius: 14px;
+                padding: 14px 18px;
+                margin-bottom: 16px;
+                box-shadow: 0 2px 12px rgba(0,0,0,0.05);
+            "></div>
+            <!-- ── END INBOUND RADAR BANNER ───────────────────────────────── -->
+
             <div class="feed-header">
                 <h3 class="feed-title">Lead Intelligence Feed</h3>
                 <select id="campaign-filter" class="feed-filter" onchange="filterLeadsByCampaign(this.value)">
@@ -361,6 +374,19 @@
             <div class="load-more-row">
                 <button class="secondary-btn" onclick="loadMoreLeads()" style="padding:10px 24px;">Load Older Leads</button>
             </div>
+
+            <!-- ── V23.5 INBOUND SIGNALS PANEL ───────────────────────────── -->
+            <div id="inbound-signals-panel" style="
+                display:none;
+                background: #fff;
+                border: 1.5px solid #e2e8f0;
+                border-radius: 16px;
+                padding: 20px;
+                margin-top: 20px;
+                box-shadow: 0 2px 12px rgba(0,0,0,0.05);
+            "></div>
+            <!-- ── END INBOUND SIGNALS PANEL ─────────────────────────────── -->
+
         </section>
 
         <!-- SEARCHES VIEW -->

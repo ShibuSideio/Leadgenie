@@ -94,7 +94,16 @@ def _acquire_lead_lock(transaction, lock_ref, now_utc):
                 locked_until = locked_until.replace(tzinfo=datetime.timezone.utc)
             if locked_until > now_utc:
                 return False
-    transaction.set(lock_ref, {"locked_until": now_utc + datetime.timedelta(days=14)})
+    # Postmortem Fix #2: write expire_at alongside locked_until so the Firestore
+    # TTL policy (once enabled in GCP Console on global_lead_locks.expire_at)
+    # automatically cleans up stale lock documents.
+    # Without a TTL index: ~547k stale docs accumulate over 12 months, growing
+    # indefinitely and incorrectly blacklisting domains for 14 days on false-positive WAFs.
+    _locked_until = now_utc + datetime.timedelta(days=14)
+    transaction.set(lock_ref, {
+        "locked_until": _locked_until,
+        "expire_at":    _locked_until,   # TTL field — Firestore TTL policy key
+    })
     return True
 
 
@@ -506,11 +515,19 @@ def dispatch():
                 return {"url": url, "status": "failed_scrape"}
 
             # WAF/bot detection
+            # Postmortem Fix #11: also release the global lock on WAF failure.
+            # Previously the lock was held for 14 days after a single WAF challenge,
+            # permanently blacklisting the domain. The lock is now released so the
+            # next pipeline run can attempt the domain again (or escalate to scraper-heavy).
             bot_keywords = ["Cloudflare Ray ID", "Please verify you are human",
                             "Enable JavaScript and cookies to continue",
                             "Access Denied", "403 Forbidden"]
             if any(kw.lower() in text.lower() for kw in bot_keywords):
                 doc_ref.update({"status": "failed", "error": "Blocked by Cloudflare/WAF"})
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
                 return {"url": url, "status": "failed_waf"}
 
             # Usage metrics

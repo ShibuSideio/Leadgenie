@@ -12,8 +12,10 @@ import json
 import hashlib
 import logging
 import datetime
+import threading
 from urllib.parse import urlparse
 from typing import Optional, Tuple, List, Dict
+
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
@@ -28,6 +30,26 @@ log = logging.getLogger(__name__)
 PROJECT_ID  = os.environ.get("PROJECT_ID", "sideio-leads-v16")
 GEMINI_MODEL = "gemini-2.5-flash"
 
+# Postmortem Fix #3: vertexai.init() was previously called at module scope
+# (old line: vertexai.init(project=PROJECT_ID, location="us-central1")).
+# This caused the Cloud Run Job to crash on import during cold-start IAM
+# propagation races and hardcoded the wrong region.
+# Fix: lazy init with DCL pattern — called once inside _generate_dossier().
+_vertex_lock:         threading.Lock = threading.Lock()
+_vertex_initialised:  bool           = False
+
+
+def _ensure_vertex_init() -> None:
+    """Idempotent, thread-safe Vertex AI initialisation (Postmortem Fix #3)."""
+    global _vertex_initialised
+    if _vertex_initialised:
+        return
+    with _vertex_lock:
+        if _vertex_initialised:
+            return
+        _location = os.environ.get("VERTEX_LOCATION", os.environ.get("LOCATION", "us-central1"))
+        vertexai.init(project=PROJECT_ID, location=_location)
+        _vertex_initialised = True
 # V20: Strict JSON schema for P12 — guarantees all three dossier keys are
 # always present as non-empty strings. Eliminates silent key-miss failures
 # in _generate_dossier() data.get() calls.
@@ -297,6 +319,7 @@ Respond ONLY in strict JSON:
 }}"""
 
         try:
+            _ensure_vertex_init()   # Postmortem Fix #3: lazy, not module-scope
             model    = GenerativeModel(GEMINI_MODEL)
             response = model.generate_content(
                 prompt,

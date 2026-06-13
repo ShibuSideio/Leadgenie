@@ -1,28 +1,45 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V23.5.2 Enterprise Build Pipeline
-# Deploy trigger: 2026-04-30 | BQ JSON Serialisation Fix + Telemetry Decoupling
+# cloudbuild.yaml — Sideio Leads V23.5.0 Enterprise Build Pipeline
+# Deploy trigger: 2026-06-13 | Inbound Sentiment Radar
 #
-# Changes from V23.5.1 (2026-04-28):
+# Changes from V23.5.2 (2026-04-30):
 #
-#   V23.5.2 (2026-04-30):
-#   + BQ SCHEMA FIX (orchestrator/api/routers/internal.py — serper_audit()):
-#     Root cause: serper_parameters was passed as a native Python dict.
-#     BigQuery insert_rows_json() requires JSON-typed columns to be a JSON-
-#     encoded STRING (json.dumps()), not a raw dict. The previous session's
-#     comment "do NOT call json.dumps" was incorrect — confirmed by Cloud
-#     Logging 500 on 2026-04-30. Fix: params_str = json.dumps(raw_params).
+#   V23.5.0 (2026-06-13) — Inbound Sentiment Radar:
+#   + NEW: services/orchestrator/services/inbound_sentiment_service.py
+#     InboundSentimentService class — 7-mode round-robin Google Search
+#     (via Serper) + Gemini Flash intent scoring. Zero platform OAuth.
+#     SIGNAL_MODES: active_intent, pain_expression, competitor_churn,
+#     hiring_signals, review_signals, trend_signals, community_signals.
+#     GLOBAL_NEGATIVE strips ad copy. sha256 dedup on URL.
+#     Gemini discard threshold: intent_score < 0.30.
+#     RLHF BQ update gated on intent_score >= 0.70.
 #
-#   + WORKER TELEMETRY DECOUPLING (pipeline-main/services/serper_service.py):
-#     _push_serper_audit() now:
-#       - Captures the httpx response object (was fire-and-forget with no check).
-#       - Logs log.warning("serper_audit_broker_non_200") on any non-200
-#         response — previously a 500 was silently discarded (log.debug only).
-#       - Exception handler escalated from log.debug to log.warning so network
-#         failures appear in Cloud Logging at WARNING severity.
-#       - No exception can propagate — daemon thread always exits cleanly.
-#         Vertex AI scoring and Firestore insertion are never blocked.
+#   + NEW: services/orchestrator/jobs/inbound_sentiment_job.py
+#     run() iterates all active tenants, calls InboundSentimentService,
+#     writes inbound_signals docs to Firestore, updates BigQuery RLHF.
+#
+#   + NEW API ROUTES:
+#     POST /api/internal/inbound-sentiment-run  — CRON trigger (internal.py)
+#     GET  /api/inbound-signals                 — list signals (leads.py)
+#     PUT  /api/inbound-signals/<id>/status     — promote to lead (leads.py)
+#     GET  /api/me → inbound_radar stats block  — 4-key summary (me.py)
+#     PUT  /api/me → inbound_radar_enabled      — on/off toggle (me.py)
+#
+#   + FRONTEND:
+#     public/app.js  — radar banner, signals panel, 4 JS functions
+#     public/index.html — #inbound-radar-banner, #inbound-signals-panel
+#
+#   + INFRA:
+#     firestore.indexes.json — 2 composite indexes on inbound_signals
+#     ARCHITECTURE_V23_COMPREHENSIVE.md — full intern-level architecture doc
+#     firestore_ttl_setup.md — TTL field setup guide
+#
+#   + TESTS:
+#     test_v23_5_inbound_radar.py — 57 new functional tests (Phase 10-14)
+#     Combined test suite: 69 (V23.4) + 57 (V23.5) = 126 tests total.
 #
 # NOTE: No new pip dependencies. No Cloud Build structural changes.
+#       No new Cloud Run services. No scheduler changes.
 # =============================================================================
 
 # Architecture:
@@ -141,10 +158,11 @@ steps:
     export PROJECT_ID="$PROJECT_ID"
     export LOCATION="asia-south1"
     export PYTHONIOENCODING=utf-8
-    echo "[GATE PY] Running V23 local smoke tests (69 cases)..."
+    echo "[GATE PY] Running V23 local smoke tests (69 cases) + V23.5 radar tests (57 cases)..."
     cd services/orchestrator
     python local_smoke_tests.py
-    echo "[GATE PY] All 69 smoke tests PASSED. Build proceeding."
+    python test_v23_5_inbound_radar.py
+    echo "[GATE PY] All 126 smoke tests PASSED (69 V23.4 + 57 V23.5). Build proceeding."
 
 # Barrier step: both gates must pass before any Docker build starts
 - id: 'gate-passed'

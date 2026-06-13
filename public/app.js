@@ -207,8 +207,38 @@ async function loadMe() {
                     waitroom.style.height = '100vh';
                     waitroom.style.display = 'flex';
                 }
+                // J-2 FIX: Poll /api/me every 30s while in the waitroom.
+                // Without this, a user whose account is approved stays stuck
+                // in the waitroom until they manually refresh the page.
+                if (!window._waitroomPollInterval) {
+                    window._waitroomPollInterval = setInterval(async () => {
+                        try {
+                            const pollUser = firebase.auth().currentUser;
+                            if (!pollUser) return;
+                            const pollToken = await pollUser.getIdToken(true);
+                            const pollResp  = await fetch(`${API_BASE}/api/me`, {
+                                headers: { 'Authorization': `Bearer ${pollToken}` }
+                            });
+                            if (!pollResp.ok) return;
+                            const pollPayload = await pollResp.json();
+                            if ((pollPayload.data || {}).approval_status !== 'pending') {
+                                clearInterval(window._waitroomPollInterval);
+                                window._waitroomPollInterval = null;
+                                showToast('Your account is now active! Welcome to Sideio 🎉', 'success');
+                                loadDashboard(); // re-run full dashboard init
+                            }
+                        } catch (pollErr) {
+                            console.warn('[Waitroom] Poll error:', pollErr);
+                        }
+                    }, 30000); // 30s
+                }
                 return;
             } else {
+                // Clear any running poll (user already approved on this session)
+                if (window._waitroomPollInterval) {
+                    clearInterval(window._waitroomPollInterval);
+                    window._waitroomPollInterval = null;
+                }
                 if (mainGrid) mainGrid.style.display = '';
                 if (navMenu) navMenu.style.display = '';
                 if (waitroom) waitroom.style.display = 'none';
@@ -281,6 +311,12 @@ async function loadMe() {
                 hookInput.value = data.crm_webhook_url;
             }
             window.currentUserData = data;
+
+            // ── V23.5: Inbound Radar widget bootstrap ────────────────────────────
+            // payload.inbound_radar is injected by /api/me V23.5
+            if (payload.inbound_radar) {
+                _renderInboundRadarBanner(payload.inbound_radar);
+            }
 
             // V17: Greeting with first name
             const dName = auth.currentUser?.displayName || '';
@@ -483,14 +519,30 @@ async function loadLeads() {
                 if (elIgn)  elIgn.innerText  = cIgnored;
                 fcUpdateKPIs(rawLeadsCache);
                 renderLeads();
-            }, (error) => {
+            }, async (error) => {
                 console.error('[Firestore] onSnapshot error:', error);
                 if (error.code === 'failed-precondition') {
                     showToast('Feed index missing — see console for index link.', 'error');
                     leadsList.innerHTML = '<div class="lead-card" style="color:#f59e0b;border-color:#f59e0b;padding:16px;">⚠ Firestore composite index required.<br><small>Open the browser console for the GCP link.</small></div>';
                     return;
                 }
-                if (error.code === 'permission-denied') { console.warn('[Firestore] Permission denied.'); return; }
+                // J-16 FIX: On permission-denied (Firebase Auth token expired after 1h),
+                // force-refresh the token and re-subscribe instead of silently dying.
+                // Without this, the lead feed freezes after 1 hour with no visible error.
+                if (error.code === 'permission-denied') {
+                    console.warn('[Firestore] Token expired — forcing refresh and reconnecting listener.');
+                    try {
+                        const u = firebase.auth().currentUser;
+                        if (u) {
+                            await u.getIdToken(true);
+                            setTimeout(() => loadLeads(), 2000); // re-subscribe after token refresh
+                        }
+                    } catch(refreshErr) {
+                        console.error('[Firestore] Token refresh failed:', refreshErr);
+                        showToast('Session expired — please refresh.', 'error');
+                    }
+                    return;
+                }
                 showToast('Live feed error — refresh to reconnect.', 'error');
             });
     } catch (error) {
@@ -988,12 +1040,14 @@ window.saveCampaignAction = async function(payload) {
         const createData = await createResp.json();
         const campaignId = createData.id;
 
-        // ── V19 IGNITION: fire Day-1 producer immediately ────────────────────
-        // /ignite bypasses the epsilon-greedy quota math and directly enqueues
-        // the Serper producer task. Errors are surfaced, not swallowed.
+        // ── V23 IGNITION: fire Day-1 producer immediately ────────────────────
+        // J-13 FIX: create_campaign already enqueues a zero-wait producer task.
+        // Only call /ignite when zero_wait_enqueued is false (enqueue failed).
+        // Previously, both ran unconditionally, doubling Serper spend on Day 1.
         let igniteMsg = 'Campaign active — scanning for leads...';
-        console.log('[V19] Create response:', createData);
-        if (campaignId) {
+        console.log('[V23] Create response:', createData);
+        if (campaignId && !createData.zero_wait_enqueued) {
+            // Zero-wait failed at create time — use /ignite as explicit fallback
             try {
                 const igniteResp = await fetch(`${API_BASE}/api/campaigns/${campaignId}/ignite`, {
                     method:  'POST',
@@ -1001,9 +1055,9 @@ window.saveCampaignAction = async function(payload) {
                     body:    JSON.stringify({})
                 });
                 const igniteData = await igniteResp.json();
-                console.log('[V19 IGNITE] Response:', igniteData);
+                console.log('[V23 IGNITE] Response:', igniteData);
                 if (igniteResp.ok && igniteData.ignite) {
-                    igniteMsg = `🚀 Engine ignited! Scanning starts in ~${igniteData.produce_jitter_s || 5}s`;
+                    igniteMsg = `🚀 Engine ignited! First leads expected in ~3 minutes.`;
                 } else {
                     console.warn('[IGNITE] Ignition call returned error:', igniteData);
                     igniteMsg = 'Campaign created — first scan queued by cron (≤5 min).';
@@ -1011,6 +1065,45 @@ window.saveCampaignAction = async function(payload) {
             } catch (igniteErr) {
                 console.warn('[IGNITE] Ignition fetch failed:', igniteErr);
             }
+        } else if (campaignId && createData.zero_wait_enqueued) {
+            // Zero-wait succeeded — no duplicate /ignite needed.
+            // J-18 FIX: Show a persistent countdown banner so users know the system
+            // is working during the 3-minute window before the first lead arrives.
+            igniteMsg = '🚀 Search engine ignited! First leads expected in ~3 minutes.';
+            const banner = document.createElement('div');
+            banner.id = 'ignition-banner';
+            banner.style.cssText = [
+                'position:fixed', 'bottom:80px', 'left:50%', 'transform:translateX(-50%)',
+                'background:linear-gradient(135deg,#4f46e5,#7c3aed)', 'color:#fff',
+                'padding:12px 24px', 'border-radius:30px', 'font-size:0.88rem',
+                'font-weight:600', 'z-index:9999', 'box-shadow:0 4px 20px rgba(79,70,229,0.4)',
+                'display:flex', 'align-items:center', 'gap:10px'
+            ].join(';');
+            let secs = 180;
+            banner.innerHTML = `<span>🚀</span><span id="ignition-banner-text">Scanning for leads — first results in ~3 min</span>`;
+            document.body.appendChild(banner);
+            const _bannerTick = setInterval(() => {
+                secs--;
+                const textEl = document.getElementById('ignition-banner-text');
+                if (secs <= 0 || !textEl) {
+                    clearInterval(_bannerTick);
+                    banner.remove();
+                } else {
+                    const m = Math.floor(secs / 60);
+                    const s = secs % 60;
+                    if (textEl) textEl.textContent = `Scanning for leads — first results in ${m}:${String(s).padStart(2,'0')}`;
+                }
+            }, 1000);
+            // Also dismiss the banner immediately when the first lead arrives via onSnapshot
+            const _origRender = window.renderLeads;
+            window.renderLeads = function() {
+                if (rawLeadsCache.length > 0) {
+                    clearInterval(_bannerTick);
+                    banner.remove();
+                    window.renderLeads = _origRender;
+                }
+                _origRender.apply(this, arguments);
+            };
         }
 
         const targetUrlsInput = document.getElementById('camp-target-urls');
@@ -3045,7 +3138,6 @@ window.dtPrefillAndLaunch = function() {
     const bio = document.getElementById('dt-extracted-bio')?.value || window._dtState.extractedBio;
     const who = document.getElementById('dt-extracted-who')?.value || window._dtState.extractedWho;
     const gl  = document.getElementById('dt-extracted-gl')?.value  || window._dtState.extractedGl;
-    const company = window._dtState.companyName;
 
     if (!bio || !who) {
         showToast('Please fill in company and target descriptions before launching.', 'error');
@@ -3068,13 +3160,13 @@ window.dtPrefillAndLaunch = function() {
 };
 
 window.saveTenantProfileAction = async function(payload) {
-    // ── STRICT LOADING STATE (abolish optimistic UI) ─────────────────────────
+    // \u2500\u2500 STRICT LOADING STATE (abolish optimistic UI) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     // The UI must NOT show "Digital Twin created" until we receive a verified
     // 200/201 from the backend. Disable all onboarding CTAs and show a spinner.
     const _twBtns = document.querySelectorAll(
         '.dt-launch-btn, #dt-launch-btn, [onclick*="dtPrefillAndLaunch"], [onclick*="dtLaunchFallback"]'
     );
-    _twBtns.forEach(b => { b.disabled = true; b._orig = b.innerHTML; b.innerHTML = '⏳ Creating Twin...'; });
+    _twBtns.forEach(b => { b.disabled = true; b._orig = b.innerHTML; b.innerHTML = '\u23f3 Creating Twin...'; });
     const _restoreTwin = () => _twBtns.forEach(b => { b.disabled = false; b.innerHTML = b._orig || 'Launch'; });
 
     showToast('Setting up Master Twin Profile...', 'info');
@@ -3082,11 +3174,11 @@ window.saveTenantProfileAction = async function(payload) {
         const user = firebase.auth().currentUser;
         if (!user) {
             _restoreTwin();
-            showToast('Session expired — please sign in again.', 'error');
+            showToast('Session expired \u2014 please sign in again.', 'error');
             return;
         }
 
-        // force=true: mandatory on iOS Safari — background tab throttling
+        // force=true: mandatory on iOS Safari \u2014 background tab throttling
         // silently expires Firebase tokens without triggering onIdTokenChanged.
         // Without force=true, the Orchestrator returns 401 and the Firestore
         // write is silently dropped with no error shown to the user.
@@ -3107,15 +3199,15 @@ window.saveTenantProfileAction = async function(payload) {
             throw new Error(`HTTP ${createResp.status}${errDetail ? ': ' + errDetail : ''}`);
         }
 
-        // ── Verified success ────────────────────────────────────────────────
+        // \u2500\u2500 Verified success \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         _restoreTwin();
         loadDashboard();
-        showToast('✅ Master Twin active! You can now add child campaigns.', 'success');
+        showToast('\u2705 Master Twin active! You can now add child campaigns.', 'success');
 
     } catch(err) {
         console.error('[saveTenantProfileAction]', err);
         _restoreTwin();
-        // Surface a visible, actionable error — never silently fail.
+        // Surface a visible, actionable error \u2014 never silently fail.
         showToast(`Failed to create Digital Twin: ${err.message || 'Network error'}. Please try again.`, 'error');
     }
 };
@@ -3152,8 +3244,13 @@ window.dtFallbackToNaturalLanguage = function() {
 
 
 // =============================================================================
-// V18 MULTI-CAMPAIGN: CHILD CAMPAIGN CREATION (STATE B)
+// V23 MULTI-CAMPAIGN: CHILD CAMPAIGN CREATION (STATE B)
 // =============================================================================
+
+// J-8 FIX: _pendingCards stores AI card data by index for deployPredictiveCard.
+// Replaces the btoa() encoding scheme which crashes on emoji/non-ASCII characters
+// that Gemini commonly generates in product names and market trend hooks.
+window._pendingCards = {};
 
 window.openChildCampaignModal = async function() {
     const aw = window.activeWallet || {};
@@ -3166,6 +3263,9 @@ window.openChildCampaignModal = async function() {
         showToast('Credits exhausted. Contact admin to reload.', 'error');
         return;
     }
+
+    // Reset card store on each open
+    window._pendingCards = {};
 
     const modal = document.getElementById('child-campaign-modal');
     if (modal) {
@@ -3182,16 +3282,19 @@ window.openChildCampaignModal = async function() {
         let html = '';
         if (rawProfile && rawProfile.recommended_campaigns && rawProfile.recommended_campaigns.length > 0) {
             rawProfile.recommended_campaigns.forEach((camp, idx) => {
-                const bProd = btoa((camp.product_name || '').replace(/['"]/g, ''));
-                const bHook = btoa((camp.market_trend_hook || '').replace(/['"]/g, ''));
-                const bAdv  = btoa((camp.unfair_advantage || '').replace(/['"]/g, ''));
+                // J-8 FIX: Store data by index — no encoding at all.
+                window._pendingCards[idx] = {
+                    prod: camp.product_name      || '',
+                    hook: camp.market_trend_hook || '',
+                    adv:  camp.unfair_advantage  || ''
+                };
                 
                 html += `
                 <div id="c-card-${idx}" style="background: rgba(255,255,255,0.6); padding: 16px; border-radius: 12px; margin-bottom: 16px; border: 1px solid var(--glass-border); text-align: left;">
                     <div id="c-card-view-${idx}">
                         <h4 style="margin:0 0 6px 0; color:var(--primary); font-size:1.1rem;">${camp.product_name || 'Product'}</h4>
                         <p style="font-size:0.9rem; margin-bottom:12px; line-height: 1.4;"><strong style="color:#4f46e5;">Market Trend:</strong> ${camp.market_trend_hook || ''}<br><strong style="color:#4f46e5;">Advantage:</strong> ${camp.unfair_advantage || ''}</p>
-                        <button class="primary-btn" style="width:100%; font-size:0.9rem; padding:8px;" onclick="window.editPredictiveCard(${idx})">Review & Launch</button>
+                        <button class="primary-btn" style="width:100%; font-size:0.9rem; padding:8px;" onclick="window.editPredictiveCard(${idx})">Review &amp; Launch</button>
                     </div>
                     <div id="c-card-edit-${idx}" class="hidden">
                         <label style="font-size:0.8rem; color:var(--text-muted); display: block;">Product Focus</label>
@@ -3206,7 +3309,7 @@ window.openChildCampaignModal = async function() {
                         <label style="font-size:0.8rem; color:var(--text-muted); display: block;">Target Location</label>
                         <input type="text" id="c-loc-${idx}" class="fc-intent-input" style="height:36px; padding:8px; margin-bottom:12px; width: 100%; border: 1px solid #d1d5db; border-radius: 8px;" placeholder="e.g. London, UK, Worldwide" value="${window._dtState?.extractedGl || ''}">
                         
-                        <button class="primary-btn" style="width:100%; font-size:0.9rem; padding:8px; background:#10b981; border:none; border-radius: 20px; color:white; font-weight: 600; cursor: pointer;" onclick="window.deployPredictiveCard(${idx}, '${bProd}', '${bHook}', '${bAdv}')">Deploy Campaign</button>
+                        <button class="primary-btn" style="width:100%; font-size:0.9rem; padding:8px; background:#10b981; border:none; border-radius: 20px; color:white; font-weight: 600; cursor: pointer;" onclick="window.deployPredictiveCard(${idx})">Deploy Campaign</button>
                     </div>
                 </div>
                 `;
@@ -3227,10 +3330,9 @@ window.openChildCampaignModal = async function() {
             if (manualBio) {
                 const productHint  = (rawProfile && (rawProfile.company_name || rawProfile.name)) || 'Your Core Service';
                 const locationHint = (rawProfile && rawProfile.detected_gl) || '';
-                const bProd = btoa(productHint.replace(/['"]/g, ''));
-                const bHook = btoa(manualBio.slice(0, 120).replace(/['"]/g, ''));
-                const bAdv  = btoa('');
-                html = `<div style="background:linear-gradient(135deg,rgba(79,70,229,0.05),rgba(124,58,237,0.05));border:1px dashed rgba(79,70,229,0.3);border-radius:12px;padding:14px;margin-bottom:16px;text-align:left;"><div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--primary);margin-bottom:6px;">&#10022; Profile Detected (Manual Twin)</div><p style="font-size:0.88rem;color:var(--text-muted);margin-bottom:14px;line-height:1.5;">${manualBio.slice(0,180)}${manualBio.length>180?'\u2026':''}</p><button class="primary-btn" style="width:100%;font-size:0.9rem;padding:8px;" onclick="window.editPredictiveCard(0)">Customise &amp; Launch &#8594;</button></div><div id="c-card-0"><div id="c-card-view-0" class="hidden"></div><div id="c-card-edit-0"><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Product / Service Focus</label><input type="text" id="c-prod-0" class="fc-intent-input" style="height:36px;padding:8px;margin-bottom:8px;width:100%;border:1px solid #d1d5db;border-radius:8px;" value="${productHint.replace(/"/g,'&quot;')}"><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Market Opportunity / Pain Point</label><textarea id="c-hook-0" class="fc-intent-input" style="min-height:60px;padding:8px;margin-bottom:8px;width:100%;border:1px solid #d1d5db;border-radius:8px;">${manualBio.slice(0,200)}</textarea><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Unfair Advantage</label><textarea id="c-adv-0" class="fc-intent-input" style="min-height:60px;padding:8px;margin-bottom:12px;width:100%;border:1px solid #d1d5db;border-radius:8px;"></textarea><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Target Location</label><input type="text" id="c-loc-0" class="fc-intent-input" style="height:36px;padding:8px;margin-bottom:12px;width:100%;border:1px solid #d1d5db;border-radius:8px;" placeholder="e.g. Kerala, India, Worldwide" value="${locationHint}"><button class="primary-btn" style="width:100%;font-size:0.9rem;padding:8px;background:#10b981;border:none;border-radius:20px;color:white;font-weight:600;cursor:pointer;" onclick="window.deployPredictiveCard(0,'${bProd}','${bHook}','${bAdv}')">Deploy Campaign</button></div></div>`;
+                // J-8 FIX: Store in _pendingCards instead of btoa()
+                window._pendingCards[0] = { prod: productHint, hook: manualBio.slice(0, 120), adv: '' };
+                html = `<div style="background:linear-gradient(135deg,rgba(79,70,229,0.05),rgba(124,58,237,0.05));border:1px dashed rgba(79,70,229,0.3);border-radius:12px;padding:14px;margin-bottom:16px;text-align:left;"><div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--primary);margin-bottom:6px;">&#10022; Profile Detected (Manual Twin)</div><p style="font-size:0.88rem;color:var(--text-muted);margin-bottom:14px;line-height:1.5;">${manualBio.slice(0,180)}${manualBio.length>180?'\u2026':''}</p><button class="primary-btn" style="width:100%;font-size:0.9rem;padding:8px;" onclick="window.editPredictiveCard(0)">Customise &amp; Launch &#8594;</button></div><div id="c-card-0"><div id="c-card-view-0" class="hidden"></div><div id="c-card-edit-0"><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Product / Service Focus</label><input type="text" id="c-prod-0" class="fc-intent-input" style="height:36px;padding:8px;margin-bottom:8px;width:100%;border:1px solid #d1d5db;border-radius:8px;" value="${productHint.replace(/"/g,'&quot;')}"><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Market Opportunity / Pain Point</label><textarea id="c-hook-0" class="fc-intent-input" style="min-height:60px;padding:8px;margin-bottom:8px;width:100%;border:1px solid #d1d5db;border-radius:8px;">${manualBio.slice(0,200)}</textarea><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Unfair Advantage</label><textarea id="c-adv-0" class="fc-intent-input" style="min-height:60px;padding:8px;margin-bottom:12px;width:100%;border:1px solid #d1d5db;border-radius:8px;"></textarea><label style="font-size:0.8rem;color:var(--text-muted);display:block;">Target Location</label><input type="text" id="c-loc-0" class="fc-intent-input" style="height:36px;padding:8px;margin-bottom:12px;width:100%;border:1px solid #d1d5db;border-radius:8px;" placeholder="e.g. Kerala, India, Worldwide" value="${locationHint}"><button class="primary-btn" style="width:100%;font-size:0.9rem;padding:8px;background:#10b981;border:none;border-radius:20px;color:white;font-weight:600;cursor:pointer;" onclick="window.deployPredictiveCard(0)">Deploy Campaign</button></div></div>`;
             } else {
                 html = '<p style="text-align:center; color:#6b7280;">No predictive campaigns available. Use the custom fallback.</p>';
             }
@@ -3245,11 +3347,15 @@ window.editPredictiveCard = function(idx) {
     document.getElementById('c-card-edit-' + idx).classList.remove('hidden');
 };
 
-window.deployPredictiveCard = async function(idx, origProd, origHook, origAdv) {
+
+window.deployPredictiveCard = async function(idx) {
+    // J-8 FIX: Read data from _pendingCards map (no btoa/origProd/origHook/origAdv args).
     const prod = (document.getElementById('c-prod-' + idx)?.value || '').trim();
     const hook = (document.getElementById('c-hook-' + idx)?.value || '').trim();
     const adv  = (document.getElementById('c-adv-' + idx)?.value || '').trim();
     const loc  = (document.getElementById('c-loc-' + idx)?.value || '').trim();
+
+    const origCard = window._pendingCards[idx] || {};
 
     if (!loc) {
         showToast('Target Location is required.', 'error');
@@ -3265,9 +3371,12 @@ window.deployPredictiveCard = async function(idx, origProd, origHook, origAdv) {
     ].join('\n');
     const personaName = `${prod} Strategy`;
 
-    const deployBtn = document.querySelector(`#c-card-edit-${idx} button.primary-btn`) ||
-                      document.querySelector(`[onclick*="deployPredictiveCard(${idx}"]`);
+    const deployBtn = document.querySelector(`#c-card-edit-${idx} button.primary-btn`);
     if (deployBtn) { deployBtn.disabled = true; deployBtn.textContent = '⚙️ Saving Agent...'; }
+
+    let savedPersonaId = '';
+    let savedPersonaBio = '';
+    let savedPersonaKeywords = '';
 
     try {
         const user  = firebase.auth().currentUser;
@@ -3281,32 +3390,35 @@ window.deployPredictiveCard = async function(idx, origProd, origHook, origAdv) {
         });
         if (pResp.ok) {
             const pJson = await pResp.json();
-            window._selectedPersonaId = pJson.id || '';
+            savedPersonaId = pJson.id || '';
+            savedPersonaBio = personaBio;
+            savedPersonaKeywords = prod;
+            window._selectedPersonaId = savedPersonaId;
             window._personasCache = []; // invalidate cache
             console.log(`[DEPLOY] Auto-created persona '${personaName}' → ${pJson.id}`);
         } else {
             console.warn('[DEPLOY] Persona auto-save failed:', await pResp.text());
-            // Non-fatal: continue without persona if API fails
-            window._selectedPersonaId = '';
         }
     } catch(pErr) {
         console.warn('[DEPLOY] Persona auto-save error (non-fatal):', pErr);
-        window._selectedPersonaId = '';
     }
 
     if (deployBtn) { deployBtn.textContent = '🚀 Launching...'; }
 
     // ── Step 2: Create the campaign with the new persona_id linked ──────────
-    const wasEdited = (btoa(prod.replace(/['"]/g, '')) !== origProd) ||
-                      (btoa(hook.replace(/['"]/g, '')) !== origHook) ||
-                      (btoa(adv.replace(/['"]/g, ''))  !== origAdv);
+    // J-8 FIX: Compare against _pendingCards (no btoa needed)
+    const wasEdited = prod !== origCard.prod || hook !== origCard.hook || adv !== origCard.adv;
 
     closeModal('child-campaign-modal');
+
+    // J-9 FIX: 600ms delay so Firestore write for the new persona settles
+    // before campaign creation reads it for denormalisation.
+    await new Promise(resolve => setTimeout(resolve, 600));
 
     saveCampaignAction({
         name:              prod,
         bio:               'CHILD_CAMPAIGN_OVERRIDE',
-        keywords:          '',
+        keywords:          prod,
         campaign_focus:    prod,
         pain_point:        hook,
         unfair_advantage:  adv,
@@ -3314,7 +3426,12 @@ window.deployPredictiveCard = async function(idx, origProd, origHook, origAdv) {
         location:          loc,
         human_edited:      wasEdited,
         target_angle_hook: hook,
-        target_angle_adv:  adv
+        target_angle_adv:  adv,
+        // Pass inline persona fields so denormalisation is guaranteed even if
+        // Firestore eventual consistency causes the persona doc read to miss.
+        persona_id:        savedPersonaId,
+        persona_bio:       savedPersonaBio,
+        persona_keywords:  savedPersonaKeywords
     });
 };
 
@@ -3843,6 +3960,12 @@ window.selectPersonaForCampaign = function(id, name) {
 // Call this when opening a modal that has a persona <select> element.
 // Fetches from API once, then serves from _personasCache.
 // CRITICAL: does NOT overwrite onchange — wires to onCcPersonaChange.
+// J-11 FIX: Track which selects already have a change listener to prevent
+// duplicate listeners accumulating each time the modal is re-opened.
+// Without this guard, opening the modal 3× causes onCcPersonaChange to fire
+// 3 times per change, causing persona preview to flicker and hide itself.
+const _dropdownListenerAttached = new WeakSet();
+
 window.populatePersonaDropdown = async function(selectElId) {
     const sel = document.getElementById(selectElId);
     if (!sel) return;
@@ -3870,21 +3993,23 @@ window.populatePersonaDropdown = async function(selectElId) {
             const opt       = document.createElement('option');
             opt.value       = p.id;           // always p.id — matches onCcPersonaChange lookup
             opt.textContent = p.name;
+            // J-17 FIX: Pre-select the persona that was chosen from the Persona Vault.
+            // selectPersonaForCampaign() sets window._selectedPersonaId; we honour it here.
             if (p.id === window._selectedPersonaId) opt.selected = true;
             sel.appendChild(opt);
         });
 
-        // BUG FIX: Do NOT reassign sel.onchange here.
-        // The HTML attribute onchange="onCcPersonaChange(this.value)" is the
-        // authoritative binding. Overwriting it with a bare value-sync killed
-        // all DOM-toggling logic. Instead: wire via addEventListener so both
-        // the HTML attribute AND this handler coexist.
-        sel.addEventListener('change', function() {
-            window._selectedPersonaId = sel.value;
-            window.onCcPersonaChange(sel.value);
-        }, { once: false });
+        // J-11 FIX: Only attach the change listener once per DOM element.
+        if (!_dropdownListenerAttached.has(sel)) {
+            sel.addEventListener('change', function() {
+                window._selectedPersonaId = sel.value;
+                window.onCcPersonaChange(sel.value);
+            });
+            _dropdownListenerAttached.add(sel);
+        }
 
-        // If a persona is already pre-selected (e.g. editing), trigger the toggle
+        // J-17 FIX: If a persona was pre-selected from the vault, trigger the
+        // conditional show/hide logic so the directive preview card appears immediately.
         if (sel.value) {
             window.onCcPersonaChange(sel.value);
         }
@@ -4084,3 +4209,224 @@ window.saveUnitEconomics = async function() {
     }
 };
 
+
+// =============================================================================
+// ██╗███╗   ██╗██████╗  ██████╗ ██╗   ██╗███╗   ██╗██████╗
+// ██║████╗  ██║██╔══██╗██╔═══██╗██║   ██║████╗  ██║██╔══██╗
+// ██║██╔██╗ ██║██████╔╝██║   ██║██║   ██║██╔██╗ ██║██║  ██║
+// ██║██║╚██╗██║██╔══██╗██║   ██║██║   ██║██║╚██╗██║██║  ██║
+// ██║██║ ╚████║██████╔╝╚██████╔╝╚██████╔╝██║ ╚████║██████╔╝
+// ╚═╝╚═╝  ╚═══╝╚═════╝  ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═════╝
+// V23.5 — Inbound Sales Signal Radar
+// =============================================================================
+
+const INTENT_COLORS = {
+    ACTIVE_SEEKING:   { bg: '#ecfdf5', border: '#10b981', badge: '#10b981', label: '🔥 Active Seeking'  },
+    COMPETITOR_CHURN: { bg: '#fff7ed', border: '#f97316', badge: '#f97316', label: '🔀 Competitor Churn' },
+    EXPRESSING_PAIN:  { bg: '#eff6ff', border: '#3b82f6', badge: '#3b82f6', label: '😣 Expressing Pain'  },
+    TREND:            { bg: '#f5f3ff', border: '#8b5cf6', badge: '#8b5cf6', label: '📈 Trend Signal'     },
+};
+
+/**
+ * Render the Inbound Radar summary banner on the Home tab.
+ * Called once from loadMe() whenever payload.inbound_radar is present.
+ */
+function _renderInboundRadarBanner(radarData) {
+    const container = document.getElementById('inbound-radar-banner');
+    if (!container) return;
+
+    const enabled       = radarData.enabled;
+    const signalsWeek   = radarData.signals_this_week || 0;
+    const lastRan       = radarData.last_ran_at ? new Date(radarData.last_ran_at).toLocaleDateString() : 'Never';
+    const topKws        = (radarData.top_pain_keywords || []).slice(0, 5);
+
+    container.style.display = 'block';
+    container.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div style="display:flex; align-items:center; gap:10px;">
+                <div style="width:10px; height:10px; border-radius:50%; background:${enabled ? '#10b981' : '#9ca3af'};
+                     box-shadow: ${enabled ? '0 0 0 3px rgba(16,185,129,0.25)' : 'none'};
+                     animation: ${enabled ? 'roiPulse 2s infinite' : 'none'};"></div>
+                <div>
+                    <span style="font-weight:700; font-size:0.85rem;">Inbound Radar</span>
+                    <span style="color:#6b7280; font-size:0.78rem; margin-left:8px;">
+                        ${enabled ? `${signalsWeek} signals this week · Last run: ${lastRan}` : 'Disabled — enable in Settings'}
+                    </span>
+                </div>
+                ${topKws.length ? `
+                    <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                        ${topKws.map(k => `<span style="background:#f1f5f9; border-radius:20px; padding:3px 10px; font-size:0.72rem; color:#475569; font-weight:600;">${k}</span>`).join('')}
+                    </div>` : ''}
+            </div>
+            <div style="display:flex; gap:8px;">
+                ${enabled ? `
+                <button onclick="loadInboundSignals()" style="
+                    background: linear-gradient(135deg,#4f46e5,#7c3aed);
+                    color:#fff; border:none; border-radius:10px;
+                    padding:8px 16px; font-size:0.8rem; font-weight:600;
+                    cursor:pointer; transition:opacity 0.2s;"
+                    onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
+                    📡 View Signals
+                </button>` : ''}
+                <button onclick="toggleInboundRadar(${!enabled})" style="
+                    background:#f8fafc; color:#374151; border:1px solid #e5e7eb;
+                    border-radius:10px; padding:8px 14px; font-size:0.78rem;
+                    font-weight:600; cursor:pointer; transition:all 0.2s;"
+                    onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='#f8fafc'">
+                    ${enabled ? '⏸ Disable' : '▶ Enable'} Radar
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+/**
+ * Load and display inbound signals in the modal/panel.
+ */
+async function loadInboundSignals(statusFilter = 'new') {
+    const panel = document.getElementById('inbound-signals-panel');
+    if (!panel) { showToast('Inbound panel not found in DOM', 'error'); return; }
+
+    panel.style.display = 'block';
+    panel.innerHTML = '<div style="text-align:center; padding:32px; color:#9ca3af;">⏳ Loading signals…</div>';
+
+    try {
+        const token = await firebase.auth().currentUser.getIdToken();
+        const res   = await fetch(`${API_BASE}/api/inbound-signals?status=${statusFilter}&limit=20`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const { signals } = await res.json();
+
+        if (!signals || signals.length === 0) {
+            panel.innerHTML = `
+                <div style="text-align:center; padding:48px; color:#9ca3af;">
+                    <div style="font-size:2.5rem; margin-bottom:12px;">📡</div>
+                    <div style="font-weight:600; margin-bottom:6px;">No ${statusFilter} signals yet</div>
+                    <div style="font-size:0.82rem;">The radar runs every 6 hours across the entire public web.</div>
+                </div>`;
+            return;
+        }
+
+        // Status filter tabs
+        const tabs = ['new','reviewed','converted_to_lead','dismissed'];
+        const tabsHtml = tabs.map(t => `
+            <button onclick="loadInboundSignals('${t}')" style="
+                background:${t === statusFilter ? 'var(--primary)' : '#f1f5f9'};
+                color:${t === statusFilter ? '#fff' : '#374151'};
+                border:none; border-radius:8px; padding:6px 14px;
+                font-size:0.78rem; font-weight:600; cursor:pointer; transition:all 0.15s;">
+                ${t.replace(/_/g,' ')}
+            </button>`).join('');
+
+        // Signal cards
+        const cards = signals.map(sig => {
+            const ic = INTENT_COLORS[sig.intent_label] || INTENT_COLORS.TREND;
+            const score = Math.round((sig.intent_score || 0) * 100);
+            const kws = (sig.pain_keywords || []).slice(0, 4).map(k =>
+                `<span style="background:#f1f5f9; border-radius:12px; padding:2px 8px; font-size:0.7rem; color:#475569;">${k}</span>`
+            ).join(' ');
+
+            return `
+            <div style="background:${ic.bg}; border:1.5px solid ${ic.border}; border-radius:14px; padding:16px 18px; margin-bottom:12px;">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
+                    <div style="flex:1; min-width:0;">
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap;">
+                            <span style="background:${ic.badge}; color:#fff; border-radius:20px; padding:3px 10px; font-size:0.7rem; font-weight:700;">${ic.label}</span>
+                            <span style="background:#fff; border:1px solid #e5e7eb; border-radius:20px; padding:2px 10px; font-size:0.7rem; font-weight:600; color:#374151;">
+                                ${sig.source_platform || 'web'}
+                            </span>
+                            ${sig.company_name ? `<span style="font-size:0.78rem; font-weight:600; color:#1e293b;">🏢 ${sig.company_name}</span>` : ''}
+                        </div>
+                        <div style="font-weight:600; font-size:0.92rem; margin-bottom:6px; color:#0f172a; line-height:1.4;">${sig.headline || '(no title)'}</div>
+                        <div style="font-size:0.82rem; color:#475569; margin-bottom:8px; line-height:1.5;">${(sig.snippet || '').substring(0,220)}…</div>
+                        <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">${kws}</div>
+                        <a href="${sig.source_url}" target="_blank" rel="noopener noreferrer" style="font-size:0.75rem; color:var(--primary); text-decoration:none;">
+                            🔗 View Source ↗
+                        </a>
+                    </div>
+                    <div style="text-align:right; flex-shrink:0;">
+                        <div style="font-size:1.8rem; font-weight:800; color:${ic.badge}; line-height:1;">${score}</div>
+                        <div style="font-size:0.65rem; font-weight:700; text-transform:uppercase; color:#9ca3af; letter-spacing:0.06em;">Intent Score</div>
+                        <div style="margin-top:10px; display:flex; flex-direction:column; gap:6px;">
+                            <button onclick="updateSignalStatus('${sig.id}', 'converted_to_lead')"
+                                style="background:linear-gradient(135deg,#10b981,#059669); color:#fff; border:none; border-radius:8px; padding:6px 14px; font-size:0.75rem; font-weight:700; cursor:pointer;">
+                                + Add as Lead
+                            </button>
+                            <button onclick="updateSignalStatus('${sig.id}', 'dismissed')"
+                                style="background:#f1f5f9; color:#6b7280; border:none; border-radius:8px; padding:5px 14px; font-size:0.75rem; cursor:pointer;">
+                                Dismiss
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+
+        panel.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:10px;">
+                <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:#6b7280;">
+                    📡 Inbound Radar — ${signals.length} ${statusFilter.replace(/_/g,' ')} signal${signals.length !== 1 ? 's' : ''}
+                </div>
+                <div style="display:flex; gap:6px; flex-wrap:wrap;">${tabsHtml}</div>
+            </div>
+            ${cards}`;
+
+    } catch (err) {
+        panel.innerHTML = `<div style="color:#dc2626; padding:20px;">Failed to load signals: ${err.message}</div>`;
+        console.error('[Inbound Radar] loadInboundSignals error:', err);
+    }
+}
+
+/**
+ * Transition a signal's status (reviewed | dismissed | converted_to_lead).
+ */
+async function updateSignalStatus(signalDocId, newStatus) {
+    try {
+        const token = await firebase.auth().currentUser.getIdToken();
+        const res = await fetch(`${API_BASE}/api/inbound-signals/${signalDocId}/status`, {
+            method:  'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ status: newStatus }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const body = await res.json();
+
+        if (newStatus === 'converted_to_lead' && body.lead_id) {
+            showToast(`✅ Lead created! ID: ${body.lead_id.substring(0,8)}…`, 'success');
+            // Reload leads feed to show the new lead
+            if (typeof loadLeads === 'function') loadLeads();
+        } else if (newStatus === 'dismissed') {
+            showToast('Signal dismissed.', 'info');
+        }
+        // Refresh the signals panel
+        const currentTab = document.querySelector('[data-radar-tab-active]')?.dataset?.radarTabActive || 'new';
+        loadInboundSignals(currentTab);
+
+    } catch (err) {
+        showToast(`Failed to update signal: ${err.message}`, 'error');
+        console.error('[Inbound Radar] updateSignalStatus error:', err);
+    }
+}
+
+/**
+ * Enable or disable the inbound radar for this tenant.
+ * Writes users/{uid}.inbound_radar.enabled = true/false.
+ */
+async function toggleInboundRadar(enable) {
+    try {
+        const token = await firebase.auth().currentUser.getIdToken();
+        // /api/me PUT accepts arbitrary profile updates — use it to toggle
+        const res = await fetch(`${API_BASE}/api/me`, {
+            method:  'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ inbound_radar_enabled: enable }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        showToast(enable ? '📡 Inbound Radar enabled!' : 'Radar disabled.', enable ? 'success' : 'info');
+        // Reload /api/me to refresh banner
+        loadMe();
+    } catch (err) {
+        showToast(`Failed to toggle radar: ${err.message}`, 'error');
+    }
+}

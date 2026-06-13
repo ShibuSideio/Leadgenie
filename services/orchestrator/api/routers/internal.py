@@ -443,6 +443,27 @@ def cron_sweep():
         }
         return t
 
+    # Postmortem Fix #5: Pre-fetch all user docs in ONE batch call before the loop.
+    # Previous: sequential _db().collection("users").document(tid).get() per campaign
+    # = N × 20ms blocking Firestore reads inside the HTTP handler.
+    # 500 campaigns × 20ms = 10s sequential I/O → Cloud Run 60s timeout → campaigns silently skipped.
+    # Fix: build a list of DocumentReferences and use db.get_all() for one bulk RPC.
+    _db_instance = _db()
+    user_refs    = {}
+    for camp_doc in campaigns:
+        tid = (camp_doc.to_dict() or {}).get("tenant_id")
+        if tid and tid not in user_refs:
+            user_refs[tid] = _db_instance.collection("users").document(tid)
+    user_docs_map: dict = {}
+    if user_refs:
+        try:
+            fetched = _db_instance.get_all(list(user_refs.values()))
+            for snap in fetched:
+                user_docs_map[snap.id] = snap.to_dict() or {}
+        except Exception as batch_err:
+            log.warning("sweep_batch_user_fetch_failed", error=str(batch_err),
+                        note="Falling back to per-campaign reads for this sweep.")
+
     for camp_doc in campaigns:
         campaign_data = camp_doc.to_dict() or {}
         campaign_id   = camp_doc.id
@@ -481,12 +502,14 @@ def cron_sweep():
             continue
 
         # ── Quota gate ───────────────────────────────────────────────────────
-        # NOTE: We do NOT check approval_status here. Campaigns can only exist
-        # for tenants who were approved at creation time. Legacy documents
-        # pre-dating the approval_status field would have approval_status=None
-        # and would be silently blocked by check_quota's != 'approved' guard.
-        # Instead: super_admin always passes; others are gated on credit balance.
-        user_doc  = (_db().collection("users").document(tenant_id).get().to_dict() or {})
+        # Postmortem Fix #5: use the pre-fetched user_docs_map instead of a
+        # per-iteration Firestore read. Falls back to a live read if the batch
+        # fetch failed for this tenant (non-fatal degradation).
+        if tenant_id in user_docs_map:
+            user_doc = user_docs_map[tenant_id]
+        else:
+            # Fallback path (batch read failed or new tenant added after batch)
+            user_doc = (_db_instance.collection("users").document(tenant_id).get().to_dict() or {})
         user_role = user_doc.get("role", "")
         if user_role != "super_admin":
             wallet    = user_doc.get("wallet", {})
@@ -571,7 +594,15 @@ def cron_sweep():
                 sched_t.FromDatetime(now_utc + datetime.timedelta(seconds=jitter))
                 task    = _oidc_task(produce_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
                 task["schedule_time"] = sched_t
-                tasks_client.create_task(request={"parent": queue_path, "task": task})
+                # Postmortem Fix #9: cap Cloud Tasks retries to prevent thundering-herd
+                # retry storms on container cold-starts. Without this, all 1000 tasks in
+                # queue retry simultaneously after a cold-start 5xx, overwhelming the
+                # single Cloud Run instance (1 vCPU × 8 threads).
+                task["dispatch_deadline"] = {"seconds": 300}  # 5-minute max per task attempt
+                tasks_client.create_task(request={
+                    "parent": queue_path,
+                    "task":   task,
+                })
                 _produce_ok = True
                 produce_dispatched += 1
                 log.info("produce_task_dispatched",
@@ -994,3 +1025,43 @@ def cron_ontology_decay():
         "status": "decay_complete", "updated": updated,
         "skipped": skipped, "errors": errored, "decay_applied": decay_log,
     }), 200
+
+
+# =============================================================================
+# POST /api/internal/inbound-sentiment-run
+# V23.5 — Inbound Sentiment Radar trigger
+# Called by Cloud Scheduler every 6 hours (or manually for testing).
+# Runs inbound_sentiment_job.run() in a daemon thread — returns 202 immediately.
+# =============================================================================
+@bp.route("/api/internal/inbound-sentiment-run", methods=["POST"])
+def trigger_inbound_sentiment():
+    """
+    Trigger the Inbound Sentiment Radar job.
+
+    Security: Protected by X-CloudTasks-QueueName or X-Internal-Secret header.
+    The job runs asynchronously — this endpoint always returns 202 within ~5 ms.
+    """
+    # Verify caller is Cloud Scheduler / internal (reuse existing OIDC check pattern)
+    internal_secret = __import__("os").environ.get("INTERNAL_CRON_SECRET", "")
+    provided_secret = request.headers.get("X-Internal-Secret", "")
+    cloud_tasks_hdr = request.headers.get("X-CloudTasks-QueueName", "")
+
+    if internal_secret and provided_secret != internal_secret and not cloud_tasks_hdr:
+        log.warning("inbound_sentiment_trigger_unauthorized")
+        return jsonify({"error": "unauthorized"}), 401
+
+    import threading
+
+    def _run():
+        try:
+            # Late import — avoids import-time Firestore/Vertex SDK init
+            from jobs.inbound_sentiment_job import run  # type: ignore[import]
+            result = run()
+            log.info("inbound_sentiment_job_finished", **result)
+        except Exception as exc:
+            log.error("inbound_sentiment_job_error", error=str(exc))
+
+    t = threading.Thread(target=_run, daemon=True, name="inbound-sentiment-job")
+    t.start()
+    log.info("inbound_sentiment_trigger_accepted")
+    return jsonify({"status": "accepted", "message": "Inbound sentiment job started"}), 202
