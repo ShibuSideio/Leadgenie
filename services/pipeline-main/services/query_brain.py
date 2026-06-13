@@ -29,24 +29,7 @@ log = get_logger("pipeline.query_brain")
 # Constants
 # ---------------------------------------------------------------------------
 
-VECTOR_PLATFORM_MAP: dict[str, list[str]] = {
-    "Social/Forum Listening": [
-        "site:reddit.com",
-        "site:quora.com",
-        "site:facebook.com/groups",
-    ],
-    "Review Hijacking": [
-        "site:tripadvisor.com",
-        "site:trustpilot.com",
-    ],
-    "Maps/GMB Targeting": [
-        "site:google.com/maps",
-        '"near me"',
-    ],
-    "Classic B2B": [
-        "site:linkedin.com/company",
-    ],
-}
+VECTOR_PLATFORM_MAP: dict[str, list[str]] = {}
 
 _QUERY_BRAIN_SCHEMA = {
     "type": "OBJECT",
@@ -284,8 +267,7 @@ def generate_smart_query(
                     )
                 if bio and top_ngrams:
                     symptom_dorks = [
-                        f'site:linkedin.com "{top_ngrams[0]}" AND ("{bio[:40]}")',
-                        f'site:reddit.com "{top_ngrams[0]}"',
+                        f'"{top_ngrams[0]}" AND ("{bio[:40]}")',
                     ]
                 log.info("query_brain_statistical_built",
                          query_count=len(translated_queries), ngrams=top_ngrams)
@@ -312,7 +294,7 @@ Data: {history_ctx}
 # TASK 2 — SYMPTOM DORKING
 User solves: '{bio}'.
 Generate exactly 3 Google Search operator strings targeting prospects experiencing this problem.
-Rule: ≥1 query MUST target social/professional networks.
+Rule: Do NOT target specific platforms or domains (do NOT use site:linkedin.com, site:facebook.com, or site:reddit.com). Focus queries purely on the problem symptoms, keywords, and professional context.
 Rule: Every query MUST include negative keywords (-shop -cart -amazon -wiki -jobs).
 
 # TASK 3 — INTENT EXPANSION

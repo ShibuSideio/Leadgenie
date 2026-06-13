@@ -445,12 +445,9 @@ def deep_context_serper_dork(
 
     tasks = [
         ("https://google.serper.dev/places",  {"q": domain, "num": 3}),
-        ("https://google.serper.dev/search",  {"q": f'site:linkedin.com/company OR site:facebook.com "{domain}"', "num": 3}),
+        ("https://google.serper.dev/search",  {"q": f'company profile OR social media "{domain}"', "num": 3}),
         ("https://google.serper.dev/search",  {
-            "q": (
-                f'site:naukri.com/job-listings OR site:instahyre.com/job OR '
-                f'site:linkedin.com/jobs OR site:indeed.com/cmp "{domain}"'
-            ),
+            "q": f'job openings OR careers "{domain}"',
             "num": 3,
         }),
     ]
