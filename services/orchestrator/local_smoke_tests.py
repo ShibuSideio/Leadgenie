@@ -1254,10 +1254,58 @@ def t_dispatch_imports_prism_not_importlib():
                 )
 
 
+def t_serper_query_sanitization():
+    """Verify that serper_service.sanitize_query strips forbidden domains and repairs syntax."""
+    import importlib.util as _ilu
+    src_path = os.path.join(_PM_PATH, "services", "serper_service.py")
+    spec = _ilu.spec_from_file_location("test_serper_service", src_path)
+    mod = _ilu.module_from_spec(spec)
+    
+    # Save already imported 'core' modules from the orchestrator space
+    import sys
+    saved_modules = {}
+    for k in list(sys.modules.keys()):
+        if k == "core" or k.startswith("core."):
+            saved_modules[k] = sys.modules.pop(k)
+
+    sys.path.insert(0, _PM_PATH)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path.pop(0)
+        # Evict pipeline-main modules to restore clean environment
+        for k in list(sys.modules.keys()):
+            if k == "core" or k.startswith("core."):
+                sys.modules.pop(k)
+        # Restore orchestrator modules
+        sys.modules.update(saved_modules)
+        
+    sanitize_query = mod.sanitize_query
+
+    # Test cases: (input, expected_output)
+    cases = [
+        ('site:linkedin.com/in "digital marketer" "London"', '"digital marketer" "London"'),
+        ('"software engineer" AND "python" -site:linkedin.com -site:facebook.com', '"software engineer" AND "python"'),
+        ('("software engineer" OR "developer") -site:linkedin.com', '("software engineer" OR "developer")'),
+        ('("hiring" OR "careers") -site:linkedin.com/jobs', '("hiring" OR "careers")'),
+        ('facebook.com marketing leads', 'marketing leads'),
+        ('leads -site:reddit.com/r/marketing', 'leads'),
+        ('("google" OR "linkedin") AND "leads"', '("google") AND "leads"'),
+        ('("linkedin" OR "facebook" OR "twitter")', ''),
+        ('("linkedin" OR "facebook" OR "software developer") AND "london"', '("software developer") AND "london"'),
+        ('-intitle:"linkedin" AND -intitle:"facebook" AND "software engineer"', '"software engineer"'),
+        ('("london" AND -intitle:"linkedin recruiter")', '("london")'),
+    ]
+
+    for q_in, q_out in cases:
+        san = sanitize_query(q_in)
+        assert san == q_out, f"Sanitizing '{q_in}' -> expected '{q_out}', got '{san}'"
+
 
 test("prism_pipeline.py exists with all 5 PRISM classes (AST)",         t_prism_pipeline_ast_check)
 test("dispatch.py: all TRACE-1..10 present, no hollow stub",            t_dispatch_trace_markers_present)
 test("dispatch.py: PrismPipeline imported directly, not via importlib", t_dispatch_imports_prism_not_importlib)
+test("Serper query sanitization (compliance check)",                     t_serper_query_sanitization)
 
 # =============================================================================
 # FINAL REPORT

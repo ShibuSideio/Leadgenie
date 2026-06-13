@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import concurrent.futures as _cf
 from urllib.parse import urlparse
@@ -97,6 +98,74 @@ def filter_serper_noise(serper_results: list) -> list:
             continue
         clean.append(r)
     return clean
+
+
+def sanitize_query(query: str) -> str:
+    """Sanitize the search query to remove any patterns blocked by Serper free tier.
+
+    Specifically, filters out tokens containing forbidden social domains or their names,
+    adjusting parentheses and logical operators (AND/OR/NOT) to prevent syntax errors.
+    """
+    if not query:
+        return ""
+
+    forbidden = ["linkedin", "facebook", "twitter", "instagram", "reddit", "quora", "youtube", "x.com"]
+
+    # Matches quoted strings (possibly with prefix like -site: or -intitle:) or parentheses or words
+    token_re = re.compile(r'([^\s()"]*"[^"]*"|[()]|[^\s()"]+)')
+
+    tokens = []
+    for match in token_re.finditer(query):
+        tokens.append(match.group(0))
+
+    clean_tokens = []
+    for token in tokens:
+        token_lower = token.lower()
+        is_forbidden = False
+        for f in forbidden:
+            if f in token_lower:
+                is_forbidden = True
+                break
+        if is_forbidden:
+            continue
+        clean_tokens.append(token)
+
+    # Clean up consecutive logical operators
+    final_tokens = []
+    for token in clean_tokens:
+        if token in ("AND", "OR", "NOT") and final_tokens and final_tokens[-1] in ("AND", "OR", "NOT"):
+            continue
+        final_tokens.append(token)
+
+    # Remove leading/trailing AND/OR/NOT
+    while final_tokens and final_tokens[0] in ("AND", "OR"):
+        final_tokens.pop(0)
+    while final_tokens and final_tokens[-1] in ("AND", "OR", "NOT"):
+        final_tokens.pop()
+
+    # Reassemble tokens
+    result = ""
+    for token in final_tokens:
+        if token in ("(", ")"):
+            result += token
+        else:
+            if result and not result.endswith("("):
+                result += " " + token
+            else:
+                result += token
+
+    # Clean up empty parentheses and trailing operators inside parentheses
+    while True:
+        new_result = re.sub(r'\(\s*\)', '', result)
+        new_result = re.sub(r'\(\s*(AND|OR|NOT)\s*\)', '', new_result)
+        new_result = re.sub(r'\(\s*(AND|OR|NOT)\s+', '(', new_result)
+        new_result = re.sub(r'\s+(AND|OR|NOT)\s*\)', ')', new_result)
+        new_result = re.sub(r'\s+', ' ', new_result).strip()
+        if new_result == result:
+            break
+        result = new_result
+
+    return result
 
 
 def _get_serper_api_key() -> str:
@@ -315,6 +384,16 @@ def search_serper(
     # Import telemetry locally to avoid circular imports
     from services.telemetry import update_circuit_telemetry  # type: ignore[import]
 
+    # Pre-emptively sanitize query for Serper free-tier compliance
+    sanitized = sanitize_query(query)
+    if not sanitized:
+        log.warning("serper_query_sanitized_to_empty", original_query=query)
+        return []
+
+    if sanitized != query:
+        log.info("serper_query_sanitized", original=query, sanitized=sanitized)
+        query = sanitized
+
     api_key = _get_serper_api_key()
     url     = "https://google.serper.dev/search"
 
@@ -409,17 +488,20 @@ def deep_context_serper_dork(
     if not domain:
         return "", False
 
-    _source_lower      = (source_url or "").lower()
-    _is_linkedin_co    = "linkedin.com/company/" in _source_lower
+    # Ensure we are working with the root domain.
+    # If a full URL is passed to domain (like in dispatch.py line 773), extract the root domain.
+    if "://" in domain or "/" in domain or "." not in domain:
+        domain = extract_root_domain(domain)
+        if not domain:
+            return "", False
 
-    if not _is_linkedin_co:
-        cleaned = domain.lower().replace("www.", "")
-        for blocked in _ENRICHMENT_SOCIAL_BLACKLIST:
-            if blocked in cleaned:
-                log.info("enrichment_gated_social", domain=domain)
-                return "", False
-    else:
-        log.info("enrichment_linkedin_company_bypass", source_url=source_url)
+    # Check against the social domains blacklist.
+    # Social domains and B2C vectors bypass enrichment since they don't contain B2B lead info.
+    cleaned = domain.lower().replace("www.", "")
+    for blocked in _ENRICHMENT_SOCIAL_BLACKLIST:
+        if blocked in cleaned:
+            log.info("enrichment_gated_social", domain=domain)
+            return "", False
 
     if sourcing_vector in _B2C_VECTORS:
         log.info("enrichment_gated_b2c_vector", domain=domain, vector=sourcing_vector)
