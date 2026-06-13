@@ -75,6 +75,14 @@ def _get_secret(secret_name: str) -> str:
     return response.payload.data.decode("utf-8")
 
 
+def _is_generic_email(email: str) -> bool:
+    if not email or "@" not in email:
+        return False
+    prefix = email.lower().strip().split("@")[0]
+    generics = {"support", "info", "admin", "sales", "billing", "jobs", "careers", "privacy", "help", "contact", "marketing", "office"}
+    return prefix in generics
+
+
 # ---------------------------------------------------------------------------
 # FIX 2: Atomic Exclusivity Lock Acquisition (transactional)
 # ---------------------------------------------------------------------------
@@ -512,6 +520,10 @@ def dispatch():
                 log.warning("dispatch_dead_payload", url=url[:80])
                 doc_ref.update({"status": "failed_scrape",
                                 "error": "Empty DOM — no cache, no snippet, no scrape"})
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
                 return {"url": url, "status": "failed_scrape"}
 
             # WAF/bot detection
@@ -566,9 +578,17 @@ def dispatch():
                 )
             except TimeoutError:
                 doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
                 return {"url": url, "status": "failed_vertex_timeout"}
             except Exception as eval_err:
                 doc_ref.update({"status": "failed", "error": str(eval_err)})
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
                 return {"url": url, "status": "failed_eval"}
 
             # ── Dynamic acceptance threshold ───────────────────────────────────
@@ -578,10 +598,14 @@ def dispatch():
             score            = evaluation.get("score", 0)
 
             if score >= accept_threshold:
-                contact_endpoints = list(evaluation.get("contact_endpoints", []))
+                contact_endpoints = []
+                for e in list(evaluation.get("contact_endpoints", [])):
+                    if e.get("platform") == "email" and _is_generic_email(e.get("uri", "")):
+                        continue
+                    contact_endpoints.append(e)
                 existing_uris     = {e["uri"] for e in contact_endpoints}
                 for em in (emails or [])[:3]:
-                    if em and em not in existing_uris:
+                    if em and em not in existing_uris and not _is_generic_email(em):
                         contact_endpoints.append({"platform": "email", "uri": em})
                         existing_uris.add(em)
                 for ph in (phones or [])[:2]:
@@ -656,6 +680,10 @@ def dispatch():
                       error=str(loop_err), exc_info=True)
             try:
                 doc_ref.update({"status": "failed", "error": "Consumer pipeline crash"})
+            except Exception:
+                pass
+            try:
+                _db().collection("global_lead_locks").document(lock_entity).delete()
             except Exception:
                 pass
             return {"url": url, "status": "crash"}
@@ -734,6 +762,12 @@ def finalize():
     if not text:
         doc_ref.update({"status": "failed_scrape",
                         "error": "scraper-heavy returned empty text"})
+        lock_entity = lead_data.get("lock_entity")
+        if lock_entity:
+            try:
+                _db().collection("global_lead_locks").document(lock_entity).delete()
+            except Exception:
+                pass
         return jsonify({"status": "failed_scrape"}), 200
 
     context_payload, _ = deep_context_serper_dork(
@@ -747,6 +781,12 @@ def finalize():
         )
     except Exception as eval_err:
         doc_ref.update({"status": "failed", "error": str(eval_err)})
+        lock_entity = lead_data.get("lock_entity")
+        if lock_entity:
+            try:
+                _db().collection("global_lead_locks").document(lock_entity).delete()
+            except Exception:
+                pass
         return jsonify({"error": str(eval_err)}), 500
 
     score = evaluation.get("score", 0)
@@ -754,14 +794,20 @@ def finalize():
     threshold = 6 if is_thin else 7
 
     if score >= threshold:
-        contact_endpoints = list(evaluation.get("contact_endpoints", []))
+        contact_endpoints = []
+        for e in list(evaluation.get("contact_endpoints", [])):
+            if e.get("platform") == "email" and _is_generic_email(e.get("uri", "")):
+                continue
+            contact_endpoints.append(e)
         existing_uris     = {e["uri"] for e in contact_endpoints}
         for em in (emails or [])[:3]:
-            if em and em not in existing_uris:
+            if em and em not in existing_uris and not _is_generic_email(em):
                 contact_endpoints.append({"platform": "email", "uri": em})
+                existing_uris.add(em)
         for ph in (phones or [])[:2]:
             if ph and ph not in existing_uris:
                 contact_endpoints.append({"platform": "other", "uri": ph})
+                existing_uris.add(ph)
 
         doc_ref.set({
             "score":       score,
@@ -775,6 +821,12 @@ def finalize():
     else:
         doc_ref.delete()
         log.info("finalize_score_gate_drop", lead_id=lead_id[:24], score=score)
+        lock_entity = lead_data.get("lock_entity")
+        if lock_entity:
+            try:
+                _db().collection("global_lead_locks").document(lock_entity).delete()
+            except Exception:
+                pass
 
     return jsonify({"status": "ok", "score": score}), 200
 
