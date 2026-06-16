@@ -22,7 +22,8 @@ from core.helpers import (  # type: ignore[import]
     _enqueue_bq_telemetry_task,
 )
 
-db = get_db()
+def _db():
+    return get_db()
 
 bp = Blueprint("leads", __name__)
 log = get_logger("orchestrator.v23.leads")
@@ -56,7 +57,7 @@ def update_lead(uid, tenant_id, user_role, doc_id):
     """
     from google.cloud import firestore  # SERVER_TIMESTAMP
 
-    doc_ref  = db.collection("leads").document(doc_id)
+    doc_ref  = _db().collection("leads").document(doc_id)
     doc_data = doc_ref.get()
 
     if not doc_data.exists or doc_data.to_dict().get("tenant_id") != tenant_id:
@@ -87,7 +88,7 @@ def update_lead(uid, tenant_id, user_role, doc_id):
     if status in ("converted", "ignored"):
         import re
         delta       = 1 if status == "converted" else -1
-        user_ref    = db.collection("users").document(tenant_id)
+        user_ref    = _db().collection("users").document(tenant_id)
         pref_updates: dict = {}
 
         if hiring_intent and hiring_intent.lower() != "none":
@@ -239,14 +240,22 @@ def list_inbound_signals(uid, tenant_id, user_role):
         return jsonify({"error": f"status must be one of {sorted(valid_statuses)}"}), 400
 
     query = (
-        db.collection("inbound_signals")
+        _db().collection("inbound_signals")
         .where(filter=fs.FieldFilter("tenant_id", "==", uid))
         .where(filter=fs.FieldFilter("status",    "==", status))
         .order_by("intent_score", direction=fs.Query.DESCENDING)
         .limit(limit)
     )
 
-    signals = [{"id": d.id, **d.to_dict()} for d in query.stream()]
+    def _sanitize_signal_doc(doc) -> dict:
+        data = doc.to_dict() or {}
+        data["id"] = doc.id
+        for k, v in data.items():
+            if hasattr(v, "isoformat"):
+                data[k] = v.isoformat()
+        return data
+
+    signals = [_sanitize_signal_doc(d) for d in query.stream()]
 
     # Optional label filter — applied after Firestore fetch (no composite index needed)
     if intent_label:
@@ -282,7 +291,7 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
         return jsonify({"error": f"status must be one of {sorted(valid_transitions)}"}), 400
 
     # Verify ownership — signal doc_id is {uid}_{signal_id} but we accept full doc_id
-    signal_ref  = db.collection("inbound_signals").document(signal_doc_id)
+    signal_ref  = _db().collection("inbound_signals").document(signal_doc_id)
     signal_snap = signal_ref.get()
 
     if not signal_snap.exists:
@@ -302,7 +311,7 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
 
     if new_status == "converted_to_lead":
         # Promote signal to a full lead document
-        lead_ref = db.collection("leads").document()
+        lead_ref = _db().collection("leads").document()
         company  = sig.get("company_name") or "Unknown Company"
         lead_ref.set({
             "uid":                uid,

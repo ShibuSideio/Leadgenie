@@ -17,7 +17,11 @@ from core.clients import get_db  # type: ignore[import]
 from core.auth import require_auth  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
 
-db = get_db()
+class _LazyDb:
+    def __getattr__(self, name):
+        return getattr(get_db(), name)
+
+db = _LazyDb()
 
 bp = Blueprint("personas", __name__)
 log = get_logger("orchestrator.v23.personas")

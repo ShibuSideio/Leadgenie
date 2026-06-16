@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sideio-v12'; // v12: evict broken manifest.json cache from v23.5 deploy
+const CACHE_NAME = 'sideio-v13'; // v13: evict broken manifest.json cache from v23.5 deploy
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
@@ -62,12 +62,12 @@ self.addEventListener('fetch', event => {
     // be cloned into a Response object. Intercepting them causes:
     //   "Failed to convert value to 'Response'" + 30-second disconnect loops.
     // Pass these requests straight to the network — never touch the cache.
+    // By returning without calling event.respondWith(), we let the browser handle them natively.
     if (
         url.hostname.includes('googleapis.com') ||
         url.hostname.includes('google.com')     ||
         url.hostname.includes('firestore')
     ) {
-        event.respondWith(fetch(event.request));
         return;
     }
 

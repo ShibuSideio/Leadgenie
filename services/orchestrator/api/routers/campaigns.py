@@ -21,7 +21,7 @@ from google.cloud import tasks_v2
 from google.cloud.firestore_v1.base_query import FieldFilter
 from google.protobuf import timestamp_pb2
 
-from core.clients import get_db  # type: ignore[import]
+from core.clients import get_db, get_tasks_client  # type: ignore[import]
 from core.config import PROJECT_ID, LOCATION, QUEUE, PIPELINE_URL  # type: ignore[import]
 from core.auth import require_auth  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
@@ -36,11 +36,20 @@ from core.helpers import (  # type: ignore[import]
     _pop_from_predictive_cache,
 )
 
-db = get_db()
+class _LazyDb:
+    def __getattr__(self, name):
+        return getattr(get_db(), name)
+
+db = _LazyDb()
+
+class _LazyTasks:
+    def __getattr__(self, name):
+        return getattr(get_tasks_client(), name)
+
+tasks_client = _LazyTasks()
 
 bp = Blueprint("campaigns", __name__)
 log = get_logger("orchestrator.v23.campaigns")
-tasks_client = tasks_v2.CloudTasksClient()
 
 MAX_CHILD_CAMPAIGNS = int(os.environ.get("MAX_CHILD_CAMPAIGNS", 5))
 
