@@ -331,10 +331,15 @@ def produce():
     combined_queue = list(dict.fromkeys(current_queue + fresh_urls))[:200]
 
     try:
-        campaign_ref.update({
+        update_data = {
             "unprocessed_queue": combined_queue,
             "last_produced_at":  firestore.SERVER_TIMESTAMP,
-        })
+        }
+        if not current_queue and combined_queue:
+            import datetime
+            update_data["next_drip_due"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        campaign_ref.update(update_data)
     except Exception as exc:
         log.critical(
             "produce_queue_write_failed",

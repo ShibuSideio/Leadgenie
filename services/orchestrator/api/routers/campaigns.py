@@ -216,6 +216,14 @@ def create_campaign(uid, tenant_id, user_role):
                 data["persona_bio"]      = _inline_persona_bio
                 data["persona_keywords"] = _inline_persona_keys
 
+    try:
+        drip_interval_mins = int(data.get("drip_interval_minutes") or 240)
+        if drip_interval_mins <= 0:
+            drip_interval_mins = 240
+    except Exception:
+        drip_interval_mins = 240
+    data["drip_interval_minutes"] = drip_interval_mins
+
     _, doc_ref = db.collection("campaigns").add(data)
 
     # Synaptic Router classification
@@ -237,8 +245,8 @@ def create_campaign(uid, tenant_id, user_role):
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     doc_ref.update({
         "unprocessed_queue": [],
-        "next_produce_due":  now_utc + datetime.timedelta(hours=24),
-        "next_drip_due":     now_utc + datetime.timedelta(hours=4),
+        "next_produce_due":  (now_utc + datetime.timedelta(hours=24)).isoformat(),
+        "next_drip_due":     (now_utc + datetime.timedelta(minutes=drip_interval_mins)).isoformat(),
     })
 
     # Zero-wait direct enqueue
@@ -387,9 +395,17 @@ def consume_campaign(uid, tenant_id, user_role, campaign_id):
     if not camp_doc.exists or camp_doc.to_dict().get("tenant_id") != tenant_id:
         return jsonify({"error": "Forbidden"}), 403
 
-    queue_depth = len((camp_doc.to_dict() or {}).get("unprocessed_queue", []))
+    camp_data = camp_doc.to_dict() or {}
+    queue_depth = len(camp_data.get("unprocessed_queue", []))
     if queue_depth == 0:
         return jsonify({"status": "noop", "reason": "unprocessed_queue empty — run /ignite first", "queue_depth": 0}), 200
+
+    try:
+        drip_interval_mins = int(camp_data.get("drip_interval_minutes") or 240)
+        if drip_interval_mins <= 0:
+            drip_interval_mins = 240
+    except Exception:
+        drip_interval_mins = 240
 
     try:
         sa_email   = get_service_account_email().strip()
@@ -401,7 +417,7 @@ def consume_campaign(uid, tenant_id, user_role, campaign_id):
         t = _oidc_task(f"{base_url}/dispatch", {"tenant_id": tenant_id, "campaign_id": campaign_id}, sa_email, base_url)
         t["schedule_time"] = ts
         tasks_client.create_task(request={"parent": queue_path, "task": t})
-        camp_ref.update({"next_drip_due": now + datetime.timedelta(hours=4)})
+        camp_ref.update({"next_drip_due": (now + datetime.timedelta(minutes=drip_interval_mins)).isoformat()})
         return jsonify({"status": "consume_enqueued", "campaign_id": campaign_id, "queue_depth": queue_depth, "fires_in_s": 2}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500

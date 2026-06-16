@@ -651,8 +651,14 @@ def cron_sweep():
                     reason="task dispatch failed — clock intentionally NOT advanced",
                     action="Campaign will be retried by the next scheduled sweep.",
                 )
-        # ── Consumer (4h interval) ────────────────────────────────────────────
-        DRIP_INTERVAL_H = 4
+        # ── Consumer (drip interval) ──────────────────────────────────────────
+        try:
+            drip_interval_mins = int(campaign_data.get("drip_interval_minutes") or 240)
+            if drip_interval_mins <= 0:
+                drip_interval_mins = 240
+        except Exception:
+            drip_interval_mins = 240
+
         # CRITICAL: the entire drip evaluation MUST live inside try/finally.
         # Any exception in the timestamp comparison phase (e.g. TypeError from
         # naive vs aware datetime, AttributeError on malformed Firestore
@@ -759,10 +765,10 @@ def cron_sweep():
         #   current value — the next 5-minute sweep retries dispatch.
         if drip_due and _dispatch_ok:
             try:
-                _next_drip = (now_utc + datetime.timedelta(hours=DRIP_INTERVAL_H)).isoformat()
+                _next_drip = (now_utc + datetime.timedelta(minutes=drip_interval_mins)).isoformat()
                 camp_doc.reference.update({
                     "next_drip_due":         _next_drip,
-                    "drip_interval_minutes": DRIP_INTERVAL_H * 60,
+                    "drip_interval_minutes": drip_interval_mins,
                 })
                 log.info("drip_clock_advanced", campaign_id=campaign_id,
                          next_drip_due=_next_drip)
