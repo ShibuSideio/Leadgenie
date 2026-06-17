@@ -217,7 +217,7 @@ def produce():
 
     for kw in smart_keywords:
         clean_location = location if location and location.lower() != "all" else ""
-        search_query   = f"{kw} AND {clean_location}" if clean_location else kw
+        search_query   = kw
 
         raw_results = search_serper(
             search_query,

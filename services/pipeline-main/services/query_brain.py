@@ -110,7 +110,12 @@ def generate_smart_query(
         )
         docs = list(q.stream())
         if not docs:
-            q    = get_db().collection("leads").where(filter=_FF("status", "in", ["contacted", "converted"])).limit(20)
+            q = (
+                get_db().collection("leads")
+                .where(filter=_FF("tenant_id", "==", tenant_id))
+                .where(filter=_FF("status", "in", ["contacted", "converted"]))
+                .limit(20)
+            )
             docs = list(q.stream())
         pain_points = [
             d.to_dict().get("pain_point", "")
@@ -267,7 +272,7 @@ def generate_smart_query(
                     )
                 if bio and top_ngrams:
                     symptom_dorks = [
-                        f'"{top_ngrams[0]}" AND ("{bio[:40]}")',
+                        f'"{top_ngrams[0]}"',
                     ]
                 log.info("query_brain_statistical_built",
                          query_count=len(translated_queries), ngrams=top_ngrams)
