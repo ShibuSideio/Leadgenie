@@ -243,15 +243,24 @@ def produce():
     log.info("TRACE-10: Serper loop complete.", fetched_count=fetched_count)
 
     # ------------------------------------------------------------------
-    # Snippet cache: persist social/walled-garden snippets for Consumer
+    # Snippet cache: persist snippets universally for two-stage funnel
     # ------------------------------------------------------------------
     for surl, meta in snippet_db.items():
         s_domain    = extract_root_domain(surl)
         is_social   = any(s_domain.endswith(d) for d in _SOCIAL_DOMAINS_PRODUCER)
-        combined    = f"{meta['title']}\n{meta['snippet']}".strip()
-        if is_social and combined:
+        
+        # Calculate matching dedup key to align scraped_cache document ID with dispatch lead_id
+        if is_social:
+            from urllib.parse import urlparse as _urlparse
+            parsed = _urlparse(surl)
+            dedup_key = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
+        else:
+            dedup_key = s_domain
+            
+        cache_key = hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
+        combined  = f"{meta['title']}\n{meta['snippet']}".strip()
+        if combined:
             try:
-                cache_key = surl.replace("/", "_")
                 get_db().collection("scraped_cache").document(cache_key).set({
                     "url":        surl,
                     "text":       combined,

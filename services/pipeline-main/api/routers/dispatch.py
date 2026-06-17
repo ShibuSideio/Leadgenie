@@ -360,15 +360,21 @@ def dispatch():
         b_domain  = extract_root_domain(batch_url)
         is_social = any(b_domain.endswith(s) for s in SOCIAL_SET)
         if is_social:
-            try:
-                cache_key = batch_url.replace("/", "_")
-                cdoc = _db().collection("scraped_cache").document(cache_key).get()
-                if cdoc.exists:
-                    txt = cdoc.to_dict().get("text", "")
-                    if txt:
-                        snippet_map[batch_url] = txt
-            except Exception:
-                pass
+            parsed     = urlparse(batch_url)
+            exact_path = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
+            dedupe_target = exact_path
+        else:
+            dedupe_target = b_domain
+        
+        try:
+            cache_key = hashlib.sha256(f"{tenant_id}_{dedupe_target}".encode()).hexdigest()
+            cdoc = _db().collection("scraped_cache").document(cache_key).get()
+            if cdoc.exists:
+                txt = cdoc.to_dict().get("text", "")
+                if txt:
+                    snippet_map[batch_url] = txt
+        except Exception:
+            pass
 
     # ── TRACE-7: Confidence Tiering Gate (pre_filter_gemini) ────────────────
     log.info("TRACE-7: Calling pre_filter_gemini.", url_count=len(batch_urls))
@@ -486,7 +492,68 @@ def dispatch():
             return {"url": url, "status": "skip_dup"}
 
         try:
-            # ── PRISM ENGINE ─────────────────────────────────────────────────
+            # ── STEP 1: Fetch lightweight snippet from scraped_cache ─────────────────
+            snippet_text = ""
+            try:
+                cache_snap = _db().collection("scraped_cache").document(lead_id).get()
+                if cache_snap.exists:
+                    snippet_text = cache_snap.to_dict().get("text", "")
+            except Exception as cache_err:
+                log.warning("dispatch_snippet_fetch_failed", lead_id=lead_id, error=str(cache_err))
+
+            if not snippet_text:
+                log.info("dispatch_no_snippet_cache_drop", url=url[:80], lead_id=lead_id)
+                doc_ref.delete()
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
+                return {"url": url, "status": "no_snippet_cache_drop"}
+
+            # ── STEP 2: Call final_score_and_dm for initial scoring ─────────────────
+            try:
+                # Increment usage metrics for Gemini call
+                shard_id = random.randint(0, 9)
+                _db().collection("usage_metrics").document(tenant_id) \
+                    .collection("shards").document(str(shard_id)) \
+                    .set({"gemini_calls": firestore.Increment(1)}, merge=True)
+
+                log.info("TRACE-9: Calling final_score_and_dm.", url=url[:80])
+                evaluation = final_score_and_dm(
+                    text=snippet_text,
+                    active_campaigns=active_campaigns,
+                    context_payload="",
+                    tech_stack=[],
+                    source_url=url
+                )
+            except TimeoutError:
+                doc_ref.update({"status": "failed", "error": "Vertex AI timeout during snippet evaluation"})
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
+                return {"url": url, "status": "failed_vertex_timeout"}
+            except Exception as eval_err:
+                doc_ref.update({"status": "failed", "error": f"Snippet evaluation failed: {eval_err}"})
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
+                return {"url": url, "status": "failed_eval"}
+
+            score = evaluation.get("score", 0)
+
+            # ── STEP 3: Check AI score and conditionally deep scrape ─────────────────
+            if score < 6:
+                log.info("dispatch_score_gate_drop", url=url[:80], score=score, threshold=6)
+                doc_ref.delete()
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
+                return {"url": url, "status": "score_drop"}
+
+            # Score is >= 6, trigger heavy DOM scrape & enrichment
             text, tech_stack, emails, phones = "", [], [], []
             prism_mode, fallback_used = "legacy", False
 
@@ -498,13 +565,6 @@ def dispatch():
                 phones        = hook.get("phones", [])
                 prism_mode    = hook.get("mode", "GeneralDomain")
                 fallback_used = hook.get("fallback_used", False)
-
-                if not text:
-                    log.info("dispatch_prism_empty_text_defer", url=url[:80],
-                             mode=prism_mode)
-                    _defer_to_scraper_heavy(url, lead_id, tenant_id, campaign_id,
-                                            bio, target_domain, preferences_weights)
-                    return {"url": url, "status": "deferred"}
             else:
                 _defer_to_scraper_heavy(url, lead_id, tenant_id, campaign_id,
                                         bio, target_domain, preferences_weights)
@@ -516,41 +576,7 @@ def dispatch():
             except Exception:
                 pass
 
-            if not text:
-                log.warning("dispatch_dead_payload", url=url[:80])
-                doc_ref.update({"status": "failed_scrape",
-                                "error": "Empty DOM — no cache, no snippet, no scrape"})
-                try:
-                    _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
-                return {"url": url, "status": "failed_scrape"}
-
-            # WAF/bot detection
-            # Postmortem Fix #11: also release the global lock on WAF failure.
-            # Previously the lock was held for 14 days after a single WAF challenge,
-            # permanently blacklisting the domain. The lock is now released so the
-            # next pipeline run can attempt the domain again (or escalate to scraper-heavy).
-            bot_keywords = ["Cloudflare Ray ID", "Please verify you are human",
-                            "Enable JavaScript and cookies to continue",
-                            "Access Denied", "403 Forbidden"]
-            if any(kw.lower() in text.lower() for kw in bot_keywords):
-                doc_ref.update({"status": "failed", "error": "Blocked by Cloudflare/WAF"})
-                try:
-                    _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
-                return {"url": url, "status": "failed_waf"}
-
-            # Usage metrics
-            shard_id = random.randint(0, 9)
-            _db().collection("usage_metrics").document(tenant_id) \
-                .collection("shards").document(str(shard_id)) \
-                .set({"gemini_calls": firestore.Increment(1)}, merge=True)
-
-            # BUG-1 FIX: deep_context_serper_dork is now inside _process_single_url().
-            # The entire function runs in a ThreadPoolExecutor future with a 25s
-            # ceiling — Serper calls block this thread, not the main worker.
+            # Deep web enrichment: run deep_context_serper_dork
             context_payload, native_hiring_intent = deep_context_serper_dork(
                 target_domain, tenant_id, sourcing_vector, source_url=url
             )
@@ -570,110 +596,73 @@ def dispatch():
                     pass
                 return {"url": url, "status": "rlhf_drop"}
 
-            # ── TRACE-9: final_score_and_dm — Gemini scoring ──────────────────
-            log.info("TRACE-9: Calling final_score_and_dm.", url=url[:80])
-            try:
-                evaluation = final_score_and_dm(
-                    text, active_campaigns, context_payload, tech_stack, source_url=url
-                )
-            except TimeoutError:
-                doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
-                try:
-                    _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
-                return {"url": url, "status": "failed_vertex_timeout"}
-            except Exception as eval_err:
-                doc_ref.update({"status": "failed", "error": str(eval_err)})
-                try:
-                    _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
-                return {"url": url, "status": "failed_eval"}
+            # ── STEP 4: Consolidate lead details and save into root leads collection ──
+            contact_endpoints = []
+            for e in list(evaluation.get("contact_endpoints", [])):
+                if e.get("platform") == "email" and _is_generic_email(e.get("uri", "")):
+                    continue
+                contact_endpoints.append(e)
+            existing_uris     = {e["uri"] for e in contact_endpoints}
+            for em in (emails or [])[:3]:
+                if em and em not in existing_uris and not _is_generic_email(em):
+                    contact_endpoints.append({"platform": "email", "uri": em})
+                    existing_uris.add(em)
+            for ph in (phones or [])[:2]:
+                if ph and ph not in existing_uris:
+                    contact_endpoints.append({"platform": "other", "uri": ph})
+                    existing_uris.add(ph)
 
-            # ── Dynamic acceptance threshold ───────────────────────────────────
-            is_shadow_thin   = text.strip().startswith("[SHADOW_LEARNER_THIN_PAYLOAD]")
-            is_thin_payload  = is_shadow_thin or len(text.strip()) < 500
-            accept_threshold = 6 if is_thin_payload else 7
-            score            = evaluation.get("score", 0)
+            log.info("TRACE-10: Writing qualified lead to Firestore.",
+                     url=url[:80], score=score, campaign_id=campaign_id)
+            lead_payload = {
+                "id":                           lead_id,
+                "source_url":                   url,
+                "tenant_id":                    tenant_id,
+                "origin_engine":                "cartographer",
+                "score":                        score,
+                "matched_campaign_ids":         evaluation.get("matched_campaign_ids", []),
+                "matched_campaigns":            [campaign_id],
+                "campaign_id":                  campaign_id,
+                "trend_mapped":                 evaluation.get("trend_mapped", False),
+                "highest_campaign_id":          evaluation.get("highest_campaign_id", "Unknown"),
+                "pain_point":                   evaluation.get("pain_point", ""),
+                "dm":                           evaluation.get("dm", ""),
+                "intent_signal":                evaluation.get("intent_signal", ""),
+                "hiring_intent_found":          evaluation.get("hiring_intent_found", "No"),
+                "tech_stack_found":             tech_stack,
+                "icebreaker_angle":             evaluation.get("icebreaker_angle", ""),
+                "contact_endpoints":            contact_endpoints,
+                "decision_maker_name":          evaluation.get("decision_maker_name", "Unknown"),
+                "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
+                "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
+                "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
+                "company_name":                 evaluation.get("company_name"),
+                "dossier_text":                 None,
+                "sourcing_vector":              sourcing_vector,
+                "confidence_tier":              url_to_tier.get(url, "High"),
+                "prism_mode":                   prism_mode,
+                "prism_fallback":               fallback_used,
+                "status":                       "new",
+                "is_in_crm":                    False,
+            }
+            doc_ref.set(lead_payload, merge=True)
+            _settle_credit(tenant_id, "success", lead_id=lead_id)
+            
+            # Shadow Track BQ write for statistical RLHF routing
+            _shadow_track_bq(
+                tenant_id=tenant_id,
+                campaign_id=campaign_id,
+                lead_id=lead_id,
+                url=url,
+                score=score,
+                sourcing_vector=sourcing_vector,
+                pain_point=evaluation.get("pain_point", ""),
+                prism_mode=prism_mode,
+            )
 
-            if score >= accept_threshold:
-                contact_endpoints = []
-                for e in list(evaluation.get("contact_endpoints", [])):
-                    if e.get("platform") == "email" and _is_generic_email(e.get("uri", "")):
-                        continue
-                    contact_endpoints.append(e)
-                existing_uris     = {e["uri"] for e in contact_endpoints}
-                for em in (emails or [])[:3]:
-                    if em and em not in existing_uris and not _is_generic_email(em):
-                        contact_endpoints.append({"platform": "email", "uri": em})
-                        existing_uris.add(em)
-                for ph in (phones or [])[:2]:
-                    if ph and ph not in existing_uris:
-                        contact_endpoints.append({"platform": "other", "uri": ph})
-                        existing_uris.add(ph)
-
-                # ── TRACE-10: Lead Firestore write ─────────────────────────────
-                log.info("TRACE-10: Writing qualified lead to Firestore.",
-                         url=url[:80], score=score, campaign_id=campaign_id)
-                lead_payload = {
-                    "id":                           lead_id,
-                    "source_url":                   url,
-                    "tenant_id":                    tenant_id,
-                    "origin_engine":                "cartographer",
-                    "score":                        score,
-                    "matched_campaign_ids":         evaluation.get("matched_campaign_ids", []),
-                    "matched_campaigns":            [campaign_id],
-                    "campaign_id":                  campaign_id,
-                    "trend_mapped":                 evaluation.get("trend_mapped", False),
-                    "highest_campaign_id":          evaluation.get("highest_campaign_id", "Unknown"),
-                    "pain_point":                   evaluation.get("pain_point", ""),
-                    "dm":                           evaluation.get("dm", ""),
-                    "intent_signal":                evaluation.get("intent_signal", ""),
-                    "hiring_intent_found":          evaluation.get("hiring_intent_found", "No"),
-                    "tech_stack_found":             evaluation.get("tech_stack_found", []),
-                    "icebreaker_angle":             evaluation.get("icebreaker_angle", ""),
-                    "contact_endpoints":            contact_endpoints,
-                    "decision_maker_name":          evaluation.get("decision_maker_name", "Unknown"),
-                    "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
-                    "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
-                    "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
-                    "company_name":                 evaluation.get("company_name"),
-                    "dossier_text":                 None,
-                    "sourcing_vector":              sourcing_vector,
-                    "confidence_tier":              url_to_tier.get(url, "High"),
-                    "prism_mode":                   prism_mode,
-                    "prism_fallback":               fallback_used,
-                    "status":                       "new",
-                    "is_in_crm":                    False,
-                }
-                doc_ref.set(lead_payload, merge=True)
-                _settle_credit(tenant_id, "success", lead_id=lead_id)
-                # SF-013 FIX: Shadow Track BQ write — fire-and-forget, zero latency.
-                # Pushes lead quality signal to swarm_analytics.shadow_track_events
-                # so the statistical RLHF router can learn from dispatch outcomes.
-                _shadow_track_bq(
-                    tenant_id=tenant_id,
-                    campaign_id=campaign_id,
-                    lead_id=lead_id,
-                    url=url,
-                    score=score,
-                    sourcing_vector=sourcing_vector,
-                    pain_point=evaluation.get("pain_point", ""),
-                    prism_mode=prism_mode,
-                )
-                if score >= 8:
-                    _maybe_notify_whatsapp(tenant_id, url, lead_id, score, evaluation)
-                return {"url": url, "score": score, "status": "success"}
-            else:
-                log.info("dispatch_score_gate_drop", url=url[:80],
-                         score=score, threshold=accept_threshold)
-                doc_ref.delete()
-                try:
-                    _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
-                return {"url": url, "status": "score_drop"}
+            if score >= 8:
+                _maybe_notify_whatsapp(tenant_id, url, lead_id, score, evaluation)
+            return {"url": url, "score": score, "status": "success"}
 
         except Exception as loop_err:
             log.error("dispatch_loop_crash", url=url[:80], campaign_id=campaign_id,
