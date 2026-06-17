@@ -332,7 +332,10 @@ DETECTED TECH STACK:
 """
     if historical_dms:
         prompt += f"\nPast successful converted messages (match tone): {historical_dms}\n"
-    prompt += f"\nText DOM:\n{text}"
+    # Token limit protection: truncate raw web text to prevent context window or credit overflow
+    max_chars = int(os.environ.get("MAX_SCRAPED_TEXT_CHARS", 50000))
+    truncated_text = text if len(text) <= max_chars else text[:max_chars] + "\n... [TRUNCATED DUE TO SIZE LIMIT] ..."
+    prompt += f"\nText DOM:\n{truncated_text}"
 
     sys_inst = (
         "You are a Dynamic Intent Analyzer with adaptive persona intelligence. "
