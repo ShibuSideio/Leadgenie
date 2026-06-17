@@ -87,12 +87,14 @@ def webhook():
                                     lead_doc = lead_ref.get()
                                     if lead_doc.exists:
                                         lead_data = lead_doc.to_dict()
+                                        previous_status = lead_data.get("status")
                                         lead_ref.update({"status": target_status})
                                         print(f"Autonomous State Sync: {lead_id} -> {target_status}")
                                         
-                                        # V7 Meta Compliance Queue Staging
-                                        if target_status == "approved":
-                                            db.collection("outbound_emails").add({
+                                        # V7 Meta Compliance Queue Staging with deduplication checks
+                                        if target_status == "approved" and previous_status != "approved":
+                                            # Use set() with lead_id to ensure absolute idempotency in staging
+                                            db.collection("outbound_emails").document(lead_id).set({
                                                 "lead_id": lead_id,
                                                 "tenant_id": lead_data.get("tenant_id"),
                                                 "url": lead_data.get("url"),

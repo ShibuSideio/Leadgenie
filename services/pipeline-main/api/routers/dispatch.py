@@ -938,7 +938,7 @@ def _maybe_notify_whatsapp(tenant_id: str, url: str, lead_id: str,
             wa_token = get_cipher().decrypt(wa_token_encrypted.encode()).decode()
         except Exception:
             wa_token = wa_token_encrypted
-        _httpx.post(
+        resp = _httpx.post(
             f"https://graph.facebook.com/v18.0/{wa_phone_id}/messages",
             json={
                 "messaging_product": "whatsapp",
@@ -960,6 +960,16 @@ def _maybe_notify_whatsapp(tenant_id: str, url: str, lead_id: str,
                      "Content-Type": "application/json"},
             timeout=5,
         )
-        log.info("whatsapp_notification_sent", tenant_id=tenant_id, score=score)
+        resp.raise_for_status()
+        resp_json = resp.json()
+        wa_message_id = None
+        if "messages" in resp_json and len(resp_json["messages"]) > 0:
+            wa_message_id = resp_json["messages"][0].get("id")
+        
+        if wa_message_id:
+            _db().collection("leads").document(lead_id).update({"wa_message_id": wa_message_id})
+            log.info("whatsapp_notification_sent", tenant_id=tenant_id, score=score, wa_message_id=wa_message_id)
+        else:
+            log.info("whatsapp_notification_sent_no_id", tenant_id=tenant_id, score=score)
     except Exception as wa_err:
         log.warning("whatsapp_notification_failed", error=str(wa_err))

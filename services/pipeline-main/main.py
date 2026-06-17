@@ -3167,9 +3167,17 @@ def finalize():
                         }
                     }
                     try:
-                        httpx.post(f"https://graph.facebook.com/v18.0/{wa_phone_id}/messages", json=wa_payload, headers={"Authorization": f"Bearer {wa_token}", "Content-Type": "application/json"}, timeout=5)
-                    except:
-                        pass
+                        resp = httpx.post(f"https://graph.facebook.com/v18.0/{wa_phone_id}/messages", json=wa_payload, headers={"Authorization": f"Bearer {wa_token}", "Content-Type": "application/json"}, timeout=5)
+                        resp.raise_for_status()
+                        resp_json = resp.json()
+                        wa_message_id = None
+                        if "messages" in resp_json and len(resp_json["messages"]) > 0:
+                            wa_message_id = resp_json["messages"][0].get("id")
+                        if wa_message_id:
+                            db.collection("leads").document(lead_id).update({"wa_message_id": wa_message_id})
+                            print(f"[FINALIZE WHATSAPP] Stored wa_message_id: {wa_message_id} on lead: {lead_id}")
+                    except Exception as wa_err:
+                        print(f"[FINALIZE WHATSAPP] Failed to send message/update ID: {wa_err}")
         else:
             # Score below threshold — delete stub
             doc_ref.delete()
