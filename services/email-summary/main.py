@@ -109,5 +109,153 @@ def send_daily_summaries():
                 
     return jsonify({"summaries_sent": count}), 200
 
+@app.route("/process-outbound", methods=["POST"])
+def process_outbound_emails():
+    import uuid
+    api_key = get_secret(SENDGRID_API_KEY_SECRET).strip()
+    if not api_key:
+        print("Missing SendGrid API Key")
+        return jsonify({"error": "Missing SendGrid API Key"}), 500
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    worker_id = str(uuid.uuid4())
+    lease_duration = datetime.timedelta(minutes=5)
+    
+    # Query candidate queued documents
+    candidates = (
+        db.collection("outbound_emails")
+        .where("status", "==", "queued")
+        .limit(10)
+        .stream()
+    )
+    
+    processed_count = 0
+    
+    for doc in candidates:
+        doc_ref = doc.reference
+        
+        # Transactional lease acquisition to avoid double-processing
+        @firestore.transactional
+        def _try_lease(transaction):
+            snapshot = doc_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return None
+            data = snapshot.to_dict()
+            status = data.get("status")
+            lease_expires = data.get("lease_expires")
+            is_expired = lease_expires and lease_expires < now
+            
+            if status == "queued" or (status == "processing" and is_expired):
+                transaction.update(doc_ref, {
+                    "status": "processing",
+                    "worker_id": worker_id,
+                    "lease_expires": now + lease_duration
+                })
+                return data
+            return None
+
+        try:
+            doc_data = _try_lease(db.transaction())
+        except Exception as lease_err:
+            print(f"Lease transaction failed for {doc.id}: {lease_err}")
+            continue
+            
+        if not doc_data:
+            continue
+            
+        recipient = doc_data.get("email")
+        dm_payload = doc_data.get("dm_payload")
+        lead_id = doc_data.get("lead_id")
+        
+        lead_ref = db.collection("leads").document(lead_id)
+        
+        if not recipient:
+            _mark_terminal_failure(db, doc_ref, lead_ref, "failed_delivery", "Missing recipient email address.")
+            processed_count += 1
+            continue
+            
+        payload = {
+            "personalizations": [{"to": [{"email": recipient}]}],
+            "from": {"email": SENDER_EMAIL},
+            "subject": "Business Partnership Outreach",
+            "content": [{"type": "text/plain", "value": dm_payload or "Hello, reaching out to connect."}]
+        }
+        
+        try:
+            resp = httpx.post(
+                "https://api.sendgrid.com/v3/mail/send",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=10
+            )
+            
+            if resp.status_code == 202:
+                # Success: Atomic sync to contacted status across both docs
+                batch = db.batch()
+                batch.update(doc_ref, {
+                    "status": "contacted",
+                    "sent_at": firestore.SERVER_TIMESTAMP,
+                    "error_message": None
+                })
+                batch.update(lead_ref, {
+                    "status": "contacted",
+                    "contacted_at": firestore.SERVER_TIMESTAMP
+                })
+                batch.commit()
+                processed_count += 1
+                print(f"Successfully sent outbound email for lead {lead_id} to {recipient}")
+            elif resp.status_code == 429 or resp.status_code >= 500:
+                # Transient Error: Revert status to queued for retrying
+                retry_count = doc_data.get("retry_count", 0) + 1
+                if retry_count >= 3:
+                    _mark_terminal_failure(db, doc_ref, lead_ref, "failed_delivery", f"Exceeded max retries. API status: {resp.status_code}")
+                else:
+                    doc_ref.update({
+                        "status": "queued",
+                        "retry_count": retry_count,
+                        "lease_expires": None,
+                        "worker_id": None,
+                        "error_message": f"Temporary error {resp.status_code}: {resp.text}"
+                    })
+                processed_count += 1
+            else:
+                # Terminal Error: bounce, authorization failure, block
+                _mark_terminal_failure(db, doc_ref, lead_ref, "failed_delivery", f"Terminal API error {resp.status_code}: {resp.text}")
+                processed_count += 1
+        except Exception as send_err:
+            # Transient Network Exception: Revert to queued
+            retry_count = doc_data.get("retry_count", 0) + 1
+            if retry_count >= 3:
+                _mark_terminal_failure(db, doc_ref, lead_ref, "failed_delivery", f"Exceeded max retries. Network exception: {send_err}")
+            else:
+                doc_ref.update({
+                    "status": "queued",
+                    "retry_count": retry_count,
+                    "lease_expires": None,
+                    "worker_id": None,
+                    "error_message": f"Network exception: {str(send_err)}"
+                })
+            processed_count += 1
+            
+    return jsonify({"status": "complete", "processed": processed_count}), 200
+
+def _mark_terminal_failure(db, doc_ref, lead_ref, status, error_msg):
+    batch = db.batch()
+    batch.update(doc_ref, {
+        "status": status,
+        "error_message": error_msg,
+        "lease_expires": None,
+        "worker_id": None
+    })
+    batch.update(lead_ref, {
+        "status": status,
+        "error_message": error_msg
+    })
+    try:
+        batch.commit()
+        print(f"Marked lead terminal failure state: {status} - {error_msg}")
+    except Exception as e:
+        print(f"Failed to write terminal failure state: {e}")
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
