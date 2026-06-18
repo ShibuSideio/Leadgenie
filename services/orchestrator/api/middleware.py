@@ -53,7 +53,7 @@ def require_auth(fn: Callable) -> Callable:
         except AuthError as exc:
             return jsonify({"error": "Unauthorized", "message": exc.message}), exc.http_status
         except Exception as exc:
-            return jsonify({"error": "Internal Error", "message": str(exc)}), 500
+            return jsonify({"error": "Unauthorized", "message": f"Authentication failed: {exc}"}), 401
         return fn(uid, tenant_id, user_role, *args, **kwargs)
     return wrapper
 
