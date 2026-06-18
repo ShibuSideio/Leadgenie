@@ -99,6 +99,7 @@ def generate_smart_query(
     pain_points:      list[str] = []
     neg_domains:      list[str] = []   # domains from rejected/low-score leads
     neg_title_frags:  list[str] = []   # title patterns (job boards, directories)
+    has_local_history: bool = False
     try:
         from google.cloud.firestore_v1.base_query import FieldFilter as _FF  # noqa: PLC0415
         # BUG-QB1 FIX: Deprecated positional .where() → FieldFilter.
@@ -108,20 +109,11 @@ def generate_smart_query(
             q = q.where(filter=_FF("campaign_id", "==", campaign_id))
         q = q.where(filter=_FF("status", "in", ["contacted", "converted"])).limit(20)
         docs = list(q.stream())
-        if not docs and campaign_id:
-            # Fallback to tenant level if campaign has no conversion history
-            log.info("query_brain_rlhf_fallback_tenant", tenant_id=tenant_id, campaign_id=campaign_id)
-            q = (
-                get_db().collection("leads")
-                .where(filter=_FF("tenant_id", "==", tenant_id))
-                .where(filter=_FF("status", "in", ["contacted", "converted"]))
-                .limit(20)
-            )
-            docs = list(q.stream())
         pain_points = [
             d.to_dict().get("pain_point", "")
             for d in docs if d.to_dict().get("pain_point")
         ]
+        has_local_history = len(pain_points) > 0
     except Exception as exc:
         log.warning("query_brain_rlhf_fetch_failed", error=str(exc))
 
@@ -396,6 +388,9 @@ Return ONLY the JSON object. No explanation, no markdown."""
         _excl_titles = " ".join(f'-intitle:"{t}"' for t in neg_title_frags[:5] if t)
         blacklist += " " + _excl_titles
         log.info("neg_rlhf_titles_injected", count=len(neg_title_frags[:5]))
+
+    if not has_local_history:
+        historical_phrases = []
 
     historical_str = ""
     if historical_phrases:

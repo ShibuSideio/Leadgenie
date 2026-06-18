@@ -497,16 +497,15 @@ def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None, pe
     """
     # ── Step 1: Fetch RLHF history context (Firestore read — no Gemini call) ──
     pain_points: list = []
+    has_local_history: bool = False
     try:
         query = db.collection("leads").where("tenant_id", "==", tenant_id)
         if campaign_id:
             query = query.where("campaign_id", "==", campaign_id)
         query = query.where("status", "in", ["contacted", "converted"]).limit(20)
         docs = list(query.stream())
-        if not docs and campaign_id:
-            query = db.collection("leads").where("tenant_id", "==", tenant_id).where("status", "in", ["contacted", "converted"]).limit(20)
-            docs = list(query.stream())
         pain_points = [d.to_dict().get("pain_point", "") for d in docs if d.to_dict().get("pain_point")]
+        has_local_history = len(pain_points) > 0
     except Exception as e:
         print(f"[QUERY BRAIN] RLHF history fetch failed: {e}")
 
@@ -703,6 +702,9 @@ Return ONLY the JSON object matching the schema. No explanation, no markdown."""
               f"{len(_shield_entities)} title blocks into Serper query")
 
     # RLHF injection: historical trend phrases appended as AND-suffix
+    if not has_local_history:
+        historical_phrases = []
+
     historical_str = ""
     if historical_phrases:
         phrases_escaped = [f'"{p}"' for p in historical_phrases[:3]]
