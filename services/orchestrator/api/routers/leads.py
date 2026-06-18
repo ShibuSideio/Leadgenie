@@ -273,14 +273,19 @@ def list_inbound_signals(uid, tenant_id, user_role):
             query = (
                 _db().collection("inbound_signals")
                 .where(filter=fs.FieldFilter("tenant_id", "==", t_id))
-                .where(filter=fs.FieldFilter("status",    "==", status))
-                .order_by("intent_score", direction=fs.Query.DESCENDING)
-                .limit(limit)
             )
             signals = [_sanitize_signal_doc(d) for d in query.stream()]
         except Exception as exc:
             log.warning("list_inbound_signals_query_failed_graceful_fallback", error=str(exc))
             signals = []
+
+        # Execute Application-Level Filtering: Once the payload documents stream into the Python runtime stack,
+        # filter out records where status != "new" or intent_score < 0.55 in-memory.
+        signals = [
+            s for s in signals
+            if s.get("status") == status
+            and float(s.get("intent_score", 0.0)) >= 0.55
+        ]
 
         # Optional label filter — applied after Firestore fetch (no composite index needed)
         if intent_label:
@@ -289,6 +294,11 @@ def list_inbound_signals(uid, tenant_id, user_role):
         # Optional campaign filter — applied after Firestore fetch (no composite index needed)
         if campaign_id:
             signals = [s for s in signals if s.get("matched_campaign_id") == campaign_id]
+
+        # Sort and Slice: Sort the remaining validated objects descending by their intent_score attribute,
+        # and slice the array to match the defensive request limit size.
+        signals.sort(key=lambda s: float(s.get("intent_score", 0.0)), reverse=True)
+        signals = signals[:limit]
 
         return jsonify({"signals": signals, "count": len(signals)}), 200
 
