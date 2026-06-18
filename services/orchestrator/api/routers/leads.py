@@ -227,25 +227,19 @@ def list_inbound_signals(uid, tenant_id, user_role):
       status        (str)   — filter by status: new | reviewed | converted_to_lead | dismissed
                               default: new
       intent_label  (str)   — filter by ACTIVE_SEEKING | EXPRESSING_PAIN | COMPETITOR_CHURN | TREND
+      campaign_id   (str)   — filter by campaign ID (optional)
       limit         (int)   — max results 1–50, default 20
     """
     from google.cloud import firestore as fs
 
     status       = request.args.get("status", "new")
     intent_label = request.args.get("intent_label")
+    campaign_id  = request.args.get("campaign_id") or request.args.get("campaign")
     limit        = min(int(request.args.get("limit", 20)), 50)
 
     valid_statuses = {"new", "reviewed", "converted_to_lead", "dismissed"}
     if status not in valid_statuses:
         return jsonify({"error": f"status must be one of {sorted(valid_statuses)}"}), 400
-
-    query = (
-        _db().collection("inbound_signals")
-        .where(filter=fs.FieldFilter("tenant_id", "==", uid))
-        .where(filter=fs.FieldFilter("status",    "==", status))
-        .order_by("intent_score", direction=fs.Query.DESCENDING)
-        .limit(limit)
-    )
 
     def _sanitize_signal_doc(doc) -> dict:
         data = doc.to_dict() or {}
@@ -255,11 +249,27 @@ def list_inbound_signals(uid, tenant_id, user_role):
                 data[k] = v.isoformat()
         return data
 
-    signals = [_sanitize_signal_doc(d) for d in query.stream()]
+    signals = []
+    try:
+        query = (
+            _db().collection("inbound_signals")
+            .where(filter=fs.FieldFilter("tenant_id", "==", tenant_id))
+            .where(filter=fs.FieldFilter("status",    "==", status))
+            .order_by("intent_score", direction=fs.Query.DESCENDING)
+            .limit(limit)
+        )
+        signals = [_sanitize_signal_doc(d) for d in query.stream()]
+    except Exception as exc:
+        log.warning("list_inbound_signals_query_failed_graceful_fallback", error=str(exc))
+        signals = []
 
     # Optional label filter — applied after Firestore fetch (no composite index needed)
     if intent_label:
         signals = [s for s in signals if s.get("intent_label") == intent_label]
+
+    # Optional campaign filter — applied after Firestore fetch (no composite index needed)
+    if campaign_id:
+        signals = [s for s in signals if s.get("matched_campaign_id") == campaign_id]
 
     return jsonify({"signals": signals, "count": len(signals)}), 200
 
