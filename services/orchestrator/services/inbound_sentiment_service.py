@@ -221,7 +221,16 @@ Classification rules:
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
         scored = json.loads(raw)
 
-        if scored.get("intent_label") == "NONE" or float(scored.get("intent_score", 0)) < 0.30:
+        raw_score = float(scored.get("intent_score", 0))
+        log.info(
+            "trace_inbound_raw_score",
+            url=url[:80],
+            score=raw_score,
+            label=scored.get("intent_label"),
+            reasoning=scored.get("reasoning", "")
+        )
+
+        if scored.get("intent_label") == "NONE" or raw_score < 0.30:
             return None
 
         return {
@@ -250,9 +259,10 @@ class InboundSentimentService:
         signals = svc.run()   # list of signal dicts sorted by intent_score desc
     """
 
-    def __init__(self, persona: dict, campaign: dict):
+    def __init__(self, persona: dict, campaign: dict, force_day_of_week: Optional[int] = None):
         self.persona       = persona
         self.campaign      = campaign
+        self.force_day_of_week = force_day_of_week
         self.pain_kws      = [str(p) for p in (persona.get("pain_points") or [])[:5]]
         self.industry      = str(persona.get("industry") or "B2B software")
         self.competitors   = [str(c) for c in (persona.get("competitors") or [])[:3]]
@@ -270,7 +280,7 @@ class InboundSentimentService:
 
     def _build_queries(self) -> list[str]:
         """Build today's search queries using the daily rotation mode."""
-        day_of_week = datetime.utcnow().weekday()  # 0=Mon, 6=Sun
+        day_of_week = datetime.utcnow().weekday() if self.force_day_of_week is None else self.force_day_of_week
         mode = SIGNAL_MODES[day_of_week]
 
         subs_base = {
