@@ -230,48 +230,72 @@ def list_inbound_signals(uid, tenant_id, user_role):
       campaign_id   (str)   — filter by campaign ID (optional)
       limit         (int)   — max results 1–50, default 20
     """
-    from google.cloud import firestore as fs
-
-    status       = request.args.get("status", "new")
-    intent_label = request.args.get("intent_label")
-    campaign_id  = request.args.get("campaign_id") or request.args.get("campaign")
-    limit        = min(int(request.args.get("limit", 20)), 50)
-
-    valid_statuses = {"new", "reviewed", "converted_to_lead", "dismissed"}
-    if status not in valid_statuses:
-        return jsonify({"error": f"status must be one of {sorted(valid_statuses)}"}), 400
-
-    def _sanitize_signal_doc(doc) -> dict:
-        data = doc.to_dict() or {}
-        data["id"] = doc.id
-        for k, v in data.items():
-            if hasattr(v, "isoformat"):
-                data[k] = v.isoformat()
-        return data
-
-    signals = []
+    import traceback
     try:
-        query = (
-            _db().collection("inbound_signals")
-            .where(filter=fs.FieldFilter("tenant_id", "==", tenant_id))
-            .where(filter=fs.FieldFilter("status",    "==", status))
-            .order_by("intent_score", direction=fs.Query.DESCENDING)
-            .limit(limit)
-        )
-        signals = [_sanitize_signal_doc(d) for d in query.stream()]
-    except Exception as exc:
-        log.warning("list_inbound_signals_query_failed_graceful_fallback", error=str(exc))
+        # Check tenant_id context resolution defensively
+        t_id = tenant_id or uid
+        if not t_id:
+            log.error("list_inbound_signals_missing_tenant_and_uid")
+            return jsonify({"signals": [], "error": True}), 400
+
+        status       = request.args.get("status", "new")
+        intent_label = request.args.get("intent_label")
+        campaign_id  = request.args.get("campaign_id") or request.args.get("campaign")
+
+        # Verify that request.args.get('limit') or similar parameters are safely cast to integers
+        raw_limit = request.args.get("limit")
+        try:
+            if raw_limit is None or str(raw_limit).strip() == "":
+                limit = 20
+            else:
+                limit = int(raw_limit)
+        except (ValueError, TypeError):
+            limit = 20
+
+        limit = min(max(1, limit), 50)
+
+        valid_statuses = {"new", "reviewed", "converted_to_lead", "dismissed"}
+        if status not in valid_statuses:
+            return jsonify({"error": f"status must be one of {sorted(valid_statuses)}"}), 400
+
+        from google.cloud import firestore as fs
+
+        def _sanitize_signal_doc(doc) -> dict:
+            data = doc.to_dict() or {}
+            data["id"] = doc.id
+            for k, v in data.items():
+                if hasattr(v, "isoformat"):
+                    data[k] = v.isoformat()
+            return data
+
         signals = []
+        try:
+            query = (
+                _db().collection("inbound_signals")
+                .where(filter=fs.FieldFilter("tenant_id", "==", t_id))
+                .where(filter=fs.FieldFilter("status",    "==", status))
+                .order_by("intent_score", direction=fs.Query.DESCENDING)
+                .limit(limit)
+            )
+            signals = [_sanitize_signal_doc(d) for d in query.stream()]
+        except Exception as exc:
+            log.warning("list_inbound_signals_query_failed_graceful_fallback", error=str(exc))
+            signals = []
 
-    # Optional label filter — applied after Firestore fetch (no composite index needed)
-    if intent_label:
-        signals = [s for s in signals if s.get("intent_label") == intent_label]
+        # Optional label filter — applied after Firestore fetch (no composite index needed)
+        if intent_label:
+            signals = [s for s in signals if s.get("intent_label") == intent_label]
 
-    # Optional campaign filter — applied after Firestore fetch (no composite index needed)
-    if campaign_id:
-        signals = [s for s in signals if s.get("matched_campaign_id") == campaign_id]
+        # Optional campaign filter — applied after Firestore fetch (no composite index needed)
+        if campaign_id:
+            signals = [s for s in signals if s.get("matched_campaign_id") == campaign_id]
 
-    return jsonify({"signals": signals, "count": len(signals)}), 200
+        return jsonify({"signals": signals, "count": len(signals)}), 200
+
+    except Exception as e:
+        traceback.print_exc()
+        log.error("list_inbound_signals_fatal_ingress_error", error=str(e), traceback=traceback.format_exc())
+        return jsonify({"signals": [], "error": True}), 200
 
 
 # =============================================================================
