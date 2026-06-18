@@ -356,10 +356,12 @@ def dispatch():
     # ── Hydrate snippet_map from scraped_cache (Producer hand-off) ──────────
     snippet_map = {}
     SOCIAL_SET  = set(SOCIAL_DOMAINS)
+    SHARED_PLATFORMS = {"linkedin.com", "medium.com", "substack.com", "wordpress.com", "github.io"}
     for batch_url in batch_urls:
         b_domain  = extract_root_domain(batch_url)
         is_social = any(b_domain.endswith(s) for s in SOCIAL_SET)
-        if is_social:
+        is_shared = any(b_domain.endswith(s) for s in SHARED_PLATFORMS)
+        if is_social or is_shared:
             parsed     = urlparse(batch_url)
             exact_path = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
             dedupe_target = exact_path
@@ -462,7 +464,8 @@ def dispatch():
             return {"url": url, "status": "skip_no_domain"}
 
         is_social = any(target_domain.endswith(s) for s in SOCIAL_SET)
-        if is_social:
+        is_shared = any(target_domain.endswith(s) for s in SHARED_PLATFORMS)
+        if is_social or is_shared:
             parsed     = urlparse(url)
             exact_path = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
             lock_entity   = hashlib.sha256(exact_path.encode()).hexdigest()

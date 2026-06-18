@@ -119,7 +119,7 @@ _vai_gm.GenerationConfig = MagicMock()
 for _n, _m in {"vertexai": _vai, "vertexai.generative_models": _vai_gm}.items():
     sys.modules.setdefault(_n, _m)
 
-# Flask stub — minimal to allow Blueprint imports
+# Flask stub - minimal to allow Blueprint imports
 try:
     import flask  # real flask if installed
 except ImportError:
@@ -137,7 +137,7 @@ except ImportError:
     sys.modules.setdefault("flask", _flask)
     sys.modules.setdefault("flask_cors", _make_mock_module("flask_cors"))
 
-# cryptography — real library (should be installed)
+# cryptography - real library (should be installed)
 try:
     from cryptography.fernet import Fernet  # noqa: F401
 except ImportError:
@@ -164,18 +164,18 @@ def test(name: str, fn: Callable) -> bool:
         fn()
         ms = (time.monotonic() - start) * 1000
         results.append({"name": name, "passed": True, "ms": ms, "err": ""})
-        print(f"  {GREEN}✓{RESET}  {name} {DIM}({ms:.0f}ms){RESET}")
+        print(f"  {GREEN}OK{RESET}  {name} {DIM}({ms:.0f}ms){RESET}")
         return True
     except Exception as exc:
         ms = (time.monotonic() - start) * 1000
         err = str(exc)
         results.append({"name": name, "passed": False, "ms": ms, "err": err})
-        print(f"  {RED}✗{RESET}  {name}")
+        print(f"  {RED}FAIL{RESET}  {name}")
         print(f"      {YELLOW}↳ {err}{RESET}")
         return False
 
 def section(title: str):
-    print(f"\n{BOLD}── {title} {'─'*(55 - len(title))}{RESET}")
+    print(f"\n{BOLD}== {title} {'='*(55 - len(title))}{RESET}")
 
 # =============================================================================
 # PHASE 1: Module Import Validation
@@ -224,7 +224,7 @@ def t_import_core_config():
             PROJECT_ID, LOCATION, QUEUE, ROI_DEFAULTS, ALLOWED_ORIGINS, get_cipher
         )
         # PROJECT_ID can be the real GCP project (Cloud Build injects it) or
-        # the local default — just assert it is a non-empty string.
+        # the local default - just assert it is a non-empty string.
         assert isinstance(PROJECT_ID, str) and PROJECT_ID, \
             f"PROJECT_ID must be a non-empty string, got {PROJECT_ID!r}"
         assert isinstance(ROI_DEFAULTS, dict), "ROI_DEFAULTS must be a dict"
@@ -382,7 +382,7 @@ def t_extract_ngrams_empty():
 
 def t_extract_ngrams_stopwords_filtered():
     from services.intelligence.shadow_tracker import extract_ngrams
-    # "the and for are" are all stop-words — should produce no valid n-grams
+    # "the and for are" are all stop-words - should produce no valid n-grams
     result = extract_ngrams("the and for are but not", top_k=5)
     for ng in result:
         words = ng.split()
@@ -442,27 +442,27 @@ def t_analytics_validate_ue_negative_cpl():
     updates = validate_and_build_ue_update({"avg_cpl": -100.0})
     assert updates["unit_economics.avg_cpl"] == 0.0
 
-test("parse_base_path — B2B domains strip to root",  t_parse_base_path_b2b)
-test("parse_base_path — social keeps 2 path segs",   t_parse_base_path_social)
-test("parse_base_path — www. stripped correctly",     t_parse_base_path_www_strip)
-test("resolve_geo — India → (India, in)",             t_resolve_geo_india)
-test("resolve_geo — USA → (USA, us)",                 t_resolve_geo_usa)
-test("resolve_geo — Global → ('', '')",               t_resolve_geo_global)
-test("resolve_geo — unknown → ('', '')",              t_resolve_geo_unknown)
-test("extract_tech_stack — WordPress detected",       t_extract_tech_stack_wordpress)
-test("extract_tech_stack — multi-tech detected",      t_extract_tech_stack_multiple)
-test("extract_tech_stack — empty on no signals",      t_extract_tech_stack_empty)
-test("extract_ngrams — 2-grams from pain text",       t_extract_ngrams_basic)
-test("extract_ngrams — empty input returns []",       t_extract_ngrams_empty)
-test("extract_ngrams — stop-words filtered",          t_extract_ngrams_stopwords_filtered)
-test("ROI formula — ad_savings math correct",         t_roi_formula_ad_savings)
-test("ROI formula — labor_savings math correct",      t_roi_formula_labor_savings)
-test("ROI formula — pipeline_value math correct",     t_roi_formula_pipeline_value)
-test("ROI formula — zero deal_size = 0 revenue",      t_roi_formula_zero_deal_size)
-test("analytics validate — valid payload accepted",   t_analytics_validate_ue_payload_valid)
-test("analytics validate — empty payload → 400",      t_analytics_validate_ue_payload_empty)
-test("analytics validate — currency uppercased",      t_analytics_validate_ue_currency)
-test("analytics validate — negative cpl clamped to 0",t_analytics_validate_ue_negative_cpl)
+test("parse_base_path - B2B domains strip to root",  t_parse_base_path_b2b)
+test("parse_base_path - social keeps 2 path segs",   t_parse_base_path_social)
+test("parse_base_path - www. stripped correctly",     t_parse_base_path_www_strip)
+test("resolve_geo - India -> (India, in)",             t_resolve_geo_india)
+test("resolve_geo - USA -> (USA, us)",                 t_resolve_geo_usa)
+test("resolve_geo - Global -> ('', '')",               t_resolve_geo_global)
+test("resolve_geo - unknown -> ('', '')",              t_resolve_geo_unknown)
+test("extract_tech_stack - WordPress detected",       t_extract_tech_stack_wordpress)
+test("extract_tech_stack - multi-tech detected",      t_extract_tech_stack_multiple)
+test("extract_tech_stack - empty on no signals",      t_extract_tech_stack_empty)
+test("extract_ngrams - 2-grams from pain text",       t_extract_ngrams_basic)
+test("extract_ngrams - empty input returns []",       t_extract_ngrams_empty)
+test("extract_ngrams - stop-words filtered",          t_extract_ngrams_stopwords_filtered)
+test("ROI formula - ad_savings math correct",         t_roi_formula_ad_savings)
+test("ROI formula - labor_savings math correct",      t_roi_formula_labor_savings)
+test("ROI formula - pipeline_value math correct",     t_roi_formula_pipeline_value)
+test("ROI formula - zero deal_size = 0 revenue",      t_roi_formula_zero_deal_size)
+test("analytics validate - valid payload accepted",   t_analytics_validate_ue_payload_valid)
+test("analytics validate - empty payload -> 400",      t_analytics_validate_ue_payload_empty)
+test("analytics validate - currency uppercased",      t_analytics_validate_ue_currency)
+test("analytics validate - negative cpl clamped to 0",t_analytics_validate_ue_negative_cpl)
 
 # =============================================================================
 # PHASE 3: Exception Hierarchy & HTTP Status Contracts
@@ -519,11 +519,11 @@ def t_exception_pipeline_classes():
     assert mod.ValidationError("bad").http_status == 400
     assert issubclass(mod.NegShieldTimeoutError, mod.LeadSniperError)
 
-test("AuthError, TokenVerif, Suspended → HTTP 401",  t_exception_auth_http_401)
-test("ForbiddenError → HTTP 403",                    t_exception_forbidden_http_403)
-test("QuotaExhaustedError → HTTP 402",               t_exception_quota_http_402)
-test("ApprovalPendingError → HTTP 403",              t_exception_approval_http_403)
-test("ValidationError, SchemaViolation → HTTP 400",  t_exception_validation_http_400)
+test("AuthError, TokenVerif, Suspended -> HTTP 401",  t_exception_auth_http_401)
+test("ForbiddenError -> HTTP 403",                    t_exception_forbidden_http_403)
+test("QuotaExhaustedError -> HTTP 402",               t_exception_quota_http_402)
+test("ApprovalPendingError -> HTTP 403",              t_exception_approval_http_403)
+test("ValidationError, SchemaViolation -> HTTP 400",  t_exception_validation_http_400)
 test("LeadSniperError is Exception, has .message",   t_exception_base_is_exception)
 test("TokenVerifError is AuthError is LeadSniper",   t_exception_hierarchy_auth_is_lead_sniper)
 test("Pipeline-main exceptions load correctly",      t_exception_pipeline_classes)
@@ -582,7 +582,7 @@ section("Phase 5: Config & Environment Hardening")
 def t_config_fernet_encryption_roundtrip():
     """Ensure Fernet cipher can encrypt and decrypt with a known-good key."""
     from cryptography.fernet import Fernet as _Fernet
-    # Use the test key directly — bypasses any cached state from a prior empty-key run
+    # Use the test key directly - bypasses any cached state from a prior empty-key run
     cipher = _Fernet(_SMOKE_FERNET_KEY.encode())
     plaintext = b"test-wa-token-abc123"
     encrypted = cipher.encrypt(plaintext)
@@ -660,7 +660,7 @@ def t_shared_package_canonical_no_duplicates():
     m2 = importlib.import_module("shared.base_path")
     assert m2.parse_base_path is shared_fn, "Must be same function object (no duplicate)"
 
-test("Fernet encrypt → decrypt roundtrip lossless", t_config_fernet_encryption_roundtrip)
+test("Fernet encrypt -> decrypt roundtrip lossless", t_config_fernet_encryption_roundtrip)
 test("ROI_DEFAULTS has all 5 required keys",         t_config_roi_defaults_all_keys)
 test("Missing ENCRYPTION_KEY raises ValueError",     t_config_missing_encryption_key_raises)
 test("Pipeline config has SERPER_API_KEY_NAME",      t_config_pipeline_serper_key_name)
@@ -736,9 +736,9 @@ def t_lazy_init_lock_get_db_concurrent():
     assert len(results_thr) == 20, "Not all 20 threads returned a value"
     first = results_thr[0]
     for inst in results_thr:
-        assert inst is first, "Singleton violated — multiple distinct Client instances"
+        assert inst is first, "Singleton violated - multiple distinct Client instances"
     assert construction_count[0] <= 1, (
-        f"Client() constructed {construction_count[0]} times — Lock not working"
+        f"Client() constructed {construction_count[0]} times - Lock not working"
     )
 
 
@@ -796,7 +796,7 @@ def t_lazy_init_vertex_lock_concurrent():
 
     assert not errors, f"Thread errors: {errors[:3]}"
     assert init_count[0] <= 1, (
-        f"vertexai.init() called {init_count[0]} times — Lock not effective"
+        f"vertexai.init() called {init_count[0]} times - Lock not effective"
     )
 
 
@@ -843,8 +843,8 @@ def t_no_grpc_client_at_module_scope():
     )
 
 
-test("get_db() concurrent 20 threads: singleton ≤1 construction",    t_lazy_init_lock_get_db_concurrent)
-test("init_vertex() concurrent 16 threads: vertexai.init() ≤1 call", t_lazy_init_vertex_lock_concurrent)
+test("get_db() concurrent 20 threads: singleton <=1 construction",    t_lazy_init_lock_get_db_concurrent)
+test("init_vertex() concurrent 16 threads: vertexai.init() <=1 call", t_lazy_init_vertex_lock_concurrent)
 test("internal.py import: get_db() NOT called at module scope",       t_no_grpc_client_at_module_scope)
 
 # =============================================================================
@@ -946,11 +946,11 @@ def t_sanitize_legacy_datetime_with_nanoseconds():
     assert "2026-03-15" in result, f"Date not found: {result!r}"
 
 
-test("to_firestore_ts: aware datetime → ISO-8601 string",           t_sanitize_datetime_aware_to_isoformat)
-test("to_firestore_ts: naive datetime → UTC ISO-8601 string",       t_sanitize_datetime_naive_gets_utc)
+test("to_firestore_ts: aware datetime -> ISO-8601 string",           t_sanitize_datetime_aware_to_isoformat)
+test("to_firestore_ts: naive datetime -> UTC ISO-8601 string",       t_sanitize_datetime_naive_gets_utc)
 test("to_firestore_ts: str/int/None/list pass through unchanged",   t_sanitize_passthrough_non_datetime)
 test("sanitize_update: SERVER_TIMESTAMP + Increment pass through",  t_sanitize_sentinel_server_timestamp_passthrough)
-test("to_firestore_ts: DatetimeWithNanoseconds → ISO-8601 string", t_sanitize_legacy_datetime_with_nanoseconds)
+test("to_firestore_ts: DatetimeWithNanoseconds -> ISO-8601 string", t_sanitize_legacy_datetime_with_nanoseconds)
 
 # =============================================================================
 # FINAL REPORT
@@ -1045,7 +1045,7 @@ def t_oidc_invalid_token_returns_401():
 
 
 def t_oidc_valid_token_but_missing_queue_header_returns_403():
-    """With valid OIDC token but no X-CloudTasks-QueueName header → 403."""
+    """With valid OIDC token but no X-CloudTasks-QueueName header -> 403."""
     from flask import Flask
 
     with patch.dict(os.environ, {"PIPELINE_MAIN_URL": "https://example.run.app",
@@ -1069,9 +1069,9 @@ def t_oidc_valid_token_but_missing_queue_header_returns_403():
                 f"Expected MISSING_QUEUE_HEADER, got: {body}"
 
 
-test("OIDC: missing Authorization header → 401",            t_oidc_missing_authorization_header)
-test("OIDC: invalid JWT → 401 INVALID_OIDC_TOKEN",          t_oidc_invalid_token_returns_401)
-test("OIDC: valid JWT + missing queue header → 403",         t_oidc_valid_token_but_missing_queue_header_returns_403)
+test("OIDC: missing Authorization header -> 401",            t_oidc_missing_authorization_header)
+test("OIDC: invalid JWT -> 401 INVALID_OIDC_TOKEN",          t_oidc_invalid_token_returns_401)
+test("OIDC: valid JWT + missing queue header -> 403",         t_oidc_valid_token_but_missing_queue_header_returns_403)
 
 # =============================================================================
 # PHASE 9: V23 Modular Pipeline-Main Import Validation
@@ -1128,7 +1128,7 @@ def t_gemini_service_imports_no_module_scope_vertex():
                    isinstance(call.func.value, ast.Name) and \
                    call.func.value.id == 'vertexai':
                     raise AssertionError(
-                        "vertexai.init() called at module scope in gemini_service.py — gRPC leak!"
+                        "vertexai.init() called at module scope in gemini_service.py - gRPC leak!"
                     )
 
 
@@ -1178,15 +1178,15 @@ def t_produce_no_gcs_import():
     )
 
 
-test("serper_service imports cleanly — no gRPC at module scope",    t_serper_service_imports_no_grpc)
-test("gemini_service imports cleanly — vertexai.init() NOT called",  t_gemini_service_imports_no_module_scope_vertex)
-test("query_brain imports cleanly — get_db() NOT called at scope",   t_query_brain_imports_without_db_call)
+test("serper_service imports cleanly - no gRPC at module scope",    t_serper_service_imports_no_grpc)
+test("gemini_service imports cleanly - vertexai.init() NOT called",  t_gemini_service_imports_no_module_scope_vertex)
+test("query_brain imports cleanly - get_db() NOT called at scope",   t_query_brain_imports_without_db_call)
 test("EA compliance: gcs_task.py PURGED (must not exist)",           t_gcs_task_purged)
 test("EA compliance: produce.py contains no GCS dump call",          t_produce_no_gcs_import)
 
 
 def t_prism_pipeline_ast_check():
-    """prism_pipeline.py exists and defines PrismPipeline + 4 hooks (AST — no import needed)."""
+    """prism_pipeline.py exists and defines PrismPipeline + 4 hooks (AST - no import needed)."""
     import ast
     src_path = os.path.join(_PM_PATH, "services", "prism_pipeline.py")
     assert os.path.isfile(src_path), (
@@ -1218,7 +1218,7 @@ def t_dispatch_trace_markers_present():
         marker = f"TRACE-{i}"
         assert marker in src, (
             f"dispatch.py is missing {marker}. "
-            f"The consumer pipeline is incomplete — leads will be silently dropped."
+            f"The consumer pipeline is incomplete - leads will be silently dropped."
         )
     # Must contain PrismPipeline usage
     assert "PrismPipeline" in src, "dispatch.py does not reference PrismPipeline"
@@ -1249,7 +1249,7 @@ def t_dispatch_imports_prism_not_importlib():
             # detect spec.loader.exec_module(mod)
             if isinstance(fn, ast.Attribute) and fn.attr == "exec_module":
                 raise AssertionError(
-                    "SF-002 REGRESSION: dispatch.py calls exec_module() in live code — "
+                    "SF-002 REGRESSION: dispatch.py calls exec_module() in live code - "
                     "the importlib monolith-loading hack has been re-introduced."
                 )
 
@@ -1339,13 +1339,13 @@ print(f"                  V23 modular pipeline-main imports (Phase 9)")
 
 verdict = len(failed) == 0
 if verdict:
-    print(f"\n  {GREEN}{BOLD}\u2705  VERDICT: GO \u2014 All {total} local smoke tests PASSED.{RESET}")
+    print(f"\n  {GREEN}{BOLD}[GO]  VERDICT: GO - All {total} local smoke tests PASSED.{RESET}")
     print(f"  {GREEN}       V23 production cutover: OIDC fail-fast, gRPC lazy init,{RESET}")
     print(f"  {GREEN}       timestamp serialization, per-vector circuit breaker,{RESET}")
-    print(f"  {GREEN}       /produce stub retired \u2014 full pipeline re-wired.{RESET}")
+    print(f"  {GREEN}       /produce stub retired - full pipeline re-wired.{RESET}")
     print(f"  {GREEN}       Ready for v23-preview Cloud Run tag deployment.{RESET}")
 else:
-    print(f"\n  {RED}{BOLD}\U0001F6AB  VERDICT: NO-GO \u2014 {len(failed)} test(s) FAILED.{RESET}")
+    print(f"\n  {RED}{BOLD}\U0001F6AB  VERDICT: NO-GO - {len(failed)} test(s) FAILED.{RESET}")
     print(f"  {RED}       Fix failures before deploying to any environment.{RESET}")
 
 print(f"{BOLD}{'='*65}{RESET}\n")

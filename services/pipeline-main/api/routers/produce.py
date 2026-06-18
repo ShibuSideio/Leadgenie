@@ -246,12 +246,14 @@ def produce():
     # ------------------------------------------------------------------
     # Snippet cache: persist snippets universally for two-stage funnel
     # ------------------------------------------------------------------
+    shared_platforms = {"linkedin.com", "medium.com", "substack.com", "wordpress.com", "github.io"}
     for surl, meta in snippet_db.items():
         s_domain    = extract_root_domain(surl)
         is_social   = any(s_domain.endswith(d) for d in _SOCIAL_DOMAINS_PRODUCER)
+        is_shared   = any(s_domain.endswith(d) for d in shared_platforms)
         
         # Calculate matching dedup key to align scraped_cache document ID with dispatch lead_id
-        if is_social:
+        if is_social or is_shared:
             from urllib.parse import urlparse as _urlparse
             parsed = _urlparse(surl)
             dedup_key = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
@@ -301,11 +303,21 @@ def produce():
         for doc in known_docs:
             u = (doc.to_dict() or {}).get("url", "")
             if u:
+                d_domain = extract_root_domain(u)
                 d_is_social = any(
-                    extract_root_domain(u).endswith(s)
+                    d_domain.endswith(s)
                     for s in _SOCIAL_DOMAINS_PRODUCER
                 )
-                dedup_key = u if d_is_social else extract_root_domain(u)
+                d_is_shared = any(
+                    d_domain.endswith(s)
+                    for s in shared_platforms
+                )
+                if d_is_social or d_is_shared:
+                    from urllib.parse import urlparse as _urlparse
+                    parsed = _urlparse(u)
+                    dedup_key = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
+                else:
+                    dedup_key = d_domain
                 existing_ids.add(
                     hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
                 )
@@ -315,11 +327,21 @@ def produce():
 
     fresh_urls: list[str] = []
     for url in raw_urls:
+        f_domain = extract_root_domain(url)
         f_is_social = any(
-            extract_root_domain(url).endswith(s)
+            f_domain.endswith(s)
             for s in _SOCIAL_DOMAINS_PRODUCER
         )
-        dedup_key = url if f_is_social else extract_root_domain(url)
+        f_is_shared = any(
+            f_domain.endswith(s)
+            for s in shared_platforms
+        )
+        if f_is_social or f_is_shared:
+            from urllib.parse import urlparse as _urlparse
+            parsed = _urlparse(url)
+            dedup_key = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
+        else:
+            dedup_key = f_domain
         lead_hash = hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
         if lead_hash not in existing_ids and url not in existing_ids:
             fresh_urls.append(url)

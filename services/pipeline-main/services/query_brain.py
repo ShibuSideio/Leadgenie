@@ -309,7 +309,16 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 system_instruction=(
                     "You are the Sideio Query Brain. Process context strictly on a single "
                     "persona vector. You are explicitly forbidden from mixing or extracting "
-                    "trend phrases across decoupled business domains."
+                    "trend phrases across decoupled business domains.\n\n"
+                    "Output Format Example:\n"
+                    "{\n"
+                    "  \"historical_phrases\": [\"trend_phrase_alpha\", \"trend_phrase_beta\", \"trend_phrase_gamma\"],\n"
+                    "  \"symptom_dorks\": [\"symptom_operator_alpha\", \"symptom_operator_beta\", \"symptom_operator_gamma\"],\n"
+                    "  \"translated_queries\": [\"conversational_query_alpha\", \"conversational_query_beta\", \"conversational_query_gamma\"]\n"
+                    "}\n\n"
+                    "Hard Operational Guard:\n"
+                    "If the provided dynamic historical context dataset is empty, you must return an empty array [] for historical phrases. "
+                    "Do not under any circumstances output sample data from this instruction block."
                 ),
             )
             if isinstance(result, dict):
