@@ -70,6 +70,7 @@ def generate_smart_query(
     sourcing_vector: Optional[str] = None,
     persona_category: Optional[str] = None,
     targeting_signals: Optional[list] = None,
+    campaign_id: Optional[str] = None,
 ) -> list[str]:
     """Generate Serper query strings via statistical router or Gemini fallback.
 
@@ -102,14 +103,14 @@ def generate_smart_query(
         from google.cloud.firestore_v1.base_query import FieldFilter as _FF  # noqa: PLC0415
         # BUG-QB1 FIX: Deprecated positional .where() → FieldFilter.
         # .where("status", "in", [...]) deprecated in firestore >= 2.13.
-        q = (
-            get_db().collection("leads")
-            .where(filter=_FF("tenant_id", "==", tenant_id))
-            .where(filter=_FF("status", "in", ["contacted", "converted"]))
-            .limit(20)
-        )
+        q = get_db().collection("leads").where(filter=_FF("tenant_id", "==", tenant_id))
+        if campaign_id:
+            q = q.where(filter=_FF("campaign_id", "==", campaign_id))
+        q = q.where(filter=_FF("status", "in", ["contacted", "converted"])).limit(20)
         docs = list(q.stream())
-        if not docs:
+        if not docs and campaign_id:
+            # Fallback to tenant level if campaign has no conversion history
+            log.info("query_brain_rlhf_fallback_tenant", tenant_id=tenant_id, campaign_id=campaign_id)
             q = (
                 get_db().collection("leads")
                 .where(filter=_FF("tenant_id", "==", tenant_id))
@@ -135,12 +136,10 @@ def generate_smart_query(
         def _fetch_rejections():
             _db  = get_db()
             # Primary: explicit rejections
-            q_rej = (
-                _db.collection("leads")
-                .where(filter=_FF2("tenant_id", "==", tenant_id))
-                .where(filter=_FF2("status", "==", "rejected"))
-                .limit(30)
-            )
+            q_rej = _db.collection("leads").where(filter=_FF2("tenant_id", "==", tenant_id))
+            if campaign_id:
+                q_rej = q_rej.where(filter=_FF2("campaign_id", "==", campaign_id))
+            q_rej = q_rej.where(filter=_FF2("status", "==", "rejected")).limit(30)
             docs_rej  = list(q_rej.stream())
             _domains:      list[str] = []
             _title_frags:  list[str] = []
@@ -177,6 +176,7 @@ def generate_smart_query(
                 domains=len(neg_domains),
                 title_frags=len(neg_title_frags),
                 tenant_id=tenant_id[:10],
+                campaign_id=campaign_id,
             )
     except Exception as _neg_exc:
         # Non-critical — never block the query pipeline over negative RLHF
@@ -230,7 +230,8 @@ def generate_smart_query(
         log.warning("query_brain_confidence_failed", error=str(exc))
 
     log.info("query_brain_router",
-             persona=_p_cat, mode=_router_mode, confidence=int(_confidence))
+             persona=_p_cat, mode=_router_mode, confidence=int(_confidence),
+             tenant_id=tenant_id, campaign_id=campaign_id)
 
     # ── Step 3a: STATISTICAL path ──────────────────────────────────────────────
     historical_phrases: list[str] = []
@@ -313,6 +314,11 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 unified_prompt,
                 expect_json=True,
                 response_schema=_QUERY_BRAIN_SCHEMA,
+                system_instruction=(
+                    "You are the Sideio Query Brain. Process context strictly on a single "
+                    "persona vector. You are explicitly forbidden from mixing or extracting "
+                    "trend phrases across decoupled business domains."
+                ),
             )
             if isinstance(result, dict):
                 historical_phrases = [
@@ -330,7 +336,9 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 log.info("query_brain_gemini_ok",
                          hist=len(historical_phrases),
                          symp=len(symptom_dorks),
-                         tq=len(translated_queries))
+                         tq=len(translated_queries),
+                         tenant_id=tenant_id,
+                         campaign_id=campaign_id)
         except Exception as exc:
             log.warning("query_brain_gemini_failed", error=str(exc))
 

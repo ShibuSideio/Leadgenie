@@ -481,7 +481,7 @@ _QUERY_BRAIN_SCHEMA = {
 }
 
 
-def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None, persona_category=None):
+def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None, persona_category=None, campaign_id=None):
     """
     V21: Hybrid Starter Motor — Confidence Threshold Router.
 
@@ -498,10 +498,13 @@ def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None, pe
     # ── Step 1: Fetch RLHF history context (Firestore read — no Gemini call) ──
     pain_points: list = []
     try:
-        query = db.collection("leads").where("tenant_id", "==", tenant_id).where("status", "in", ["contacted", "converted"]).limit(20)
+        query = db.collection("leads").where("tenant_id", "==", tenant_id)
+        if campaign_id:
+            query = query.where("campaign_id", "==", campaign_id)
+        query = query.where("status", "in", ["contacted", "converted"]).limit(20)
         docs = list(query.stream())
-        if not docs:
-            query = db.collection("leads").where("status", "in", ["contacted", "converted"]).limit(20)
+        if not docs and campaign_id:
+            query = db.collection("leads").where("tenant_id", "==", tenant_id).where("status", "in", ["contacted", "converted"]).limit(20)
             docs = list(query.stream())
         pain_points = [d.to_dict().get("pain_point", "") for d in docs if d.to_dict().get("pain_point")]
     except Exception as e:
@@ -1425,7 +1428,8 @@ def produce():
     ).strip()
     smart_keywords = generate_smart_query(
         keywords, tenant_id, bio, sourcing_vector,
-        persona_category=_persona_cat
+        persona_category=_persona_cat,
+        campaign_id=campaign_id
     )
     _tlog.info("TRACE-8: generate_smart_query complete. smart_keyword_count=%d", len(smart_keywords))
 

@@ -185,6 +185,7 @@ def produce():
             keywords, tenant_id, bio, sourcing_vector,
             persona_category=_persona_cat,
             targeting_signals=_targeting_signals,
+            campaign_id=campaign_id,
         )
     except Exception as exc:
         log.critical(
