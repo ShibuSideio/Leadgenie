@@ -140,6 +140,15 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
     all_signals: list[dict] = []
 
     for camp in campaigns:
+        # Force a hard reset of these variables at the very top of the loop block
+        current_pain_points = camp.get("pain_points", [])
+        current_target_audience = camp.get("target_audience", [])
+        if not current_pain_points:
+            current_pain_points = []
+        if not current_target_audience:
+            current_target_audience = []
+        persona = {}
+
         persona_id = camp.get("persona_id")
         if not persona_id:
             continue
