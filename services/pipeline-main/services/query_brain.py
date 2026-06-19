@@ -60,6 +60,44 @@ _DEFAULT_BLACKLIST = (
 
 
 # ---------------------------------------------------------------------------
+# Scoped Context Class
+# ---------------------------------------------------------------------------
+
+class CampaignQueryContext:
+    """Scoped query construction context for a single evaluated campaign instance.
+    
+    Enforces strict campaign-level isolation and context purification to prevent
+    leakage/cross-contamination of database attributes (target_audience, pain_points,
+    intents) across distinct campaign loops.
+    """
+    def __init__(
+        self,
+        campaign_id: Optional[str],
+        tenant_id: str,
+        user_keywords: list[str],
+        bio: str,
+        sourcing_vector: Optional[str] = None,
+        persona_category: Optional[str] = None,
+        targeting_signals: Optional[list] = None,
+    ):
+        self.campaign_id = campaign_id
+        self.tenant_id = tenant_id
+        self.target_audience = list(user_keywords) if user_keywords else []
+        self.bio = bio or ""
+        self.sourcing_vector = sourcing_vector
+        self.persona_category = persona_category
+        self.targeting_signals = list(targeting_signals) if targeting_signals else []
+        
+        # Scoped dynamic arrays
+        self.pain_points: list[str] = []
+        self.intents: list[str] = []
+        self.neg_domains: list[str] = []
+        self.neg_title_frags: list[str] = []
+        self.symptom_dorks: list[str] = []
+        self.has_local_history: bool = False
+
+
+# ---------------------------------------------------------------------------
 # Main function
 # ---------------------------------------------------------------------------
 
@@ -82,11 +120,7 @@ def generate_smart_query(
         persona_category:   Persona category for BQ intent confidence query.
         targeting_signals:  List of Persona targeting signal strings.  Any
                             entry starting with "NOT " (case-insensitive) is
-                            parsed into a Serper exclusion operator:
-                              "NOT digital marketing agency"
-                              --> -\"digital marketing agency\"
-                            Positive signals (no NOT prefix) are reserved for
-                            future intent-boosting (currently a no-op).
+                            parsed into a Serper exclusion operator.
 
     Returns:
         List of ready-to-use Serper query strings (may be empty on error).
@@ -95,42 +129,43 @@ def generate_smart_query(
     from services.gemini_service import call_gemini_2_5  # type: ignore[import]
     import json
 
+    # Instantiate the campaign scoped context to ensure absolute data boundary isolation.
+    ctx = CampaignQueryContext(
+        campaign_id=campaign_id,
+        tenant_id=tenant_id,
+        user_keywords=user_keywords,
+        bio=bio,
+        sourcing_vector=sourcing_vector,
+        persona_category=persona_category,
+        targeting_signals=targeting_signals,
+    )
+
     # ── Step 1: RLHF history (Firestore read) ─────────────────────────────────
-    pain_points:      list[str] = []
-    neg_domains:      list[str] = []   # domains from rejected/low-score leads
-    neg_title_frags:  list[str] = []   # title patterns (job boards, directories)
-    has_local_history: bool = False
     try:
         from google.cloud.firestore_v1.base_query import FieldFilter as _FF  # noqa: PLC0415
-        # BUG-QB1 FIX: Deprecated positional .where() → FieldFilter.
-        # .where("status", "in", [...]) deprecated in firestore >= 2.13.
-        q = get_db().collection("leads").where(filter=_FF("tenant_id", "==", tenant_id))
-        if campaign_id:
-            q = q.where(filter=_FF("campaign_id", "==", campaign_id))
+        q = get_db().collection("leads").where(filter=_FF("tenant_id", "==", ctx.tenant_id))
+        if ctx.campaign_id:
+            q = q.where(filter=_FF("campaign_id", "==", ctx.campaign_id))
         q = q.where(filter=_FF("status", "in", ["contacted", "converted"])).limit(20)
         docs = list(q.stream())
-        pain_points = [
+        ctx.pain_points = [
             d.to_dict().get("pain_point", "")
             for d in docs if d.to_dict().get("pain_point")
         ]
-        has_local_history = len(pain_points) > 0
+        ctx.has_local_history = len(ctx.pain_points) > 0
     except Exception as exc:
         log.warning("query_brain_rlhf_fetch_failed", error=str(exc))
 
     # ── Step 1b: Negative RLHF — Shadow Ledger rejection footprints ───────────
-    # Query rejected / low-score leads for this tenant and extract common
-    # junk footprints (domain = N/A, job board titles, directory patterns).
-    # These become dynamic Google Search exclusion operators: -site:X, -intitle:"Y".
     try:
         from google.cloud.firestore_v1.base_query import FieldFilter as _FF2  # noqa: PLC0415
         import concurrent.futures as _cf
 
         def _fetch_rejections():
             _db  = get_db()
-            # Primary: explicit rejections
-            q_rej = _db.collection("leads").where(filter=_FF2("tenant_id", "==", tenant_id))
-            if campaign_id:
-                q_rej = q_rej.where(filter=_FF2("campaign_id", "==", campaign_id))
+            q_rej = _db.collection("leads").where(filter=_FF2("tenant_id", "==", ctx.tenant_id))
+            if ctx.campaign_id:
+                q_rej = q_rej.where(filter=_FF2("campaign_id", "==", ctx.campaign_id))
             q_rej = q_rej.where(filter=_FF2("status", "==", "rejected")).limit(30)
             docs_rej  = list(q_rej.stream())
             _domains:      list[str] = []
@@ -141,17 +176,13 @@ def generate_smart_query(
             ]
             for d in docs_rej:
                 dd = d.to_dict() or {}
-                # Extract domain from target_url or target_domain
                 domain = (
                     dd.get("target_domain")
                     or dd.get("domain")
                     or ""
                 ).strip().lower()
-                score = dd.get("score", 10)
-                # Skip N/A domains and already-blacklisted generics
                 if domain and domain not in ("n/a", "unknown", "") and "." in domain:
                     _domains.append(domain)
-                # Extract title for junk pattern detection
                 title = (dd.get("title") or dd.get("raw_query") or "").lower()
                 for pattern in JUNK_TITLE_PATTERNS:
                     if pattern in title and pattern not in _title_frags:
@@ -160,22 +191,20 @@ def generate_smart_query(
 
         with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
             _fut = _pool.submit(_fetch_rejections)
-            neg_domains, neg_title_frags = _fut.result(timeout=2.0)
+            ctx.neg_domains, ctx.neg_title_frags = _fut.result(timeout=2.0)
 
-        if neg_domains or neg_title_frags:
+        if ctx.neg_domains or ctx.neg_title_frags:
             log.info(
                 "query_brain_neg_rlhf_loaded",
-                domains=len(neg_domains),
-                title_frags=len(neg_title_frags),
-                tenant_id=tenant_id[:10],
-                campaign_id=campaign_id,
+                domains=len(ctx.neg_domains),
+                title_frags=len(ctx.neg_title_frags),
+                tenant_id=ctx.tenant_id[:10],
+                campaign_id=ctx.campaign_id,
             )
     except Exception as _neg_exc:
-        # Non-critical — never block the query pipeline over negative RLHF
         log.debug("query_brain_neg_rlhf_failed", error=str(_neg_exc))
 
-
-    _p_cat = (persona_category or "general").strip() or "general"
+    _p_cat = (ctx.persona_category or "general").strip() or "general"
 
     # ── Step 2: Confidence threshold router ───────────────────────────────────
     _CONF_THRESHOLD = 1000.0
@@ -202,10 +231,10 @@ def generate_smart_query(
                 job = bq.query(
                     q_str,
                     job_config=_bq.QueryJobConfig(query_parameters=[
-                        _bq.ScalarQueryParameter("tid", "STRING", tenant_id),
+                        _bq.ScalarQueryParameter("tid", "STRING", ctx.tenant_id),
                         _bq.ScalarQueryParameter("cat", "STRING", _p_cat),
                     ]),
-                    location="asia-south1",  # REGIONALITY FIX: never rely on SDK default
+                    location="asia-south1",
                 )
                 rows = list(job.result(timeout=3))
                 return float(rows[0]["total_confidence"]) if rows else 0.0
@@ -223,13 +252,9 @@ def generate_smart_query(
 
     log.info("query_brain_router",
              persona=_p_cat, mode=_router_mode, confidence=int(_confidence),
-             tenant_id=tenant_id, campaign_id=campaign_id)
+             tenant_id=ctx.tenant_id, campaign_id=ctx.campaign_id)
 
     # ── Step 3a: STATISTICAL path ──────────────────────────────────────────────
-    historical_phrases: list[str] = []
-    symptom_dorks:      list[str] = []
-    translated_queries: list[str] = []
-
     if _router_mode == "STATISTICAL":
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
@@ -246,10 +271,10 @@ def generate_smart_query(
                     job = bq.query(
                         ng_q,
                         job_config=_bq.QueryJobConfig(query_parameters=[
-                            _bq.ScalarQueryParameter("tid", "STRING", tenant_id),
+                            _bq.ScalarQueryParameter("tid", "STRING", ctx.tenant_id),
                             _bq.ScalarQueryParameter("cat", "STRING", _p_cat),
                         ]),
-                        location="asia-south1",  # REGIONALITY FIX: never rely on SDK default
+                        location="asia-south1",
                     )
                     rows = list(job.result(timeout=3))
                     return [r["n_gram"] for r in rows if r["n_gram"]]
@@ -257,18 +282,18 @@ def generate_smart_query(
                 top_ngrams = pool.submit(_fetch_ngrams).result(timeout=3.5)
 
             if top_ngrams:
-                historical_phrases = top_ngrams[:3]
-                kw_str = ", ".join(user_keywords) if user_keywords else ""
+                ctx.pain_points = top_ngrams[:3]
+                kw_str = ", ".join(ctx.target_audience) if ctx.target_audience else ""
                 for ng in top_ngrams[:3]:
-                    translated_queries.append(
+                    ctx.intents.append(
                         f'"{ng}" AND ({kw_str})' if kw_str else f'"{ng}"'
                     )
-                if bio and top_ngrams:
-                    symptom_dorks = [
+                if ctx.bio and top_ngrams:
+                    ctx.symptom_dorks = [
                         f'"{top_ngrams[0]}"',
                     ]
                 log.info("query_brain_statistical_built",
-                         query_count=len(translated_queries), ngrams=top_ngrams)
+                         query_count=len(ctx.intents), ngrams=top_ngrams)
             else:
                 _router_mode = "GEMINI_FALLBACK"
                 log.info("query_brain_statistical_no_ngrams_degrading")
@@ -279,9 +304,9 @@ def generate_smart_query(
 
     # ── Step 3b: GEMINI FALLBACK ───────────────────────────────────────────────
     if _router_mode == "GEMINI_FALLBACK":
-        kw_str       = ", ".join(user_keywords) if user_keywords else ""
-        vector_label = sourcing_vector or "Classic B2B"
-        history_ctx  = json.dumps(pain_points) if pain_points else "[]"
+        kw_str       = ", ".join(ctx.target_audience) if ctx.target_audience else ""
+        vector_label = ctx.sourcing_vector or "Classic B2B"
+        history_ctx  = json.dumps(ctx.pain_points) if ctx.pain_points else "[]"
 
         unified_prompt = f"""You are the Sideio Query Brain. Perform ALL THREE tasks in a single response.
 
@@ -290,7 +315,7 @@ Extract exactly 3 short B2B trend phrases from successful lead pain_points.
 Data: {history_ctx}
 
 # TASK 2 — SYMPTOM DORKING
-User solves: '{bio}'.
+User solves: '{ctx.bio}'.
 Generate exactly 3 Google Search operator strings targeting prospects experiencing this problem.
 Rule: Do NOT target specific platforms or domains (do NOT use site:linkedin.com, site:facebook.com, or site:reddit.com). Focus queries purely on the problem symptoms, keywords, and professional context.
 Rule: Every query MUST include negative keywords (-shop -cart -amazon -wiki -jobs).
@@ -322,24 +347,24 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 ),
             )
             if isinstance(result, dict):
-                historical_phrases = [
+                ctx.pain_points = [
                     p.strip() for p in result.get("historical_phrases", [])
                     if isinstance(p, str) and p.strip()
                 ][:3]
-                symptom_dorks = [
+                ctx.symptom_dorks = [
                     s.strip() for s in result.get("symptom_dorks", [])
                     if isinstance(s, str) and s.strip()
                 ][:3]
-                translated_queries = [
+                ctx.intents = [
                     q.strip() for q in result.get("translated_queries", [])
                     if isinstance(q, str) and q.strip()
                 ][:3]
                 log.info("query_brain_gemini_ok",
-                         hist=len(historical_phrases),
-                         symp=len(symptom_dorks),
-                         tq=len(translated_queries),
-                         tenant_id=tenant_id,
-                         campaign_id=campaign_id)
+                         hist=len(ctx.pain_points),
+                         symp=len(ctx.symptom_dorks),
+                         tq=len(ctx.intents),
+                         tenant_id=ctx.tenant_id,
+                         campaign_id=ctx.campaign_id)
         except Exception as exc:
             log.warning("query_brain_gemini_failed", error=str(exc))
 
@@ -347,20 +372,11 @@ Return ONLY the JSON object. No explanation, no markdown."""
     blacklist = _DEFAULT_BLACKLIST
 
     # ── Pre-emptive Persona exclusions: "NOT <phrase>" targeting signals (V23.5) ─
-    # These are injected FIRST — before Shadow Ledger or neg_shield — so they
-    # are guaranteed to appear in every generated Serper query string.
-    #
-    # Parsing rule (case-insensitive):
-    #   "NOT digital marketing agency"  →  -"digital marketing agency"
-    #   "NOT site:linkedin.com/jobs"    →  -"site:linkedin.com/jobs"
-    #
-    # Positive signals (no "NOT " prefix) are a no-op here; reserved for
-    # future intent-weight boosting in the statistical RLHF path.
     _pre_exclusions: list[str] = []
-    for _sig in (targeting_signals or []):
+    for _sig in (ctx.targeting_signals or []):
         _sig_clean = (_sig or "").strip()
         if _sig_clean.upper().startswith("NOT "):
-            _phrase = _sig_clean[4:].strip()   # strip the 4-char "NOT " prefix
+            _phrase = _sig_clean[4:].strip()
             if _phrase:
                 _pre_exclusions.append(f'-"{_phrase}"')
 
@@ -372,9 +388,9 @@ Return ONLY the JSON object. No explanation, no markdown."""
             sample=_pre_exclusions[:3],
         )
 
-    # Negative Signal Shield injection (static Neo4j-style exclusion list from Shadow Ledger)
+    # Negative Signal Shield injection
     try:
-        shield_domains, shield_entities = fetch_neg_shield(tenant_id)
+        shield_domains, shield_entities = fetch_neg_shield(ctx.tenant_id)
         if shield_domains:
             blacklist += " " + " ".join(f"-site:{d}" for d in shield_domains[:15] if d)
         if shield_entities:
@@ -385,48 +401,45 @@ Return ONLY the JSON object. No explanation, no markdown."""
     except Exception as exc:
         log.warning("neg_shield_injection_failed", error=str(exc))
 
-    # Negative RLHF dorking — dynamic exclusion from rejection footprints (V23.5)
-    # Appends -site: and -intitle: operators derived from leads the campaign rejected,
-    # steering Serper away from historically junk sources (job boards, dirs, thin pages).
-    if neg_domains:
-        # Cap at 10 to avoid query string overflow (~2048 char Google limit)
-        _excl_sites = " ".join(f"-site:{d}" for d in neg_domains[:10] if d)
+    # Negative RLHF dorking
+    if ctx.neg_domains:
+        _excl_sites = " ".join(f"-site:{d}" for d in ctx.neg_domains[:10] if d)
         blacklist += " " + _excl_sites
-        log.info("neg_rlhf_sites_injected", count=len(neg_domains[:10]))
-    if neg_title_frags:
-        _excl_titles = " ".join(f'-intitle:"{t}"' for t in neg_title_frags[:5] if t)
+        log.info("neg_rlhf_sites_injected", count=len(ctx.neg_domains[:10]))
+    if ctx.neg_title_frags:
+        _excl_titles = " ".join(f'-intitle:"{t}"' for t in ctx.neg_title_frags[:5] if t)
         blacklist += " " + _excl_titles
-        log.info("neg_rlhf_titles_injected", count=len(neg_title_frags[:5]))
+        log.info("neg_rlhf_titles_injected", count=len(ctx.neg_title_frags[:5]))
 
-    if not has_local_history:
-        historical_phrases = []
+    if not ctx.has_local_history:
+        ctx.pain_points = []
 
     historical_str = ""
-    if historical_phrases:
-        phrases_esc  = [f'"{p}"' for p in historical_phrases[:3]]
+    if ctx.pain_points:
+        phrases_esc  = [f'"{p}"' for p in ctx.pain_points[:3]]
         historical_str = " AND (" + " OR ".join(phrases_esc) + ")"
 
     smart_queries: list[str] = []
-    kw_str = ", ".join(user_keywords) if user_keywords else ""
+    kw_str = ", ".join(ctx.target_audience) if ctx.target_audience else ""
 
-    if translated_queries:
-        for tq in translated_queries:
+    if ctx.intents:
+        for tq in ctx.intents:
             smart_queries.append(f'"{tq}"{historical_str} {blacklist}')
         log.info("query_brain_assembled",
-                 count=len(translated_queries), mode=_router_mode,
-                 vector=sourcing_vector or "Classic B2B")
+                 count=len(ctx.intents), mode=_router_mode,
+                 vector=ctx.sourcing_vector or "Classic B2B")
     elif kw_str:
-        for kw in user_keywords or []:
+        for kw in ctx.target_audience or []:
             smart_queries.append(f'("{kw}"){historical_str} {blacklist}')
 
-    for sd in symptom_dorks:
+    for sd in ctx.symptom_dorks:
         smart_queries.append(f"{sd} {blacklist}")
 
-    if sourcing_vector and sourcing_vector in VECTOR_PLATFORM_MAP:
-        for dork in VECTOR_PLATFORM_MAP[sourcing_vector]:
+    if ctx.sourcing_vector and ctx.sourcing_vector in VECTOR_PLATFORM_MAP:
+        for dork in VECTOR_PLATFORM_MAP[ctx.sourcing_vector]:
             smart_queries.append(f"{dork}{historical_str} {blacklist}")
         log.info("synaptic_router_dorks_appended",
-                 count=len(VECTOR_PLATFORM_MAP[sourcing_vector]),
-                 vector=sourcing_vector)
+                 count=len(VECTOR_PLATFORM_MAP[ctx.sourcing_vector]),
+                 vector=ctx.sourcing_vector)
 
     return smart_queries

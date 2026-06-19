@@ -1302,10 +1302,115 @@ def t_serper_query_sanitization():
         assert san == q_out, f"Sanitizing '{q_in}' -> expected '{q_out}', got '{san}'"
 
 
+def t_query_brain_campaign_isolation():
+    """Verify campaign isolation: generated Toyota queries do not contain medical or brand story."""
+    import importlib.util as _ilu
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    src_path = os.path.join(_PM_PATH, "services", "query_brain.py")
+    spec = _ilu.spec_from_file_location("test_query_brain", src_path)
+    mod = _ilu.module_from_spec(spec)
+
+    # Save already imported 'core' and 'services' modules
+    saved_modules = {}
+    saved_services = {}
+    for k in list(sys.modules.keys()):
+        if k == "core" or k.startswith("core."):
+            saved_modules[k] = sys.modules.pop(k)
+        elif k == "services" or k.startswith("services."):
+            saved_services[k] = sys.modules.pop(k)
+
+    sys.path.insert(0, _PM_PATH)
+    try:
+        # Load gemini_service
+        gs_path = os.path.join(_PM_PATH, "services", "gemini_service.py")
+        gs_spec = _ilu.spec_from_file_location("services.gemini_service", gs_path)
+        gs = _ilu.module_from_spec(gs_spec)
+        sys.modules["services.gemini_service"] = gs
+        gs_spec.loader.exec_module(gs)
+
+        # Load neg_shield
+        ns_path = os.path.join(_PM_PATH, "services", "neg_shield.py")
+        ns_spec = _ilu.spec_from_file_location("services.neg_shield", ns_path)
+        ns = _ilu.module_from_spec(ns_spec)
+        sys.modules["services.neg_shield"] = ns
+        ns_spec.loader.exec_module(ns)
+
+        spec.loader.exec_module(mod)
+
+        # Mock BQ client, Firestore DB and Gemini API calls
+        mock_db = MagicMock()
+        mock_leads = MagicMock()
+        mock_db.collection.return_value = mock_leads
+        mock_leads.where.return_value = mock_leads
+        mock_leads.limit.return_value = mock_leads
+        mock_leads.stream.return_value = []
+
+        mock_bq = MagicMock()
+        mock_job = MagicMock()
+        mock_job.result.return_value = []
+        mock_bq.query.return_value = mock_job
+
+        mock_shield = MagicMock(return_value=([], []))
+        mock_gemini = MagicMock()
+
+        # We patch the modules needed for mod.generate_smart_query
+        with patch.object(mod, "get_db", return_value=mock_db), \
+             patch.object(mod, "get_bq_client", return_value=mock_bq), \
+             patch.object(gs, "call_gemini_2_5", mock_gemini), \
+             patch.object(ns, "fetch_neg_shield", mock_shield):
+
+            # First run: medical campaign
+            mock_gemini.return_value = {
+                "historical_phrases": ["medical device", "brand story design", "hospital"],
+                "symptom_dorks": ["clinical workflow", "patient records"],
+                "translated_queries": ["medical billing software", "brand story marketing"]
+            }
+            med_queries = mod.generate_smart_query(
+                user_keywords=["medical", "brand story"],
+                tenant_id="tenant_123",
+                bio="medical device software and brand story marketing",
+                sourcing_vector="Classic B2B",
+                campaign_id="campaign_medical"
+            )
+
+            # Second run: Toyota campaign (distinct campaign)
+            mock_gemini.return_value = {
+                "historical_phrases": ["Toyota truck", "automotive"],
+                "symptom_dorks": ["Toyota fuel efficiency"],
+                "translated_queries": ["Toyota car review"]
+            }
+            toyota_queries = mod.generate_smart_query(
+                user_keywords=["Toyota"],
+                tenant_id="tenant_123",
+                bio="Toyota vehicle sales",
+                sourcing_vector="Classic B2B",
+                campaign_id="campaign_toyota"
+            )
+
+            # Assert zero contamination of medical or brand story attributes in Toyota queries
+            for q in toyota_queries:
+                if "Toyota" in q or "toyota" in q.lower():
+                    assert "medical" not in q.lower(), f"Contamination 'medical' found in Toyota query: {q}"
+                    assert "brand story" not in q.lower(), f"Contamination 'brand story' found in Toyota query: {q}"
+    finally:
+        sys.path.pop(0)
+        # Evict pipeline-main modules to restore clean environment
+        for k in list(sys.modules.keys()):
+            if k == "core" or k.startswith("core.") or k == "services" or k.startswith("services."):
+                sys.modules.pop(k, None)
+        # Restore orchestrator modules
+        sys.modules.update(saved_modules)
+        sys.modules.update(saved_services)
+
+
 test("prism_pipeline.py exists with all 5 PRISM classes (AST)",         t_prism_pipeline_ast_check)
 test("dispatch.py: all TRACE-1..10 present, no hollow stub",            t_dispatch_trace_markers_present)
 test("dispatch.py: PrismPipeline imported directly, not via importlib", t_dispatch_imports_prism_not_importlib)
 test("Serper query sanitization (compliance check)",                     t_serper_query_sanitization)
+test("Query Brain campaign isolation",                                 t_query_brain_campaign_isolation)
+
 
 # =============================================================================
 # FINAL REPORT
