@@ -147,7 +147,9 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
         persona_snap = db.collection("personas").document(persona_id).get()
         if not persona_snap.exists:
             continue
-        persona = persona_snap.to_dict()
+        persona = persona_snap.to_dict() or {}
+
+        assert persona.get("uid") == uid or persona.get("tenant_id") == uid, "Persona multi-tenancy violation detected."
 
         try:
             svc     = InboundSentimentService(persona=persona, campaign=camp)

@@ -232,6 +232,10 @@ def dispatch():
                   error=str(cget_err), exc_info=True)
         return jsonify({"error": "Firestore timeout fetching campaign"}), 500
 
+    if campaign.get("tenant_id") != tenant_id:
+        log.warning("dispatch_unauthorized_tenant_context", campaign_id=campaign_id, tenant_id=tenant_id)
+        return jsonify({"error": "Unauthorized tenant context"}), 403
+
     bio             = campaign.get("bio", "")
     sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
     location        = campaign.get("location", "").strip()

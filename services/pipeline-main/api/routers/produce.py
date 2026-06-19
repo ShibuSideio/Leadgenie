@@ -87,6 +87,10 @@ def produce():
         )
         return jsonify({"error": "Firestore error fetching campaign"}), 500
 
+    if campaign.get("tenant_id") != tenant_id:
+        log.warning("produce_unauthorized_tenant_context", campaign_id=campaign_id, tenant_id=tenant_id)
+        return jsonify({"error": "Unauthorized tenant context"}), 403
+
     log.info(
         "TRACE-5: Campaign fetched.",
         sourcing_vector=campaign.get("sourcing_vector"),
