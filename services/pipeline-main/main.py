@@ -511,6 +511,8 @@ def generate_smart_query(user_keywords, tenant_id, bio, sourcing_vector=None, pe
 
     # ── Step 2: Resolve persona_category for router key ————————————————
     _p_cat = (persona_category or "general").strip() or "general"
+    if campaign_id:
+        _p_cat = f"{campaign_id}_{_p_cat}"
 
     # ── Step 2a: Confidence Threshold Router ─────────────────────────────
     # SELECT SUM(yield_weight) with a 3-second hard timeout.

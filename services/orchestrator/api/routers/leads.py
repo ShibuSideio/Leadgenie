@@ -119,6 +119,7 @@ def update_lead(uid, tenant_id, user_role, doc_id):
                 camp_snap  = db.collection("campaigns").document(camp_id_st).get()
                 camp_dict  = camp_snap.to_dict() if camp_snap.exists else {}
                 persona_cat = (camp_dict.get("persona_name") or camp_dict.get("name") or "general").strip()
+                persona_cat = f"{camp_id_st}_{persona_cat}"
             if pain_st and persona_cat:
                 _async_shadow_track(persona_category=persona_cat, pain_point=pain_st, tenant_id=tenant_id)
         except Exception as st_e:

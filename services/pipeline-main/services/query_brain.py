@@ -205,6 +205,8 @@ def generate_smart_query(
         log.debug("query_brain_neg_rlhf_failed", error=str(_neg_exc))
 
     _p_cat = (ctx.persona_category or "general").strip() or "general"
+    if ctx.campaign_id:
+        _p_cat = f"{ctx.campaign_id}_{_p_cat}"
 
     # ── Step 2: Confidence threshold router ───────────────────────────────────
     _CONF_THRESHOLD = 1000.0

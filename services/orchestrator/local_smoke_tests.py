@@ -1361,6 +1361,8 @@ def t_query_brain_campaign_isolation():
              patch.object(gs, "call_gemini_2_5", mock_gemini), \
              patch.object(ns, "fetch_neg_shield", mock_shield):
 
+            _gc_bq.ScalarQueryParameter.reset_mock()
+
             # First run: medical campaign
             mock_gemini.return_value = {
                 "historical_phrases": ["medical device", "brand story design", "hospital"],
@@ -1394,6 +1396,19 @@ def t_query_brain_campaign_isolation():
                 if "Toyota" in q or "toyota" in q.lower():
                     assert "medical" not in q.lower(), f"Contamination 'medical' found in Toyota query: {q}"
                     assert "brand story" not in q.lower(), f"Contamination 'brand story' found in Toyota query: {q}"
+
+            # Verify BQ call campaign isolation prefixing
+            print("MOCK_BQ CALLS:", mock_bq.mock_calls)
+            print("MOCK_BQ.QUERY CALLS:", mock_bq.query.call_args_list)
+            assert mock_bq.query.call_count > 0, "BQ client query was not called"
+            cat_params = []
+            for call in _gc_bq.ScalarQueryParameter.call_args_list:
+                args = call[0]
+                if len(args) >= 3 and args[0] == "cat":
+                    cat_params.append(args[2])
+            print("EXTRACTED CAT PARAMS:", cat_params)
+            assert any("campaign_medical" in c for c in cat_params), f"Medical campaign ID not found in BQ cat parameters: {cat_params}"
+            assert any("campaign_toyota" in c for c in cat_params), f"Toyota campaign ID not found in BQ cat parameters: {cat_params}"
     finally:
         sys.path.pop(0)
         # Evict pipeline-main modules to restore clean environment
