@@ -147,20 +147,44 @@ def generate_smart_query(
     )
 
     # ── Step 1: RLHF history (Firestore read) ─────────────────────────────────
-    try:
-        from google.cloud.firestore_v1.base_query import FieldFilter as _FF  # noqa: PLC0415
-        q = get_db().collection("leads").where(filter=_FF("tenant_id", "==", ctx.tenant_id))
-        if ctx.campaign_id:
-            q = q.where(filter=_FF("campaign_id", "==", ctx.campaign_id))
-        q = q.where(filter=_FF("status", "in", ["contacted", "converted"])).limit(20)
-        docs = list(q.stream())
-        ctx.pain_points = [
-            d.to_dict().get("pain_point", "")
-            for d in docs if d.to_dict().get("pain_point")
-        ]
-        ctx.has_local_history = len(ctx.pain_points) > 0
-    except Exception as exc:
-        log.warning("query_brain_rlhf_fetch_failed", error=str(exc))
+    # FIX (2026-06-20): Prevent global tenant fallback leakage.
+    # Without campaign_id scoping, the query returns pain_points from ALL tenant
+    # campaigns — including B2B SaaS. Those B2B pain points ("Weak brand story",
+    # "unclear positioning") then leak into Real Estate queries via historical_str.
+    #
+    # Policy:
+    #   - campaign_id present → scope to that campaign only (safe)
+    #   - campaign_id missing + consumer vector → SKIP entirely (no tenant-wide)
+    #   - campaign_id missing + B2B vector → allow tenant-wide (acceptable)
+    _is_consumer_ctx = (ctx.sourcing_vector or "").lower().strip() in _CONSUMER_VECTORS
+    _skip_rlhf = (not ctx.campaign_id) and _is_consumer_ctx
+
+    if _skip_rlhf:
+        log.info("query_brain_rlhf_skipped_consumer_no_campaign_id",
+                 vector=ctx.sourcing_vector, tenant_id=ctx.tenant_id[:10],
+                 note="Skipping tenant-wide RLHF fetch for consumer vector "
+                      "to prevent B2B pain point leakage.")
+    else:
+        try:
+            from google.cloud.firestore_v1.base_query import FieldFilter as _FF  # noqa: PLC0415
+            q = get_db().collection("leads").where(filter=_FF("tenant_id", "==", ctx.tenant_id))
+            if ctx.campaign_id:
+                q = q.where(filter=_FF("campaign_id", "==", ctx.campaign_id))
+            else:
+                log.warning("query_brain_rlhf_tenant_wide",
+                            tenant_id=ctx.tenant_id[:10],
+                            vector=ctx.sourcing_vector,
+                            note="No campaign_id — RLHF fetch is tenant-wide. "
+                                 "Pain points may span multiple vectors.")
+            q = q.where(filter=_FF("status", "in", ["contacted", "converted"])).limit(20)
+            docs = list(q.stream())
+            ctx.pain_points = [
+                d.to_dict().get("pain_point", "")
+                for d in docs if d.to_dict().get("pain_point")
+            ]
+            ctx.has_local_history = len(ctx.pain_points) > 0
+        except Exception as exc:
+            log.warning("query_brain_rlhf_fetch_failed", error=str(exc))
 
     # ── Step 1b: Negative RLHF — Shadow Ledger rejection footprints ───────────
     try:
@@ -472,10 +496,27 @@ Return ONLY the JSON object. No explanation, no markdown."""
     if not ctx.has_local_history:
         ctx.pain_points = []
 
+    # ── Consumer vector guard (FIX 2026-06-20) ─────────────────────────────
+    # CRITICAL: Consumer/B2C campaigns must NEVER have historical_str appended.
+    # Even if campaign-scoped RLHF returned pain_points from a correctly-tagged
+    # B2C lead, appending AND ("...") operators to consumer search queries
+    # destroys Serper recall by adding irrelevant boolean constraints.
+    # Consumer queries rely purely on intents + symptom_dorks + blacklist.
+    _is_consumer = (ctx.sourcing_vector or "").lower().strip() in _CONSUMER_VECTORS
+    if _is_consumer:
+        if ctx.pain_points:
+            log.info("query_brain_consumer_pain_points_suppressed",
+                     count=len(ctx.pain_points),
+                     sample=ctx.pain_points[:2],
+                     vector=ctx.sourcing_vector,
+                     campaign_id=ctx.campaign_id,
+                     note="Consumer vectors do not use historical_str. "
+                          "Pain points suppressed to prevent query suffocation.")
+        ctx.pain_points = []
+
     # ── Post-generation sanitizer (FIX 2026-06-20) ─────────────────────────
     # For consumer vectors, scrub any B2B jargon that Gemini may have leaked
     # into translated_queries despite the prompt guards. Belt-and-suspenders.
-    _is_consumer = (ctx.sourcing_vector or "").lower().strip() in _CONSUMER_VECTORS
     if _is_consumer and ctx.intents:
         _B2B_JARGON = {
             "brand story", "unclear positioning", "weak brand",
