@@ -31,12 +31,15 @@ log = get_logger("pipeline.query_brain")
 
 VECTOR_PLATFORM_MAP: dict[str, list[str]] = {}
 
+# FIX (2026-06-20): Removed hardcoded "B2B" from schema description.
+# The word "B2B" in the schema primed Gemini to hallucinate corporate
+# pain points even for B2C/Real Estate campaigns.
 _QUERY_BRAIN_SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "historical_phrases": {
             "type":        "ARRAY",
-            "description": "Exactly 3 short B2B trend phrases from historical lead pain_points.",
+            "description": "Up to 3 short trend phrases from historical lead pain_points. Return empty array if no data provided.",
             "items":       {"type": "STRING"},
         },
         "symptom_dorks": {
@@ -57,6 +60,9 @@ _DEFAULT_BLACKLIST = (
     "-wiki -jobs -careers -investors -support -\"login\" "
     "-www.zoominfo.com -www.ibm.com -www.amazon.com"
 )
+
+# B2C / consumer vectors that must suppress corporate B2B prompt framing
+_CONSUMER_VECTORS: set[str] = {"b2c", "real estate", "b2c2b", "property"}
 
 
 # ---------------------------------------------------------------------------
@@ -310,11 +316,43 @@ def generate_smart_query(
         vector_label = ctx.sourcing_vector or "Classic B2B"
         history_ctx  = json.dumps(ctx.pain_points) if ctx.pain_points else "[]"
 
-        unified_prompt = f"""You are the Sideio Query Brain. Perform ALL THREE tasks in a single response.
+        # FIX (2026-06-20): Vector-aware prompt branching.
+        # B2C / Real Estate / Property campaigns get a consumer-oriented prompt
+        # that explicitly suppresses corporate B2B jargon ("Weak brand story",
+        # "unclear positioning", etc.) which was being hallucinated by Gemini
+        # because the old prompt hardcoded "B2B" in TASK 1.
+        _is_consumer_vector = vector_label.lower().strip() in _CONSUMER_VECTORS
+
+        if _is_consumer_vector:
+            # ── CONSUMER / B2C PROMPT ──────────────────────────────────────
+            unified_prompt = f"""You are the Sideio Query Brain operating in {vector_label} mode. Perform ALL THREE tasks in a single response.
+
+# TASK 1 — HISTORICAL MINING
+Extract up to 3 short {vector_label} trend phrases from historical lead pain_points.
+Data: {history_ctx}
+CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for historical_phrases. Do NOT generate, synthesize, or hallucinate any phrases. Do NOT output corporate B2B terms like "brand story", "positioning", "market fit", or "lead generation".
+
+# TASK 2 — SYMPTOM DORKING
+User solves: '{ctx.bio}'.
+Generate exactly 3 Google Search operator strings targeting {vector_label} prospects experiencing this problem.
+Context: This is a {vector_label} campaign. Focus on consumer pain points, property/service search behavior, and end-user needs — NOT corporate B2B marketing language.
+Rule: Do NOT target specific platforms or domains (do NOT use site:linkedin.com, site:facebook.com, or site:reddit.com). Focus queries purely on the problem symptoms, keywords, and consumer context.
+Rule: Every query MUST include negative keywords (-shop -cart -amazon -wiki -jobs).
+
+# TASK 3 — INTENT EXPANSION
+Audience: '{kw_str}'. Vector: '{vector_label}'.
+Translate into exactly 3 natural-language conversational queries that a {vector_label} buyer or end-user would type into Google.
+CRITICAL: These queries must reflect consumer/buyer search behavior for the {vector_label} vertical. Do NOT use B2B corporate jargon, SaaS terminology, or enterprise sales language.
+
+Return ONLY the JSON object. No explanation, no markdown."""
+        else:
+            # ── STANDARD B2B PROMPT ────────────────────────────────────────
+            unified_prompt = f"""You are the Sideio Query Brain. Perform ALL THREE tasks in a single response.
 
 # TASK 1 — RLHF HISTORICAL MINING
-Extract exactly 3 short B2B trend phrases from successful lead pain_points.
+Extract up to 3 short {vector_label} trend phrases from successful lead pain_points.
 Data: {history_ctx}
+CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for historical_phrases. Do NOT synthesize or hallucinate placeholder data.
 
 # TASK 2 — SYMPTOM DORKING
 User solves: '{ctx.bio}'.
@@ -328,25 +366,41 @@ Translate into exactly 3 natural-language conversational queries for this platfo
 
 Return ONLY the JSON object. No explanation, no markdown."""
 
+        # System instruction — vector-aware compliance guard
+        _system_instruction = (
+            f"You are the Sideio Query Brain operating in {vector_label} mode. "
+            "Process context strictly on a single persona vector. You are explicitly "
+            "forbidden from mixing or extracting trend phrases across decoupled "
+            "business domains.\n\n"
+            "Output Format Example:\n"
+            "{\n"
+            "  \"historical_phrases\": [],\n"
+            "  \"symptom_dorks\": [\"symptom_operator_alpha\", \"symptom_operator_beta\", \"symptom_operator_gamma\"],\n"
+            "  \"translated_queries\": [\"conversational_query_alpha\", \"conversational_query_beta\", \"conversational_query_gamma\"]\n"
+            "}\n\n"
+            "ABSOLUTE COMPLIANCE GUARD:\n"
+            "If the provided historical dataset is empty, is '[]', or contains no entries, "
+            "you MUST return an empty array [] for historical_phrases. "
+            "Do NOT synthesize, hallucinate, or generate placeholder data under any circumstances. "
+            "Do not output sample data from this instruction block.\n"
+        )
+        if _is_consumer_vector:
+            _system_instruction += (
+                f"\nVECTOR GUARD ({vector_label}):\n"
+                "You are generating queries for a CONSUMER / end-user campaign. "
+                "You are FORBIDDEN from using B2B corporate jargon including but not limited to: "
+                "'brand story', 'positioning', 'market fit', 'lead generation', 'pipeline', "
+                "'enterprise sales', 'stakeholder alignment', 'go-to-market', 'product-market fit'. "
+                "All generated queries must use consumer/buyer language appropriate for the "
+                f"{vector_label} vertical.\n"
+            )
+
         try:
             result = call_gemini_2_5(
                 unified_prompt,
                 expect_json=True,
                 response_schema=_QUERY_BRAIN_SCHEMA,
-                system_instruction=(
-                    "You are the Sideio Query Brain. Process context strictly on a single "
-                    "persona vector. You are explicitly forbidden from mixing or extracting "
-                    "trend phrases across decoupled business domains.\n\n"
-                    "Output Format Example:\n"
-                    "{\n"
-                    "  \"historical_phrases\": [\"trend_phrase_alpha\", \"trend_phrase_beta\", \"trend_phrase_gamma\"],\n"
-                    "  \"symptom_dorks\": [\"symptom_operator_alpha\", \"symptom_operator_beta\", \"symptom_operator_gamma\"],\n"
-                    "  \"translated_queries\": [\"conversational_query_alpha\", \"conversational_query_beta\", \"conversational_query_gamma\"]\n"
-                    "}\n\n"
-                    "Hard Operational Guard:\n"
-                    "If the provided dynamic historical context dataset is empty, you must return an empty array [] for historical phrases. "
-                    "Do not under any circumstances output sample data from this instruction block."
-                ),
+                system_instruction=_system_instruction,
             )
             if isinstance(result, dict):
                 ctx.pain_points = [
@@ -365,6 +419,8 @@ Return ONLY the JSON object. No explanation, no markdown."""
                          hist=len(ctx.pain_points),
                          symp=len(ctx.symptom_dorks),
                          tq=len(ctx.intents),
+                         vector=vector_label,
+                         is_consumer=_is_consumer_vector,
                          tenant_id=ctx.tenant_id,
                          campaign_id=ctx.campaign_id)
         except Exception as exc:
@@ -416,6 +472,35 @@ Return ONLY the JSON object. No explanation, no markdown."""
     if not ctx.has_local_history:
         ctx.pain_points = []
 
+    # ── Post-generation sanitizer (FIX 2026-06-20) ─────────────────────────
+    # For consumer vectors, scrub any B2B jargon that Gemini may have leaked
+    # into translated_queries despite the prompt guards. Belt-and-suspenders.
+    _is_consumer = (ctx.sourcing_vector or "").lower().strip() in _CONSUMER_VECTORS
+    if _is_consumer and ctx.intents:
+        _B2B_JARGON = {
+            "brand story", "unclear positioning", "weak brand",
+            "go-to-market", "product-market fit", "market fit",
+            "lead generation", "pipeline", "stakeholder alignment",
+            "enterprise sales", "saas", "b2b",
+        }
+        _clean_intents = []
+        for tq in ctx.intents:
+            tq_lower = tq.lower()
+            if any(jargon in tq_lower for jargon in _B2B_JARGON):
+                log.warning("query_brain_b2b_jargon_scrubbed",
+                            intent=tq[:80], vector=ctx.sourcing_vector,
+                            campaign_id=ctx.campaign_id)
+            else:
+                _clean_intents.append(tq)
+        if _clean_intents:
+            ctx.intents = _clean_intents
+        else:
+            # All intents were contaminated — fall back to keyword-based queries
+            log.warning("query_brain_all_intents_scrubbed",
+                        vector=ctx.sourcing_vector, campaign_id=ctx.campaign_id,
+                        note="Falling back to keyword-based queries.")
+            ctx.intents = []
+
     historical_str = ""
     if ctx.pain_points:
         phrases_esc  = [f'"{p}"' for p in ctx.pain_points[:3]]
@@ -429,7 +514,8 @@ Return ONLY the JSON object. No explanation, no markdown."""
             smart_queries.append(f'"{tq}"{historical_str} {blacklist}')
         log.info("query_brain_assembled",
                  count=len(ctx.intents), mode=_router_mode,
-                 vector=ctx.sourcing_vector or "Classic B2B")
+                 vector=ctx.sourcing_vector or "Classic B2B",
+                 is_consumer=_is_consumer)
     elif kw_str:
         for kw in ctx.target_audience or []:
             smart_queries.append(f'("{kw}"){historical_str} {blacklist}')
