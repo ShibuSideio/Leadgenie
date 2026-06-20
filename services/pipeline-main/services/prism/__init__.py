@@ -8,13 +8,7 @@ Contains:
   - ``B2B2CIntermediaryFinder`` — distributor/reseller search
   - ``PrismPipeline``         — orchestrator composing all four
 
-These classes are extracted verbatim from the monolith and re-exported
-from this package to maintain a clean import surface.
+V23 architecture: these classes live in ``services/prism_pipeline.py``
+and are imported directly by ``api/routers/dispatch.py``.
+This package init is intentionally empty — no re-exports needed.
 """
-from pipeline_main.services.prism.engine import (  # noqa: F401
-    OperatingModeRouter,
-    WalledGardenHook,
-    GeneralDomainHook,
-    B2B2CIntermediaryFinder,
-    PrismPipeline,
-)

@@ -10,7 +10,7 @@ any doc_ref.update() call reaches Firestore:
     V16 Autonomous    →  origin_engine = "autonomous"
 
 Fields marked Optional[str] = None are forward-compat placeholders for V16.
-The validate_and_update_lead() helper in main.py enforces this at runtime.
+Enforced at runtime by the dispatch router (api/routers/dispatch.py).
 """
 
 from typing import List, Literal, Optional, Dict, Any
