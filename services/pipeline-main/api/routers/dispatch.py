@@ -314,13 +314,11 @@ def dispatch():
                  campaign_id=campaign_id)
         return jsonify({"status": "queue_empty", "processed": 0}), 200
 
-    # DRIP FLOOD FIX: Capped from 10 → 5 per drip window.
-    # With DRIP_INTERVAL_H=4 in internal.py, a campaign with 50 queued URLs would
-    # previously process all 50 in 5 dispatches over 20 hours — too fast, flooding
-    # the CEO dashboard with stale-looking batch leads.
-    # At 5/dispatch × 4h intervals = max 30 leads/day per campaign — controlled drip
-    # that preserves the "fresh intelligence" UX the platform promises.
-    BATCH_SIZE = 5
+    # BATCH_SIZE restored to 10 (P2 fix — 2026-06-20).
+    # The prior reduction to 5 halved daily throughput to ~30 URLs/day per campaign.
+    # At 10/dispatch × 4h intervals = max 60 URLs/day per campaign — adequate
+    # pipeline fill rate given the downstream score gate pass-rate of ~30-40%.
+    BATCH_SIZE = 10
     batch_urls = current_queue[:BATCH_SIZE]
     remaining  = current_queue[BATCH_SIZE:]
 
@@ -521,68 +519,15 @@ def dispatch():
             return {"url": url, "status": "skip_dup"}
 
         try:
-            # ── STEP 1: Fetch lightweight snippet from scraped_cache ─────────────────
-            snippet_text = ""
-            try:
-                cache_snap = _db().collection("scraped_cache").document(lead_id).get()
-                if cache_snap.exists:
-                    snippet_text = cache_snap.to_dict().get("text", "")
-            except Exception as cache_err:
-                log.warning("dispatch_snippet_fetch_failed", lead_id=lead_id, error=str(cache_err))
-
-            if not snippet_text:
-                log.info("dispatch_no_snippet_cache_drop", url=url[:80], lead_id=lead_id)
-                doc_ref.delete()
-                try:
-                    _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
-                return {"url": url, "status": "no_snippet_cache_drop"}
-
-            # ── STEP 2: Call final_score_and_dm for initial scoring ─────────────────
-            try:
-                # Increment usage metrics for Gemini call
-                shard_id = random.randint(0, 9)
-                _db().collection("usage_metrics").document(tenant_id) \
-                    .collection("shards").document(str(shard_id)) \
-                    .set({"gemini_calls": firestore.Increment(1)}, merge=True)
-
-                log.info("TRACE-9: Calling final_score_and_dm.", url=url[:80])
-                evaluation = final_score_and_dm(
-                    text=snippet_text,
-                    active_campaigns=active_campaigns,
-                    context_payload="",
-                    tech_stack=[],
-                    source_url=url
-                )
-            except TimeoutError:
-                doc_ref.update({"status": "failed", "error": "Vertex AI timeout during snippet evaluation"})
-                try:
-                    _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
-                return {"url": url, "status": "failed_vertex_timeout"}
-            except Exception as eval_err:
-                doc_ref.update({"status": "failed", "error": f"Snippet evaluation failed: {eval_err}"})
-                try:
-                    _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
-                return {"url": url, "status": "failed_eval"}
-
-            score = evaluation.get("score", 0)
-
-            # ── STEP 3: Check AI score and conditionally deep scrape ─────────────────
-            if score < 6:
-                log.info("dispatch_score_gate_drop", url=url[:80], score=score, threshold=6)
-                doc_ref.delete()
-                try:
-                    _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
-                return {"url": url, "status": "score_drop"}
-
-            # Score is >= 6, trigger heavy DOM scrape & enrichment
+            # ── STEP 1: PRISM deep scrape FIRST (P0 FIX — 2026-06-20) ────────────
+            # ARCHITECTURE FIX: Invert the two-stage funnel.
+            # Previously: snippet → score(snippet) → if ≥6 → PRISM scrape
+            # Now:         PRISM scrape → score(full DOM) → dynamic threshold
+            #
+            # The old flow evaluated ~200 chars of Serper snippet through Gemini,
+            # which killed 60-75% of viable B2C leads at the score < 6 gate because
+            # snippets lack explicit intent language. Scoring the full DOM gives
+            # Gemini sufficient context to accurately assess lead quality.
             text, tech_stack, emails, phones = "", [], [], []
             prism_mode, fallback_used = "legacy", False
 
@@ -599,13 +544,45 @@ def dispatch():
                                         bio, target_domain, preferences_weights)
                 return {"url": url, "status": "deferred_prism_uninit"}
 
+            # If PRISM returned empty text (JS SPA, WAF block), fall back to
+            # the snippet cache from the produce phase.
+            if not text:
+                try:
+                    cache_snap = _db().collection("scraped_cache").document(lead_id).get()
+                    if cache_snap.exists:
+                        text = cache_snap.to_dict().get("text", "")
+                except Exception as cache_err:
+                    log.warning("dispatch_snippet_fetch_failed", lead_id=lead_id, error=str(cache_err))
+
+            if not text:
+                # Neither PRISM nor snippet cache yielded usable text.
+                # Defer to scraper-heavy for JS rendering instead of hard-deleting.
+                log.info("dispatch_no_text_defer", url=url[:80], lead_id=lead_id,
+                         prism_mode=prism_mode)
+                _defer_to_scraper_heavy(url, lead_id, tenant_id, campaign_id,
+                                        bio, target_domain, preferences_weights)
+                return {"url": url, "status": "deferred_no_text"}
+
+            # WAF / bot-check detection on full DOM
+            bot_keywords = ["Cloudflare Ray ID", "Please verify you are human",
+                            "Enable JavaScript and cookies to continue",
+                            "Checking if the site connection is secure",
+                            "Access Denied", "403 Forbidden"]
+            if any(kw.lower() in text.lower() for kw in bot_keywords):
+                doc_ref.update({"status": "failed", "error": "Blocked by Cloudflare/WAF"})
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
+                return {"url": url, "status": "blocked_waf"}
+
             # Stamp prism_mode on stub
             try:
                 doc_ref.update({"prism_mode": prism_mode, "fallback_used": fallback_used})
             except Exception:
                 pass
 
-            # Deep web enrichment: run deep_context_serper_dork
+            # ── STEP 2: Deep web enrichment ──────────────────────────────────────
             context_payload, native_hiring_intent = deep_context_serper_dork(
                 target_domain, tenant_id, sourcing_vector, source_url=url
             )
@@ -624,6 +601,65 @@ def dispatch():
                 except Exception:
                     pass
                 return {"url": url, "status": "rlhf_drop"}
+
+            # ── STEP 3: Score on FULL DOM text (P0 + P1 FIX) ─────────────────────
+            try:
+                # Increment usage metrics for Gemini call
+                shard_id = random.randint(0, 9)
+                _db().collection("usage_metrics").document(tenant_id) \
+                    .collection("shards").document(str(shard_id)) \
+                    .set({"gemini_calls": firestore.Increment(1)}, merge=True)
+
+                log.info("TRACE-9: Calling final_score_and_dm on full DOM.",
+                         url=url[:80], text_chars=len(text), prism_mode=prism_mode)
+                evaluation = final_score_and_dm(
+                    text=text,
+                    active_campaigns=active_campaigns,
+                    context_payload=context_payload,
+                    tech_stack=tech_stack,
+                    source_url=url
+                )
+            except TimeoutError:
+                doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
+                return {"url": url, "status": "failed_vertex_timeout"}
+            except Exception as eval_err:
+                doc_ref.update({"status": "failed", "error": f"Scoring failed: {eval_err}"})
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
+                return {"url": url, "status": "failed_eval"}
+
+            score = evaluation.get("score", 0)
+
+            # ── STEP 3b: Dynamic score threshold (P1 FIX — 2026-06-20) ───────────
+            # Restored from legacy main.py L2820-2828.
+            # Snippet-sourced leads (< 500 chars) lack DOM depth. Gemini cannot
+            # confidently score them >= 7 even with clear intent.
+            # WalledGardenHook tags thin payloads with [SHADOW_LEARNER_THIN_PAYLOAD]
+            # prefix — also treated as thin regardless of char count.
+            _is_shadow_thin  = text.strip().startswith("[SHADOW_LEARNER_THIN_PAYLOAD]")
+            is_thin_payload  = _is_shadow_thin or len(text.strip()) < 500
+            accept_threshold = 6 if is_thin_payload else 7
+
+            log.info("dispatch_score_gate_eval",
+                     url=url[:80], score=score, threshold=accept_threshold,
+                     text_chars=len(text), thin=is_thin_payload,
+                     shadow_thin=_is_shadow_thin, prism_mode=prism_mode)
+
+            if score < accept_threshold:
+                log.info("dispatch_score_gate_drop", url=url[:80],
+                         score=score, threshold=accept_threshold)
+                doc_ref.delete()
+                try:
+                    _db().collection("global_lead_locks").document(lock_entity).delete()
+                except Exception:
+                    pass
+                return {"url": url, "status": "score_drop"}
 
             # ── STEP 4: Consolidate lead details and save into root leads collection ──
             contact_endpoints = []
