@@ -363,7 +363,10 @@ def dispatch():
         b_domain  = extract_root_domain(batch_url)
         is_social = any(b_domain.endswith(s) for s in SOCIAL_SET)
         is_shared = any(b_domain.endswith(s) for s in SHARED_PLATFORMS)
-        if is_social or is_shared:
+        # P3 FIX: B2C campaigns use URL-path dedup (matches produce.py cache_key)
+        _B2C_VECTORS = {"b2c", "real estate", "b2c2b", "property"}
+        _is_b2c = sourcing_vector.lower().strip() in _B2C_VECTORS
+        if is_social or is_shared or _is_b2c:
             parsed     = urlparse(batch_url)
             exact_path = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
             dedupe_target = exact_path
@@ -467,7 +470,10 @@ def dispatch():
 
         is_social = any(target_domain.endswith(s) for s in SOCIAL_SET)
         is_shared = any(target_domain.endswith(s) for s in SHARED_PLATFORMS)
-        if is_social or is_shared:
+        # P3 FIX: B2C/Real Estate campaigns use URL-path dedup (matches produce.py)
+        _B2C_VECTORS = {"b2c", "real estate", "b2c2b", "property"}
+        _is_b2c = sourcing_vector.lower().strip() in _B2C_VECTORS
+        if is_social or is_shared or _is_b2c:
             parsed     = urlparse(url)
             exact_path = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
             lock_entity   = hashlib.sha256(exact_path.encode()).hexdigest()

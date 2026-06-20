@@ -257,7 +257,13 @@ def produce():
         is_shared   = any(s_domain.endswith(d) for d in shared_platforms)
         
         # Calculate matching dedup key to align scraped_cache document ID with dispatch lead_id
-        if is_social or is_shared:
+        # P3 FIX (2026-06-20): B2C/Real Estate campaigns use URL-path dedup.
+        # Domain-level dedup exhausts inventory after ~3 produce cycles because
+        # listing aggregators (propertyfinder.ae, bayut.com) host thousands of
+        # distinct listings under a single root domain.
+        _B2C_VECTORS = {"b2c", "real estate", "b2c2b", "property"}
+        _is_b2c = sourcing_vector.lower().strip() in _B2C_VECTORS
+        if is_social or is_shared or _is_b2c:
             from urllib.parse import urlparse as _urlparse
             parsed = _urlparse(surl)
             dedup_key = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
@@ -316,7 +322,10 @@ def produce():
                     d_domain.endswith(s)
                     for s in shared_platforms
                 )
-                if d_is_social or d_is_shared:
+                # P3 FIX: B2C campaigns use URL-path dedup (matches snippet cache + fresh dedup)
+                _B2C_VECTORS = {"b2c", "real estate", "b2c2b", "property"}
+                _is_b2c = sourcing_vector.lower().strip() in _B2C_VECTORS
+                if d_is_social or d_is_shared or _is_b2c:
                     from urllib.parse import urlparse as _urlparse
                     parsed = _urlparse(u)
                     dedup_key = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
@@ -340,7 +349,10 @@ def produce():
             f_domain.endswith(s)
             for s in shared_platforms
         )
-        if f_is_social or f_is_shared:
+        # P3 FIX: B2C campaigns use URL-path dedup (matches snippet cache + existing leads)
+        _B2C_VECTORS = {"b2c", "real estate", "b2c2b", "property"}
+        _is_b2c = sourcing_vector.lower().strip() in _B2C_VECTORS
+        if f_is_social or f_is_shared or _is_b2c:
             from urllib.parse import urlparse as _urlparse
             parsed = _urlparse(url)
             dedup_key = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
