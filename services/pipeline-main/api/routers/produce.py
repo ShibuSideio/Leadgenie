@@ -42,6 +42,34 @@ log = get_logger("pipeline.produce")
 
 _SOCIAL_DOMAINS_PRODUCER = SOCIAL_DOMAINS
 
+# ---------------------------------------------------------------------------
+# FIX (2026-06-21): System error string ingestion filter.
+# Firestore campaign documents occasionally contain error messages, fallback
+# sentinels, or log fragments that were accidentally persisted as keyword or
+# bio values. When ingested, these produce searches like:
+#   "fallback intent processing required" -wiki -jobs ...
+# which return zero useful results and waste Serper credits.
+# ---------------------------------------------------------------------------
+_SYSTEM_JUNK_PATTERNS: frozenset[str] = frozenset({
+    "fallback intent processing required",
+    "error",
+    "exception",
+    "traceback",
+    "internal server error",
+    "timeout",
+    "failed to",
+    "null",
+    "undefined",
+    "none",
+    "n/a",
+    "child_campaign_override",
+    "shadow_learner",
+    "[shadow_learner",
+    "placeholder",
+    "test_keyword",
+    "sample_data",
+})
+
 
 @bp.route("/produce", methods=["POST"])
 @require_tasks_oidc
@@ -131,32 +159,105 @@ def produce():
         )
         log.info("child_campaign_override_resolved", bio_preview=bio[:80])
 
+    # ------------------------------------------------------------------
+    # FIX (2026-06-21): Bio field sanitizer.
+    # Scrub the bio if it contains system error strings or sentinels
+    # that should never reach the Gemini prompt (they cause intent
+    # hallucination and system-error-string searches).
+    # Uses a stricter set than keywords — generic words like "error"
+    # could appear legitimately in a campaign bio.
+    # ------------------------------------------------------------------
+    _BIO_JUNK_PATTERNS: set[str] = {
+        "fallback intent processing required",
+        "internal server error",
+        "traceback",
+        "child_campaign_override",
+        "shadow_learner",
+        "[shadow_learner",
+        "test_keyword",
+        "sample_data",
+        "placeholder bio",
+        "undefined",
+    }
+    if bio and any(junk in bio.lower() for junk in _BIO_JUNK_PATTERNS):
+        log.warning(
+            "produce_bio_sanitized",
+            campaign_id=campaign_id,
+            original_bio_preview=bio[:120],
+            note="Bio field contains system junk. Cleared to prevent prompt pollution.",
+        )
+        bio = ""
+
     # Synthesise keywords from bio if empty
     if not keywords:
         if bio:
             keywords = [w.strip() for w in bio.split() if len(w.strip()) > 3][:5]
             log.info("keywords_synthesised_from_bio",
                      count=len(keywords), campaign_id=campaign_id)
-        if not keywords:
-            log.critical(
-                "produce_empty_keywords",
-                campaign_id=campaign_id,
-                persona_id=_persona_id,
-                persona_keywords=campaign.get("persona_keywords"),
-                keywords=campaign.get("keywords"),
-                bio=campaign.get("bio"),
-                note="ABORT: No Serper query can be constructed.",
-            )
-            return jsonify({
-                "error":       "Empty keywords matrix",
-                "campaign_id": campaign_id,
-                "debug": {
-                    "persona_id":        _persona_id,
-                    "persona_keywords":  campaign.get("persona_keywords"),
-                    "keywords":          campaign.get("keywords"),
-                    "bio":               campaign.get("bio"),
-                },
-            }), 400
+
+    # ------------------------------------------------------------------
+    # FIX (2026-06-21): Keyword ingestion sanitizer.
+    # Drop any keywords that match known system error strings, log
+    # fragments, or fallback sentinels before they reach Query Brain.
+    # ------------------------------------------------------------------
+    _raw_count = len(keywords)
+    keywords = [
+        kw for kw in keywords
+        if kw.strip()
+        and len(kw.strip()) > 2
+        and not any(junk in kw.lower() for junk in _SYSTEM_JUNK_PATTERNS)
+    ]
+    _dropped = _raw_count - len(keywords)
+    if _dropped > 0:
+        log.warning(
+            "produce_keywords_sanitized",
+            campaign_id=campaign_id,
+            dropped=_dropped,
+            remaining=len(keywords),
+            note="System error strings or sentinel values removed from keywords.",
+        )
+
+    if not keywords:
+        log.critical(
+            "produce_empty_keywords",
+            campaign_id=campaign_id,
+            persona_id=_persona_id,
+            persona_keywords=campaign.get("persona_keywords"),
+            keywords=campaign.get("keywords"),
+            bio=campaign.get("bio"),
+            note="ABORT: No Serper query can be constructed (post-sanitization).",
+        )
+        return jsonify({
+            "error":       "Empty keywords matrix",
+            "campaign_id": campaign_id,
+            "debug": {
+                "persona_id":        _persona_id,
+                "persona_keywords":  campaign.get("persona_keywords"),
+                "keywords":          campaign.get("keywords"),
+                "bio":               campaign.get("bio"),
+            },
+        }), 400
+
+    # ------------------------------------------------------------------
+    # FIX (2026-06-21): Location field validation guard.
+    # Reject location values that are obviously not geographic (audience
+    # descriptions, error messages, or strings > 100 chars).
+    # ------------------------------------------------------------------
+    _LOCATION_JUNK_TOKENS = {
+        "interested", "customers", "vehicle", "users", "audience",
+        "persona", "error", "exception", "fallback", "null",
+    }
+    if location and (
+        len(location) > 100
+        or any(tok in location.lower() for tok in _LOCATION_JUNK_TOKENS)
+    ):
+        log.warning(
+            "produce_location_rejected",
+            campaign_id=campaign_id,
+            original_location=location[:120],
+            note="Location field contains non-geographic data. Reset to empty.",
+        )
+        location = ""
 
     log.info(
         "TRACE-6: Keywords resolved.",
@@ -202,6 +303,41 @@ def produce():
 
     log.info("TRACE-8: generate_smart_query() complete.",
              smart_keyword_count=len(smart_keywords))
+
+    # ------------------------------------------------------------------
+    # FIX (2026-06-21): Post-generation query sanitizer.
+    # Drop any generated Serper queries that contain system error strings
+    # or internal pipeline terms that should never reach Serper.
+    # ------------------------------------------------------------------
+    _pre_sanitize_count = len(smart_keywords)
+    smart_keywords = [
+        sq for sq in smart_keywords
+        if not any(junk in sq.lower() for junk in _SYSTEM_JUNK_PATTERNS)
+    ]
+    _sq_dropped = _pre_sanitize_count - len(smart_keywords)
+    if _sq_dropped > 0:
+        log.warning(
+            "produce_smart_queries_sanitized",
+            campaign_id=campaign_id,
+            dropped=_sq_dropped,
+            remaining=len(smart_keywords),
+            note="System junk detected in generated Serper queries. Dropped.",
+        )
+
+    if not smart_keywords:
+        log.warning(
+            "produce_all_queries_sanitized_empty",
+            campaign_id=campaign_id,
+            note="All generated queries were system junk. Nothing to search.",
+        )
+        return jsonify({
+            "status": "produced",
+            "fetched": 0,
+            "deduplicated": 0,
+            "queued": 0,
+            "queue_depth": len(campaign.get("unprocessed_queue", [])),
+            "warning": "All queries sanitized as system junk.",
+        }), 200
 
     # Telemetry: bill the expected Serper calls
     try:
