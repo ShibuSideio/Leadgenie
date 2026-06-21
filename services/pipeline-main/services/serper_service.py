@@ -57,8 +57,16 @@ _ENRICHMENT_SOCIAL_BLACKLIST = [
 
 # FIX (2026-06-21): Replaced dead platform-specific B2C list with archetype-based
 # detection. The old list contained labels ("Reddit B2C", etc.) that could never
-# be produced by classify_sourcing_vector(). Now uses the shared archetype check.
-from services.query_brain import _is_consumer_archetype  # type: ignore[import]
+# be produced by classify_sourcing_vector(). Now uses the canonical archetype set.
+# NOTE: Defined inline (not imported from query_brain) because the smoke test
+# harness loads serper_service.py via importlib in an isolated namespace where
+# cross-module imports are unavailable.
+_CONSUMER_ARCHETYPES: frozenset = frozenset({"B2C", "B2B2C", "D2C"})
+
+def _is_consumer_archetype(vector: str) -> bool:
+    """Return True if *vector* is a consumer-facing business archetype."""
+    return (vector or "").upper().strip() in _CONSUMER_ARCHETYPES
+
 
 _ENTERPRISE_DOMAINS = [
     "ibm.com", "amazon.com", "microsoft.com",
