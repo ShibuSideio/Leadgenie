@@ -128,27 +128,21 @@ def pre_filter_gemini(snippets: list, bio: str, location_target: str) -> dict:
     if not snippets:
         return {"High": [], "Medium": []}
 
-    prompt = f"""CONFIDENCE TIERING GATE: Evaluate each URL snippet against the user's business context.
-
+    prompt = f"""CONFIDENCE TIERING GATE: Evaluate each URL snippet as an investigative OSINT engine against the user's business context.
 USER BIO: '{bio}'
 TARGET LOCATION: '{location_target}'
 
-# STEP 1 — PERSONA CLASSIFICATION
-Classify the user as B2B Vendor or B2C Service Provider.
+# STEP 1 — OSINT SCORING MATRIX
+Evaluate the snippets purely on RAW INTENT and SYMPTOMS, ignoring corporate polish.
 
-# STEP 2 — PERSONA-LOCKED TIERING RULES
-IF B2B Vendor:
-- High: Business explicitly experiencing the pain point, correct intent + geo.
-- Medium: Ambiguous intent or geo, relevant industry.
-- Low: Competitor, directory, aggregator, SEO blog, D2C retail.
+High Confidence: Raw, unpolished footprints. This includes niche forum complaints, municipal PDFs, unoptimized local business pages, or direct expressions of pain/need that match the USER BIO. "Ugly" is good if the intent is strong.
 
-IF B2C Service Provider:
-- High: Individual EXPLICITLY expressing the pain point in their own words.
-- Medium: Individual whose need is implied but not explicit.
-- Low: Agency, corporate, competitor, directory, or institutional URL.
+Medium Confidence: Ambiguous intent, but highly relevant industry or location.
 
-# STEP 3 — UNIVERSAL RULES
-SOCIAL PLATFORM RULE: Evaluate the SPECIFIC POST intent, not the platform.
+Low Confidence: SEO-optimized listicles, directories (Yelp, G2, etc.), marketing blogs, generic news articles, or clear competitors. High polish usually means low lead value.
+
+# STEP 2 — UNIVERSAL RULES
+SOCIAL PLATFORM RULE: Evaluate the SPECIFIC POST intent, not the platform's general purpose.
 GEO RULE: Wrong region → Low.
 
 Snippets: {json.dumps(snippets)}"""
