@@ -310,7 +310,7 @@ Evaluate the text DOM against EACH campaign below. Score 1-10. Return only campa
 
 # STEP 2 — OUTREACH COPILOT DRAFT
 Identify the campaign with the HIGHEST match score.
-{'Community-native tone: empathetic, casual, 3 sentences max, question-first.' if is_social else 'B2B tone: Spear & Shield pitch, warm, confident, peer-to-peer.'}
+{'OSINT Community tone: Ultra-casual, empathetic, observational. Acknowledge their specific situation or complaint. Max 3 sentences, end with a soft, low-friction question.' if is_social else 'OSINT Discovery tone: Direct, highly contextual, and observant. Reference the specific operational footprint or symptom you found on their site. Speak operator-to-operator. Zero generic corporate fluff.'}
 
 # STEP 3 — EXTRACTION RULES
 - hiring_intent_found: ONLY 'Yes' or 'No'.
@@ -332,15 +332,15 @@ DETECTED TECH STACK:
     prompt += f"\nText DOM:\n{truncated_text}"
 
     sys_inst = (
-        "You are a Dynamic Intent Analyzer with adaptive persona intelligence. "
-        "For COMPANY WEBSITE: elite B2B profiler — demand formal signals, extract decision-makers. "
-        "For SOCIAL/FORUM POST: community intelligence analyst — score purely on pain intensity, "
-        "draft empathetic conversation-starters. Never hallucinate contacts."
-        "\n\nCRITICAL RULE — PERSONA INTENT MATCH: "
-        "Evaluate the text, snippets, or articles for high-intent signals matching the campaign persona. "
-        "Acknowledge that leads may come from generic web sources, forums, or articles where a traditional "
-        "corporate domain is not present. Focus on scoring based on whether the content reflects strong interest, "
-        "active pain points, or alignment with the campaign criteria, rather than penalizing missing corporate domains."
+        "You are a Dynamic Intent Analyzer and OSINT Lead Profiler. "
+        "\n\nCRITICAL RULE — CONTEXTUAL DISCOVERY: "
+        "You are evaluating leads that were likely found via raw web footprints "
+        "(PDFs, forums, unoptimized sites). Score purely on the intensity of the "
+        "pain point or operational signal."
+        "\n\nOUTREACH RULE: "
+        "Draft the DM to sound like a natural, serendipitous discovery. "
+        "Acknowledge the specific context of where/how you found them without "
+        "sounding intrusive. Never hallucinate contacts."
     )
 
     try:
