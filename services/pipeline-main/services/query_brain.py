@@ -374,56 +374,61 @@ def generate_smart_query(
         _is_consumer_vector = _is_consumer_archetype(vector_label)
 
         if _is_consumer_vector:
-            # ── CONSUMER / B2C PROMPT ──────────────────────────────────────
-            unified_prompt = f"""You are the Sideio Query Brain operating in {vector_label} mode. Perform ALL THREE tasks in a single response.
+            # ── CONSUMER PROMPT (V23.6 — Unified OSINT / Anti-SEO) ─────────
+            unified_prompt = f"""You are the Sideio Query Brain, operating as an elite OSINT investigator. Your goal is to find raw, hidden, unpolished web footprints of people or businesses experiencing specific pain points.
 
-# TASK 1 — HISTORICAL MINING
-Extract up to 3 short {vector_label} trend phrases from historical lead pain_points.
+# TASK 1 — RLHF HISTORICAL MINING
+Extract up to 3 short trend phrases from successful lead pain_points. Context domain: {vector_label}.
 Data: {history_ctx}
-CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for historical_phrases. Do NOT generate, synthesize, or hallucinate any phrases. Do NOT output corporate B2B terms like "brand story", "positioning", "market fit", or "lead generation".
+CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for historical_phrases. Do NOT synthesize placeholder data.
 
-# TASK 2 — SYMPTOM DORKING
-User solves: '{ctx.bio}'.
-Generate exactly 3 Google Search operator strings (Boolean dorks) targeting {vector_label} prospects.
-Context: This is a {vector_label} campaign. Focus on consumer pain points, property/service search behavior, and end-user needs.
-Rule: Do NOT target specific platforms (no site:linkedin.com, site:facebook.com, site:reddit.com).
-Rule: Every query MUST include negative keywords (-shop -cart -amazon -wiki -jobs).
-Rule: Output ONLY valid Google Dork Boolean strings using operators like OR, AND, quotes, intitle:, inurl:. NEVER use conversational phrases, natural-language questions, or sentences starting with 'Show me', 'I am looking for', 'Find', 'How to', 'Where can I', or 'What are'.
+# TASK 2 — SYMPTOM DORKING (ANTI-SEO PROTOCOL)
+Target Pain Point / Bio: '{ctx.bio}'.
+Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW, unfiltered web footprints of prospects experiencing this problem.
+Rule: Focus purely on symptoms, complaints, and unpolished data (e.g., filetype:pdf, inurl:forum, intitle:"help with").
+Rule: You MUST bypass SEO-optimized directories, aggregators, and marketing blogs.
+Rule: Every single query MUST include this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 
 # TASK 3 — INTENT EXPANSION
-Audience: '{kw_str}'. Vector: '{vector_label}'.
-Generate exactly 3 Google search queries that a {vector_label} buyer or end-user would type.
-CRITICAL FORMAT RULE: Return ONLY short keyword-based search strings — the raw phrases someone types into Google's search bar. Examples: '2BHK apartment Muscat rent', 'best dental clinic near me reviews', 'used Toyota Fortuner Kerala price'.
-FORBIDDEN: Do NOT return conversational sentences, questions starting with 'Show me', 'I am looking for', 'Find me', or 'How to'. Do NOT use B2B corporate jargon.
+Audience: '{kw_str}'. Context: '{vector_label}'.
+Translate the pain point into exactly 3 natural-language conversational queries that a frustrated person or operator might ask on a niche forum, help board, or community group. Do not use generic commercial keywords.
 
 Return ONLY the JSON object. No explanation, no markdown."""
         else:
-            # ── STANDARD B2B PROMPT ────────────────────────────────────────
-            unified_prompt = f"""You are the Sideio Query Brain. Perform ALL THREE tasks in a single response.
+            # ── STANDARD PROMPT (V23.6 — Unified OSINT / Anti-SEO) ────────
+            unified_prompt = f"""You are the Sideio Query Brain, operating as an elite OSINT investigator. Your goal is to find raw, hidden, unpolished web footprints of people or businesses experiencing specific pain points.
 
 # TASK 1 — RLHF HISTORICAL MINING
-Extract up to 3 short {vector_label} trend phrases from successful lead pain_points.
+Extract up to 3 short trend phrases from successful lead pain_points. Context domain: {vector_label}.
 Data: {history_ctx}
-CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for historical_phrases. Do NOT synthesize or hallucinate placeholder data.
+CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for historical_phrases. Do NOT synthesize placeholder data.
 
-# TASK 2 — SYMPTOM DORKING
-User solves: '{ctx.bio}'.
-Generate exactly 3 Google Search operator strings targeting prospects experiencing this problem.
-Rule: Do NOT target specific platforms or domains (do NOT use site:linkedin.com, site:facebook.com, or site:reddit.com). Focus queries purely on the problem symptoms, keywords, and professional context.
-Rule: Every query MUST include negative keywords (-shop -cart -amazon -wiki -jobs).
+# TASK 2 — SYMPTOM DORKING (ANTI-SEO PROTOCOL)
+Target Pain Point / Bio: '{ctx.bio}'.
+Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW, unfiltered web footprints of prospects experiencing this problem.
+Rule: Focus purely on symptoms, complaints, and unpolished data (e.g., filetype:pdf, inurl:forum, intitle:"help with").
+Rule: You MUST bypass SEO-optimized directories, aggregators, and marketing blogs.
+Rule: Every single query MUST include this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 
 # TASK 3 — INTENT EXPANSION
-Audience: '{kw_str}'. Vector: '{vector_label}'.
-Translate into exactly 3 natural-language conversational queries for this platform.
+Audience: '{kw_str}'. Context: '{vector_label}'.
+Translate the pain point into exactly 3 natural-language conversational queries that a frustrated person or operator might ask on a niche forum, help board, or community group. Do not use generic commercial keywords.
 
 Return ONLY the JSON object. No explanation, no markdown."""
 
-        # System instruction — vector-aware compliance guard
+        # System instruction — OSINT / Anti-SEO compliance guard (V23.6)
         _system_instruction = (
-            f"You are the Sideio Query Brain operating in {vector_label} mode. "
-            "Process context strictly on a single persona vector. You are explicitly "
-            "forbidden from mixing or extracting trend phrases across decoupled "
-            "business domains.\n\n"
+            f"You are the Sideio Query Brain operating as an elite OSINT investigator in {vector_label} mode. "
+            "Your absolute mission is to find RAW, unpolished web footprints of real intent — "
+            "not SEO-optimized directories, listicles, or marketing blogs.\n\n"
+            "ANTI-SEO MANDATE:\n"
+            "Every symptom_dork you generate MUST actively bypass SEO spam. "
+            "Use advanced Google operators (filetype:, inurl:forum, intitle:, site: for niche domains) "
+            "and aggressive negative payloads (-site:yelp.com -site:g2.com -directory -listicle -\"top 10\"). "
+            "Never produce queries that would return listicle pages, review aggregators, or paid directories.\n\n"
+            "PERSONA ISOLATION:\n"
+            "Process context strictly on a single persona vector. Do not mix or extract "
+            "trend phrases across decoupled business domains.\n\n"
             "Output Format Example:\n"
             "{\n"
             "  \"historical_phrases\": [],\n"
@@ -438,20 +443,11 @@ Return ONLY the JSON object. No explanation, no markdown."""
         )
         if _is_consumer_vector:
             _system_instruction += (
-                f"\nVECTOR GUARD ({vector_label}):\n"
-                "You are generating queries for a CONSUMER / end-user campaign. "
-                "You are FORBIDDEN from using B2B corporate jargon including but not limited to: "
-                "'brand story', 'positioning', 'market fit', 'lead generation', 'pipeline', "
-                "'enterprise sales', 'stakeholder alignment', 'go-to-market', 'product-market fit'. "
-                "All generated queries must use consumer/buyer language appropriate for the "
-                f"{vector_label} vertical.\n\n"
-                "QUERY FORMAT GUARD:\n"
-                "All symptom_dorks MUST be valid Google Dork Boolean strings using operators "
-                "(OR, AND, quotes, intitle:, inurl:, -keyword). NEVER output conversational "
-                "sentences or natural-language questions.\n"
-                "All translated_queries MUST be short keyword-based search phrases — the raw "
-                "text a consumer types into Google. NEVER start with 'Show me', 'I am looking for', "
-                "'Find me', 'How to', 'Where can I', or 'What are'.\n"
+                f"\nCONSUMER CONTEXT HINT ({vector_label}):\n"
+                "The target audience for this campaign is end consumers / individual buyers. "
+                "When generating symptom_dorks and translated_queries, lean towards pain signals "
+                "found in community forums, social threads, review complaint pages, and niche "
+                f"Q&A boards relevant to the {vector_label} vertical.\n"
             )
 
         try:
