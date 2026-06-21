@@ -3228,11 +3228,18 @@ window.dtLaunchFallback = function() {
 
     closeDTModal();
 
-    window.saveTenantProfileAction({
-        name: campName,
-        bio: 'Fallback intent processing required.', // LLM Backend Cartographer handles intent
-        keywords: txt.substring(0, 120),
-        gl: ''
+    // FIX (2026-06-21): Previously wrote bio='Fallback intent processing required.'
+    // as a LITERAL STRING into Firestore. This string then flowed through the
+    // pipeline and produced Serper searches for the error message itself.
+    // Fix: Use the standard CHILD_CAMPAIGN_OVERRIDE sentinel so the backend
+    // synthesizes bio from campaign_focus, and pass the user's free-text input
+    // as campaign_focus (not raw keywords) for proper backend handling.
+    saveCampaignAction({
+        name:           campName,
+        bio:            'CHILD_CAMPAIGN_OVERRIDE',
+        keywords:       txt.substring(0, 120),
+        campaign_focus: txt.substring(0, 250),
+        gl:             ''
     });
 };
 

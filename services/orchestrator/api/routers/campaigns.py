@@ -54,6 +54,77 @@ log = get_logger("orchestrator.v23.campaigns")
 MAX_CHILD_CAMPAIGNS = int(os.environ.get("MAX_CHILD_CAMPAIGNS", 5))
 
 # ---------------------------------------------------------------------------
+# FIX (2026-06-21): Campaign field sanitizer — server-side write boundary.
+# Scrubs system error strings, fallback sentinels, and non-geographic location
+# values BEFORE they are persisted to Firestore. This is the last line of
+# defense against upstream Prism UI bugs or API callers sending polluted data.
+# ---------------------------------------------------------------------------
+_FIELD_JUNK_PATTERNS: frozenset = frozenset({
+    "fallback intent processing required",
+    "internal server error",
+    "traceback",
+    "shadow_learner",
+    "[shadow_learner",
+    "placeholder bio",
+    "test_keyword",
+    "sample_data",
+})
+_LOCATION_JUNK_TOKENS: frozenset = frozenset({
+    "interested", "customers", "vehicle", "users", "audience",
+    "persona", "error", "exception", "fallback",
+})
+
+
+def _sanitize_campaign_fields(data: dict) -> dict:
+    """Scrub campaign fields at the Firestore write boundary.
+
+    Modifies *data* in-place and returns it for chaining convenience.
+    Fields checked:
+        - ``bio``: cleared if it contains known system error strings.
+        - ``keywords``: individual keywords containing junk are dropped.
+        - ``location``: cleared if it contains non-geographic tokens or is too long.
+
+    Returns:
+        The sanitized *data* dict.
+    """
+    # -- bio ---------------------------------------------------------------
+    bio = data.get("bio", "")
+    if bio and isinstance(bio, str) and bio != "CHILD_CAMPAIGN_OVERRIDE":
+        if any(junk in bio.lower() for junk in _FIELD_JUNK_PATTERNS):
+            log.warning("campaign_field_sanitized",
+                        field="bio", original=bio[:120],
+                        note="Bio contained system junk — cleared.")
+            data["bio"] = ""
+
+    # -- keywords ----------------------------------------------------------
+    kw = data.get("keywords", "")
+    if kw and isinstance(kw, str):
+        parts = [k.strip() for k in kw.split(",") if k.strip()]
+        clean = [
+            k for k in parts
+            if len(k) > 2
+            and not any(junk in k.lower() for junk in _FIELD_JUNK_PATTERNS)
+        ]
+        if len(clean) < len(parts):
+            log.warning("campaign_field_sanitized",
+                        field="keywords",
+                        dropped=len(parts) - len(clean),
+                        remaining=len(clean))
+            data["keywords"] = ", ".join(clean)
+
+    # -- location ----------------------------------------------------------
+    loc = data.get("location", "")
+    if loc and isinstance(loc, str):
+        if (len(loc) > 100
+                or any(tok in loc.lower() for tok in _LOCATION_JUNK_TOKENS)):
+            log.warning("campaign_field_sanitized",
+                        field="location", original=loc[:120],
+                        note="Location contained non-geographic data — cleared.")
+            data["location"] = ""
+
+    return data
+
+# ---------------------------------------------------------------------------
 # GL / Geo mapping (canonical copy)
 # ---------------------------------------------------------------------------
 _GL_MAP: dict[str, str] = {
@@ -224,6 +295,9 @@ def create_campaign(uid, tenant_id, user_role):
         drip_interval_mins = 240
     data["drip_interval_minutes"] = drip_interval_mins
 
+    # Server-side field sanitization — last line of defense
+    _sanitize_campaign_fields(data)
+
     _, doc_ref = db.collection("campaigns").add(data)
 
     # Synaptic Router classification
@@ -305,6 +379,9 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
                 campaign.get("campaign_focus", "") or
                 ", ".join(campaign.get("keywords", []))
             )
+
+    # Server-side field sanitization — last line of defense
+    _sanitize_campaign_fields(data)
 
     doc_ref.update(data)
     _enqueue_bq_telemetry_task(tenant_id, doc_data.to_dict(), data.get("status") or "updated")
