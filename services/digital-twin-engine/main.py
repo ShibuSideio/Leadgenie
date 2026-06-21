@@ -426,33 +426,35 @@ def _call_gemini_unified(root_domain: str, text_blob: str) -> dict:
     Hard timeout: 7 s wall-clock via ThreadPoolExecutor.
     """
     safe_blob = text_blob[:6_000]   # ~1500 tokens — well within Flash's context
-    prompt = f"""You are a Business Intelligence engine analysing the company at domain: {root_domain}
+    prompt = f"""You are a ruthless Business Intelligence extractor analyzing the domain: {root_domain}
 
 The following text was collected from their website and search index:
 ---
 {safe_blob}
 ---
 
-Complete ALL THREE tasks in a single JSON response:
+Complete ALL THREE tasks in a single JSON response.
+CRITICAL: Strip away all marketing fluff, corporate jargon, and buzzwords. Translate everything into raw, mechanical utility.
 
 TASK 1 — COMPANY BIO:
-Write a company_bio: 1-2 precise sentences describing what they sell/do. Be specific. No filler.
+Write a company_bio: 1-2 precise sentences describing what they mechanically sell/do. Be brutal. No filler. (e.g., instead of "empowering revenue operations," write "sells spreadsheet automation software").
 
 TASK 2 — TARGET PERSONAS:
-Identify exactly 3 ideal target_personas — the types of clients this company would pitch to.
-For each include: name (short label), description (pain point + why this company solves it), location_hint (country/region; use 'Global' if uncertain).
+Identify exactly 3 ideal target_personas based on who holds the budget and feels the operational pain.
+For each include: name (short label), description (the exact raw symptom/pain point they suffer from + why this company solves it mechanically), location_hint (country/region; use 'Global' if uncertain).
 
 TASK 3 — PRODUCTS WITH TRENDS:
 Identify up to 3 distinct products or services this company offers.
-For each, act as a Head of Growth: identify the current macro-economic trend or market shift driving demand (market_trend_hook) and why this company specifically wins against alternatives (unfair_advantage).
+For each, identify the current macro-economic trend or market shift driving demand (market_trend_hook) and the raw, functional reason this company wins against alternatives (unfair_advantage).
 
-Return ONLY valid JSON matching the schema. No markdown, no explanation. Never hallucinate. If text is insufficient, make best inference and flag ambiguity in description fields."""
+Return ONLY valid JSON matching the schema. No markdown, no explanation. Never hallucinate."""
 
     model  = GenerativeModel(
         "gemini-2.5-flash",
         system_instruction=(
-            "You are a Business Intelligence engine. "
-            "Return a precise, factual JSON object. Never hallucinate."
+            "You are an elite, no-nonsense Business Intelligence engine. "
+            "You translate polished marketing websites into brutal, mechanical realities. "
+            "Return a precise, factual JSON object. Never use corporate jargon. Never hallucinate."
         )
     )
     config = GenerationConfig(
