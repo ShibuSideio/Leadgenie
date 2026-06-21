@@ -439,7 +439,15 @@ Return ONLY the JSON object. No explanation, no markdown."""
             "If the provided historical dataset is empty, is '[]', or contains no entries, "
             "you MUST return an empty array [] for historical_phrases. "
             "Do NOT synthesize, hallucinate, or generate placeholder data under any circumstances. "
-            "Do not output sample data from this instruction block.\n"
+            "Do not output sample data from this instruction block.\n\n"
+            "RAW QUERY OUTPUT MANDATE:\n"
+            "CRITICAL: You are a search engine query generator. "
+            "YOU MUST OUTPUT ONLY THE RAW BOOLEAN DORK for each symptom_dork entry. "
+            "Do NOT include conversational text, do NOT start with 'I\\'m looking for' or 'Identify' or 'Show me' or 'Find'. "
+            "Output ONLY the exact string to be typed into Google. "
+            "Do not wrap the entire output in quotes unless it is a single exact-match phrase. "
+            "translated_queries MAY be conversational (they represent forum-style questions), "
+            "but symptom_dorks must be pure Google operator strings.\n"
         )
         if _is_consumer_vector:
             _system_instruction += (
@@ -466,6 +474,23 @@ Return ONLY the JSON object. No explanation, no markdown."""
                     s.strip() for s in result.get("symptom_dorks", [])
                     if isinstance(s, str) and s.strip()
                 ][:3]
+
+                # ── Runtime sanitizer: strip conversational fluff from dorks (V23.6) ──
+                import re as _re
+                _CONVERSATIONAL_PREFIX = _re.compile(
+                    r'^(?:I\'?m looking for|Show me|Find|Identify|Search for|Look for|I need|I want)\s+',
+                    _re.IGNORECASE
+                )
+                _sanitized_dorks = []
+                for _dork in ctx.symptom_dorks:
+                    _cleaned = _CONVERSATIONAL_PREFIX.sub('', _dork).strip()
+                    if _cleaned != _dork:
+                        log.warning("symptom_dork_conversational_prefix_stripped",
+                                    original=_dork[:80], cleaned=_cleaned[:80])
+                    if _cleaned:
+                        _sanitized_dorks.append(_cleaned)
+                ctx.symptom_dorks = _sanitized_dorks
+
                 ctx.intents = [
                     q.strip() for q in result.get("translated_queries", [])
                     if isinstance(q, str) and q.strip()
