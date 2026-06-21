@@ -1668,6 +1668,25 @@ body {
     line-height: 1.55;
 }
 
+/* Cascading Geo Dropdown — V23.6 */
+.geo-cascade-select {
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%236b7280' viewBox='0 0 16 16'%3E%3Cpath d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 32px;
+    transition: opacity 0.25s ease, border-color 0.2s, box-shadow 0.2s, background 0.2s;
+}
+.geo-cascade-select:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    background-color: #f1f5f9;
+}
+.geo-cascade-select:not(:disabled):hover {
+    border-color: var(--primary);
+}
+
 /* ==========================================================================
    L0 SUPER ADMIN DASHBOARD — Tab System
    ========================================================================== */

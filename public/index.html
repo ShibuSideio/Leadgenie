@@ -1121,20 +1121,21 @@
 
         <div class="edit-field-group">
             <label class="edit-field-label">Geographic Targeting</label>
-            <div style="display:flex; gap:10px;">
-                <select id="edit-camp-gl" onchange="handleCountryChange('edit-camp-gl','edit-camp-location')" class="edit-field-input" style="flex:1; cursor:pointer;">
-                    <option value="">Global</option>
-                    <option value="us">United States</option>
-                    <option value="uk">United Kingdom</option>
-                    <option value="ca">Canada</option>
-                    <option value="au">Australia</option>
-                    <option value="in">India</option>
-                    <option value="sg">Singapore</option>
-                    <option value="de">Germany</option>
-                    <option value="ae">UAE</option>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <select id="geo-continent-select" class="edit-field-input geo-cascade-select" style="flex:1; min-width:120px; cursor:pointer;">
+                    <option value="">🌍 Continent</option>
                 </select>
-                <input type="text" id="edit-camp-location" placeholder="City or Region" class="edit-field-input" style="flex:2;">
+                <select id="geo-country-select" class="edit-field-input geo-cascade-select" style="flex:1; min-width:120px; cursor:pointer;" disabled>
+                    <option value="">🏳️ Country</option>
+                </select>
+                <select id="geo-region-select" class="edit-field-input geo-cascade-select" style="flex:1; min-width:120px; cursor:pointer;" disabled>
+                    <option value="">📍 Region</option>
+                </select>
             </div>
+            <p id="geo-compiled-preview" style="margin:6px 0 0; font-size:0.72rem; color:#7c3aed; font-style:italic; min-height:1em;"></p>
+            <!-- Hidden fields preserve backward-compat IDs for saveEditedCampaign -->
+            <input type="hidden" id="edit-camp-gl">
+            <input type="hidden" id="edit-camp-location">
         </div>
 
         <div style="display:flex; gap:12px;">

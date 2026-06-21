@@ -32,6 +32,152 @@ let rawLeadsCache = [];
 let unsubscribeLeads = null;   // declared here to avoid temporal dead zone
 const _leadsMap = new Map();
 
+// =============================================================================
+// CASCADING GEO DROPDOWN — V23.6
+// Loads /assets/geo_data.json once, drives continent→country→region cascade.
+// Compiles selection into flat string for backward-compat with Python prompts.
+// =============================================================================
+let _geoDataCache = null;
+
+async function loadGeoData() {
+    if (_geoDataCache) return _geoDataCache;
+    try {
+        const resp = await fetch('/assets/geo_data.json');
+        if (!resp.ok) throw new Error(`geo_data.json fetch failed: ${resp.status}`);
+        _geoDataCache = await resp.json();
+    } catch (e) {
+        console.error('[GEO CASCADE] Failed to load geo data:', e);
+        _geoDataCache = { continents: [] };
+    }
+    return _geoDataCache;
+}
+
+function _resetSelect(el, placeholder) {
+    el.innerHTML = `<option value="">${placeholder}</option>`;
+    el.disabled = true;
+    el.value = '';
+}
+
+function _updateGeoPreview() {
+    const continent = document.getElementById('geo-continent-select')?.value || '';
+    const country   = document.getElementById('geo-country-select')?.value   || '';
+    const region    = document.getElementById('geo-region-select')?.value    || '';
+    const preview   = document.getElementById('geo-compiled-preview');
+    const compiled  = _compileGeoString(continent, country, region);
+    if (preview) preview.textContent = compiled ? `📍 ${compiled}` : '';
+    // Sync hidden fields for backward compat
+    const glHidden  = document.getElementById('edit-camp-gl');
+    const locHidden = document.getElementById('edit-camp-location');
+    if (glHidden)  glHidden.value  = _resolveGlCode(country) || '';
+    if (locHidden) locHidden.value = compiled;
+}
+
+function _compileGeoString(continent, country, region) {
+    const parts = [region, country, continent].filter(Boolean);
+    return parts.join(', ');
+}
+
+function _resolveGlCode(countryName) {
+    if (!_geoDataCache || !countryName) return '';
+    for (const c of _geoDataCache.continents) {
+        const match = c.countries.find(co => co.name === countryName);
+        if (match) return match.gl || '';
+    }
+    return '';
+}
+
+async function initGeoCascade(existingGeoHierarchy, existingGl, existingLocation) {
+    const data = await loadGeoData();
+    const continentEl = document.getElementById('geo-continent-select');
+    const countryEl   = document.getElementById('geo-country-select');
+    const regionEl    = document.getElementById('geo-region-select');
+    if (!continentEl || !countryEl || !regionEl) return;
+
+    // Populate continents
+    continentEl.innerHTML = '<option value="">🌍 Continent</option>';
+    data.continents.forEach(c => {
+        continentEl.innerHTML += `<option value="${c.name}">${c.name}</option>`;
+    });
+
+    _resetSelect(countryEl, '🏳️ Country');
+    _resetSelect(regionEl,  '📍 Region');
+
+    // Wire event listeners (remove old ones first to prevent duplication)
+    continentEl.onchange = function() {
+        const cName = this.value;
+        _resetSelect(countryEl, '🏳️ Country');
+        _resetSelect(regionEl,  '📍 Region');
+        if (!cName) { _updateGeoPreview(); return; }
+        const continent = data.continents.find(c => c.name === cName);
+        if (!continent) { _updateGeoPreview(); return; }
+        countryEl.disabled = false;
+        continent.countries.forEach(co => {
+            countryEl.innerHTML += `<option value="${co.name}">${co.name}</option>`;
+        });
+        _updateGeoPreview();
+    };
+
+    countryEl.onchange = function() {
+        const coName = this.value;
+        _resetSelect(regionEl, '📍 Region');
+        if (!coName) { _updateGeoPreview(); return; }
+        const continentName = continentEl.value;
+        const continent = data.continents.find(c => c.name === continentName);
+        const country   = continent?.countries.find(co => co.name === coName);
+        if (!country || !country.regions || country.regions.length === 0) {
+            _updateGeoPreview();
+            return;
+        }
+        regionEl.disabled = false;
+        country.regions.forEach(r => {
+            regionEl.innerHTML += `<option value="${r}">${r}</option>`;
+        });
+        _updateGeoPreview();
+    };
+
+    regionEl.onchange = function() {
+        _updateGeoPreview();
+    };
+
+    // ── Hydrate from existing data ──────────────────────────────────────────
+    if (existingGeoHierarchy && existingGeoHierarchy.continent) {
+        // Structured geo_hierarchy exists — use it directly
+        continentEl.value = existingGeoHierarchy.continent;
+        continentEl.onchange();
+        if (existingGeoHierarchy.country) {
+            countryEl.value = existingGeoHierarchy.country;
+            countryEl.onchange();
+            if (existingGeoHierarchy.region) {
+                regionEl.value = existingGeoHierarchy.region;
+                regionEl.onchange();
+            }
+        }
+    } else if (existingGl) {
+        // Legacy: try to reverse-map the gl code to continent/country
+        for (const cont of data.continents) {
+            const match = cont.countries.find(co => co.gl === existingGl);
+            if (match) {
+                continentEl.value = cont.name;
+                continentEl.onchange();
+                countryEl.value = match.name;
+                countryEl.onchange();
+                // Try to match the location string to a region
+                if (existingLocation) {
+                    const regionMatch = match.regions.find(
+                        r => existingLocation.toLowerCase().includes(r.toLowerCase())
+                    );
+                    if (regionMatch) {
+                        regionEl.value = regionMatch;
+                        regionEl.onchange();
+                    }
+                }
+                break;
+            }
+        }
+    }
+    _updateGeoPreview();
+}
+
 // Toast — defined as function declaration so it is hoisted and available
 // everywhere, including in loadLeads which runs before window.showToast assignment.
 function showToast(message, type = 'info') {
@@ -916,9 +1062,9 @@ window.openEditModal = function(id) {
         keysHint.textContent   = '';
     }
 
-    const glEl = document.getElementById('edit-camp-gl');
-    if (glEl) glEl.value = camp.gl || '';
-    document.getElementById('edit-camp-location').value = camp.location || '';
+    // ── Cascading Geo Dropdown hydration (V23.6) ─────────────────────────────
+    // Initialise the cascade and hydrate from geo_hierarchy (new) or gl/location (legacy)
+    initGeoCascade(camp.geo_hierarchy || null, camp.gl || '', camp.location || '');
 
     showModal('edit-campaign-modal');
 };
@@ -933,14 +1079,21 @@ window.saveEditedCampaign = async function() {
     const name     = document.getElementById('edit-camp-name')?.value      || '';
     const bio      = document.getElementById('edit-camp-bio')?.value       || '';
     const keywords = document.getElementById('edit-camp-keys')?.value      || '';
+    // gl + location are synced from cascade via hidden inputs (_updateGeoPreview)
     const gl       = document.getElementById('edit-camp-gl')?.value        || '';
     const location = document.getElementById('edit-camp-location')?.value  || '';
+    // Build structured geo_hierarchy for future use
+    const geo_hierarchy = {
+        continent: document.getElementById('geo-continent-select')?.value || '',
+        country:   document.getElementById('geo-country-select')?.value   || '',
+        region:    document.getElementById('geo-region-select')?.value    || '',
+    };
     if (!id)   { showToast('Campaign ID missing. Please refresh.', 'error'); return; }
     if (!name) { showToast('Campaign name is required.', 'error'); return; }
 
     try {
         const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', {
-            name, bio, keywords, gl, location
+            name, bio, keywords, gl, location, geo_hierarchy
         });
         if (success) {
             showToast('Campaign updated successfully!', 'success');
