@@ -1,7 +1,7 @@
 # Sideio Lead Sniper — V23 Comprehensive Architecture Reference
 ## Full Technical Specification for Engineering Teams
 
-> **Version:** V23.4 (Production-Frozen as of 2026-04-20)
+> **Version:** V23.5 (Updated 2026-06-21 — Archetype Refactor + Query Quality Hardening)
 > **Codebase mapped:** `D:\.gemini\antigravity\scratch\sideio_leads`
 > **Document purpose:** Complete intern-grade rebuild reference — maps architecture to current live code
 
@@ -31,12 +31,16 @@
 20. [Intern Rebuild Checklist](#20-intern-rebuild-checklist)
 21. [Design Invariants — Never Break These](#21-design-invariants--never-break-these)
 22. [V22 Amputation Record](#22-v22-amputation-record)
+- [Appendix A: Firestore Composite Index](#appendix-a-firestore-composite-index)
+- [Appendix B: Key File → Function Cross-Reference](#appendix-b-key-file---function-cross-reference)
+- [Appendix C: V23.5 Changelog — Sourcing Vector Archetype Refactor](#appendix-c-v235-changelog--sourcing-vector-archetype-refactor)
+- [Appendix D: Schema Boundary Isolation (V23.5)](#appendix-d-schema-boundary-isolation-v235)
 
 ---
 
 ## 1. SYSTEM OVERVIEW
 
-**Sideio Lead Sniper** is a fully automated, multi-tenant B2B lead generation SaaS. It discovers, scores, and delivers hyper-personalized outreach messages to paying tenants — autonomously, 24/7, without manual input.
+**Sideio Lead Sniper** is a fully automated, multi-tenant lead generation SaaS supporting both B2B and B2C verticals. It discovers, scores, and delivers hyper-personalized outreach messages to paying tenants — autonomously, 24/7, without manual input.
 
 ### 1.1 Core Execution Loop
 
@@ -144,7 +148,7 @@ sideio_leads/
 |   |   +-- core/
 |   |   |   +-- config.py            # All env vars
 |   |   |   +-- clients.py           # Lazy Firestore + Cloud Tasks singletons
-|   |   |   +-- helpers.py           # All shared business logic (637 lines)
+|   |   |   +-- helpers.py           # All shared business logic + archetype classifier
 |   |   |   +-- logging.py           # structlog JSON logger -> Cloud Logging
 |   |   +-- services/intelligence/
 |   |       +-- shadow_tracker.py    # BQ n-gram accumulator
@@ -158,13 +162,16 @@ sideio_leads/
 |   |       +-- query_brain.py       # Hybrid Starter Motor (BQ -> Gemini fallback)
 |   |       +-- serper_service.py    # Serper API calls + noise filtering
 |   |       +-- prism_pipeline.py    # URL routing (WalledGarden/B2B2C/General)
-|   |
 |   +-- scraper-heavy/               # Cloud Run: Playwright Headless Browser
 |   +-- digital-twin-engine/         # Cloud Run: Website Analyser
 |   +-- autonomous-engine/           # Cloud Run JOB (no HTTP): Nightly Scraper
 |   +-- shadow-learner-aggregator/   # Cloud Run: RLHF Swarm Weight Aggregator
 |   +-- whatsapp-webhook/            # Cloud Run: WhatsApp Business API
 |   +-- email-summary/               # Cloud Run: Weekly Digest Sender
+|
++-- migration/                       # Database migration scripts
+|   +-- patch_sourcing_vector.py     # Migrate campaigns to archetype-based vectors
+|   +-- scrub_oman_b2b_arrays.py     # Clear zombie B2B data from B2C campaigns
 |
 +-- firebase.json                    # Hosting config + Firestore rules pointer
 +-- firestore.rules                  # V13.22 multi-tenant security rules
@@ -332,7 +339,7 @@ Document ID: Auto-generated Firestore ID
   "next_produce_due": "<ISO-8601 TIMESTAMP>",
   "drip_interval_minutes": 60,
   "unprocessed_queue": [],
-  "sourcing_vector": "Classic B2B",
+  "sourcing_vector": "B2C",
   "persona_id": "<firestore_persona_doc_id>",
   "persona_bio": "Denormalised bio from linked Persona Vault.",
   "persona_keywords": "keyword1, keyword2",
@@ -346,7 +353,7 @@ Document ID: Auto-generated Firestore ID
 **Critical notes:**
 - `next_produce_due`/`next_drip_due`: ISO-8601 strings (NOT Firestore Timestamp). Set by cron sweep.
 - `unprocessed_queue`: Array of Serper result objects. Populated by `/produce`, drained by `/dispatch` (batch of 10).
-- `sourcing_vector`: One of `Classic B2B`, `WalledGarden Social`, `B2B2C`. Set by Synaptic Router on creation.
+- `sourcing_vector`: **V23.5 Archetype Model.** One of `B2B`, `B2C`, `B2B2C`, `D2C`. Classified by Gemini via `classify_sourcing_vector()` in `helpers.py`. Legacy campaigns may still have old values (`Classic B2B`, `Social/Forum Listening`, `Review Hijacking`, `Maps/GMB Targeting`) which are backwards-compatible (treated as B2B routing). See [Sourcing Vector Archetype System](#65-sourcing-vector-archetype-system--consumer-routing) for full details.
 - `persona_bio/keywords/name`: Denormalised from Persona Vault at creation. Updated on persona PUT.
 - `target_urls`: **PERMANENTLY AMPUTATED in V22**. May exist in legacy docs but is never read by pipeline.
 
@@ -594,13 +601,14 @@ File: `services/pipeline-main/services/query_brain.py::generate_smart_query`
 - Example query: `"struggling with churn" OR "high turnover" OR "losing customers"`
 
 **Path B - GEMINI_FALLBACK** (cold start / new personas):
-```python
-symptom_prompt = f"""The user solves: '{bio}'.
-Generate 3 highly specific Google Search operators to find targets PUBLICLY EXPERIENCING this problem.
-Rule 1: Include at least one query targeting site:linkedin.com, site:facebook.com, or site:reddit.com.
-Rule 2: Append negative keywords (e.g., '-shop -cart -amazon -wiki').
-Return ONLY a JSON list of 3 strings."""
-```
+
+The Gemini prompt is **archetype-aware** (V23.5). When `sourcing_vector` is a consumer archetype (B2C, B2B2C, D2C), the prompt explicitly:
+- Forbids B2B corporate jargon ("brand story", "positioning", "market fit", "lead generation")
+- Demands Google Dork Boolean format for `symptom_dorks` (operators: OR, AND, quotes, intitle:, inurl:)
+- Demands short keyword-based search strings for `translated_queries` (NOT conversational sentences)
+- Injects a `VECTOR GUARD` + `QUERY FORMAT GUARD` into the system instruction
+
+When `sourcing_vector` is B2B (or any legacy value), the standard B2B prompt is used with professional context framing.
 
 **Routing decision:**
 ```
@@ -610,6 +618,25 @@ BQ timeout > 3 seconds    -> GEMINI_FALLBACK (circuit breaker)
 ```
 
 Configurable at runtime: `Firestore system_config/router.confidence_threshold` (default: 1000)
+
+### Step 5.5: Query Assembly & Self-Negation Prevention (V23.5)
+
+After Gemini returns `symptom_dorks`, `translated_queries`, and `historical_phrases`, the Query Brain assembles final Serper query strings by appending a global blacklist of exclusions.
+
+**Blacklist layers (cumulative):**
+1. `_DEFAULT_BLACKLIST`: `-wiki -jobs -careers -investors -support -"login" -www.zoominfo.com -www.ibm.com -www.amazon.com`
+2. Persona `NOT <phrase>` targeting signals → `-"phrase"`
+3. Negative Signal Shield (BQ `Negative_Signals` table) → `-site:domain` + `-intitle:"entity"`
+4. Negative RLHF domains/titles from campaign-scoped lead history
+
+**Self-negation prevention (`_deconflict_blacklist()`):**
+Before appending the blacklist to each query string, the assembler regex-extracts all positive `site:domain.com` operators from the query body. If the blacklist contains a `-site:domain.com` for the same domain, that exclusion is stripped for that specific query. This prevents Gemini-generated symptom dorks from being silently nullified by the global blacklist.
+
+**Consumer vector guards (V23.5):**
+When `_is_consumer_archetype(sourcing_vector)` is True:
+- RLHF tenant-wide fallback is skipped entirely (prevents B2B pain point leakage)
+- `pain_points` are suppressed → `historical_str` is always empty
+- Post-generation B2B jargon scrubber strips any leaked corporate terms from `translated_queries`
 
 Final query always appends Negative Knowledge Graph shield:
 ```python
@@ -1583,6 +1610,21 @@ These are hard constraints. Breaking any one causes silent data corruption, bill
 18. **CORS preflight returns 204 before auth check:** OPTIONS requests handled before `require_auth`.
     Otherwise browsers get CORS error on preflight and every API call fails.
 
+19. **`tenant_profiles` is NEVER read at runtime by the pipeline.** (V23.5) The `dispatch.py` execution
+    path has zero runtime coupling to the `tenant_profiles` collection. All persona data must be
+    snapshot-copied into the campaign document at creation time. Any fallback to `tenant_profiles`
+    causes cross-campaign branding leakage.
+
+20. **Consumer archetype detection uses `_CONSUMER_ARCHETYPES` frozenset.** (V23.5) The canonical
+    set `{"B2C", "B2B2C", "D2C"}` is defined in `query_brain.py` (pipeline-main), `helpers.py`
+    (orchestrator), and `serper_service.py` (inline). All three MUST stay in sync.
+    The function `_is_consumer_archetype()` is the single source of truth for consumer routing.
+
+21. **Blacklist must never self-negate positive site: operators.** (V23.5) The `_deconflict_blacklist()`
+    function in `query_brain.py` strips conflicting `-site:` exclusions from the blacklist when the
+    query body already contains a positive `site:` for the same domain. Removing this function will
+    cause Gemini-generated symptom dorks targeting specific sites to be silently nullified.
+
 ---
 
 ## 22. V22 AMPUTATION RECORD
@@ -1624,15 +1666,15 @@ Deploy: `firebase deploy --only firestore:indexes`
 | File | Key Functions |
 |---|---|
 | orchestrator/main_v23.py | create_app() -- Blueprint registry, CORS middleware |
-| orchestrator/core/helpers.py | check_quota(), reserve_credits(), _atomic_settle_txn(), _async_shadow_track(), _call_gemini_bounded(), handle_purge() |
+| orchestrator/core/helpers.py | check_quota(), reserve_credits(), classify_sourcing_vector(), is_consumer_archetype(), _atomic_settle_txn(), _async_shadow_track() |
 | orchestrator/api/routers/internal.py | cron_sweep(), bq_push(), serper_audit(), settle_credits() |
 | orchestrator/api/routers/campaigns.py | create_campaign(), ignite_campaign(), consume_campaign() |
 | orchestrator/api/routers/settings.py | analyze_website() (J-4 retry + J-7 schema validation) |
 | pipeline-main/api/routers/produce.py | produce() -- Serper search + dedup + queue write |
 | pipeline-main/api/routers/dispatch.py | dispatch() -- Gemini gate + PrismPipeline + score + write |
-| pipeline-main/services/query_brain.py | generate_smart_query() -- Hybrid Confidence Router |
+| pipeline-main/services/query_brain.py | generate_smart_query(), _is_consumer_archetype(), _deconflict_blacklist() -- Hybrid Confidence Router |
 | pipeline-main/services/prism_pipeline.py | process_url() -- WalledGarden/B2B2C/GeneralDomain routing |
-| pipeline-main/services/serper_service.py | search_serper(), filter_serper_noise(), extract_root_domain() |
+| pipeline-main/services/serper_service.py | search_serper(), filter_serper_noise(), deep_context_serper_dork(), _is_consumer_archetype() |
 | autonomous-engine/engine.py | main(), _can_use_gemini(), _validate_and_cache() |
 | public/app.js | loadDashboard(), loadLeads(), createLeadCardV2(), dtPrefillAndLaunch(), deployPredictiveCard(), openChildCampaignModal() |
 
@@ -1640,4 +1682,117 @@ Deploy: `firebase deploy --only firestore:indexes`
 
 *Document compiled from: architecture.md (V22, 2464 lines), architecture1.md (V23, 419 lines),
 and direct codebase inspection of 25+ source files.*
-*Current version: V23.4 | Compiled: 2026-06-08*
+*Current version: V23.5 | Compiled: 2026-06-08 | Updated: 2026-06-21*
+
+---
+
+## APPENDIX C: V23.5 CHANGELOG — SOURCING VECTOR ARCHETYPE REFACTOR
+
+### Motivation
+
+Pre-V23.5, the `sourcing_vector` field was constrained to a 4-value hardcoded industry-specific enum:
+`Social/Forum Listening | Review Hijacking | Classic B2B | Maps/GMB Targeting`.
+
+This caused **total lead starvation** for non-B2B campaigns (Real Estate, Dental, Automotive) because:
+1. The classifier enum had zero consumer vectors — every campaign was force-classified as B2B.
+2. `CHILD_CAMPAIGN_OVERRIDE` campaigns were hardcoded to `"Classic B2B"` — bypassing Gemini entirely.
+3. The downstream pipeline had complete consumer routing support (prompts, jargon scrubbers, URL-path dedup) gated on `{"b2c", "real estate", "property"}` — but these values could never be produced.
+
+### Solution: Business-Motion Archetypes
+
+Replaced the industry-specific enum with 4 dynamic business-motion archetypes:
+
+| Archetype | Meaning | Consumer? | Pipeline Behavior |
+|-----------|---------|:---------:|--------------------|
+| `B2B` | Sells to businesses | No | Standard B2B prompt, domain-level dedup, full RLHF |
+| `B2C` | Sells to end consumers | **Yes** | Consumer prompt, URL-path dedup, pain point suppression, B2B jargon scrubber |
+| `B2B2C` | Sells through intermediaries | **Yes** | Consumer routing |
+| `D2C` | Direct-to-consumer brand | **Yes** | Consumer routing |
+
+Legacy values (`Classic B2B`, `Social/Forum Listening`, etc.) are **backwards-compatible** — `is_consumer_archetype()` returns `False` for all of them.
+
+### 6.5 Sourcing Vector Archetype System & Consumer Routing
+
+#### Classification Flow
+
+```
+Campaign creation (campaigns.py)
+  ├── bio != "CHILD_CAMPAIGN_OVERRIDE"
+  │     └── classify_sourcing_vector(bio, weights) → Gemini → "B2B" | "B2C" | "B2B2C" | "D2C"
+  │
+  └── bio == "CHILD_CAMPAIGN_OVERRIDE"
+        └── effective_bio = focus + pain + advantage
+              └── classify_sourcing_vector(effective_bio, weights) → Gemini → archetype
+                   (was hardcoded to "Classic B2B" before V23.5)
+```
+
+#### Consumer Detection (Single Source of Truth)
+
+```python
+# Canonical frozenset (defined in helpers.py, query_brain.py, serper_service.py)
+_CONSUMER_ARCHETYPES = frozenset({"B2C", "B2B2C", "D2C"})
+
+def _is_consumer_archetype(vector: str) -> bool:
+    return (vector or "").upper().strip() in _CONSUMER_ARCHETYPES
+```
+
+#### Consumer Routing Guards (Pipeline-Main)
+
+| Guard | File | Trigger | Effect |
+|-------|------|---------|--------|
+| RLHF skip | query_brain.py | Consumer + no campaign_id | Skips tenant-wide RLHF fetch |
+| Consumer prompt | query_brain.py | `_is_consumer_archetype(vector_label)` | B2C-specific prompt with dork-format enforcement |
+| VECTOR GUARD | query_brain.py | Consumer vector | System instruction forbidding B2B jargon |
+| QUERY FORMAT GUARD | query_brain.py | Consumer vector | Enforces Boolean dork format for symptom_dorks |
+| Pain point suppression | query_brain.py | Consumer vector | Forces `historical_str = ""` |
+| B2B jargon scrubber | query_brain.py | Consumer vector | Post-generation filter strips "brand story", "positioning", etc. |
+| URL-path dedup | produce.py, dispatch.py | Consumer vector | Uses URL-path key instead of domain-level for dedup |
+| Enrichment gate | serper_service.py | Consumer vector | Skips deep_context_serper_dork (no B2B enrichment) |
+
+### Files Changed in V23.5
+
+| Commit | File | Change |
+|--------|------|--------|
+| `534e2bb` | query_brain.py | Consumer prompt branch + VECTOR GUARD system instruction |
+| `f74ee8f` | query_brain.py | Consumer pain point suppression + B2B jargon scrubber |
+| `6cf7e48` | produce.py | 4-layer ingestion sanitizer + campaign isolation |
+| `9ed7c18` | dispatch.py | Removed live read-through to `tenant_profiles` |
+| `150a175` | helpers.py, campaigns.py, internal.py, query_brain.py, produce.py, dispatch.py, serper_service.py | Archetype refactor: replaced rigid enum with B2B/B2C/B2B2C/D2C |
+| `b864a93` | serper_service.py | Inlined `_is_consumer_archetype` for smoke test isolation |
+| `8c0f45c` | query_brain.py | Boolean dork enforcement, self-negation prevention, QUERY FORMAT GUARD |
+
+### Migration Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `migration/patch_sourcing_vector.py` | Patches specific campaigns to clean archetypes + scans for legacy values |
+| `migration/scrub_oman_b2b_arrays.py` | Clears zombie B2B strings from `pain_points`, `features`, `value_propositions` arrays |
+
+---
+
+## APPENDIX D: SCHEMA BOUNDARY ISOLATION (V23.5)
+
+Strict unidirectional data boundary enforced between three Firestore domains:
+
+```
+tenant_profiles (Digital Twin / Core Identity)
+      │
+      │ READ-ONLY at campaign creation time (snapshot-copy)
+      │ ZERO runtime access from pipeline-main
+      ▼
+campaigns (Execution State)
+      │
+      │ Denormalized persona_bio, persona_keywords
+      │ Independent sourcing_vector (classified per-campaign)
+      ▼
+leads (Output Artifacts)
+      │
+      │ Stores sourcing_vector from parent campaign
+      │ NEVER reads back to tenant_profiles or campaigns
+```
+
+**Enforced invariants:**
+- `dispatch.py` has ZERO `tenant_profiles` collection references at runtime
+- `produce.py` context is instantiated fresh inside each campaign loop (`CampaignQueryContext`)
+- Persona data is snapshot-copied into the campaign document — never fetched live from the Persona Vault during pipeline execution
+
