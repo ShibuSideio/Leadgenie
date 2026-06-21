@@ -1,7 +1,7 @@
 # Sideio Lead Sniper — V23 Comprehensive Architecture Reference
 ## Full Technical Specification for Engineering Teams
 
-> **Version:** V23.5 (Updated 2026-06-21 — Archetype Refactor + Query Quality Hardening)
+> **Version:** V23.7 (Updated 2026-06-21 — Fault Recovery + State Alignment + Retry Escalation Topology)
 > **Codebase mapped:** `D:\.gemini\antigravity\scratch\sideio_leads`
 > **Document purpose:** Complete intern-grade rebuild reference — maps architecture to current live code
 
@@ -35,6 +35,7 @@
 - [Appendix B: Key File → Function Cross-Reference](#appendix-b-key-file---function-cross-reference)
 - [Appendix C: V23.5 Changelog — Sourcing Vector Archetype Refactor](#appendix-c-v235-changelog--sourcing-vector-archetype-refactor)
 - [Appendix D: Schema Boundary Isolation (V23.5)](#appendix-d-schema-boundary-isolation-v235)
+- [Appendix E: V23.7 Changelog — Fault Recovery & State Alignment](#appendix-e-v237-changelog--fault-recovery--state-alignment)
 
 ---
 
@@ -404,13 +405,25 @@ Document ID: `sha256(tenant_id + '_' + root_domain)` — deterministic, NEVER au
   "phone": "3125550199",
   "origin_engine": "cartographer",
   "credit_settled": false,
-  "createdAt": "<SERVER_TIMESTAMP>"
+  "createdAt": "<SERVER_TIMESTAMP>",
+  "processing_started_at": "<SERVER_TIMESTAMP>",
+  "retry_count": 0,
+  "error": null,
+  "requeue_source": null
 }
 ```
 
-**Status enum:** `processing` -> `new` -> `contacted` -> `converted` | `ignored` | `failed`
+**Status enum:** `queued` -> `processing` -> `new` -> `contacted` -> `converted` | `ignored` | `failed`
 **Score gate:** Only leads scoring `>= 7` survive. Scores below 7 -> document **deleted** immediately.
 **`origin_engine`:** `"autonomous"` (pre-scored cache) or `"cartographer"` (live Serper). Drives the Predictive Match badge.
+
+**V23.7 Fault Recovery Fields:**
+| Field | Type | Purpose |
+|---|---|---|
+| `processing_started_at` | Timestamp | Set by `dispatch.py` at lead creation. Used by zombie sweep (not `createdAt`) |
+| `retry_count` | Integer | Tracks zombie recovery attempts (0→3). Reset to 0 on manual requeue |
+| `error` | String/null | Human-readable failure reason displayed in UI error badge |
+| `requeue_source` | String/null | `"manual_ui"` or `"zombie_sweep"` — tracks re-entry vector |
 
 ### 4.6 `global_lead_locks` Collection
 
@@ -483,6 +496,7 @@ Global domain intelligence repository. Self-updating weight table.
 | `system_config/router` | Epsilon-greedy router config + confidence threshold (default: 1000) |
 | `system_telemetry/circuit_breaker_state` | Serper 429 rate + scraper OOM rate |
 | `usage_metrics/{tenant_id}` | Serper search count per tenant |
+| `dead_letter_leads` | V23.7: Terminal zombie failures after 3 retries. Full lead payload + `original_doc_id`, `dlq_reason`, `dlq_routed_at` |
 
 ---
 
@@ -631,6 +645,8 @@ After Gemini returns `symptom_dorks`, `translated_queries`, and `historical_phra
 
 **Self-negation prevention (`_deconflict_blacklist()`):**
 Before appending the blacklist to each query string, the assembler regex-extracts all positive `site:domain.com` operators from the query body. If the blacklist contains a `-site:domain.com` for the same domain, that exclusion is stripped for that specific query. This prevents Gemini-generated symptom dorks from being silently nullified by the global blacklist.
+
+**V23.5+ Path-aware domain deconfliction:** The extraction regex now strips URL paths and subdomains before comparison. `site:linkedin.com/company` correctly deconflicts against `-site:linkedin.com`. A post-generation scrubber also strips any ghost `AND {location}` suffix if a `site:` operator is present in the LLM output (V23.5 query contamination fix).
 
 **Consumer vector guards (V23.5):**
 When `_is_consumer_archetype(sourcing_vector)` is True:
@@ -802,6 +818,13 @@ to `/produce` without waiting for the cron sweep. Sets `zero_wait_enqueued: true
 4. If rejection_reason == "Competitor"/"Author": fires async neg_signal -> BQ
 5. If status == "approved": fires async shadow_track -> BQ Intent_Keywords
 
+**V23.7 Requeue Interceptor:** If `status == "queued"` AND current lead status is `"failed"`:
+1. **Credit gate:** Checks `wallet.total_credits > wallet.reserved_credits` — returns **HTTP 402** if depleted
+2. **State reset:** Sets `status: "queued"`, clears `lock_entity`, `error`, `processing_started_at`; resets `retry_count: 0`
+3. **Credit reserve:** Increments `wallet.reserved_credits` by 1
+4. **Cloud Task dispatch:** Creates a fresh pipeline task with `dispatch_deadline: 300s`
+5. Returns `{"status": "requeued"}` with HTTP 200 — bypasses RLHF chain
+
 ---
 
 ## 8. FRONTEND ARCHITECTURE
@@ -849,6 +872,16 @@ function loadLeads() {
             rawLeadsCache = [];
             snapshot.forEach(doc => { let d = doc.data(); d.id = doc.id; rawLeadsCache.push(d); });
             rawLeadsCache.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+            // V23.7: Track failed + processing counters for state visibility
+            let cFailed = 0, cProcessing = 0;
+            rawLeadsCache.forEach(l => {
+                if (l.status === 'failed') cFailed++;
+                if (l.status === 'processing' || l.status === 'queued') cProcessing++;
+            });
+            const elFail = document.getElementById('stat-failed');
+            if (elFail) elFail.innerText = cFailed;
+
             renderLeads();
         }, async (error) => {
             if (error.code === 'permission-denied') {
@@ -906,6 +939,16 @@ Source labels:
 - `origin_engine: "autonomous"` -> `AI Match`
 - `origin_engine: "cartographer"` -> `Web Signal`
 
+**V23.7 Fault Recovery UI States:**
+
+| Status | Card Style | Badge / Indicator |
+|---|---|---|
+| `failed` | `.lead-card--failed` (red left border + gradient) | Error badge: `⚠️ {lead.error}` + `🔄 Re-queue` button |
+| `processing` | `.lead-card--processing` (amber left border) | Pulsing indicator: `⏳ Processing in progress...` |
+| `queued` | `.lead-card--processing` (amber left border) | Pulsing indicator: `⏳ Queued for processing...` |
+
+Re-queue button calls `requeueFailedLead(leadId, btn)` — 500ms debounce, sends `PUT /api/leads/{id}` with `status: 'queued'`. Handles HTTP 402 with `"Insufficient credits"` toast.
+
 ### 8.6 Conversational Campaign Modal ("Find New Clients")
 
 **Step 1:** Natural language intent textarea + quick-start chips + character hint  
@@ -944,6 +987,8 @@ Campaign cards stored in `window._pendingCards[idx]` (NOT btoa -- emoji-safe, J-
 | `fcParseIntent()` | Extract who/where from natural language |
 | `openChildCampaignModal()` | Opens child campaign modal + loads predictive cards |
 | `populatePersonaDropdown()` | Fills dropdown from _personasMap + pre-selects |
+| `requeueFailedLead()` | V23.7: PUT /api/leads/{id} → status:queued, handles 402 credit gate |
+| `recycleRejectedLead()` | Resets rejected lead → status:unprocessed |
 
 ---
 
@@ -1341,6 +1386,13 @@ except Exception as loop_e:
     continue  # Never hangs in "processing" state
 ```
 
+> **V23.7 Note:** The zombie sweep no longer hard-fails leads on first encounter. Leads stuck in `processing` for >15min are now auto-retried up to 3 times (`retry_count++`) before terminal failure. See §18.6.
+
+```python
+# (existing Universal Loop Crash Handler continues to set status: failed immediately on code-level crash)
+# Zombie sweep (§18.6) handles the DIFFERENT case of timeout/infrastructure hangs
+```
+
 ### 18.2 Circuit Breaker (Cron Sweep)
 
 If `serper_error_rate > 15%` OR `scraper_oom_rate > 5%`:
@@ -1387,6 +1439,66 @@ All campaign timestamps stored as ISO-8601 strings, NOT Firestore Timestamp obje
 campaign_ref.update({"next_produce_due": (now_utc + timedelta(hours=24)).isoformat()})
 ```
 Legacy documents with DatetimeWithNanoseconds are handled via `hasattr(.timestamp)` check.
+
+### 18.6 Zombie Recovery — Retry Escalation Topology (V23.7)
+
+The cron sweep (`POST /api/internal/cron/sweep`) runs every 5 minutes and detects leads stuck in `status: "processing"` where `processing_started_at` exceeds 15 minutes.
+
+**Previous behavior (V22-V23.5):** Hard-fail immediately → `status: "failed"` with `"Zombie recovery >15min"`. No retry.
+
+**V23.7 Retry Escalation:**
+
+```
+┌───────────────────────────────────────────────────┐
+│ processing_started_at > 15min && status=processing │
+└───────────────────────┬───────────────────────────┘
+                        │
+              retry_count < 3?
+               ┌────┴────┐
+               │ YES     │ NO
+               ▼         ▼
+          Re-queue    Terminal Fail
+          + retry++   + DLQ route
+          + Cloud     + lock release
+            Task      + credit refund
+```
+
+**Auto-retry (retry_count < 3):**
+- Sets `status: "queued"`, clears `lock_entity` and `error`
+- Increments `retry_count`
+- Dispatches fresh Cloud Task with 5-60s random jitter and `dispatch_deadline: 300s`
+
+**Terminal failure (retry_count ≥ 3):**
+- Sets `status: "failed"` with descriptive error message
+- Routes full lead payload to `dead_letter_leads` Firestore collection
+- Releases `global_lead_locks` entry
+- Refunds `wallet.reserved_credits` (-1)
+
+**Sweep response metrics:**
+```json
+{
+  "zombie_recovered": 2,
+  "zombie_dlq": 1,
+  "zombie_locks_released": 1
+}
+```
+
+### 18.7 Dispatch Batch Timeout Ceiling (V23.7)
+
+File: `services/pipeline-main/api/routers/dispatch.py`
+
+The URL batch processor (`ThreadPoolExecutor`) now has a 180-second wall-clock ceiling. If `time.monotonic() - _batch_start > 180s`, the for-loop breaks and logs `dispatch_batch_timeout_ceiling` with remaining URL count.
+
+```python
+_OUTER_TIMEOUT_S = 180  # hard ceiling for entire URL batch
+_batch_start = time.monotonic()
+for fut in _cf.as_completed(futures, timeout=_URL_TIMEOUT_S):
+    if time.monotonic() - _batch_start > _OUTER_TIMEOUT_S:
+        log.error("dispatch_batch_timeout_ceiling", ...)
+        break
+```
+
+This prevents Cloud Run request timeout (300s container default) from killing in-progress writes.
 
 ---
 
@@ -1625,6 +1737,16 @@ These are hard constraints. Breaking any one causes silent data corruption, bill
     query body already contains a positive `site:` for the same domain. Removing this function will
     cause Gemini-generated symptom dorks targeting specific sites to be silently nullified.
 
+22. **Zombie sweep must use `processing_started_at`, not `createdAt`.** (V23.7) The field
+    `processing_started_at` is set by `dispatch.py` at the moment lead processing actually begins.
+    Using `createdAt` would kill leads that were queued for a long time but haven't started yet.
+    Zombie recovery must retry 3 times (`retry_count`) before terminal failure — never hard-fail
+    on first encounter.
+
+23. **Manual requeue must validate wallet credits before re-processing.** (V23.7) The `PUT /api/leads/{id}`
+    requeue interceptor returns HTTP 402 if `total_credits <= reserved_credits`. This prevents unbounded
+    re-processing loops that bypass the credit system.
+
 ---
 
 ## 22. V22 AMPUTATION RECORD
@@ -1661,28 +1783,41 @@ No migration script required. This is a deliberate soft migration.
 
 Deploy: `firebase deploy --only firestore:indexes`
 
+**V23.7 Required Index (Zombie Sweep):**
+```json
+{
+  "collectionGroup": "leads",
+  "fields": [
+    { "fieldPath": "status", "order": "ASCENDING" },
+    { "fieldPath": "processing_started_at", "order": "ASCENDING" }
+  ]
+}
+```
+> Firestore auto-generates the index link in Cloud Run logs on first query failure if not pre-deployed.
+
 ## APPENDIX B: KEY FILE -> FUNCTION CROSS-REFERENCE
 
 | File | Key Functions |
 |---|---|
 | orchestrator/main_v23.py | create_app() -- Blueprint registry, CORS middleware |
 | orchestrator/core/helpers.py | check_quota(), reserve_credits(), classify_sourcing_vector(), is_consumer_archetype(), _atomic_settle_txn(), _async_shadow_track() |
-| orchestrator/api/routers/internal.py | cron_sweep(), bq_push(), serper_audit(), settle_credits() |
+| orchestrator/api/routers/internal.py | cron_sweep(), bq_push(), serper_audit(), settle_credits(). V23.7: zombie retry escalation + DLQ routing |
 | orchestrator/api/routers/campaigns.py | create_campaign(), ignite_campaign(), consume_campaign() |
+| orchestrator/api/routers/leads.py | update_lead(). V23.7: requeue interceptor + credit gate (402) + Cloud Task dispatch |
 | orchestrator/api/routers/settings.py | analyze_website() (J-4 retry + J-7 schema validation) |
 | pipeline-main/api/routers/produce.py | produce() -- Serper search + dedup + queue write |
-| pipeline-main/api/routers/dispatch.py | dispatch() -- Gemini gate + PrismPipeline + score + write |
+| pipeline-main/api/routers/dispatch.py | dispatch() -- Gemini gate + PrismPipeline + score + write. V23.7: processing_started_at + 180s batch ceiling |
 | pipeline-main/services/query_brain.py | generate_smart_query(), _is_consumer_archetype(), _deconflict_blacklist() -- Hybrid Confidence Router |
 | pipeline-main/services/prism_pipeline.py | process_url() -- WalledGarden/B2B2C/GeneralDomain routing |
 | pipeline-main/services/serper_service.py | search_serper(), filter_serper_noise(), deep_context_serper_dork(), _is_consumer_archetype() |
 | autonomous-engine/engine.py | main(), _can_use_gemini(), _validate_and_cache() |
-| public/app.js | loadDashboard(), loadLeads(), createLeadCardV2(), dtPrefillAndLaunch(), deployPredictiveCard(), openChildCampaignModal() |
+| public/app.js | loadDashboard(), loadLeads(), createLeadCardV2(), dtPrefillAndLaunch(), deployPredictiveCard(), openChildCampaignModal(). V23.7: requeueFailedLead(), recycleRejectedLead() |
 
 ---
 
 *Document compiled from: architecture.md (V22, 2464 lines), architecture1.md (V23, 419 lines),
 and direct codebase inspection of 25+ source files.*
-*Current version: V23.5 | Compiled: 2026-06-08 | Updated: 2026-06-21*
+*Current version: V23.7 | Compiled: 2026-06-08 | Updated: 2026-06-21*
 
 ---
 
@@ -1796,3 +1931,65 @@ leads (Output Artifacts)
 - `produce.py` context is instantiated fresh inside each campaign loop (`CampaignQueryContext`)
 - Persona data is snapshot-copied into the campaign document — never fetched live from the Persona Vault during pipeline execution
 
+## APPENDIX E: V23.7 CHANGELOG — FAULT RECOVERY & STATE ALIGNMENT
+
+### Motivation
+
+Leads stuck in `processing` for >15 minutes were immediately killed to terminal `status: "failed"` by the zombie sweep, with no retry mechanism. These dead leads were:
+1. **Invisible in the frontend** — `renderLeads()` only whitelisted `new`, `contacted`, `converted`
+2. **Un-retryable** — no UI mechanism to re-process a failed lead
+3. **Dashboard-mismatched** — Firestore document count ≠ displayed card count
+4. **Credit-trapped** — `wallet.reserved_credits` incremented but never refunded on zombie kill
+
+### Solution: Distributed State Alignment + Retry Escalation Topology
+
+#### Backend Changes
+
+| File | Change | Lines |
+|---|---|---|
+| `internal.py` | Zombie sweep uses `processing_started_at` (not `createdAt`). 3-retry escalation before terminal DLQ | ~L789-890 |
+| `internal.py` | Consumer Cloud Tasks now have `dispatch_deadline: 300s` | L727 |
+| `internal.py` | `zombie_dlq` counter in sweep response metrics | L894, L902 |
+| `dispatch.py` | Sets `processing_started_at: SERVER_TIMESTAMP` at lead creation | L542 |
+| `dispatch.py` | 180s wall-clock ceiling on URL batch processing (`_OUTER_TIMEOUT_S`) | L783-795 |
+| `dispatch.py` | `import time` added for monotonic clock | L34 |
+| `leads.py` | Requeue interceptor: credit gate (402), state reset, Cloud Task dispatch | L70-148 |
+
+#### Frontend Changes
+
+| File | Change | Lines |
+|---|---|---|
+| `app.js` | `renderLeads()` filter expanded: `queued`, `processing`, `failed` | L726 |
+| `app.js` | `cFailed`, `cProcessing` counters in `onSnapshot` | L651-671 |
+| `app.js` | `createLeadCardV2()`: status-aware CSS classes + error badge / processing indicator | L2653-2777 |
+| `app.js` | `requeueFailedLead()` function with 500ms debounce and 402 handling | L1844-1877 |
+| `app.js` | Delegated click handler for `data-action="requeue"` | L3085-3091 |
+| `styles.css` | `.lead-card--failed`, `.lead-error-badge`, `.lead-requeue-btn`, `.lead-processing-indicator` | L1806-1878 |
+
+#### New Firestore Schema
+
+| Field / Collection | Type | Purpose |
+|---|---|---|
+| `leads.processing_started_at` | Timestamp | Zombie detection anchor (replaces `createdAt`) |
+| `leads.retry_count` | Integer | Tracks auto-retry attempts (0→3) |
+| `leads.error` | String | Human-readable failure reason |
+| `leads.requeue_source` | String | `"manual_ui"` or `"zombie_sweep"` |
+| `dead_letter_leads` (collection) | Documents | Terminal failures after 3 retries + `dlq_reason`, `dlq_routed_at` |
+
+#### Required Composite Index
+
+```json
+{
+  "collectionGroup": "leads",
+  "fields": [
+    { "fieldPath": "status", "order": "ASCENDING" },
+    { "fieldPath": "processing_started_at", "order": "ASCENDING" }
+  ]
+}
+```
+
+#### Design Invariants Preserved
+- Zero changes to OSINT query logic (`query_brain.py`, `produce.py` untouched)
+- Schema names `status`, `lock_entity`, `tenant_id` unchanged
+- No React/Vue/NPM dependencies introduced (Vanilla JS PWA)
+- All existing RLHF, Shadow Tracker, and Negative Signal flows untouched
