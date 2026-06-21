@@ -1,0 +1,59 @@
+{
+  "continents": [
+    {
+      "name": "Asia",
+      "countries": [
+        { "name": "India", "gl": "in", "regions": ["Andhra Pradesh", "Delhi", "Goa", "Gujarat", "Karnataka", "Kerala", "Maharashtra", "Rajasthan", "Tamil Nadu", "Telangana", "Uttar Pradesh", "West Bengal"] },
+        { "name": "UAE", "gl": "ae", "regions": ["Abu Dhabi", "Dubai", "Sharjah", "Ajman", "Fujairah"] },
+        { "name": "Singapore", "gl": "sg", "regions": [] },
+        { "name": "Japan", "gl": "jp", "regions": ["Tokyo", "Osaka", "Kyoto", "Hokkaido", "Fukuoka"] },
+        { "name": "Oman", "gl": "om", "regions": ["Muscat", "Dhofar", "Al Batinah", "Al Dakhiliyah"] },
+        { "name": "Saudi Arabia", "gl": "sa", "regions": ["Riyadh", "Jeddah", "Makkah", "Eastern Province", "Medina"] },
+        { "name": "Israel", "gl": "il", "regions": ["Tel Aviv", "Jerusalem", "Haifa", "Central District"] }
+      ]
+    },
+    {
+      "name": "Europe",
+      "countries": [
+        { "name": "United Kingdom", "gl": "uk", "regions": ["England", "Scotland", "Wales", "Northern Ireland", "London", "Manchester", "Birmingham"] },
+        { "name": "Germany", "gl": "de", "regions": ["Bavaria", "Berlin", "Hamburg", "Hesse", "North Rhine-Westphalia", "Saxony"] },
+        { "name": "France", "gl": "fr", "regions": ["Île-de-France", "Provence-Alpes-Côte d'Azur", "Auvergne-Rhône-Alpes", "Nouvelle-Aquitaine"] },
+        { "name": "Netherlands", "gl": "nl", "regions": ["North Holland", "South Holland", "Utrecht", "Gelderland"] },
+        { "name": "Ireland", "gl": "ie", "regions": ["Dublin", "Cork", "Galway", "Limerick"] },
+        { "name": "Sweden", "gl": "se", "regions": ["Stockholm", "Gothenburg", "Malmö", "Uppsala"] }
+      ]
+    },
+    {
+      "name": "North America",
+      "countries": [
+        { "name": "United States", "gl": "us", "regions": ["California", "New York", "Texas", "Florida", "Illinois", "Washington", "Massachusetts", "Colorado", "Georgia", "North Carolina", "Virginia", "Ohio", "Pennsylvania"] },
+        { "name": "Canada", "gl": "ca", "regions": ["Ontario", "British Columbia", "Alberta", "Quebec", "Manitoba", "Nova Scotia"] },
+        { "name": "Mexico", "gl": "mx", "regions": ["Mexico City", "Jalisco", "Nuevo León", "Quintana Roo"] }
+      ]
+    },
+    {
+      "name": "South America",
+      "countries": [
+        { "name": "Brazil", "gl": "br", "regions": ["São Paulo", "Rio de Janeiro", "Minas Gerais", "Bahia", "Paraná"] },
+        { "name": "Argentina", "gl": "ar", "regions": ["Buenos Aires", "Córdoba", "Santa Fe", "Mendoza"] },
+        { "name": "Colombia", "gl": "co", "regions": ["Bogotá", "Antioquia", "Valle del Cauca", "Santander"] }
+      ]
+    },
+    {
+      "name": "Africa",
+      "countries": [
+        { "name": "South Africa", "gl": "za", "regions": ["Gauteng", "Western Cape", "KwaZulu-Natal", "Eastern Cape"] },
+        { "name": "Nigeria", "gl": "ng", "regions": ["Lagos", "Abuja", "Rivers", "Oyo", "Kano"] },
+        { "name": "Kenya", "gl": "ke", "regions": ["Nairobi", "Mombasa", "Kisumu", "Nakuru"] },
+        { "name": "Egypt", "gl": "eg", "regions": ["Cairo", "Alexandria", "Giza", "Luxor"] }
+      ]
+    },
+    {
+      "name": "Oceania",
+      "countries": [
+        { "name": "Australia", "gl": "au", "regions": ["New South Wales", "Victoria", "Queensland", "Western Australia", "South Australia", "Tasmania"] },
+        { "name": "New Zealand", "gl": "nz", "regions": ["Auckland", "Wellington", "Canterbury", "Otago"] }
+      ]
+    }
+  ]
+}
