@@ -767,33 +767,33 @@
                             style="width:100%; box-sizing:border-box; padding:12px 14px; border:1.5px solid #e5e7eb; border-radius:10px; font-size:0.9rem; color:#111827; background:#fafafa; transition:all 0.2s; outline:none; font-family:inherit;"
                             onfocus="this.style.borderColor='#4f46e5';this.style.background='#fff';this.style.boxShadow='0 0 0 3px rgba(79,70,229,0.1)'"
                             onblur="this.style.borderColor='#e5e7eb';this.style.background='#fafafa';this.style.boxShadow='none'">
-                        <p style="margin:6px 0 0; font-size:0.74rem; color:#9ca3af;">Name it after the strategy this agent runs, not your product.</p>
+                        <p style="margin:6px 0 0; font-size:0.74rem; color:#9ca3af;">Give this agent a clear name based on who you are looking for (e.g., 'Local Roofer Campaign' or 'SaaS Churn Recovery').</p>
                     </div>
 
                     <!-- Field 2: Core Directive -->
                     <div>
                         <label style="display:block; font-size:0.8rem; font-weight:700; color:#374151; margin-bottom:6px; letter-spacing:0.3px; text-transform:uppercase;">
-                            The Core Directive
+                            Your Business Identifier
                             <span style="color:#ef4444; margin-left:2px;">*</span>
                         </label>
                         <div style="font-size:0.76rem; color:#6b7280; margin-bottom:8px; display:flex; align-items:center; gap:6px;">
-                            <span style="background:#ede9fe; color:#5b21b6; padding:2px 8px; border-radius:20px; font-weight:600; font-size:0.7rem;">Value Prop &amp; ICP</span>
-                            Fill in the blanks below — the AI reads this verbatim.
+                            <span style="background:#ede9fe; color:#5b21b6; padding:2px 8px; border-radius:20px; font-weight:600; font-size:0.7rem;">Target Profile</span>
+                            Clearly state who you serve and your unique angle below so the agent knows what to look for.
                         </div>
                         <textarea id="persona-bio" rows="7" spellcheck="true"
                             style="width:100%; box-sizing:border-box; padding:14px 16px; border:1.5px solid #e5e7eb; border-radius:10px; font-size:0.875rem; color:#111827; background:#fafafa; transition:all 0.2s; outline:none; resize:vertical; font-family:'Courier New', monospace; line-height:1.7;"
                             onfocus="this.style.borderColor='#4f46e5';this.style.background='#fff';this.style.boxShadow='0 0 0 3px rgba(79,70,229,0.1)'"
                             onblur="this.style.borderColor='#e5e7eb';this.style.background='#fafafa';this.style.boxShadow='none'"></textarea>
-                        <p style="margin:6px 0 0; font-size:0.74rem; color:#9ca3af;">&#128161; The more specific your directive, the sharper the AI's targeting will be.</p>
+                        <p style="margin:6px 0 0; font-size:0.74rem; color:#9ca3af;">&#128161; Tip: Be as specific as possible. Clear details help the AI ignore irrelevant websites.</p>
                     </div>
 
                     <!-- Field 3: Targeting Signals Token Input -->
                     <div>
                         <label style="display:block; font-size:0.8rem; font-weight:700; color:#374151; margin-bottom:6px; letter-spacing:0.3px; text-transform:uppercase;">
-                            Targeting Signals
+                            Pain & Symptom Keywords
                         </label>
                         <p style="margin:0 0 8px; font-size:0.76rem; color:#6b7280; line-height:1.5;">
-                            What phrases indicate a perfect-fit prospect? Press <kbd style="background:#f3f4f6; border:1px solid #d1d5db; border-radius:4px; padding:1px 5px; font-size:0.7rem;">Enter</kbd> or <kbd style="background:#f3f4f6; border:1px solid #d1d5db; border-radius:4px; padding:1px 5px; font-size:0.7rem;">,</kbd> to add a signal. Use <strong>NOT&nbsp;b2c</strong> to exclude.
+                            What phrases or complaints would your ideal customer say on a forum or website? Type a phrase and press <kbd style="background:#f3f4f6; border:1px solid #d1d5db; border-radius:4px; padding:1px 5px; font-size:0.7rem;">Enter</kbd>.
                         </p>
                         <!-- Token pill container -->
                         <div id="persona-tag-container"
@@ -801,7 +801,7 @@
                             onclick="document.getElementById('persona-tag-input').focus()">
                             <!-- Pills injected here dynamically -->
                             <input id="persona-tag-input" type="text"
-                                placeholder="Type a signal and press Enter…"
+                                placeholder="e.g., 'looking for recommendations', 'software is too slow', 'need a reliable contractor'..."
                                 autocomplete="off"
                                 style="border:none; outline:none; background:transparent; font-size:0.85rem; min-width:180px; flex:1; padding:4px 2px; color:#111827; font-family:inherit;"
                                 onkeydown="handlePersonaTagInput(event)"

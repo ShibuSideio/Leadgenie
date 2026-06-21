@@ -3945,7 +3945,7 @@ function _renderPersonaTags() {
         container.insertBefore(pill, input);
     });
 
-    input.placeholder = _personaTags.length === 0 ? 'Type a signal and press Enter\u2026' : '';
+    input.placeholder = _personaTags.length === 0 ? "e.g., 'looking for recommendations', 'software is too slow'..." : '';
     _syncPersonaTagsToHidden();
 }
 
@@ -4028,7 +4028,7 @@ window.savePersona = async function() {
     const saveBtn = document.getElementById('persona-save-btn');
 
     if (!name) { showToast('Agent Name / Strategy is required.', 'error');  return; }
-    if (!bio || bio === _BIO_TEMPLATE) { showToast('Please fill in the Core Directive.', 'error'); return; }
+    if (!bio || bio === _BIO_TEMPLATE) { showToast('Please fill in the Business Identifier.', 'error'); return; }
 
     if (saveBtn) {
         saveBtn.disabled = true;
