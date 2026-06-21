@@ -388,6 +388,7 @@ Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW, u
 Rule: Focus purely on symptoms, complaints, and unpolished data (e.g., filetype:pdf, inurl:forum, intitle:"help with").
 Rule: You MUST bypass SEO-optimized directories, aggregators, and marketing blogs.
 Rule: Every single query MUST include this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
+Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end of a query. Weave the geographic context organically into the search operators (e.g., intitle:"Oman" or site:.om). The Serper API handles geo-bounding separately.
 
 # TASK 3 — INTENT EXPANSION
 Audience: '{kw_str}'. Context: '{vector_label}'.
@@ -409,6 +410,7 @@ Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW, u
 Rule: Focus purely on symptoms, complaints, and unpolished data (e.g., filetype:pdf, inurl:forum, intitle:"help with").
 Rule: You MUST bypass SEO-optimized directories, aggregators, and marketing blogs.
 Rule: Every single query MUST include this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
+Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end of a query. Weave the geographic context organically into the search operators (e.g., intitle:"Oman" or site:.om). The Serper API handles geo-bounding separately.
 
 # TASK 3 — INTENT EXPANSION
 Audience: '{kw_str}'. Context: '{vector_label}'.
@@ -447,7 +449,13 @@ Return ONLY the JSON object. No explanation, no markdown."""
             "Output ONLY the exact string to be typed into Google. "
             "Do not wrap the entire output in quotes unless it is a single exact-match phrase. "
             "translated_queries MAY be conversational (they represent forum-style questions), "
-            "but symptom_dorks must be pure Google operator strings.\n"
+            "but symptom_dorks must be pure Google operator strings.\n\n"
+            "GEO ISOLATION RULE:\n"
+            "NEVER append AND {location} or AND {city} or AND {country} at the end of any query. "
+            "The Serper API receives geo-bounding parameters separately (gl, location). "
+            "If you need to target a region, weave it into the search operators organically "
+            "(e.g., intitle:\"Oman\" or site:.om or inurl:oman). "
+            "A trailing AND {place} destroys query precision.\n"
         )
         if _is_consumer_vector:
             _system_instruction += (
@@ -481,11 +489,23 @@ Return ONLY the JSON object. No explanation, no markdown."""
                     r'^(?:I\'?m looking for|Show me|Find|Identify|Search for|Look for|I need|I want)\s+',
                     _re.IGNORECASE
                 )
+                # FIX (V23.6): Strip trailing AND {location} suffixes the LLM appends
+                # despite prompt constraints. Catches: AND Oman, AND Kerala, AND "Dubai"
+                _TRAILING_AND_GEO = _re.compile(
+                    r'\s+AND\s+["\']?[A-Z][A-Za-z\s\-]+["\']?\s*$'
+                )
                 _sanitized_dorks = []
                 for _dork in ctx.symptom_dorks:
                     _cleaned = _CONVERSATIONAL_PREFIX.sub('', _dork).strip()
+                    # Strip trailing AND {location}
+                    _geo_match = _TRAILING_AND_GEO.search(_cleaned)
+                    if _geo_match:
+                        log.warning("symptom_dork_trailing_AND_geo_stripped",
+                                    original=_cleaned[:100],
+                                    stripped_suffix=_geo_match.group().strip())
+                        _cleaned = _cleaned[:_geo_match.start()].strip()
                     if _cleaned != _dork:
-                        log.warning("symptom_dork_conversational_prefix_stripped",
+                        log.warning("symptom_dork_sanitized",
                                     original=_dork[:80], cleaned=_cleaned[:80])
                     if _cleaned:
                         _sanitized_dorks.append(_cleaned)
@@ -521,9 +541,24 @@ Return ONLY the JSON object. No explanation, no markdown."""
         targets a specific site: but the global blacklist also excludes it.
         """
         import re
-        # Extract all positive site: domains from the query body
+        # Extract all positive site: domains from the query body.
+        # FIX (V23.6): Strip URL paths (/company, /jobs) and subdomain prefixes
+        # (ae.linkedin.com → linkedin.com) so that site:linkedin.com/company
+        # correctly deconflicts against -site:linkedin.com in the blacklist.
+        def _extract_root_domain(raw: str) -> str:
+            """linkedin.com/company → linkedin.com, ae.linkedin.com → linkedin.com"""
+            d = raw.lower().replace("www.", "")
+            d = d.split("/")[0]  # strip path
+            parts = d.split(".")
+            # Keep last 2 segments (or 3 for co.uk style TLDs)
+            if len(parts) > 2 and len(parts[-1]) <= 3 and len(parts[-2]) <= 3:
+                d = ".".join(parts[-3:])  # e.g. bbc.co.uk
+            elif len(parts) > 2:
+                d = ".".join(parts[-2:])  # e.g. ae.linkedin.com → linkedin.com
+            return d
+
         _positive_sites = set(
-            m.group(1).lower().replace("www.", "")
+            _extract_root_domain(m.group(1))
             for m in re.finditer(r'(?<![- ])site:([^\s]+)', query_body)
         )
         if not _positive_sites:
@@ -533,7 +568,7 @@ Return ONLY the JSON object. No explanation, no markdown."""
         _filtered = []
         for tok in _tokens:
             if tok.startswith("-site:"):
-                _excl_domain = tok[6:].lower().replace("www.", "")
+                _excl_domain = _extract_root_domain(tok[6:])
                 if _excl_domain in _positive_sites:
                     log.info("blacklist_self_negation_prevented",
                              domain=_excl_domain,
