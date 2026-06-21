@@ -179,10 +179,8 @@ def _score_with_gemini(title: str, snippet: str, url: str, icp_description: str)
     if not snippet:
         return None
 
-    prompt = f"""You are an inbound B2B sales signal classifier.
-
-Classify the buying intent of this public web content for a company selling solutions
-related to: {icp_description}
+    prompt = f"""You are an inbound OSINT intent classifier.
+Classify the raw buying intent or operational pain expressed in this public web content for a system solving: {icp_description}
 
 Title: {title}
 Snippet: {snippet}
@@ -198,12 +196,12 @@ Respond with ONLY a JSON object (no markdown fences):
   "reasoning": "<one sentence>"
 }}
 
-Classification rules:
-- ACTIVE_SEEKING  (0.75-1.0): Explicitly looking for a solution, asking for recommendations
-- COMPETITOR_CHURN(0.70-0.95): Mentions switching from or dissatisfied with a competitor
-- EXPRESSING_PAIN (0.40-0.75): Describes a problem but not yet searching for solutions
-- TREND           (0.10-0.45): General discussion; no personal pain expressed
-- NONE            (0.0 -0.29): Not relevant; marketing copy; news article with no pain signal
+Classification rules (OSINT Focus):
+- ACTIVE_SEEKING  (0.75-1.0): Explicitly looking for a solution, asking for help on a forum/board.
+- COMPETITOR_CHURN(0.70-0.95): Complaining about a current tool/service, frustrated with a provider.
+- EXPRESSING_PAIN (0.40-0.75): Venting about a raw operational problem, symptom, or inefficiency.
+- TREND           (0.10-0.45): General market discussion; no personal pain expressed.
+- NONE            (0.0 -0.29): Polished marketing copy, SEO articles, directories, or irrelevant noise.
 """
     try:
         import vertexai
