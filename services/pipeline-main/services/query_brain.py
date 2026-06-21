@@ -61,8 +61,34 @@ _DEFAULT_BLACKLIST = (
     "-www.zoominfo.com -www.ibm.com -www.amazon.com"
 )
 
-# B2C / consumer vectors that must suppress corporate B2B prompt framing
-_CONSUMER_VECTORS: set[str] = {"b2c", "real estate", "b2c2b", "property"}
+# ---------------------------------------------------------------------------
+# Consumer Archetype Detection (V23 Dynamic Refactor)
+# ---------------------------------------------------------------------------
+# FIX (2026-06-21): Replaced brittle exact-string set
+# ({"b2c", "real estate", "b2c2b", "property"}) with archetype-based check.
+# The canonical archetypes (B2C, B2B2C, D2C) are defined in
+# orchestrator.core.helpers. This module re-exports a standalone function
+# so downstream pipeline modules can import it without cross-service deps.
+#
+# The actual industry context (Real Estate, Dental, SaaS) is passed via
+# the campaign's effective_bio and keywords — NOT inferred from the vector.
+# ---------------------------------------------------------------------------
+
+_CONSUMER_ARCHETYPES: frozenset = frozenset({"B2C", "B2B2C", "D2C"})
+
+
+def _is_consumer_archetype(vector: str) -> bool:
+    """Return True if *vector* is a consumer-facing business archetype.
+
+    Handles new archetypes (B2C, B2B2C, D2C) and guarantees backwards
+    compatibility — legacy values (Classic B2B, Social/Forum Listening,
+    Review Hijacking, Maps/GMB Targeting) all return False.
+
+    This is the single source of truth for consumer routing across the
+    entire pipeline-main service. Imported by produce.py, dispatch.py,
+    and serper_service.py.
+    """
+    return (vector or "").upper().strip() in _CONSUMER_ARCHETYPES
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +148,7 @@ def generate_smart_query(
         user_keywords:      List of campaign keyword strings.
         tenant_id:          Tenant UID for BQ scoping.
         bio:                Effective campaign bio.
-        sourcing_vector:    Campaign sourcing vector label ("Classic B2B", etc.).
+        sourcing_vector:    Campaign sourcing archetype ("B2B", "B2C", etc.).
         persona_category:   Persona category for BQ intent confidence query.
         targeting_signals:  List of Persona targeting signal strings.  Any
                             entry starting with "NOT " (case-insensitive) is
@@ -156,7 +182,7 @@ def generate_smart_query(
     #   - campaign_id present → scope to that campaign only (safe)
     #   - campaign_id missing + consumer vector → SKIP entirely (no tenant-wide)
     #   - campaign_id missing + B2B vector → allow tenant-wide (acceptable)
-    _is_consumer_ctx = (ctx.sourcing_vector or "").lower().strip() in _CONSUMER_VECTORS
+    _is_consumer_ctx = _is_consumer_archetype(ctx.sourcing_vector)
     _skip_rlhf = (not ctx.campaign_id) and _is_consumer_ctx
 
     if _skip_rlhf:
@@ -337,7 +363,7 @@ def generate_smart_query(
     # ── Step 3b: GEMINI FALLBACK ───────────────────────────────────────────────
     if _router_mode == "GEMINI_FALLBACK":
         kw_str       = ", ".join(ctx.target_audience) if ctx.target_audience else ""
-        vector_label = ctx.sourcing_vector or "Classic B2B"
+        vector_label = ctx.sourcing_vector or "B2B"
         history_ctx  = json.dumps(ctx.pain_points) if ctx.pain_points else "[]"
 
         # FIX (2026-06-20): Vector-aware prompt branching.
@@ -345,7 +371,7 @@ def generate_smart_query(
         # that explicitly suppresses corporate B2B jargon ("Weak brand story",
         # "unclear positioning", etc.) which was being hallucinated by Gemini
         # because the old prompt hardcoded "B2B" in TASK 1.
-        _is_consumer_vector = vector_label.lower().strip() in _CONSUMER_VECTORS
+        _is_consumer_vector = _is_consumer_archetype(vector_label)
 
         if _is_consumer_vector:
             # ── CONSUMER / B2C PROMPT ──────────────────────────────────────
@@ -502,7 +528,7 @@ Return ONLY the JSON object. No explanation, no markdown."""
     # B2C lead, appending AND ("...") operators to consumer search queries
     # destroys Serper recall by adding irrelevant boolean constraints.
     # Consumer queries rely purely on intents + symptom_dorks + blacklist.
-    _is_consumer = (ctx.sourcing_vector or "").lower().strip() in _CONSUMER_VECTORS
+    _is_consumer = _is_consumer_archetype(ctx.sourcing_vector)
     if _is_consumer:
         if ctx.pain_points:
             log.info("query_brain_consumer_pain_points_suppressed",
@@ -555,7 +581,7 @@ Return ONLY the JSON object. No explanation, no markdown."""
             smart_queries.append(f'"{tq}"{historical_str} {blacklist}')
         log.info("query_brain_assembled",
                  count=len(ctx.intents), mode=_router_mode,
-                 vector=ctx.sourcing_vector or "Classic B2B",
+                 vector=ctx.sourcing_vector or "B2B",
                  is_consumer=_is_consumer)
     elif kw_str:
         for kw in ctx.target_audience or []:

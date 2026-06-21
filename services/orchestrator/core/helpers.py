@@ -204,28 +204,74 @@ def get_vector_weights() -> dict:
             return doc.to_dict()
     except Exception as e:
         print(f"[VECTOR WEIGHTS] Read failed: {e}")
-    return {
-        "Classic B2B": 10, "Social/Forum Listening": 8,
-        "Review Hijacking": 5, "Maps/GMB Targeting": 3,
-    }
+    return {"B2B": 10, "B2C": 5, "B2B2C": 3, "D2C": 2}
 
+
+# ---------------------------------------------------------------------------
+# Archetype-Based Sourcing Vector Classification (V23 Dynamic Refactor)
+# ---------------------------------------------------------------------------
+# FIX (2026-06-21): Replaced rigid industry-specific enum
+# ("Social/Forum Listening", "Review Hijacking", "Classic B2B",
+# "Maps/GMB Targeting") with dynamic business-motion archetypes.
+#
+# The old enum could NEVER produce a consumer vector, so every campaign
+# (including Real Estate, Dental, Automotive) was force-classified as
+# "Classic B2B" and processed through B2B corporate prompt templates.
+#
+# New archetypes:
+#   B2B   — Business sells to other businesses (SaaS, consulting, agencies)
+#   B2C   — Business sells directly to end consumers (retail, real estate,
+#           dental, automotive, hospitality, food service)
+#   B2B2C — Business sells through intermediaries to reach consumers
+#           (franchises, channel partners, white-label platforms)
+#   D2C   — Direct-to-consumer brand (e-commerce, subscription boxes)
+#
+# Legacy values ("Classic B2B", "Social/Forum Listening", etc.) are
+# backwards-compatible: _is_consumer_archetype() returns False for all of
+# them, so existing B2B campaigns continue to work unchanged.
+# ---------------------------------------------------------------------------
 
 _SOURCING_VECTOR_SCHEMA = {
     "type": "STRING",
-    "enum": ["Social/Forum Listening", "Review Hijacking", "Classic B2B", "Maps/GMB Targeting"],
+    "enum": ["B2B", "B2C", "B2B2C", "D2C"],
 }
+
+# Canonical consumer archetypes — single source of truth.
+_CONSUMER_ARCHETYPES: frozenset = frozenset({"B2C", "B2B2C", "D2C"})
+
+
+def is_consumer_archetype(vector: str) -> bool:
+    """Return True if *vector* is a consumer-facing business archetype.
+
+    Handles both new archetypes (B2C, B2B2C, D2C) and guarantees backwards
+    compatibility with legacy values (Classic B2B, Social/Forum Listening,
+    Review Hijacking, Maps/GMB Targeting) which all return False.
+    """
+    return (vector or "").upper().strip() in _CONSUMER_ARCHETYPES
 
 
 def classify_sourcing_vector(bio: str, industry_weights: dict) -> str:
+    """Classify the business-motion archetype from a campaign bio via Gemini.
+
+    Returns one of: ``"B2B"``, ``"B2C"``, ``"B2B2C"``, ``"D2C"``.
+    Defaults to ``"B2B"`` on empty bio, classification failure, or
+    unrecognised output.
+    """
     if not bio:
-        return "Classic B2B"
+        return "B2B"
     try:
         from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
         prompt = (
-            f"Based on this user's business bio: '{bio}', and the global sourcing success "
-            f"weights: {json.dumps(industry_weights)}, select the single optimal digital "
-            "sourcing vector: \"Social/Forum Listening\", \"Review Hijacking\", "
-            "\"Classic B2B\", or \"Maps/GMB Targeting\". Output ONLY the chosen string."
+            f"Classify this business description into its fundamental business "
+            f"motion archetype. Bio: '{bio}'.\n\n"
+            "Return ONLY one of these exact strings:\n"
+            '  "B2B"   — sells to other businesses (SaaS, consulting, agencies)\n'
+            '  "B2C"   — sells to end consumers (retail, real estate, dental, '
+            'automotive, hospitality, food service, property)\n'
+            '  "B2B2C" — sells through intermediaries to consumers (franchises, '
+            'channel partners)\n'
+            '  "D2C"   — direct-to-consumer brand (e-commerce, subscriptions)\n\n'
+            "Output ONLY the archetype string. No explanation."
         )
         model    = GenerativeModel("gemini-2.5-flash")
         response = model.generate_content(
@@ -236,12 +282,17 @@ def classify_sourcing_vector(bio: str, industry_weights: dict) -> str:
                 temperature=0.1,
             ),
         )
-        vector = json.loads(response.text) if response.text.strip().startswith('"') else response.text.strip().strip('"')
-        valid  = {"Social/Forum Listening", "Review Hijacking", "Classic B2B", "Maps/GMB Targeting"}
-        return vector if vector in valid else "Classic B2B"
+        vector = (
+            json.loads(response.text)
+            if response.text.strip().startswith('"')
+            else response.text.strip().strip('"')
+        )
+        valid = {"B2B", "B2C", "B2B2C", "D2C"}
+        return vector if vector in valid else "B2B"
     except Exception as e:
         print(f"[SYNAPTIC ROUTER] Classification failed: {e}")
-        return "Classic B2B"
+        return "B2B"
+
 
 
 def _get_router_config(db_client=None) -> dict:

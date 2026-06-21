@@ -30,6 +30,7 @@ from core.helpers import (  # type: ignore[import]
     get_service_account_email,
     get_vector_weights,
     classify_sourcing_vector,
+    is_consumer_archetype,
     reserve_credits,
     release_reservation,
     _get_router_config,
@@ -300,10 +301,10 @@ def create_campaign(uid, tenant_id, user_role):
 
     _, doc_ref = db.collection("campaigns").add(data)
 
-    # Synaptic Router classification
+    # Synaptic Router classification (V23 archetype-based)
     bio = data.get("bio", "")
+    weights = get_vector_weights()
     if bio and bio != "CHILD_CAMPAIGN_OVERRIDE":
-        weights = get_vector_weights()
         vector  = classify_sourcing_vector(bio, weights)
         doc_ref.update({"sourcing_vector": vector})
         log.info("sourcing_vector_classified", campaign_id=doc_ref.id, vector=vector)
@@ -313,7 +314,12 @@ def create_campaign(uid, tenant_id, user_role):
             data.get("pain_point", ""),
             data.get("unfair_advantage", ""),
         ]))
-        doc_ref.update({"sourcing_vector": "Classic B2B", "effective_bio": effective_bio})
+        # FIX (2026-06-21): Classify effective_bio through Gemini instead of
+        # hardcoding "Classic B2B". The old code forced ALL child campaigns
+        # into B2B regardless of actual industry (Real Estate, Dental, etc.).
+        vector = classify_sourcing_vector(effective_bio, weights) if effective_bio else "B2B"
+        doc_ref.update({"sourcing_vector": vector, "effective_bio": effective_bio})
+        log.info("sourcing_vector_classified_child", campaign_id=doc_ref.id, vector=vector)
 
     # Zero-wait timestamps
     now_utc = datetime.datetime.now(datetime.timezone.utc)

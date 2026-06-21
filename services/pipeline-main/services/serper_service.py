@@ -55,10 +55,10 @@ _ENRICHMENT_SOCIAL_BLACKLIST = [
     "linkedin.com", "quora.com", "twitter.com", "x.com", "medium.com",
 ]
 
-_B2C_VECTORS = [
-    "Reddit B2C", "Quora B2C", "Google Maps B2C",
-    "TripAdvisor B2C", "YouTube B2C", "Facebook Groups B2C",
-]
+# FIX (2026-06-21): Replaced dead platform-specific B2C list with archetype-based
+# detection. The old list contained labels ("Reddit B2C", etc.) that could never
+# be produced by classify_sourcing_vector(). Now uses the shared archetype check.
+from services.query_brain import _is_consumer_archetype  # type: ignore[import]
 
 _ENTERPRISE_DOMAINS = [
     "ibm.com", "amazon.com", "microsoft.com",
@@ -464,7 +464,7 @@ def search_serper(
 def deep_context_serper_dork(
     domain: str,
     tenant_id: str,
-    sourcing_vector: str = "Classic B2B",
+    sourcing_vector: str = "B2B",
     source_url: str = "",
 ) -> tuple[str, bool]:
     """Fetch contextual GMB / social / hiring signals for a domain via Serper.
@@ -503,8 +503,8 @@ def deep_context_serper_dork(
             log.info("enrichment_gated_social", domain=domain)
             return "", False
 
-    if sourcing_vector in _B2C_VECTORS:
-        log.info("enrichment_gated_b2c_vector", domain=domain, vector=sourcing_vector)
+    if _is_consumer_archetype(sourcing_vector):
+        log.info("enrichment_gated_consumer_archetype", domain=domain, vector=sourcing_vector)
         return "", False
 
     api_key = _get_serper_api_key()

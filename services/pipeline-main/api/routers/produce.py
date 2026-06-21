@@ -29,6 +29,7 @@ from core.logging import get_logger    # type: ignore[import]
 from core.clients import get_db        # type: ignore[import]
 from middleware.oidc import require_tasks_oidc  # type: ignore[import]
 from services.query_brain import generate_smart_query  # type: ignore[import]
+from services.query_brain import _is_consumer_archetype  # type: ignore[import]
 from services.serper_service import (  # type: ignore[import]
     search_serper,
     filter_serper_noise,
@@ -124,7 +125,7 @@ def produce():
         sourcing_vector=campaign.get("sourcing_vector"),
     )
 
-    sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
+    sourcing_vector = campaign.get("sourcing_vector", "B2B")
     location        = campaign.get("location", "").strip()
     gl              = campaign.get("gl", "").strip()
 
@@ -397,8 +398,7 @@ def produce():
         # Domain-level dedup exhausts inventory after ~3 produce cycles because
         # listing aggregators (propertyfinder.ae, bayut.com) host thousands of
         # distinct listings under a single root domain.
-        _B2C_VECTORS = {"b2c", "real estate", "b2c2b", "property"}
-        _is_b2c = sourcing_vector.lower().strip() in _B2C_VECTORS
+        _is_b2c = _is_consumer_archetype(sourcing_vector)
         if is_social or is_shared or _is_b2c:
             from urllib.parse import urlparse as _urlparse
             parsed = _urlparse(surl)
@@ -459,8 +459,7 @@ def produce():
                     for s in shared_platforms
                 )
                 # P3 FIX: B2C campaigns use URL-path dedup (matches snippet cache + fresh dedup)
-                _B2C_VECTORS = {"b2c", "real estate", "b2c2b", "property"}
-                _is_b2c = sourcing_vector.lower().strip() in _B2C_VECTORS
+                _is_b2c = _is_consumer_archetype(sourcing_vector)
                 if d_is_social or d_is_shared or _is_b2c:
                     from urllib.parse import urlparse as _urlparse
                     parsed = _urlparse(u)
@@ -486,8 +485,7 @@ def produce():
             for s in shared_platforms
         )
         # P3 FIX: B2C campaigns use URL-path dedup (matches snippet cache + existing leads)
-        _B2C_VECTORS = {"b2c", "real estate", "b2c2b", "property"}
-        _is_b2c = sourcing_vector.lower().strip() in _B2C_VECTORS
+        _is_b2c = _is_consumer_archetype(sourcing_vector)
         if f_is_social or f_is_shared or _is_b2c:
             from urllib.parse import urlparse as _urlparse
             parsed = _urlparse(url)

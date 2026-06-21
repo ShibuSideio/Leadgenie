@@ -352,10 +352,11 @@ def cron_sweep():
     CB_WINDOW_MINUTES     = int(__import__("os").environ.get("CB_WINDOW_MINUTES", "15"))
 
     # Mapping: which sourcing vector labels are impacted by each breaker.
+    # FIX (2026-06-21): Updated to archetype-based vectors.
     # GeneralDomain vectors depend on Serper + scraper-heavy.
-    # WalledGarden vectors (LinkedIn, social) are unaffected.
+    # Consumer archetypes (B2C, D2C) are immune to Serper circuit breakers.
     _GENERAL_DOMAIN_VECTORS = frozenset({
-        "Classic B2B", "Review Hijacking", "Maps/GMB Targeting",
+        "B2B", "Classic B2B", "Review Hijacking", "Maps/GMB Targeting",
     })
     _WALLED_GARDEN_VECTORS = frozenset({
         "Social/Forum Listening",
@@ -485,7 +486,7 @@ def cron_sweep():
         # Skip only campaigns whose sourcing vector is in the blocked set.
         # WalledGarden campaigns (Social/Forum Listening) are immune and
         # continue even when Serper / scraper thresholds are breached.
-        campaign_vector = campaign_data.get("sourcing_vector", "Classic B2B") or "Classic B2B"
+        campaign_vector = campaign_data.get("sourcing_vector", "B2B") or "B2B"
         if campaign_vector in blocked_vectors:
             log.warning(
                 "circuit_breaker_campaign_skipped",
@@ -879,7 +880,7 @@ def conversion_feedback():
     lead_dict       = lead_doc.to_dict()
     tenant_id       = lead_dict.get("tenant_id")
     tech_stack      = lead_dict.get("tech_stack_found", [])
-    sourcing_vector = lead_dict.get("sourcing_vector", "Classic B2B")
+    sourcing_vector = lead_dict.get("sourcing_vector", "B2B")
     hiring_intent   = lead_dict.get("hiring_intent_found", "No")
     delta           = 1 if status == "converted" else -1
 
@@ -943,7 +944,7 @@ def cron_reflection():
                 scrubbed.append({
                     "outcome":         d.get("status"),
                     "score":           d.get("score"),
-                    "sourcing_vector": d.get("sourcing_vector", "Classic B2B"),
+                    "sourcing_vector": d.get("sourcing_vector", "B2B"),
                     "confidence_tier": d.get("confidence_tier", "High"),
                     "hiring_intent":   d.get("hiring_intent_found", "No"),
                     "tech_stack":      d.get("tech_stack_found", []),
@@ -957,21 +958,21 @@ def cron_reflection():
         return jsonify({"status": "no_data", "message": "Insufficient sample."}), 200
 
     current_weights = get_vector_weights()
-    prompt = f"""You are a global B2B outreach intelligence system performing a weekly strategic audit.
+    prompt = f"""You are a global outreach intelligence system performing a weekly strategic audit.
 Analyze these {len(scrubbed)} anonymized lead outcomes. Return ONLY a JSON object with updated integer
-weights for exactly these keys: "Classic B2B", "Social/Forum Listening", "Review Hijacking", "Maps/GMB Targeting".
+weights for exactly these keys: "B2B", "B2C", "B2B2C", "D2C".
 CURRENT WEIGHTS: {json.dumps(current_weights)}
 LEAD OUTCOMES: {json.dumps(scrubbed)}"""
 
     SCHEMA = {
         "type": "OBJECT",
         "properties": {
-            "Classic B2B": {"type": "INTEGER"},
-            "Social/Forum Listening": {"type": "INTEGER"},
-            "Review Hijacking": {"type": "INTEGER"},
-            "Maps/GMB Targeting": {"type": "INTEGER"},
+            "B2B": {"type": "INTEGER"},
+            "B2C": {"type": "INTEGER"},
+            "B2B2C": {"type": "INTEGER"},
+            "D2C": {"type": "INTEGER"},
         },
-        "required": ["Classic B2B", "Social/Forum Listening", "Review Hijacking", "Maps/GMB Targeting"],
+        "required": ["B2B", "B2C", "B2B2C", "D2C"],
     }
 
     model    = GenerativeModel("gemini-2.5-flash")
@@ -981,7 +982,7 @@ LEAD OUTCOMES: {json.dumps(scrubbed)}"""
     )
     try:
         new_weights = json.loads(response.text)
-        valid_keys  = {"Classic B2B", "Social/Forum Listening", "Review Hijacking", "Maps/GMB Targeting"}
+        valid_keys  = {"B2B", "B2C", "B2B2C", "D2C"}
         new_weights = {k: int(v) for k, v in new_weights.items() if k in valid_keys}
     except Exception as e:
         return jsonify({"error": "Reflection LLM failed", "details": str(e)}), 500

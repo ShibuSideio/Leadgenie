@@ -50,6 +50,7 @@ from services.serper_service import (  # type: ignore[import]
 )
 from services.gemini_service import pre_filter_gemini, final_score_and_dm  # type: ignore[import]
 from services.prism_pipeline import PrismPipeline                           # type: ignore[import]
+from services.query_brain import _is_consumer_archetype  # type: ignore[import]
 # SF-002 FIX: PrismPipeline is now imported from the standalone
 # services/prism_pipeline.py module (zero import-time side effects).
 # The previous importlib.exec_module(main.py) approach executed 3185 lines
@@ -237,7 +238,7 @@ def dispatch():
         return jsonify({"error": "Unauthorized tenant context"}), 403
 
     bio             = campaign.get("bio", "")
-    sourcing_vector = campaign.get("sourcing_vector", "Classic B2B")
+    sourcing_vector = campaign.get("sourcing_vector", "B2B")
     location        = campaign.get("location", "").strip()
 
     # ── PERSONA VAULT: inject persona bio (V23 precedence) ──────────────────
@@ -392,8 +393,7 @@ def dispatch():
         is_social = any(b_domain.endswith(s) for s in SOCIAL_SET)
         is_shared = any(b_domain.endswith(s) for s in SHARED_PLATFORMS)
         # P3 FIX: B2C campaigns use URL-path dedup (matches produce.py cache_key)
-        _B2C_VECTORS = {"b2c", "real estate", "b2c2b", "property"}
-        _is_b2c = sourcing_vector.lower().strip() in _B2C_VECTORS
+        _is_b2c = _is_consumer_archetype(sourcing_vector)
         if is_social or is_shared or _is_b2c:
             parsed     = urlparse(batch_url)
             exact_path = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
@@ -499,8 +499,7 @@ def dispatch():
         is_social = any(target_domain.endswith(s) for s in SOCIAL_SET)
         is_shared = any(target_domain.endswith(s) for s in SHARED_PLATFORMS)
         # P3 FIX: B2C/Real Estate campaigns use URL-path dedup (matches produce.py)
-        _B2C_VECTORS = {"b2c", "real estate", "b2c2b", "property"}
-        _is_b2c = sourcing_vector.lower().strip() in _B2C_VECTORS
+        _is_b2c = _is_consumer_archetype(sourcing_vector)
         if is_social or is_shared or _is_b2c:
             parsed     = urlparse(url)
             exact_path = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
@@ -844,7 +843,7 @@ def finalize():
         return jsonify({"error": "Lead stub not found"}), 404
 
     lead_data       = snap.to_dict() or {}
-    sourcing_vector = lead_data.get("sourcing_vector", "Classic B2B")
+    sourcing_vector = lead_data.get("sourcing_vector", "B2B")
     active_campaigns = [lead_data]  # minimal context for scoring
 
     if not text:
