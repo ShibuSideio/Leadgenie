@@ -1803,3 +1803,76 @@ body {
     .l0-tab { font-size: 0.78rem; padding: 8px 10px; }
     #l0-panel-operations > div { grid-template-columns: 1fr !important; }
 }
+
+/* ── Fault Recovery State UI (V23.7) ─────────────────────────────────────── */
+.lead-card--failed {
+    border-left: 4px solid #ef4444 !important;
+    background: linear-gradient(90deg, rgba(239,68,68,0.04) 0%, transparent 40%) !important;
+}
+.lead-card--processing {
+    border-left: 4px solid #f59e0b !important;
+    background: linear-gradient(90deg, rgba(245,158,11,0.04) 0%, transparent 40%) !important;
+}
+.lead-error-badge {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 0;
+    padding: 10px 14px;
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+    border-radius: 8px;
+    color: #dc2626;
+    font-size: 0.82rem;
+    font-weight: 500;
+    line-height: 1.4;
+}
+.lead-error-badge .error-icon {
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
+.lead-requeue-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    background: rgba(79, 70, 229, 0.1);
+    color: #4f46e5;
+    border: 1px solid rgba(79, 70, 229, 0.25);
+    border-radius: 6px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    flex-shrink: 0;
+    font-family: inherit;
+}
+.lead-requeue-btn:hover {
+    background: rgba(79, 70, 229, 0.18);
+    border-color: #4f46e5;
+    transform: translateY(-1px);
+}
+.lead-requeue-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+.lead-processing-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0;
+    padding: 8px 14px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+    border-radius: 8px;
+    color: #b45309;
+    font-size: 0.82rem;
+    font-weight: 500;
+    animation: processingPulse 2s ease-in-out infinite;
+}
+@keyframes processingPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+}

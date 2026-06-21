@@ -650,8 +650,11 @@ async function loadLeads() {
                 });
                 let cNew = 0, cContact = 0, cConvert = 0;
                 let cDiscovered = rawLeadsCache.length, cActionable = 0, cIgnored = 0;
+                let cFailed = 0, cProcessing = 0;
                 rawLeadsCache.forEach(l => {
                     if (l.status === 'ignored') { cIgnored++; return; }
+                    if (l.status === 'failed')  { cFailed++; return; }
+                    if (l.status === 'processing' || l.status === 'queued') { cProcessing++; return; }
                     if (l.status === 'new' || !l.status) cActionable++;
                     if (l.status === 'contacted') { cContact++; }
                     else if (l.status === 'converted') { cConvert++; }
@@ -660,9 +663,11 @@ async function loadLeads() {
                 const elDisc = document.getElementById('stat-discovered');
                 const elAct  = document.getElementById('stat-actionable');
                 const elIgn  = document.getElementById('stat-ignored');
+                const elFail = document.getElementById('stat-failed');
                 if (elDisc) elDisc.innerText = cDiscovered;
                 if (elAct)  elAct.innerText  = cActionable;
                 if (elIgn)  elIgn.innerText  = cIgnored;
+                if (elFail) elFail.innerText = cFailed;
                 fcUpdateKPIs(rawLeadsCache);
                 renderLeads();
             }, async (error) => {
@@ -719,7 +724,7 @@ let virtualObserver = new IntersectionObserver((entries) => {
 
 function renderLeads() {
     const filteredLeads = rawLeadsCache.filter(lead => {
-        if (!['new', 'contacted', 'converted'].includes(lead.status || 'new')) return false;
+        if (!['new', 'contacted', 'converted', 'queued', 'processing', 'failed'].includes(lead.status || 'new')) return false;
         if (currentCampaignFilter !== 'all') {
             const matched = Array.isArray(lead.matched_campaigns)
                 ? lead.matched_campaigns.includes(currentCampaignFilter)
@@ -1837,6 +1842,40 @@ window.recycleRejectedLead = async function(leadId, btn) {
     }
 };
 
+// ── Manual Re-queue for failed leads (V23.7) ─────────────────────────────
+let _requeueDebouncing = false;
+window.requeueFailedLead = async function(leadId, btn) {
+    if (_requeueDebouncing) return;
+    _requeueDebouncing = true;
+    setTimeout(() => { _requeueDebouncing = false; }, 500);
+    if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Re-queuing…'; }
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) { showToast('Session expired. Please sign in again.', 'error'); return; }
+        const token = await user.getIdToken(true);
+        const resp  = await fetch(`${API_BASE}/api/leads/${leadId}`, {
+            method:  'PUT',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ status: 'queued', lock_entity: null, error: null, requeue_source: 'manual_ui' })
+        });
+        if (resp.status === 402) {
+            showToast('Insufficient credits to re-queue this lead.', 'error');
+            if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Re-queue'; }
+            return;
+        }
+        if (resp.ok) {
+            showToast('Lead re-queued for processing.', 'success');
+        } else {
+            showToast('Re-queue failed. Please try again.', 'error');
+            if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Re-queue'; }
+        }
+    } catch (err) {
+        console.error('requeueFailedLead error:', err);
+        showToast('Network error re-queuing lead.', 'error');
+        if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Re-queue'; }
+    }
+};
+
 // =============================================================================
 // L0 QUERY AUDIT — Serper Telemetry Tab (V23.4)
 // =============================================================================
@@ -2646,7 +2685,9 @@ window.createLeadCardV2 = function(docId, lead) {
     var card = document.createElement('div');
     card.className = 'lead-card-v2';
     card.id = docId;
-
+    // ── Status-aware card styling (V23.7) ──
+    if (lead.status === 'failed') card.classList.add('lead-card--failed');
+    if (lead.status === 'processing' || lead.status === 'queued') card.classList.add('lead-card--processing');
     var displayName = lead.company_name || '';
     var hostname = '';
     try { var raw = lead.url || lead.source_url || ''; hostname = raw ? new URL(raw).hostname.replace('www.','') : ''; } catch(e) {}
@@ -2753,6 +2794,23 @@ window.createLeadCardV2 = function(docId, lead) {
                 '</div>' +
             '</div>' +
         '</div>';
+
+    // ── Fault Recovery State UI (V23.7) ──────────────────────────────────
+    if (lead.status === 'failed') {
+        var errorBadge = document.createElement('div');
+        errorBadge.className = 'lead-error-badge';
+        errorBadge.innerHTML =
+            '<span class="error-icon">⚠️</span>' +
+            '<span>' + (lead.error || 'Processing failed — unknown error.') + '</span>' +
+            '<button class="lead-requeue-btn" data-action="requeue" data-lead-id="' + docId + '">' +
+            '🔄 Re-queue</button>';
+        card.appendChild(errorBadge);
+    } else if (lead.status === 'processing' || lead.status === 'queued') {
+        var procIndicator = document.createElement('div');
+        procIndicator.className = 'lead-processing-indicator';
+        procIndicator.innerHTML = '⏳ ' + (lead.status === 'queued' ? 'Queued for processing...' : 'Processing in progress...');
+        card.appendChild(procIndicator);
+    }
 
     return card;
 };
@@ -3020,10 +3078,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const leadsList = document.getElementById('leads-list');
     if (leadsList) {
         leadsList.addEventListener('click', function(e) {
-            const btn = e.target.closest('[data-action="copilot"]');
+            const btn = e.target.closest('[data-action=\"copilot\"]');
             if (btn && !btn.disabled) {
                 const docId = btn.dataset.leadId;
                 if (docId) copilotAction(docId);
+            }
+            // ── Fault Recovery: Re-queue action (V23.7) ──
+            const reqBtn = e.target.closest('[data-action=\"requeue\"]');
+            if (reqBtn && !reqBtn.disabled) {
+                const leadId = reqBtn.getAttribute('data-lead-id');
+                if (leadId) requeueFailedLead(leadId, reqBtn);
             }
         });
     }

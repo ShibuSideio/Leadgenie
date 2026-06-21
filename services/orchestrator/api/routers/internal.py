@@ -724,6 +724,7 @@ def cron_sweep():
                         sched_t.FromDatetime(now_utc + datetime.timedelta(seconds=jitter))
                         task    = _oidc_task(consume_url, {"tenant_id": tenant_id, "campaign_id": campaign_id})
                         task["schedule_time"] = sched_t
+                        task["dispatch_deadline"] = {"seconds": 300}
                         tasks_client.create_task(request={"parent": queue_path, "task": task})
                         _dispatch_ok = True
                         consume_dispatched += 1
@@ -785,52 +786,112 @@ def cron_sweep():
             )
 
 
-    # ── Zombie Lead Recovery ─────────────────────────────────────────────────
+    # ── Zombie Lead Recovery (V23.7 — Retry Escalation Topology) ────────────
     from google.cloud import firestore as _fs
     ZOMBIE_MINS    = 15
+    MAX_RETRIES    = 3
     zombie_cutoff  = now_utc - datetime.timedelta(minutes=ZOMBIE_MINS)
-    zombie_recovered = zombie_locks_released = 0
+    zombie_recovered = zombie_locks_released = zombie_dlq = 0
     try:
         zombie_docs = (
             _db().collection("leads")
               .where(filter=FieldFilter("status",    "==", "processing"))
-              .where(filter=FieldFilter("createdAt", "<",  zombie_cutoff))
+              .where(filter=FieldFilter("processing_started_at", "<",  zombie_cutoff))
               .limit(100).stream()
         )
         for zombie_doc in zombie_docs:
             zombie_data = zombie_doc.to_dict() or {}
+            current_retry = zombie_data.get("retry_count", 0)
             try:
-                zombie_doc.reference.update({
-                    "status":       "failed",
-                    "error":        f"Zombie recovery >{ZOMBIE_MINS}min.",
-                    "recovered_at": _fs.SERVER_TIMESTAMP,
-                })
-                zombie_recovered += 1
+                if current_retry < MAX_RETRIES:
+                    # ── AUTO-RETRY: re-queue with incremented counter ──
+                    zombie_doc.reference.update({
+                        "status":       "queued",
+                        "lock_entity":  None,
+                        "error":        None,
+                        "retry_count":  current_retry + 1,
+                        "recovered_at": _fs.SERVER_TIMESTAMP,
+                    })
+                    zombie_recovered += 1
+                    log.info("zombie_auto_retry",
+                             doc_id=zombie_doc.id,
+                             retry_attempt=current_retry + 1,
+                             max_retries=MAX_RETRIES,
+                             note=f"Zombie recovery triggered auto-retry attempt "
+                                  f"{current_retry + 1} for doc {zombie_doc.id}")
+                    # Dispatch fresh Cloud Task for re-processing
+                    try:
+                        _zombie_tenant = zombie_data.get("tenant_id", "")
+                        _zombie_camp   = zombie_data.get("campaign_id", "")
+                        if _zombie_tenant and _zombie_camp:
+                            _z_jitter  = random.randint(5, 60)
+                            _z_sched   = ts_pb2.Timestamp()
+                            _z_sched.FromDatetime(now_utc + datetime.timedelta(seconds=_z_jitter))
+                            _z_task    = _oidc_task(consume_url, {
+                                "tenant_id": _zombie_tenant,
+                                "campaign_id": _zombie_camp,
+                            })
+                            _z_task["schedule_time"]     = _z_sched
+                            _z_task["dispatch_deadline"] = {"seconds": 300}
+                            tasks_client.create_task(request={
+                                "parent": queue_path, "task": _z_task,
+                            })
+                            log.info("zombie_retry_task_dispatched",
+                                     doc_id=zombie_doc.id,
+                                     jitter_s=_z_jitter)
+                    except Exception as zt_err:
+                        log.warning("zombie_retry_task_dispatch_failed",
+                                    doc_id=zombie_doc.id, error=str(zt_err))
+                else:
+                    # ── TERMINAL: max retries exhausted → DLQ ──
+                    zombie_doc.reference.update({
+                        "status":       "failed",
+                        "lock_entity":  None,
+                        "error":        f"Zombie recovery failed after {MAX_RETRIES} retries "
+                                        f"(>{ZOMBIE_MINS}min execution limit).",
+                        "recovered_at": _fs.SERVER_TIMESTAMP,
+                    })
+                    zombie_dlq += 1
+                    log.warning("zombie_terminal_failure_dlq",
+                                doc_id=zombie_doc.id,
+                                retry_count=current_retry,
+                                note="Max retries exhausted. Routed to dead_letter_leads.")
+                    # Route payload to Dead Letter Queue collection
+                    try:
+                        _dlq_payload = dict(zombie_data)
+                        _dlq_payload["original_doc_id"]  = zombie_doc.id
+                        _dlq_payload["dlq_reason"]        = f"Zombie recovery exhausted {MAX_RETRIES} retries"
+                        _dlq_payload["dlq_routed_at"]     = _fs.SERVER_TIMESTAMP
+                        _db().collection("dead_letter_leads").add(_dlq_payload)
+                    except Exception as dlq_err:
+                        log.error("zombie_dlq_write_failed",
+                                  doc_id=zombie_doc.id, error=str(dlq_err))
+                    # Release lock + refund credit only on terminal failure
+                    lock_entity = zombie_data.get("lock_entity")
+                    if lock_entity:
+                        try:
+                            lr = _db().collection("global_lead_locks").document(lock_entity)
+                            if lr.get().exists:
+                                lr.delete()
+                                zombie_locks_released += 1
+                        except Exception:
+                            pass
+                    zombie_tenant = zombie_data.get("tenant_id")
+                    if zombie_tenant:
+                        try:
+                            _db().collection("users").document(zombie_tenant).update(
+                                {"wallet.reserved_credits": _fs.Increment(-1)}
+                            )
+                        except Exception:
+                            pass
             except Exception:
                 continue
-            lock_entity = zombie_data.get("lock_entity")
-            if lock_entity:
-                try:
-                    lr = _db().collection("global_lead_locks").document(lock_entity)
-                    if lr.get().exists:
-                        lr.delete()
-                        zombie_locks_released += 1
-                except Exception:
-                    pass
-            zombie_tenant = zombie_data.get("tenant_id")
-            if zombie_tenant:
-                try:
-                    _db().collection("users").document(zombie_tenant).update(
-                        {"wallet.reserved_credits": _fs.Increment(-1)}
-                    )
-                except Exception:
-                    pass
     except Exception as zse:
         audit_trail.append(f"⚠️ Zombie sweep error: {zse}")
 
     log.info("cron_sweep_complete",
              producers=produce_dispatched, consumers=consume_dispatched,
-             zombies=zombie_recovered,
+             zombies=zombie_recovered, zombie_dlq=zombie_dlq,
              circuit_breaker_blocked_vectors=sorted(blocked_vectors) if blocked_vectors else [])
     return jsonify({
         "message": f"V23 Sweep: {produce_dispatched} producers + {consume_dispatched} consumers.",
@@ -838,6 +899,7 @@ def cron_sweep():
         "consume_dispatched":    consume_dispatched,
         "zombie_recovered":      zombie_recovered,
         "zombie_locks_released": zombie_locks_released,
+        "zombie_dlq":            zombie_dlq,
         "circuit_breaker":       "partial" if blocked_vectors else "closed",
         "blocked_vectors":       sorted(blocked_vectors) if blocked_vectors else [],
         "audit_trail":           audit_trail,

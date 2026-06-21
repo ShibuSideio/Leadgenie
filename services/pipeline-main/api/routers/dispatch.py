@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import random
+import time
 from urllib.parse import urlparse
 
 from flask import Blueprint, jsonify, request
@@ -538,6 +539,7 @@ def dispatch():
                 "confidence_tier":   url_to_tier.get(url, "High"),
                 "sourcing_vector":   sourcing_vector,
                 "status":            "processing",
+                "processing_started_at": firestore.SERVER_TIMESTAMP,
                 "is_in_crm":         False,
                 "createdAt":         firestore.SERVER_TIMESTAMP,
                 "expire_at":         expire_at,
@@ -778,10 +780,19 @@ def dispatch():
     # ── Dispatch all approved URLs in parallel (max 5 workers, 25s per URL) ─
     _URL_TIMEOUT_S = 25   # per-URL hard wall-clock ceiling
     _MAX_WORKERS   = 5    # Cloud Run 1 vCPU: 5 threads max before I/O queuing
+    _OUTER_TIMEOUT_S = 180  # hard ceiling for entire URL batch (V23.7)
 
     with _cf.ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
         futures = {executor.submit(_process_single_url, u): u for u in approved_urls}
+        _batch_start = time.monotonic()
         for fut in _cf.as_completed(futures, timeout=(_URL_TIMEOUT_S * len(approved_urls))):
+            if time.monotonic() - _batch_start > _OUTER_TIMEOUT_S:
+                log.error("dispatch_batch_timeout_ceiling",
+                          timeout_s=_OUTER_TIMEOUT_S,
+                          processed=len(results),
+                          remaining=len(futures) - len(results),
+                          note="Hard 180s ceiling hit. Remaining URLs abandoned.")
+                break
             url = futures[fut]
             try:
                 result = fut.result(timeout=_URL_TIMEOUT_S)

@@ -66,6 +66,84 @@ def update_lead(uid, tenant_id, user_role, doc_id):
     data = request.json or {}
     data.pop("tenant_id", None)
     data["updatedAt"] = firestore.SERVER_TIMESTAMP
+    lead_dict = doc_data.to_dict() or {}
+
+    # ── Manual Requeue Gate (V23.7 — Fault Recovery) ─────────────────────────
+    # If the UI sends status='queued' (from a failed lead's re-queue button),
+    # we intercept here to: validate credits, reset retry state, and dispatch
+    # a fresh Cloud Task. This prevents re-processing without sufficient wallet.
+    if data.get("status") == "queued" and lead_dict.get("status") == "failed":
+        # Credit gate: verify tenant has available credits
+        user_doc  = _db().collection("users").document(tenant_id).get()
+        if user_doc.exists:
+            wallet       = (user_doc.to_dict() or {}).get("wallet", {})
+            total_credits    = wallet.get("total_credits", 0)
+            reserved_credits = wallet.get("reserved_credits", 0)
+            if total_credits <= reserved_credits:
+                log.warning("requeue_credit_gate_blocked",
+                            doc_id=doc_id, tenant_id=tenant_id,
+                            total=total_credits, reserved=reserved_credits)
+                return jsonify({"error": "Insufficient credits"}), 402
+
+        # Apply clean requeue mutation
+        doc_ref.update({
+            "status":                 "queued",
+            "lock_entity":            None,
+            "error":                  None,
+            "retry_count":            0,
+            "processing_started_at":  None,
+            "requeue_source":         data.get("requeue_source", "manual_ui"),
+            "updatedAt":              firestore.SERVER_TIMESTAMP,
+        })
+        # Reserve a credit for the re-processing attempt
+        try:
+            _db().collection("users").document(tenant_id).update(
+                {"wallet.reserved_credits": firestore.Increment(1)}
+            )
+        except Exception as _cred_err:
+            log.warning("requeue_credit_reserve_failed", error=str(_cred_err))
+
+        # Dispatch fresh Cloud Task
+        try:
+            from core.config import (  # type: ignore[import]
+                PROJECT_ID, LOCATION, QUEUE, PIPELINE_URL, ORCHESTRATOR_SA_EMAIL
+            )
+            import google.cloud.tasks_v2 as _tv2
+            import json as _json
+            _campaign_id = lead_dict.get("campaign_id", "")
+            if PIPELINE_URL and ORCHESTRATOR_SA_EMAIL and _campaign_id:
+                _tc = _tv2.CloudTasksClient()
+                _qp = _tc.queue_path(PROJECT_ID, LOCATION, QUEUE)
+                _task_body = _json.dumps({
+                    "tenant_id": tenant_id,
+                    "campaign_id": _campaign_id,
+                }).encode()
+                _tc.create_task(request={
+                    "parent": _qp,
+                    "task": {
+                        "http_request": {
+                            "http_method": _tv2.HttpMethod.POST,
+                            "url":     f"{PIPELINE_URL}/dispatch",
+                            "headers": {"Content-Type": "application/json"},
+                            "body":    _task_body,
+                            "oidc_token": {
+                                "service_account_email": ORCHESTRATOR_SA_EMAIL,
+                                "audience": PIPELINE_URL,
+                            },
+                        },
+                        "dispatch_deadline": {"seconds": 300},
+                    },
+                })
+                log.info("requeue_task_dispatched",
+                         doc_id=doc_id, campaign_id=_campaign_id)
+        except Exception as _task_err:
+            log.warning("requeue_task_dispatch_failed",
+                        doc_id=doc_id, error=str(_task_err))
+
+        log.info("lead_requeued",
+                 doc_id=doc_id, tenant_id=tenant_id,
+                 source=data.get("requeue_source", "manual_ui"))
+        return jsonify({"status": "requeued"}), 200
 
     # Persist the update
     if "interactions" in data:
