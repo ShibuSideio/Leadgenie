@@ -273,21 +273,49 @@ def dispatch():
     if not active_campaigns:
         active_campaigns = [campaign]
 
-    # ── Target personas — load from tenant_profiles if not on campaign doc ──
+    # ── Target personas — CAMPAIGN-LOCAL ONLY (V23 isolation enforcement) ────
+    # FIX (2026-06-21): Removed live read-through to tenant_profiles collection.
+    # The old code fell back to reading target_personas from the global Digital
+    # Twin profile when the campaign document lacked them. This violated the
+    # snapshot-copy isolation boundary — any B2B persona descriptions on the
+    # tenant profile would silently leak into campaign-specific Prism evaluation.
+    #
+    # New policy:
+    #   1. Campaign has target_personas → use them (snapshot from creation)
+    #   2. Campaign lacks target_personas but has persona_bio → synthesize
+    #      a single-entry persona from campaign-level fields (safe — snapshot)
+    #   3. Campaign has neither → CRITICAL warning for human investigation;
+    #      proceed with empty personas (PrismPipeline handles gracefully)
+    # -----------------------------------------------------------------------
     raw_personas = campaign.get("target_personas", [])
     if not raw_personas:
-        try:
-            profile_snap = _db().collection("tenant_profiles").document(tenant_id).get()
-            if profile_snap.exists:
-                raw_personas = profile_snap.to_dict().get("target_personas", [])
-                log.info("dispatch_personas_loaded_from_profile",
-                         count=len(raw_personas), tenant_id=tenant_id)
-        except Exception as pe:
-            log.warning("dispatch_persona_profile_failed", error=str(pe))
-    if not raw_personas and bio:
-        raw_personas = [{"name": "Target Persona", "description": bio,
-                         "location_hint": location or "Global"}]
-        log.info("dispatch_persona_bio_fallback", campaign_id=campaign_id)
+        # Attempt synthesis from campaign-level persona snapshot fields
+        _p_bio  = campaign.get("persona_bio", "").strip()
+        _p_name = campaign.get("persona_name", "").strip()
+        if _p_bio or bio:
+            raw_personas = [{
+                "name":          _p_name or "Target Persona",
+                "description":   _p_bio or bio,
+                "location_hint": location or "Global",
+            }]
+            log.info("dispatch_persona_synthesized_from_campaign",
+                     campaign_id=campaign_id,
+                     persona_name=raw_personas[0]["name"],
+                     note="Synthesized from campaign-level persona_bio/bio. "
+                          "No tenant_profiles read performed.")
+        else:
+            # No persona data at all — flag for human-in-the-loop review
+            log.critical(
+                "dispatch_campaign_missing_personas",
+                campaign_id=campaign_id,
+                tenant_id=tenant_id,
+                has_bio=bool(bio),
+                has_persona_bio=bool(_p_bio),
+                has_persona_name=bool(_p_name),
+                note="HUMAN-IN-THE-LOOP: Campaign has no target_personas, "
+                     "no persona_bio, and no bio. Prism will operate in "
+                     "generic mode. Investigate campaign configuration.",
+            )
     campaign["target_personas"] = raw_personas
 
     # ── TRACE-5: Instantiate PrismPipeline ──────────────────────────────────
