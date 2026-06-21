@@ -384,15 +384,17 @@ CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for his
 
 # TASK 2 — SYMPTOM DORKING
 User solves: '{ctx.bio}'.
-Generate exactly 3 Google Search operator strings targeting {vector_label} prospects experiencing this problem.
-Context: This is a {vector_label} campaign. Focus on consumer pain points, property/service search behavior, and end-user needs — NOT corporate B2B marketing language.
-Rule: Do NOT target specific platforms or domains (do NOT use site:linkedin.com, site:facebook.com, or site:reddit.com). Focus queries purely on the problem symptoms, keywords, and consumer context.
+Generate exactly 3 Google Search operator strings (Boolean dorks) targeting {vector_label} prospects.
+Context: This is a {vector_label} campaign. Focus on consumer pain points, property/service search behavior, and end-user needs.
+Rule: Do NOT target specific platforms (no site:linkedin.com, site:facebook.com, site:reddit.com).
 Rule: Every query MUST include negative keywords (-shop -cart -amazon -wiki -jobs).
+Rule: Output ONLY valid Google Dork Boolean strings using operators like OR, AND, quotes, intitle:, inurl:. NEVER use conversational phrases, natural-language questions, or sentences starting with 'Show me', 'I am looking for', 'Find', 'How to', 'Where can I', or 'What are'.
 
 # TASK 3 — INTENT EXPANSION
 Audience: '{kw_str}'. Vector: '{vector_label}'.
-Translate into exactly 3 natural-language conversational queries that a {vector_label} buyer or end-user would type into Google.
-CRITICAL: These queries must reflect consumer/buyer search behavior for the {vector_label} vertical. Do NOT use B2B corporate jargon, SaaS terminology, or enterprise sales language.
+Generate exactly 3 Google search queries that a {vector_label} buyer or end-user would type.
+CRITICAL FORMAT RULE: Return ONLY short keyword-based search strings — the raw phrases someone types into Google's search bar. Examples: '2BHK apartment Muscat rent', 'best dental clinic near me reviews', 'used Toyota Fortuner Kerala price'.
+FORBIDDEN: Do NOT return conversational sentences, questions starting with 'Show me', 'I am looking for', 'Find me', or 'How to'. Do NOT use B2B corporate jargon.
 
 Return ONLY the JSON object. No explanation, no markdown."""
         else:
@@ -442,7 +444,14 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 "'brand story', 'positioning', 'market fit', 'lead generation', 'pipeline', "
                 "'enterprise sales', 'stakeholder alignment', 'go-to-market', 'product-market fit'. "
                 "All generated queries must use consumer/buyer language appropriate for the "
-                f"{vector_label} vertical.\n"
+                f"{vector_label} vertical.\n\n"
+                "QUERY FORMAT GUARD:\n"
+                "All symptom_dorks MUST be valid Google Dork Boolean strings using operators "
+                "(OR, AND, quotes, intitle:, inurl:, -keyword). NEVER output conversational "
+                "sentences or natural-language questions.\n"
+                "All translated_queries MUST be short keyword-based search phrases — the raw "
+                "text a consumer types into Google. NEVER start with 'Show me', 'I am looking for', "
+                "'Find me', 'How to', 'Where can I', or 'What are'.\n"
             )
 
         try:
@@ -477,7 +486,44 @@ Return ONLY the JSON object. No explanation, no markdown."""
             log.warning("query_brain_gemini_failed", error=str(exc))
 
     # ── Step 4: Assemble Serper query strings ──────────────────────────────────
+
+    def _deconflict_blacklist(query_body: str, bl: str) -> str:
+        """Strip -site: exclusions from *bl* that conflict with positive site:
+        operators already present in *query_body*.
+
+        Example:
+            query_body = 'site:facebook.com "property in Oman"'
+            bl = '-wiki -site:facebook.com -site:linkedin.com'
+            → returns '-wiki -site:linkedin.com'
+
+        This prevents self-negating dorks where a Gemini-generated symptom dork
+        targets a specific site: but the global blacklist also excludes it.
+        """
+        import re
+        # Extract all positive site: domains from the query body
+        _positive_sites = set(
+            m.group(1).lower().replace("www.", "")
+            for m in re.finditer(r'(?<![- ])site:([^\s]+)', query_body)
+        )
+        if not _positive_sites:
+            return bl
+        # Filter out conflicting -site: exclusions from the blacklist
+        _tokens = bl.split()
+        _filtered = []
+        for tok in _tokens:
+            if tok.startswith("-site:"):
+                _excl_domain = tok[6:].lower().replace("www.", "")
+                if _excl_domain in _positive_sites:
+                    log.info("blacklist_self_negation_prevented",
+                             domain=_excl_domain,
+                             note="Positive site: in query conflicts with -site: in blacklist. "
+                                  "Exclusion removed.")
+                    continue
+            _filtered.append(tok)
+        return " ".join(_filtered)
+
     blacklist = _DEFAULT_BLACKLIST
+
 
     # ── Pre-emptive Persona exclusions: "NOT <phrase>" targeting signals (V23.5) ─
     _pre_exclusions: list[str] = []
@@ -578,21 +624,25 @@ Return ONLY the JSON object. No explanation, no markdown."""
 
     if ctx.intents:
         for tq in ctx.intents:
-            smart_queries.append(f'"{tq}"{historical_str} {blacklist}')
+            _bl = _deconflict_blacklist(f'"{tq}"{historical_str}', blacklist)
+            smart_queries.append(f'"{tq}"{historical_str} {_bl}')
         log.info("query_brain_assembled",
                  count=len(ctx.intents), mode=_router_mode,
                  vector=ctx.sourcing_vector or "B2B",
                  is_consumer=_is_consumer)
     elif kw_str:
         for kw in ctx.target_audience or []:
-            smart_queries.append(f'("{kw}"){historical_str} {blacklist}')
+            _bl = _deconflict_blacklist(f'("{kw}"){historical_str}', blacklist)
+            smart_queries.append(f'("{kw}"){historical_str} {_bl}')
 
     for sd in ctx.symptom_dorks:
-        smart_queries.append(f"{sd} {blacklist}")
+        _bl = _deconflict_blacklist(sd, blacklist)
+        smart_queries.append(f"{sd} {_bl}")
 
     if ctx.sourcing_vector and ctx.sourcing_vector in VECTOR_PLATFORM_MAP:
         for dork in VECTOR_PLATFORM_MAP[ctx.sourcing_vector]:
-            smart_queries.append(f"{dork}{historical_str} {blacklist}")
+            _bl = _deconflict_blacklist(f"{dork}{historical_str}", blacklist)
+            smart_queries.append(f"{dork}{historical_str} {_bl}")
         log.info("synaptic_router_dorks_appended",
                  count=len(VECTOR_PLATFORM_MAP[ctx.sourcing_vector]),
                  vector=ctx.sourcing_vector)
