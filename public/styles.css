@@ -1882,3 +1882,79 @@ body {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.55; }
 }
+
+/* ==========================================================================
+   V23.8: VIP INBOX — FEED MODE SEGMENTED TOGGLE
+   ========================================================================== */
+
+.segmented-control {
+    display: inline-flex;
+    align-items: center;
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 4px;
+    gap: 2px;
+    margin-bottom: 14px;
+}
+
+.toggle-btn {
+    position: relative;
+    padding: 8px 18px;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: 'Inter', sans-serif;
+    font-size: 0.84rem;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    user-select: none;
+}
+.toggle-btn:hover {
+    color: var(--text-main);
+    background: rgba(255, 255, 255, 0.55);
+}
+.toggle-btn.active {
+    background: var(--bg-card);
+    color: var(--text-main);
+    font-weight: 600;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
+}
+
+/* Radar pulse dot — indicates unread inbound signals */
+.radar-pulse-dot {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #ef4444;
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5);
+    animation: radarPulse 1.8s ease-in-out infinite;
+}
+@keyframes radarPulse {
+    0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); transform: scale(1); }
+    50%  { box-shadow: 0 0 0 5px rgba(239, 68, 68, 0);  transform: scale(1.15); }
+    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);    transform: scale(1); }
+}
+
+/* Hide the dot until JS removes d-none when inbound leads arrive */
+.radar-pulse-dot.d-none { display: none !important; }
+
+/* ── Responsive: stack on narrow viewports ─────────────────────────────── */
+@media (max-width: 500px) {
+    .segmented-control {
+        display: flex;
+        width: 100%;
+    }
+    .toggle-btn {
+        flex: 1;
+        text-align: center;
+        padding: 10px 12px;
+        font-size: 0.82rem;
+    }
+}

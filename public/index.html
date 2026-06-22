@@ -368,6 +368,17 @@
             "></div>
             <!-- ── END INBOUND RADAR BANNER ───────────────────────────────── -->
 
+            <!-- ── VIP INBOX: FEED MODE TOGGLE (V23.8) ────────────────────── -->
+            <div id="feed-mode-toggle" class="segmented-control">
+                <button class="toggle-btn active" data-feed-mode="outbound">
+                    &#127919; Outbound Campaigns
+                </button>
+                <button class="toggle-btn radar-btn" data-feed-mode="inbound">
+                    &#128225; Inbound Radar <span class="radar-pulse-dot d-none"></span>
+                </button>
+            </div>
+            <!-- ── END FEED MODE TOGGLE ────────────────────────────────────── -->
+
             <div class="feed-header">
                 <h3 class="feed-title">Lead Intelligence Feed</h3>
                 <select id="campaign-filter" class="feed-filter" onchange="filterLeadsByCampaign(this.value)">
