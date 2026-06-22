@@ -2209,12 +2209,59 @@ function renderKanban() {
         });
     });
 
-    // Attach drop targets
+    // Attach drop targets — V23.9: enhanced with placeholder + hovered class
     document.querySelectorAll('.kanban-col').forEach(col => {
-        col.addEventListener('dragover',  e => { e.preventDefault(); col.classList.add('drag-over'); });
-        col.addEventListener('dragleave', ()  => col.classList.remove('drag-over'));
-        col.addEventListener('drop',      e  => handleKanbanDrop(e, col));
+        const body = col.querySelector('.kanban-col-body');
+        col.addEventListener('dragover', e => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            col.classList.add('kanban-col--hovered');
+            col.classList.add('drag-over'); // backward compat
+            if (!body) return;
+            // Insert placeholder at correct position
+            let existing = body.querySelector('.kanban-placeholder');
+            if (!existing) {
+                existing = document.createElement('div');
+                existing.className = 'kanban-placeholder';
+            }
+            // Find the card we're hovering over to insert before it
+            const afterEl = _getDragAfterElement(body, e.clientY);
+            if (afterEl) {
+                body.insertBefore(existing, afterEl);
+            } else {
+                body.appendChild(existing);
+            }
+        });
+        col.addEventListener('dragleave', e => {
+            // Only remove if actually leaving the column (not entering a child)
+            if (col.contains(e.relatedTarget)) return;
+            col.classList.remove('kanban-col--hovered', 'drag-over');
+            const ph = body && body.querySelector('.kanban-placeholder');
+            if (ph) ph.remove();
+        });
+        col.addEventListener('drop', e => {
+            col.classList.remove('kanban-col--hovered', 'drag-over');
+            const ph = body && body.querySelector('.kanban-placeholder');
+            if (ph) ph.remove();
+            handleKanbanDrop(e, col);
+        });
     });
+
+    // Helper: find the card element directly after the mouse Y position
+    function _getDragAfterElement(container, y) {
+        const cards = [...container.querySelectorAll('.crm-card:not(.kanban-card--dragging)')];
+        let closest = null;
+        let closestOffset = Number.NEGATIVE_INFINITY;
+        cards.forEach(child => {
+            const box = child.getBoundingClientRect();
+            const offset = y - box.top - box.height / 2;
+            if (offset < 0 && offset > closestOffset) {
+                closestOffset = offset;
+                closest = child;
+            }
+        });
+        return closest;
+    }
 
     // Health widget
     const fmt = v => `\u20B9${Number(v || 0).toLocaleString('en-IN')}`;
@@ -2256,10 +2303,15 @@ function buildKanbanCard(lead, now) {
 
     card.addEventListener('dragstart', e => {
         crmDraggedId = id;
-        card.classList.add('dragging');
+        card.classList.add('dragging', 'kanban-card--dragging');
         e.dataTransfer.effectAllowed = 'move';
     });
-    card.addEventListener('dragend', () => card.classList.remove('dragging'));
+    card.addEventListener('dragend', () => {
+        card.classList.remove('dragging', 'kanban-card--dragging');
+        // Clean up any stale placeholders across all columns
+        document.querySelectorAll('.kanban-placeholder').forEach(ph => ph.remove());
+        document.querySelectorAll('.kanban-col--hovered').forEach(c => c.classList.remove('kanban-col--hovered', 'drag-over'));
+    });
     card.addEventListener('click',   () => openCrmPanel(lead));
     return card;
 }

@@ -615,6 +615,8 @@ hr {
 .col-negotiating .kanban-col-header { border-color: #f59e0b; color: #d97706; }
 .col-won .kanban-col-header { border-color: #22c55e; color: #16a34a; }
 .col-lost .kanban-col-header { border-color: #f87171; color: #dc2626; }
+/* V23.9: Enhanced drag-and-drop feedback */
+.kanban-col--hovered { background: #f1f5f9; border-color: #c7d2fe; transition: background 0.2s ease, border-color 0.2s ease; }
 .crm-card {
     background: white;
     border: 1px solid var(--glass-border);
@@ -622,11 +624,21 @@ hr {
     padding: 12px;
     cursor: grab;
     user-select: none;
-    transition: transform 0.15s, box-shadow 0.15s;
+    transition: transform 0.15s, box-shadow 0.15s, opacity 0.2s;
     font-size: 0.83rem;
 }
 .crm-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.1); transform: translateY(-1px); }
 .crm-card.dragging { opacity: 0.5; cursor: grabbing; transform: scale(0.97); }
+.kanban-card--dragging { opacity: 0.4; transform: scale(0.98); cursor: grabbing; box-shadow: none; }
+.kanban-placeholder {
+    background: rgba(79, 70, 229, 0.05);
+    border: 2px dashed var(--primary);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    height: 100px;
+    transition: all 0.2s ease;
+    pointer-events: none;
+}
 .crm-card .card-domain { font-weight: 600; color: var(--text-main); font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .crm-card .card-score { font-size: 0.7rem; color: var(--text-muted); margin-top: 2px; }
 .crm-card .card-signal { font-size: 0.75rem; color: #4f46e5; margin-top: 6px; background: #ede9fe; padding: 4px 8px; border-radius: 6px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
