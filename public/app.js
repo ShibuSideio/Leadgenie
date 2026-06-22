@@ -2843,13 +2843,18 @@ window.createLeadCardV2 = function(docId, lead) {
         '<div class="lc-badges">'+prismBadge+bHTML+'</div>' +
         // XSS-FIX: expand btn — data-action delegation
         '<button class="lc-expand-btn" data-action="expand" data-lead-id="'+docId+'">' +
-            '<span id="lc-expand-icon-'+docId+'">&#x2193;</span> See opening message &amp; full intelligence' +
+            '<span id="lc-expand-icon-'+docId+'">&#x2193;</span> See opening message' +
         '</button>' +
         '<div class="lc-expanded" id="'+expandId+'">' +
             (dm ? '<div class="lc-section"><div class="lc-section-label">Your Opening Message</div><div class="lc-icebreaker">'+dm+'</div></div>' : '') +
             (lead.pain_point && lead.pain_point !== signal ? '<div class="lc-section"><div class="lc-section-label">Why This Lead</div><div class="lc-why">'+lead.pain_point+'</div></div>' : '') +
-            _prismDossierHTML(lead) +
-            cInfo +
+            '<button class="expand-btn" data-action="toggle-dossier" data-lead-id="'+docId+'">' +
+                '<span class="dossier-chevron">&#x25BC;</span> View Full Dossier &amp; Tags' +
+            '</button>' +
+            '<div class="dossier-container" id="dossier-'+docId+'">' +
+                _prismDossierHTML(lead) +
+                cInfo +
+            '</div>' +
         '</div>' +
         '<div class="lc-actions-primary">' +
             '<button class="lc-contact-btn lc-copilot-btn'+(isCont?' lc-copilot-btn--contacted':'')+'"' +
@@ -2963,6 +2968,17 @@ window.createLeadCardV2 = function(docId, lead) {
             if (!docId) return;
             window.openRejectionModal(docId);
             lcCloseMore(docId);
+
+        } else if (action === 'toggle-dossier') {
+            // V23.9: Progressive disclosure — toggle dossier container
+            if (!docId) return;
+            var dossier = document.getElementById('dossier-' + docId);
+            if (!dossier) return;
+            var isExpanded = dossier.classList.toggle('expanded');
+            var chevron = btn.querySelector('.dossier-chevron');
+            if (chevron) chevron.innerHTML = isExpanded ? '&#x25B2;' : '&#x25BC;';
+            btn.childNodes[btn.childNodes.length - 1].textContent =
+                isExpanded ? ' Hide Dossier' : ' View Full Dossier & Tags';
         }
     });
 })();
