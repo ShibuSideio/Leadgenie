@@ -528,7 +528,13 @@ hr {
     flex-direction: column;
     gap: 16px;
     min-height: 0;
-    overflow: hidden;
+    width: 100%;
+    height: calc(100vh - 64px);  /* full viewport minus sticky glass-nav */
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 24px;
+    background-color: var(--bg-main);
+    box-sizing: border-box;
 }
 .crm-health-bar {
     display: flex;
@@ -552,20 +558,20 @@ hr {
     overflow-y: hidden;          /* clip any accidental vertical bleed from the board */
     padding-bottom: 12px;        /* breathing room so scrollbar doesn't eat card bottoms */
     flex: 1;
-    min-height: 400px;
+    min-height: 0;               /* allow flex child to shrink below content height */
     scrollbar-width: thin;
     scrollbar-color: #c7d2fe transparent;
 }
 .kanban-col {
     flex: 0 0 320px;             /* fixed width — never shrink, never grow */
     min-width: 320px;
-    max-width: 320px;
+    max-width: 350px;
     background: #f8fafc;
     border-radius: 12px;
     border: 1px solid var(--glass-border);
     display: flex;
     flex-direction: column;
-    max-height: 68vh;
+    height: 100%;                /* fill kanban-board height */
 }
 .kanban-col-header {
     display: flex;
@@ -636,7 +642,7 @@ hr {
     background: white;
     border-left: 1px solid var(--glass-border);
     box-shadow: -8px 0 32px rgba(0,0,0,0.12);
-    z-index: 500;
+    z-index: 1000;               /* float OVER kanban board + topnav */
     display: flex;
     flex-direction: column;
     transform: translateX(100%);
