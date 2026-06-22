@@ -32,6 +32,11 @@ let rawLeadsCache = [];
 let unsubscribeLeads = null;   // declared here to avoid temporal dead zone
 const _leadsMap = new Map();
 
+// ── V23.8: VIP Inbox — Feed Mode State ──────────────────────────────────────
+// Controls whether the main lead feed shows outbound campaigns or inbound radar
+// signals. Toggled by #feed-mode-toggle buttons in the UI.
+let CURRENT_FEED_MODE = 'outbound';
+
 // =============================================================================
 // CASCADING GEO DROPDOWN — V23.6
 // Loads /assets/geo_data.json once, drives continent→country→region cascade.
@@ -634,11 +639,23 @@ async function loadLeads() {
             .limit(200)
             .onSnapshot((snapshot) => {
                 rawLeadsCache = [];
+                let _inboundArrived = false; // V23.8: track new inbound signals
                 snapshot.forEach(doc => {
                     let data = doc.data();
                     data.id = doc.id;
                     rawLeadsCache.push(data);
+                    // V23.8: Detect inbound leads for radar pulse dot
+                    // ⚠ SCHEMA NOTE: Change 'inbound' to match your actual
+                    //   lead.source value for inbound signals if different.
+                    if ((data.source === 'inbound' || data.sourcing_vector === 'inbound') && !_inboundArrived) {
+                        _inboundArrived = true;
+                    }
                 });
+                // V23.8: Show radar pulse if inbound leads exist but user is on outbound tab
+                if (_inboundArrived && CURRENT_FEED_MODE !== 'inbound') {
+                    const dot = document.querySelector('.radar-pulse-dot');
+                    if (dot) dot.classList.remove('d-none');
+                }
                 if (rawLeadsCache.length === 0) { renderLeads(); return; }
                 // Client-side tiebreaker: highest score wins when createdAt is equal.
                 // Primary sort is already chronological desc from Firestore.
@@ -723,7 +740,15 @@ let virtualObserver = new IntersectionObserver((entries) => {
 }, { rootMargin: '600px' });
 
 function renderLeads() {
-    const filteredLeads = rawLeadsCache.filter(lead => {
+    // ── V23.8: Primary split — inbound vs outbound ──────────────────────────
+    // ⚠ SCHEMA NOTE: Change 'inbound' to match your actual lead.source value
+    //   for inbound signals if the backend uses a different identifier.
+    const _isInbound = (l) => l.source === 'inbound' || l.sourcing_vector === 'inbound';
+    const modeFiltered = CURRENT_FEED_MODE === 'inbound'
+        ? rawLeadsCache.filter(_isInbound)
+        : rawLeadsCache.filter(l => !_isInbound(l));
+
+    const filteredLeads = modeFiltered.filter(lead => {
         if (!['new', 'contacted', 'converted', 'queued', 'processing', 'failed'].includes(lead.status || 'new')) return false;
         if (currentCampaignFilter !== 'all') {
             const matched = Array.isArray(lead.matched_campaigns)
@@ -3069,6 +3094,28 @@ document.addEventListener('DOMContentLoaded', () => {
     if (dtOverlay) {
         dtOverlay.addEventListener('click', (e) => {
             if (e.target === dtOverlay) closeDTModal();
+        });
+    }
+
+    // ── V23.8: VIP Inbox — Feed Mode Toggle ──────────────────────────────────
+    // Delegated listener on #feed-mode-toggle switches between outbound/inbound.
+    const feedToggle = document.getElementById('feed-mode-toggle');
+    if (feedToggle) {
+        feedToggle.addEventListener('click', (e) => {
+            const btn = e.target.closest('.toggle-btn');
+            if (!btn || btn.classList.contains('active')) return;
+            // Swap active state
+            feedToggle.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            // Update global mode
+            CURRENT_FEED_MODE = btn.dataset.feedMode || 'outbound';
+            // Clear radar pulse dot when switching to inbound
+            if (CURRENT_FEED_MODE === 'inbound') {
+                const dot = document.querySelector('.radar-pulse-dot');
+                if (dot) dot.classList.add('d-none');
+            }
+            // Re-render feed with new mode
+            renderLeads();
         });
     }
 
