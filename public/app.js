@@ -37,6 +37,35 @@ const _leadsMap = new Map();
 // signals. Toggled by #feed-mode-toggle buttons in the UI.
 let CURRENT_FEED_MODE = 'outbound';
 
+// ── V23.9: Indexed Split Caches ─────────────────────────────────────────────
+// Pre-routed during onSnapshot so renderLeads() reads O(1) instead of
+// filtering the full rawLeadsCache on every render.
+let inboundCache  = [];
+let outboundCache = [];
+
+// Shared predicate — single source of truth for inbound classification.
+// ⚠ SCHEMA NOTE: Update 'inbound' if backend uses a different value.
+const _isInbound = (l) => l.source === 'inbound' || l.sourcing_vector === 'inbound';
+
+// Debounced render — coalesces rapid onSnapshot bursts into one paint.
+let _renderRAF = null;
+function _scheduleRender() {
+    if (_renderRAF) return;           // already scheduled
+    _renderRAF = requestAnimationFrame(() => {
+        _renderRAF = null;
+        renderLeads();
+    });
+}
+
+// Helper: remove a lead from ALL caches by docId (used by CRM push, rejection)
+function _evictLeadFromCaches(docId) {
+    const match = l => (l.id || l.doc_id) !== docId;
+    rawLeadsCache  = rawLeadsCache.filter(match);
+    inboundCache   = inboundCache.filter(match);
+    outboundCache  = outboundCache.filter(match);
+    _leadsMap.delete(docId);
+}
+
 // =============================================================================
 // CASCADING GEO DROPDOWN — V23.6
 // Loads /assets/geo_data.json once, drives continent→country→region cascade.
@@ -638,17 +667,23 @@ async function loadLeads() {
             .orderBy('createdAt', 'desc')
             .limit(200)
             .onSnapshot((snapshot) => {
+                // ── V23.9: Indexed ingestion + split routing ────────────────
                 rawLeadsCache = [];
-                let _inboundArrived = false; // V23.8: track new inbound signals
+                inboundCache  = [];
+                outboundCache = [];
+                _leadsMap.clear();
+                let _inboundArrived = false;
                 snapshot.forEach(doc => {
                     let data = doc.data();
                     data.id = doc.id;
                     rawLeadsCache.push(data);
-                    // V23.8: Detect inbound leads for radar pulse dot
-                    // ⚠ SCHEMA NOTE: Change 'inbound' to match your actual
-                    //   lead.source value for inbound signals if different.
-                    if ((data.source === 'inbound' || data.sourcing_vector === 'inbound') && !_inboundArrived) {
+                    _leadsMap.set(doc.id, data);  // O(1) lookup for observer
+                    // Route into split caches
+                    if (_isInbound(data)) {
+                        inboundCache.push(data);
                         _inboundArrived = true;
+                    } else {
+                        outboundCache.push(data);
                     }
                 });
                 // V23.8: Show radar pulse if inbound leads exist but user is on outbound tab
@@ -656,15 +691,19 @@ async function loadLeads() {
                     const dot = document.querySelector('.radar-pulse-dot');
                     if (dot) dot.classList.remove('d-none');
                 }
-                if (rawLeadsCache.length === 0) { renderLeads(); return; }
+                if (rawLeadsCache.length === 0) { _scheduleRender(); return; }
                 // Client-side tiebreaker: highest score wins when createdAt is equal.
                 // Primary sort is already chronological desc from Firestore.
-                rawLeadsCache.sort((a, b) => {
+                const _sortChron = (a, b) => {
                     const tA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
                     const tB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
                     if (tB !== tA) return tB - tA;          // newest first
                     return (b.score || 0) - (a.score || 0); // score tiebreaker
-                });
+                };
+                rawLeadsCache.sort(_sortChron);
+                inboundCache.sort(_sortChron);
+                outboundCache.sort(_sortChron);
+                // ── KPI counters (read from rawLeadsCache for global totals) ─
                 let cNew = 0, cContact = 0, cConvert = 0;
                 let cDiscovered = rawLeadsCache.length, cActionable = 0, cIgnored = 0;
                 let cFailed = 0, cProcessing = 0;
@@ -686,7 +725,7 @@ async function loadLeads() {
                 if (elIgn)  elIgn.innerText  = cIgnored;
                 if (elFail) elFail.innerText = cFailed;
                 fcUpdateKPIs(rawLeadsCache);
-                renderLeads();
+                _scheduleRender();  // V23.9: debounced via rAF
             }, async (error) => {
                 console.error('[Firestore] onSnapshot error:', error);
                 if (error.code === 'failed-precondition') {
@@ -728,7 +767,8 @@ let virtualObserver = new IntersectionObserver((entries) => {
     entries.forEach(entry => {
         if (entry.isIntersecting && !entry.target.hasAttribute('data-rendered')) {
             const leadId = entry.target.getAttribute('data-lead-id');
-            const lead = rawLeadsCache.find(l => (l.id || l.doc_id) === leadId);
+            // V23.9: O(1) lookup via _leadsMap (populated during onSnapshot)
+            const lead = _leadsMap.get(leadId);
             if (lead) {
                 const newCard = window.createLeadCardV2(leadId, lead);
                 entry.target.replaceWith(newCard);
@@ -740,15 +780,11 @@ let virtualObserver = new IntersectionObserver((entries) => {
 }, { rootMargin: '600px' });
 
 function renderLeads() {
-    // ── V23.8: Primary split — inbound vs outbound ──────────────────────────
-    // ⚠ SCHEMA NOTE: Change 'inbound' to match your actual lead.source value
-    //   for inbound signals if the backend uses a different identifier.
-    const _isInbound = (l) => l.source === 'inbound' || l.sourcing_vector === 'inbound';
-    const modeFiltered = CURRENT_FEED_MODE === 'inbound'
-        ? rawLeadsCache.filter(_isInbound)
-        : rawLeadsCache.filter(l => !_isInbound(l));
+    // ── V23.9: Read directly from pre-routed split cache ────────────────────
+    // No filter pass needed — onSnapshot already routes into inbound/outbound.
+    const baseData = (CURRENT_FEED_MODE === 'inbound') ? inboundCache : outboundCache;
 
-    const filteredLeads = modeFiltered.filter(lead => {
+    const filteredLeads = baseData.filter(lead => {
         if (!['new', 'contacted', 'converted', 'queued', 'processing', 'failed'].includes(lead.status || 'new')) return false;
         if (currentCampaignFilter !== 'all') {
             const matched = Array.isArray(lead.matched_campaigns)
@@ -837,7 +873,7 @@ window.pushToCRM = async function(docId, leadStr) {
         if (success) {
             const cardEl = document.getElementById(docId);
             if (cardEl) { virtualObserver.unobserve(cardEl); cardEl.remove(); }
-            rawLeadsCache = rawLeadsCache.filter(l => (l.id || l.doc_id) !== docId);
+            _evictLeadFromCaches(docId);  // V23.9: sync all split caches
             showToast('✅ Lead saved to CRM pipeline — view it in the CRM sidebar.', 'success');
             const userUrl = window.currentUserData?.crm_webhook_url;
             if (userUrl) {
@@ -863,8 +899,8 @@ window.pushToCRM = async function(docId, leadStr) {
 window.openRejectionModal = function(docId) {
     document.getElementById('rejection-lead-id').value = docId;
     // Optimistic removal from visible feed so UX feels instant
-    const idx = rawLeadsCache.findIndex(l => l.id === docId);
-    if (idx !== -1) { rawLeadsCache.splice(idx, 1); renderLeads(); }
+    _evictLeadFromCaches(docId);  // V23.9: sync all split caches
+    renderLeads();
     showModal('rejection-modal');
 };
 
