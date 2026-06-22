@@ -2749,6 +2749,27 @@ window.createLeadCardV2 = function(docId, lead) {
     // ── Status-aware card styling (V23.7) ──
     if (lead.status === 'failed') card.classList.add('lead-card--failed');
     if (lead.status === 'processing' || lead.status === 'queued') card.classList.add('lead-card--processing');
+
+    // ── V23.9: Skeleton card for queued/processing leads ─────────────────
+    // Returns a clean shimmer placeholder instead of the full card body.
+    if (lead.status === 'queued' || lead.status === 'processing') {
+        var stLabel = lead.status === 'queued' ? 'Queued for processing…' : 'Processing in progress…';
+        card.innerHTML =
+            '<div style="padding:20px; display:flex; flex-direction:column; gap:12px;">' +
+                '<div style="display:flex; align-items:center; gap:10px;">' +
+                    '<div class="skeleton-block" style="width:140px; height:16px;"></div>' +
+                    '<div class="skeleton-block" style="width:50px; height:14px; margin-left:auto;"></div>' +
+                '</div>' +
+                '<div class="skeleton-block" style="width:100%; height:10px;"></div>' +
+                '<div class="skeleton-block" style="width:85%; height:10px;"></div>' +
+                '<div class="skeleton-block" style="width:60%; height:10px;"></div>' +
+                '<div style="display:flex; align-items:center; gap:6px; margin-top:4px; color:#b45309; font-size:0.8rem; font-weight:500;">' +
+                    '<span>⏳</span> <span>' + stLabel + '</span>' +
+                '</div>' +
+            '</div>';
+        return card;
+    }
+
     var displayName = lead.company_name || '';
     var hostname = '';
     try { var raw = lead.url || lead.source_url || ''; hostname = raw ? new URL(raw).hostname.replace('www.','') : ''; } catch(e) {}
@@ -2856,21 +2877,27 @@ window.createLeadCardV2 = function(docId, lead) {
             '</div>' +
         '</div>';
 
-    // ── Fault Recovery State UI (V23.7) ──────────────────────────────────
+    // ── Fault Recovery: Error Translation (V23.9) ────────────────────────
     if (lead.status === 'failed') {
+        var rawErr = (lead.error || '').toLowerCase();
+        var userMsg = 'Pipeline error. Requeue to try again.';
+        if (rawErr.indexOf('402') !== -1)
+            userMsg = 'Out of Credits \u2014 Top up to retry.';
+        else if (rawErr.indexOf('timeout') !== -1 || rawErr.indexOf('playwright') !== -1)
+            userMsg = 'Website blocked AI scraper. Requeue to try fallback.';
+        else if (rawErr.indexOf('zombie') !== -1)
+            userMsg = 'Processing timed out. Requeue to retry.';
+        else if (rawErr.indexOf('rate') !== -1 || rawErr.indexOf('429') !== -1)
+            userMsg = 'Rate limited by source. Requeue in a few minutes.';
+
         var errorBadge = document.createElement('div');
         errorBadge.className = 'lead-error-badge';
         errorBadge.innerHTML =
-            '<span class="error-icon">⚠️</span>' +
-            '<span>' + (lead.error || 'Processing failed — unknown error.') + '</span>' +
+            '<span class="error-icon">\u26a0\ufe0f</span>' +
+            '<span>' + userMsg + '</span>' +
             '<button class="lead-requeue-btn" data-action="requeue" data-lead-id="' + docId + '">' +
-            '🔄 Re-queue</button>';
+            '\ud83d\udd04 Re-queue</button>';
         card.appendChild(errorBadge);
-    } else if (lead.status === 'processing' || lead.status === 'queued') {
-        var procIndicator = document.createElement('div');
-        procIndicator.className = 'lead-processing-indicator';
-        procIndicator.innerHTML = '⏳ ' + (lead.status === 'queued' ? 'Queued for processing...' : 'Processing in progress...');
-        card.appendChild(procIndicator);
     }
 
     return card;

@@ -1810,10 +1810,10 @@ body {
     #l0-panel-operations > div { grid-template-columns: 1fr !important; }
 }
 
-/* ── Fault Recovery State UI (V23.7) ─────────────────────────────────────── */
+/* ── Fault Recovery State UI (V23.7 → V23.9 polish) ──────────────────────── */
 .lead-card--failed {
-    border-left: 4px solid #ef4444 !important;
-    background: linear-gradient(90deg, rgba(239,68,68,0.04) 0%, transparent 40%) !important;
+    border-left: 3px solid var(--danger, #ef4444) !important;
+    background: #fef2f2 !important;
 }
 .lead-card--processing {
     border-left: 4px solid #f59e0b !important;
@@ -1825,10 +1825,10 @@ body {
     gap: 10px;
     margin: 10px 0;
     padding: 10px 14px;
-    background: rgba(239, 68, 68, 0.08);
-    border: 1px solid rgba(239, 68, 68, 0.25);
+    background: rgba(239, 68, 68, 0.06);
+    border: 1px solid rgba(239, 68, 68, 0.18);
     border-radius: 8px;
-    color: #dc2626;
+    color: #b91c1c;
     font-size: 0.82rem;
     font-weight: 500;
     line-height: 1.4;
@@ -1841,22 +1841,24 @@ body {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 14px;
-    background: rgba(79, 70, 229, 0.1);
-    color: #4f46e5;
-    border: 1px solid rgba(79, 70, 229, 0.25);
-    border-radius: 6px;
-    font-size: 0.78rem;
-    font-weight: 600;
+    padding: 8px 16px;
+    background: #4f46e5;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.8rem;
+    font-weight: 700;
     cursor: pointer;
     transition: all 0.2s ease;
     white-space: nowrap;
     flex-shrink: 0;
     font-family: inherit;
+    box-shadow: 0 1px 4px rgba(79, 70, 229, 0.25);
+    margin-left: auto;
 }
 .lead-requeue-btn:hover {
-    background: rgba(79, 70, 229, 0.18);
-    border-color: #4f46e5;
+    background: #4338ca;
+    box-shadow: 0 3px 10px rgba(79, 70, 229, 0.35);
     transform: translateY(-1px);
 }
 .lead-requeue-btn:disabled {
@@ -1864,6 +1866,21 @@ body {
     cursor: not-allowed;
     transform: none;
 }
+
+/* ── Shimmer Skeleton (V23.9) ────────────────────────────────────────────── */
+@keyframes shimmer {
+    0%   { background-position: -1000px 0; }
+    100% { background-position:  1000px 0; }
+}
+.skeleton-block {
+    background: #e2e8f0;
+    background-image: linear-gradient(90deg, #e2e8f0 0px, #f8fafc 40px, #e2e8f0 80px);
+    background-size: 1000px 100%;
+    animation: shimmer 2s infinite linear;
+    border-radius: 4px;
+}
+
+/* Deprecated: kept for backward compat; V23.9 uses skeleton cards instead */
 .lead-processing-indicator {
     display: flex;
     align-items: center;
