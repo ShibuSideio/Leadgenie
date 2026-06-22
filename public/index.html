@@ -66,6 +66,10 @@
         .sio-modal-overlay.open { display: flex; }
         @keyframes sioFadeIn { from { opacity: 0; } to { opacity: 1; } }
 
+        /* ── VIEW CONTROLLER UTILITIES (V23.7) ──────────── */
+        .d-none { display: none !important; }
+        .view-container { width: 100%; }
+
         .sio-modal-box {
             background: rgba(255,255,255,0.92);
             backdrop-filter: blur(20px);
@@ -256,9 +260,9 @@
     <nav class="glass-nav">
         <div class="logo">Sideio <span class="logo-mark">&#10022;</span></div>
         <div class="top-cmd-bar" id="top-cmd-bar">
-            <button class="cmd-btn active" id="tab-dashboard" onclick="switchTab('dashboard')">Home</button>
-            <button class="cmd-btn" id="tab-crm" style="display:none;" onclick="switchTab('crm-test')">&#128203; CRM</button>
-            <button class="cmd-btn" id="tab-campaigns" onclick="switchTab('target')">Searches</button>
+            <button class="cmd-btn active" id="tab-dashboard" data-target-view="dashboard" onclick="switchTab('dashboard')">Home</button>
+            <button class="cmd-btn" id="tab-crm" data-target-view="crm" style="display:none;" onclick="switchTab('crm-test')">&#128203; CRM</button>
+            <button class="cmd-btn" id="tab-campaigns" data-target-view="dashboard" onclick="switchTab('target')">Searches</button>
             <button class="cmd-btn" id="tab-personas" onclick="switchTab('persona-vault')">&#127918; Personas</button>
             <button class="cmd-btn" id="tab-reports" onclick="switchTab('reports')">Reports</button>
             <button class="cmd-btn" id="tab-l0-admin" style="display:none;" onclick="switchTab('l0-admin')">Admin</button>
@@ -306,6 +310,9 @@
 
     <!-- MAIN CANVAS -->
     <main class="dashboard-grid app-main">
+
+        <!-- ═══ VIEW CONTROLLER: MAIN DASHBOARD VIEW ═══ -->
+        <div id="main-dashboard-view" class="view-container">
 
         <!-- DASHBOARD VIEW -->
         <section id="view-dashboard" class="main-feed">
@@ -832,8 +839,10 @@
             </div>
         </div>
 
-        <!-- CRM VIEW -->
-        <section id="view-crm-test" class="glass-panel main-feed" style="display:none; padding:20px; overflow:visible; display:flex; flex-direction:column;">
+        </div><!-- /main-dashboard-view -->
+
+        <!-- ═══ VIEW CONTROLLER: CRM VIEW (sibling of main-dashboard-view) ═══ -->
+        <section id="view-crm-test" class="glass-panel main-feed view-container" style="display:none; padding:20px; overflow:visible; flex-direction:column;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-shrink:0;">
                 <div>
                     <h2 style="margin:0;">Pipeline CRM</h2>
