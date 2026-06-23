@@ -57,7 +57,10 @@ def get_serper_logs(uid, tenant_id, user_role):
     raw_from = request.args.get("date_from", "")
     raw_to   = request.args.get("date_to",   "")
     camp_flt = request.args.get("campaign_id", "").strip()
-    limit    = min(int(request.args.get("limit", 500)), 2000)
+    try:
+        limit = min(int(request.args.get("limit", 500)), 2000)
+    except (ValueError, TypeError):
+        limit = 500
 
     try:
         date_from = datetime.date.fromisoformat(raw_from) if raw_from else today - datetime.timedelta(days=7)

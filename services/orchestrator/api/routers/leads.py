@@ -30,6 +30,8 @@ log = get_logger("orchestrator.v23.leads")
 
 NEG_SIGNAL_REASONS = frozenset({"competitor", "author"})
 
+_LEAD_UPDATE_ALLOWED = {"status", "is_in_crm", "crm_status", "rejection_reason", "deal_value", "follow_up_date", "notes", "crm_notes"}
+
 REJECTION_PENALTY_MAP: dict[str, float] = {
     "not_b2b":        -0.25,
     "bad_data":       -0.20,
@@ -77,8 +79,8 @@ def update_lead(uid, tenant_id, user_role, doc_id):
         user_doc  = _db().collection("users").document(tenant_id).get()
         if user_doc.exists:
             wallet       = (user_doc.to_dict() or {}).get("wallet", {})
-            total_credits    = wallet.get("total_credits", 0)
-            reserved_credits = wallet.get("reserved_credits", 0)
+            total_credits    = wallet.get("allocated_credits", 0)
+            reserved_credits = wallet.get("consumed_credits", 0)
             if total_credits <= reserved_credits:
                 log.warning("requeue_credit_gate_blocked",
                             doc_id=doc_id, tenant_id=tenant_id,
@@ -92,6 +94,7 @@ def update_lead(uid, tenant_id, user_role, doc_id):
             "lock_entity":            None,
             "error":                  firestore.DELETE_FIELD,
             "error_details":          firestore.DELETE_FIELD,
+            "credit_settled":         False,
             "retry_count":            0,
             "processing_attempts":    0,
             "processing_started_at":  None,
@@ -157,6 +160,7 @@ def update_lead(uid, tenant_id, user_role, doc_id):
             "interactions": firestore.ArrayUnion([db_interaction]),
         })
     else:
+        data = {k: v for k, v in data.items() if k in _LEAD_UPDATE_ALLOWED}
         doc_ref.update(data)
 
     status           = data.get("status")
@@ -197,7 +201,7 @@ def update_lead(uid, tenant_id, user_role, doc_id):
             camp_id_st  = lead_dict.get("campaign_id") or ""
             persona_cat = "general"
             if camp_id_st:
-                camp_snap  = db.collection("campaigns").document(camp_id_st).get()
+                camp_snap  = _db().collection("campaigns").document(camp_id_st).get()
                 camp_dict  = camp_snap.to_dict() if camp_snap.exists else {}
                 persona_cat = (camp_dict.get("persona_name") or camp_dict.get("name") or "general").strip()
                 persona_cat = f"{camp_id_st}_{persona_cat}"
@@ -213,7 +217,7 @@ def update_lead(uid, tenant_id, user_role, doc_id):
         base_path_key = parse_base_path(source_url)
         if base_path_key and base_path_key != "unknown":
             try:
-                ont_ref  = db.collection("ontology_map").document(base_path_key)
+                ont_ref  = _db().collection("ontology_map").document(base_path_key)
                 ont_snap = ont_ref.get()
                 if ont_snap.exists:
                     total_yield = ont_snap.to_dict().get("total_yield", 0)
@@ -244,7 +248,7 @@ def update_lead(uid, tenant_id, user_role, doc_id):
                     src_url = lead_dict.get("source_url", lead_dict.get("url", ""))
                     bpk     = parse_base_path(src_url)
                     if bpk and bpk != "unknown":
-                        ont_ref  = db.collection("ontology_map").document(bpk)
+                        ont_ref  = _db().collection("ontology_map").document(bpk)
                         ont_snap = ont_ref.get()
                         if ont_snap.exists:
                             ont_ref.update({
@@ -278,7 +282,7 @@ def update_lead(uid, tenant_id, user_role, doc_id):
     # ── Headless CRM egress webhook (converted) ───────────────────────────────
     if status == "converted":
         try:
-            user_crm_doc    = db.collection("users").document(tenant_id).get().to_dict() or {}
+            user_crm_doc    = _db().collection("users").document(tenant_id).get().to_dict() or {}
             crm_webhook_url = user_crm_doc.get("crm_webhook_url")
             if crm_webhook_url:
                 crm_payload = {

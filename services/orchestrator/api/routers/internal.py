@@ -278,6 +278,9 @@ def settle_credits():
 # =============================================================================
 @bp.route("/purge", methods=["POST"])
 def purge():
+    ok, err = _verify_oidc(request)
+    if not ok:
+        return jsonify({"error": err}), 401 if "Missing" in err else 403
     return handle_purge(request)
 
 

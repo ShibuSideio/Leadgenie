@@ -62,6 +62,7 @@ log = get_logger("orchestrator.v23")
 def create_app() -> Flask:
     """Create the V23 Flask application — fully modular, no legacy."""
     app = Flask(__name__)
+    app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024  # 2MB max request size
 
     @app.before_request
     def handle_preflight():

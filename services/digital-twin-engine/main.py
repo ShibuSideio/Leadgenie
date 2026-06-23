@@ -46,7 +46,7 @@ app = Flask(__name__)
 
 # Apply strict CORS for production + local dev
 CORS(app, 
-    origins=["https://lead-sniper-prod.web.app", "http://localhost:5000"],
+    origins=["https://lead-sniper-prod.web.app"],
     methods=["*"],
     allow_headers=["*"],
     supports_credentials=True

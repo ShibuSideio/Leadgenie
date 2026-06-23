@@ -44,7 +44,10 @@ def me_endpoint(uid: str, tenant_id: str, user_role: str):
         if "agreed_to_terms" in payload:
             updates["agreed_to_terms"] = fs.SERVER_TIMESTAMP
         if "crm_webhook_url" in payload:
-            updates["crm_webhook_url"] = payload["crm_webhook_url"]
+            crm_url = payload["crm_webhook_url"]
+            if crm_url and not crm_url.startswith(("http://", "https://")):
+                return jsonify({"error": "Webhook URL must start with http:// or https://"}), 400
+            updates["crm_webhook_url"] = crm_url
         # V23.5: inbound radar toggle
         if "inbound_radar_enabled" in payload:
             updates["inbound_radar.enabled"] = bool(payload["inbound_radar_enabled"])

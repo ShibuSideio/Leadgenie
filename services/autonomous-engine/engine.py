@@ -91,7 +91,6 @@ _SOCIAL_ONTOLOGY_DOMAINS = {
     "kaggle.com","instagram.com","twitter.com","x.com","youtube.com"
 }
 
-vertexai.init(project=PROJECT_ID, location="us-central1")
 
 
 def parse_base_path(url: str) -> str:

@@ -1,16 +1,40 @@
+import logging
 import os
 import datetime
 import httpx
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from google.cloud import firestore
 from google.cloud import secretmanager
 import vertexai
 from vertexai.generative_models import GenerativeModel
 
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
-db = firestore.Client()
 project_id = os.environ.get("PROJECT_ID", "sideio-leads-v16")
-sm_client = secretmanager.SecretManagerServiceClient()
+
+_db_instance = None
+def _db():
+    global _db_instance
+    if _db_instance is None:
+        _db_instance = firestore.Client()
+    return _db_instance
+
+_sm_instance = None
+def _sm():
+    global _sm_instance
+    if _sm_instance is None:
+        _sm_instance = secretmanager.SecretManagerServiceClient()
+    return _sm_instance
+
+def _verify_internal_caller(request):
+    """Verify request comes from Cloud Tasks or Cloud Scheduler."""
+    if request.headers.get("X-CloudTasks-QueueName") or request.headers.get("X-CloudScheduler-JobName"):
+        return True
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        return True  # Cloud Run IAM handles actual token validation
+    return False
 
 SENDGRID_API_KEY_SECRET = f"projects/{project_id}/secrets/sendgrid_api_key/versions/latest"
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "admin@yourdomain.com")
@@ -18,14 +42,16 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "admin@yourdomain.com")
 try:
     vertexai.init(project=project_id, location="asia-south1")
     model = GenerativeModel("gemini-2.5-flash")
-except:
+except Exception as e:
+    logger.warning("Failed to initialize Vertex AI model: %s", e)
     model = None
 
 def get_secret(secret_name):
     try:
-        response = sm_client.access_secret_version(request={"name": secret_name})
+        response = _sm().access_secret_version(request={"name": secret_name})
         return response.payload.data.decode("UTF-8")
-    except:
+    except Exception as e:
+        logger.warning("Failed to access secret %s: %s", secret_name, e)
         return ""
 
 def send_summary_email(recipient, lead_count, top_leads):
@@ -60,8 +86,10 @@ def send_summary_email(recipient, lead_count, top_leads):
 
 @app.route("/send", methods=["POST"])
 def send_daily_summaries():
+    if not _verify_internal_caller(request):
+        return jsonify({"error": "Unauthorized"}), 403
     # Triggered centrally. Iterates through tenants and compiles daily digests.
-    tenants = db.collection("tenants").stream()
+    tenants = _db().collection("tenants").stream()
     count = 0
     
     
@@ -75,7 +103,7 @@ def send_daily_summaries():
         email = t_data.get("admin_email")
         if email:
             # Query recent leads securely across all campaigns for this tenant
-            leads_query = db.collection("leads").where("tenant_id", "==", t.id).limit(50).stream()
+            leads_query = _db().collection("leads").where("tenant_id", "==", t.id).limit(50).stream()
             
             top_leads = []
             total = 0
@@ -99,7 +127,7 @@ def send_daily_summaries():
             combined_context = " ".join(global_pain_points[:100]) # Cap input limits
             prompt = f"Analyze these successful B2B conversions and extract the top 3 global macro-trends or highly converting sectors/keywords: {combined_context}"
             response = model.generate_content(prompt)
-            db.collection("macro_trends").document("latest").set({
+            _db().collection("macro_trends").document("latest").set({
                 "trends": response.text,
                 "timestamp": firestore.SERVER_TIMESTAMP
             })
@@ -111,6 +139,8 @@ def send_daily_summaries():
 
 @app.route("/process-outbound", methods=["POST"])
 def process_outbound_emails():
+    if not _verify_internal_caller(request):
+        return jsonify({"error": "Unauthorized"}), 403
     import uuid
     api_key = get_secret(SENDGRID_API_KEY_SECRET).strip()
     if not api_key:
@@ -123,7 +153,7 @@ def process_outbound_emails():
     
     # Query candidate queued documents
     candidates = (
-        db.collection("outbound_emails")
+        _db().collection("outbound_emails")
         .where("status", "==", "queued")
         .limit(10)
         .stream()
@@ -155,7 +185,7 @@ def process_outbound_emails():
             return None
 
         try:
-            doc_data = _try_lease(db.transaction())
+            doc_data = _try_lease(_db().transaction())
         except Exception as lease_err:
             print(f"Lease transaction failed for {doc.id}: {lease_err}")
             continue
@@ -167,10 +197,10 @@ def process_outbound_emails():
         dm_payload = doc_data.get("dm_payload")
         lead_id = doc_data.get("lead_id")
         
-        lead_ref = db.collection("leads").document(lead_id)
+        lead_ref = _db().collection("leads").document(lead_id)
         
         if not recipient:
-            _mark_terminal_failure(db, doc_ref, lead_ref, "failed_delivery", "Missing recipient email address.")
+            _mark_terminal_failure(_db(), doc_ref, lead_ref, "failed_delivery", "Missing recipient email address.")
             processed_count += 1
             continue
             
@@ -191,7 +221,7 @@ def process_outbound_emails():
             
             if resp.status_code == 202:
                 # Success: Atomic sync to contacted status across both docs
-                batch = db.batch()
+                batch = _db().batch()
                 batch.update(doc_ref, {
                     "status": "contacted",
                     "sent_at": firestore.SERVER_TIMESTAMP,
@@ -208,7 +238,7 @@ def process_outbound_emails():
                 # Transient Error: Revert status to queued for retrying
                 retry_count = doc_data.get("retry_count", 0) + 1
                 if retry_count >= 3:
-                    _mark_terminal_failure(db, doc_ref, lead_ref, "failed_delivery", f"Exceeded max retries. API status: {resp.status_code}")
+                    _mark_terminal_failure(_db(), doc_ref, lead_ref, "failed_delivery", f"Exceeded max retries. API status: {resp.status_code}")
                 else:
                     doc_ref.update({
                         "status": "queued",
@@ -220,13 +250,13 @@ def process_outbound_emails():
                 processed_count += 1
             else:
                 # Terminal Error: bounce, authorization failure, block
-                _mark_terminal_failure(db, doc_ref, lead_ref, "failed_delivery", f"Terminal API error {resp.status_code}: {resp.text}")
+                _mark_terminal_failure(_db(), doc_ref, lead_ref, "failed_delivery", f"Terminal API error {resp.status_code}: {resp.text}")
                 processed_count += 1
         except Exception as send_err:
             # Transient Network Exception: Revert to queued
             retry_count = doc_data.get("retry_count", 0) + 1
             if retry_count >= 3:
-                _mark_terminal_failure(db, doc_ref, lead_ref, "failed_delivery", f"Exceeded max retries. Network exception: {send_err}")
+                _mark_terminal_failure(_db(), doc_ref, lead_ref, "failed_delivery", f"Exceeded max retries. Network exception: {send_err}")
             else:
                 doc_ref.update({
                     "status": "queued",
@@ -239,8 +269,8 @@ def process_outbound_emails():
             
     return jsonify({"status": "complete", "processed": processed_count}), 200
 
-def _mark_terminal_failure(db, doc_ref, lead_ref, status, error_msg):
-    batch = db.batch()
+def _mark_terminal_failure(db_client, doc_ref, lead_ref, status, error_msg):
+    batch = db_client.batch()
     batch.update(doc_ref, {
         "status": status,
         "error_message": error_msg,

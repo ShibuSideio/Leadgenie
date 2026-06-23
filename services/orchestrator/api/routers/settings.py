@@ -91,7 +91,8 @@ def upsert_tenant_profile(uid, tenant_id, user_role):
         return jsonify({"error": err_msg}), status_code
 
     data = request.json or {}
-    data.pop("tenant_id", None)
+    _TENANT_PROFILE_ALLOWED = {"company_name", "industry", "website", "knowledge_base", "onboarding_complete", "preferred_geo", "target_personas"}
+    data = {k: v for k, v in data.items() if k in _TENANT_PROFILE_ALLOWED}
     data["tenant_id"] = tenant_id
     data["createdAt"] = firestore.SERVER_TIMESTAMP
     data["updatedAt"] = firestore.SERVER_TIMESTAMP
@@ -172,6 +173,29 @@ def _is_waf_response(html: str, status_code: int) -> bool:
     return any(fp in lowered for fp in _WAF_FINGERPRINTS)
 
 
+import ipaddress
+import socket
+
+def _is_internal_url(url_str):
+    """Block SSRF by checking if URL resolves to internal/private IP."""
+    try:
+        from urllib.parse import urlparse
+        hostname = urlparse(url_str).hostname
+        if not hostname:
+            return True
+        _BLOCKED = {'localhost', '127.0.0.1', '::1', 'metadata.google.internal', '169.254.169.254'}
+        if hostname in _BLOCKED:
+            return True
+        resolved = socket.getaddrinfo(hostname, None)
+        for _, _, _, _, addr in resolved:
+            ip = ipaddress.ip_address(addr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return True
+    except Exception:
+        return True
+    return False
+
+
 @bp.route("/api/analyze-website", methods=["POST"])
 @require_auth
 def analyze_website(uid, tenant_id, user_role):
@@ -183,6 +207,9 @@ def analyze_website(uid, tenant_id, user_role):
         return jsonify({"error": "Missing url"}), 400
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
+
+    if _is_internal_url(url):
+        return jsonify({"error": "URL not allowed"}), 400
 
     log.info("analyze_website_start", url=url, tenant_id=tenant_id)
 

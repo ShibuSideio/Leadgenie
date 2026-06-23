@@ -153,12 +153,14 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
         if not persona_id:
             continue
 
-        persona_snap = db.collection("personas").document(persona_id).get()
+        persona_snap = db.collection("tenant_profiles").document(uid).collection("personas").document(persona_id).get()
         if not persona_snap.exists:
             continue
         persona = persona_snap.to_dict() or {}
 
-        assert persona.get("uid") == uid or persona.get("tenant_id") == uid, "Persona multi-tenancy violation detected."
+        if not (persona.get("uid") == uid or persona.get("tenant_id") == uid):
+            log.warning("invalid_persona_data", uid=uid[:8], persona_id=persona_id, reason="Persona multi-tenancy violation detected.")
+            continue  # Skip this tenant, don't crash the whole job
 
         try:
             svc     = InboundSentimentService(persona=persona, campaign=camp)

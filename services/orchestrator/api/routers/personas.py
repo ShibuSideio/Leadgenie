@@ -17,6 +17,10 @@ from core.clients import get_db  # type: ignore[import]
 from core.auth import require_auth  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
 
+import re
+def _strip_html(text):
+    return re.sub(r'<[^>]+>', '', text).strip()
+
 class _LazyDb:
     def __getattr__(self, name):
         return getattr(get_db(), name)
@@ -67,14 +71,12 @@ def list_personas(uid, tenant_id, user_role):
 def create_persona(uid, tenant_id, user_role):
     from google.cloud import firestore
     data     = request.json or {}
-    p_name   = (data.get("name") or "").strip()
-    p_bio    = (data.get("bio")  or "").strip()
+    p_name   = _strip_html((data.get("name") or ""))
+    p_bio    = _strip_html((data.get("bio")  or ""))
     p_keys   = (data.get("keywords") or "").strip()
     # targeting_signals: list of strings. "NOT <phrase>" entries become Serper exclusion operators.
-    p_signals = [
-        s.strip() for s in (data.get("targeting_signals") or [])
-        if isinstance(s, str) and s.strip()
-    ]
+    raw_ts = data.get("targeting_signals")
+    p_signals = [s.strip() for s in raw_ts if isinstance(s, str) and s.strip()] if isinstance(raw_ts, list) else []
     if not p_name or not p_bio:
         return jsonify({"error": "name and bio are required"}), 400
     _, p_ref = (
@@ -102,13 +104,11 @@ def create_persona(uid, tenant_id, user_role):
 def update_persona(uid, tenant_id, user_role, persona_id):
     from google.cloud import firestore
     data     = request.json or {}
-    p_name   = (data.get("name") or "").strip()
-    p_bio    = (data.get("bio")  or "").strip()
+    p_name   = _strip_html((data.get("name") or ""))
+    p_bio    = _strip_html((data.get("bio")  or ""))
     p_keys   = (data.get("keywords") or "").strip()
-    p_signals = [
-        s.strip() for s in (data.get("targeting_signals") or [])
-        if isinstance(s, str) and s.strip()
-    ]
+    raw_ts = data.get("targeting_signals")
+    p_signals = [s.strip() for s in raw_ts if isinstance(s, str) and s.strip()] if isinstance(raw_ts, list) else []
     if not p_name or not p_bio:
         return jsonify({"error": "name and bio are required"}), 400
 

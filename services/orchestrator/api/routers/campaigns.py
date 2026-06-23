@@ -54,6 +54,8 @@ log = get_logger("orchestrator.v23.campaigns")
 
 MAX_CHILD_CAMPAIGNS = int(os.environ.get("MAX_CHILD_CAMPAIGNS", 5))
 
+_CAMPAIGN_UPDATE_ALLOWED = {"name", "bio", "keywords", "status", "gl", "location", "persona_id", "drip_interval_minutes", "geo_hierarchy"}
+
 # ---------------------------------------------------------------------------
 # FIX (2026-06-21): Campaign field sanitizer — server-side write boundary.
 # Scrubs system error strings, fallback sentinels, and non-geographic location
@@ -198,6 +200,18 @@ def create_campaign(uid, tenant_id, user_role):
     data = request.json or {}
     data.pop("tenant_id", None)
 
+    name = (data.get("name") or "").strip()
+    if not name or len(name) > 200:
+        return jsonify({"error": "Campaign name is required (max 200 chars)"}), 400
+    data["name"] = name
+    bio = (data.get("bio") or "").strip()
+    if len(bio) > 5000:
+        return jsonify({"error": "Bio exceeds maximum length of 5000 characters"}), 400
+    data["bio"] = bio
+    keywords_raw = data.get("keywords", "")
+    if isinstance(keywords_raw, str) and len(keywords_raw) > 2000:
+        return jsonify({"error": "Keywords exceed maximum length of 2000 characters"}), 400
+
     # GL derivation
     loc_raw = (data.get("location") or "").strip()
     data["gl"] = _resolve_gl(loc_raw)
@@ -299,7 +313,11 @@ def create_campaign(uid, tenant_id, user_role):
     # Server-side field sanitization — last line of defense
     _sanitize_campaign_fields(data)
 
-    _, doc_ref = db.collection("campaigns").add(data)
+    try:
+        _, doc_ref = db.collection("campaigns").add(data)
+    except Exception as e:
+        log.error("firestore_campaign_create_error", error=str(e), tenant_id=tenant_id)
+        return jsonify({"error": "Failed to create campaign"}), 500
 
     # Synaptic Router classification (V23 archetype-based)
     bio = data.get("bio", "")
@@ -389,6 +407,7 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
     # Server-side field sanitization — last line of defense
     _sanitize_campaign_fields(data)
 
+    data = {k: v for k, v in data.items() if k in _CAMPAIGN_UPDATE_ALLOWED}
     doc_ref.update(data)
     _enqueue_bq_telemetry_task(tenant_id, doc_data.to_dict(), data.get("status") or "updated")
     return jsonify({"status": "success"}), 200
@@ -405,6 +424,9 @@ def delete_campaign(uid, tenant_id, user_role, doc_id):
     doc_data = doc_ref.get()
     if not doc_data.exists or doc_data.to_dict().get("tenant_id") != tenant_id:
         return jsonify({"error": "Forbidden"}), 403
+    orphan_leads = get_db().collection("leads").where("campaign_id", "==", doc_id).where("tenant_id", "==", tenant_id).limit(1).get()
+    if orphan_leads:
+        return jsonify({"error": "Cannot delete campaign with existing leads. Pause it instead."}), 409
     doc_ref.delete()
     log.info("campaign_deleted", campaign_id=doc_id, tenant_id=tenant_id)
     return jsonify({"status": "success"}), 200

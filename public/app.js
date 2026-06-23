@@ -18,6 +18,14 @@ const API_BASE = "";
 // Digital Twin Engine — Reverse Proxy via Firebase
 const DT_ENGINE_URL = "";
 
+// ── P0-XSS: HTML escape helper for server-controlled data in innerHTML ──────
+function _escapeHTML(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.textContent = String(str);
+    return div.innerHTML;
+}
+
 
 
 // DOM Elements
@@ -1601,17 +1609,17 @@ window.renderMacroTrends = function() {
     tableBody.innerHTML = campaigns.map(c => `
         <tr style="border-bottom: 1px solid var(--glass-border);">
             <td style="padding: 12px; font-weight: 500;">
-                ${c.email}<br>
-                <small style="font-family:monospace; color:var(--text-muted); font-size:0.75rem;">${(c.tenant_id||'').substring(0,8)}</small>
+                ${_escapeHTML(c.email)}<br>
+                <small style="font-family:monospace; color:var(--text-muted); font-size:0.75rem;">${_escapeHTML((c.tenant_id||'').substring(0,8))}</small>
             </td>
             <td style="padding: 12px; font-weight: 500;">
-                ${c.name}
+                ${_escapeHTML(c.name)}
             </td>
             <td style="padding: 12px;">
-                <div style="font-size:0.85rem; max-height: 4.8em; overflow:hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;" title="${(c.bio||'').replace(/"/g, '&quot;')}">${c.bio}</div>
+                <div style="font-size:0.85rem; max-height: 4.8em; overflow:hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;" title="${_escapeHTML(c.bio||'')}">${_escapeHTML(c.bio)}</div>
             </td>
             <td style="padding: 12px; font-size:0.8rem; font-family:monospace; color:var(--primary);">
-                ${c.keywords}
+                ${_escapeHTML(c.keywords)}
             </td>
             <td style="padding: 12px; text-align:right; font-weight:bold; color:var(--success);">
                 ${(c.leads_generated||0).toLocaleString()}
@@ -1674,7 +1682,7 @@ window.mintCredentials = async function(tenantId) {
         if (resp.ok) {
             showToast(`Minted ${amtEl.value} credits.`, 'success');
             amtEl.value = '';
-            fetchL0Data();
+            fetchL0Telemetry();
         } else {
             showToast('Failed to mint.', 'error');
         }
@@ -1873,7 +1881,7 @@ window.fetchShadowLedger = async function() {
             const domain    = lead.base_path || lead.source_url || lead.domain || lead.company_domain || '&mdash;';
             const score     = lead.score != null ? `<span style="font-weight:700; color:${lead.score>=70?'#10b981':lead.score>=40?'#f59e0b':'#ef4444'}">${lead.score}</span>` : '&mdash;';
             const userRej   = REJECTION_LABELS[lead.rejection_reason] || lead.rejection_reason || '<span style="color:var(--text-muted);">Legacy ignore</span>';
-            const aiRej     = lead.ai_rejection_reason ? `<span title="${lead.ai_rejection_reason}">${lead.ai_rejection_reason.slice(0,60)}${lead.ai_rejection_reason.length>60?'&hellip;':''}</span>` : '<span style="color:var(--text-muted);">N/A</span>';
+            const aiRej     = lead.ai_rejection_reason ? `<span title="${_escapeHTML(lead.ai_rejection_reason)}">${_escapeHTML(lead.ai_rejection_reason.slice(0,60))}${lead.ai_rejection_reason.length>60?'&hellip;':''}</span>` : '<span style="color:var(--text-muted);">N/A</span>';
             return `<tr style="border-bottom:1px solid #f8fafc; transition:background 0.15s;" onmouseover="this.style.background='#fafafa'" onmouseout="this.style.background=''">
                 <td style="padding:10px 12px; font-weight:500; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${domain}</td>
                 <td style="padding:10px 12px; text-align:center;">${score}</td>
@@ -1889,7 +1897,7 @@ window.fetchShadowLedger = async function() {
 
     } catch(err) {
         console.error('[Shadow Ledger]', err);
-        tbody.innerHTML = `<tr><td colspan="5" style="padding:16px; text-align:center; color:#ef4444;">Error: ${err.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="5" style="padding:16px; text-align:center; color:#ef4444;">Error: ${_escapeHTML(err.message)}</td></tr>`;
     }
 };
 
@@ -2077,8 +2085,8 @@ window.fetchSerperAuditLogs = async function() {
             const ts      = row.timestamp ? row.timestamp.replace('T', ' ').slice(0, 19) : '—';
             const campShort = (row.campaign_id || '—').slice(0, 14);
             const query   = (row.raw_query || '').length > 80
-                ? `<span title="${(row.raw_query||'').replace(/"/g,'&quot;')}">${(row.raw_query||'').slice(0,80)}&hellip;</span>`
-                : (row.raw_query || '—');
+                ? `<span title="${_escapeHTML(row.raw_query||'')}">${_escapeHTML((row.raw_query||'').slice(0,80))}&hellip;</span>`
+                : _escapeHTML(row.raw_query || '') || '—';
             // Parse serper_parameters (JSON string from BQ)
             let params = '—';
             try {
@@ -2087,7 +2095,7 @@ window.fetchSerperAuditLogs = async function() {
                     : (row.serper_parameters || {});
                 params = Object.entries(p)
                     .filter(([k]) => k !== 'q')  // 'q' is the raw_query itself
-                    .map(([k, v]) => `<span style="background:#f3f4f6; border-radius:4px; padding:2px 6px; font-size:0.72rem;">${k}=${v}</span>`)
+                    .map(([k, v]) => `<span style="background:#f3f4f6; border-radius:4px; padding:2px 6px; font-size:0.72rem;">${_escapeHTML(k)}=${_escapeHTML(String(v))}</span>`)
                     .join(' ') || '<span style="color:#9ca3af;">none</span>';
             } catch(_) {}
 
@@ -2110,7 +2118,7 @@ window.fetchSerperAuditLogs = async function() {
 
     } catch(err) {
         console.error('[Serper Audit]', err);
-        if (tbody) tbody.innerHTML = `<tr><td colspan="6" style="padding:16px; text-align:center; color:#ef4444;">Error: ${err.message}</td></tr>`;
+        if (tbody) tbody.innerHTML = `<tr><td colspan="6" style="padding:16px; text-align:center; color:#ef4444;">Error: ${_escapeHTML(err.message)}</td></tr>`;
         if (statToday) statToday.textContent = 'ERR';
     }
 };
@@ -2888,16 +2896,16 @@ window.createLeadCardV2 = function(docId, lead) {
         return card;
     }
 
-    var displayName = lead.company_name || '';
+    var displayName = _escapeHTML(lead.company_name || '');
     var hostname = '';
     try { var raw = lead.url || lead.source_url || ''; hostname = raw ? new URL(raw).hostname.replace('www.','') : ''; } catch(e) {}
-    if (!displayName) displayName = hostname || 'Unknown Company';
+    if (!displayName) displayName = _escapeHTML(hostname) || 'Unknown Company';
 
     var score   = lead.score || 0;
     var heatPct = Math.round((score / 10) * 100);
     var emoji   = getScoreEmoji(score);
-    var signal  = lead.intent_signal || lead.pain_point || '';
-    var dm      = lead.dm || '';
+    var signal  = _escapeHTML(lead.intent_signal || lead.pain_point || '');
+    var dm      = _escapeHTML(lead.dm || '');
     var timeAgo = fcTimeAgo(lead.createdAt || lead.promotedAt);
     var srcLbl  = (lead.sourcing_vector || lead.source || '').indexOf('Autonomous') !== -1
         ? 'AI Match' : (lead.source || 'Web Signal');
@@ -4188,7 +4196,7 @@ window.loadPersonaVault = async function() {
         grid.innerHTML = list.map(p => _buildPersonaCard(p)).join('');
     } catch(err) {
         console.error('[Persona Vault]', err);
-        if (grid) grid.innerHTML = `<div style="text-align:center;color:#ef4444;padding:32px;grid-column:1/-1;">Failed to load personas: ${err.message}</div>`;
+        if (grid) grid.innerHTML = `<div style="text-align:center;color:#ef4444;padding:32px;grid-column:1/-1;">Failed to load personas: ${_escapeHTML(err.message)}</div>`;
     }
 };
 
@@ -4196,7 +4204,7 @@ window.loadPersonaVault = async function() {
 function _buildPersonaCard(p) {
     const kwChips = (p.keywords || '').split(',')
         .map(k => k.trim()).filter(Boolean).slice(0, 5)
-        .map(k => `<span style="display:inline-block; background:rgba(79,70,229,0.08); color:#4f46e5; font-size:0.7rem; font-weight:600; padding:3px 8px; border-radius:20px; margin:2px;">${k}</span>`)
+        .map(k => `<span style="display:inline-block; background:rgba(79,70,229,0.08); color:#4f46e5; font-size:0.7rem; font-weight:600; padding:3px 8px; border-radius:20px; margin:2px;">${_escapeHTML(k)}</span>`)
         .join('');
     const bioPreview = (p.bio || '').length > 120 ? p.bio.slice(0, 120) + '…' : (p.bio || '—');
     const safeId  = (p.id  || '').replace(/'/g, "\\'");
@@ -4207,13 +4215,13 @@ function _buildPersonaCard(p) {
     return `
     <div style="background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:20px; display:flex; flex-direction:column; gap:12px; box-shadow:0 1px 4px rgba(0,0,0,0.06); transition:box-shadow 0.2s;" onmouseover="this.style.boxShadow='0 4px 16px rgba(79,70,229,0.12)'" onmouseout="this.style.boxShadow='0 1px 4px rgba(0,0,0,0.06)'">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:8px;">
-            <div style="font-size:1rem; font-weight:700; color:#1e1b4b; line-height:1.3;">${p.name || 'Unnamed Persona'}</div>
+            <div style="font-size:1rem; font-weight:700; color:#1e1b4b; line-height:1.3;">${_escapeHTML(p.name) || 'Unnamed Persona'}</div>
             <div style="display:flex; gap:8px; flex-shrink:0;">
                 <button onclick="openPersonaModal('${safeId}','${safeName}','${safeBio}','${safeKeys}')" style="background:none; border:1px solid #d1d5db; border-radius:8px; padding:5px 10px; font-size:0.75rem; font-weight:600; color:#4f46e5; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.background='#ede9fe'" onmouseout="this.style.background='none'">&#9998; Edit</button>
                 <button onclick="deletePersona('${safeId}','${safeName}')" style="background:none; border:1px solid #fecaca; border-radius:8px; padding:5px 10px; font-size:0.75rem; font-weight:600; color:#ef4444; cursor:pointer; transition:all 0.15s;" onmouseover="this.style.background='#fef2f2'" onmouseout="this.style.background='none'">&#128465;</button>
             </div>
         </div>
-        <div style="font-size:0.82rem; color:#6b7280; line-height:1.5;">${bioPreview}</div>
+        <div style="font-size:0.82rem; color:#6b7280; line-height:1.5;">${_escapeHTML(bioPreview)}</div>
         <div style="display:flex; flex-wrap:wrap; gap:4px; min-height:24px;">${kwChips || '<span style="font-size:0.72rem;color:#9ca3af;">No keywords set</span>'}</div>
         <div style="margin-top:auto; padding-top:8px; border-top:1px solid #f1f5f9; display:flex; justify-content:flex-end;">
             <button onclick="selectPersonaForCampaign('${safeId}','${safeName || 'Persona'}')" style="background:linear-gradient(135deg,#4f46e5,#7c3aed); color:#fff; border:none; border-radius:8px; padding:7px 14px; font-size:0.78rem; font-weight:600; cursor:pointer; transition:opacity 0.15s;" onmouseover="this.style.opacity='0.85'" onmouseout="this.style.opacity='1'">
@@ -4358,7 +4366,7 @@ window.savePersona = async function() {
         const resp = await fetch(url, {
             method,
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, bio, keywords })
+            body: JSON.stringify({ name, bio, keywords, targeting_signals: _personaTags })
         });
 
         if (!resp.ok) {
@@ -4844,7 +4852,7 @@ async function loadInboundSignals(statusFilter = 'new') {
             ${cards}`;
 
     } catch (err) {
-        panel.innerHTML = `<div style="color:#dc2626; padding:20px;">Failed to load signals: ${err.message}</div>`;
+        panel.innerHTML = `<div style="color:#dc2626; padding:20px;">Failed to load signals: ${_escapeHTML(err.message)}</div>`;
         console.error('[Inbound Radar] loadInboundSignals error:', err);
     }
 }
