@@ -693,6 +693,8 @@ async function loadLeads() {
                     data.id = doc.id;
                     rawLeadsCache.push(data);
                     _leadsMap.set(doc.id, data);  // O(1) lookup for observer
+                    // V23.9: Raw data shape logger — traces ALL leads for Radar debugging
+                    console.log('[Radar Raw DB Shape]', { id: data.id, source: data.source, type: data.type, is_inbound: data.is_inbound, sourcing_vector: data.sourcing_vector });
                     // Route into split caches
                     if (_isInbound(data)) {
                         inboundCache.push(data);
@@ -1963,8 +1965,7 @@ window.requeueFailedLead = async function(leadId, btn) {
                 error: null,
                 error_details: null,
                 processing_attempts: 0,
-                requeue_source: 'manual_ui',
-                _delete_fields: ['error', 'error_details']
+                requeue_source: 'manual_ui'
             })
         });
         if (resp.status === 402) {

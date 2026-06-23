@@ -85,12 +85,15 @@ def update_lead(uid, tenant_id, user_role, doc_id):
                             total=total_credits, reserved=reserved_credits)
                 return jsonify({"error": "Insufficient credits"}), 402
 
-        # Apply clean requeue mutation
+        # Apply clean requeue mutation — V23.9: use DELETE_FIELD to nuke
+        # error fields entirely (not just None), preventing worker re-fail.
         doc_ref.update({
             "status":                 "queued",
             "lock_entity":            None,
-            "error":                  None,
+            "error":                  firestore.DELETE_FIELD,
+            "error_details":          firestore.DELETE_FIELD,
             "retry_count":            0,
+            "processing_attempts":    0,
             "processing_started_at":  None,
             "requeue_source":         data.get("requeue_source", "manual_ui"),
             "updatedAt":              firestore.SERVER_TIMESTAMP,
