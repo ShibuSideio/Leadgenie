@@ -286,6 +286,14 @@ async function loadDashboard() {
 
     await initializeDashboardState();
 
+    // V23.9: Ensure default view state — CRM hidden, dashboard visible
+    const crmView = document.getElementById('view-crm-test');
+    if (crmView) crmView.style.display = 'none';
+    const adminView = document.getElementById('view-l0-admin');
+    if (adminView) adminView.style.display = 'none';
+    const dashView = document.getElementById('view-dashboard');
+    if (dashView) dashView.style.display = '';
+
     if (window.crmAutoOpen) {
         window.crmAutoOpen = false;
         switchTab('crm-test');
@@ -668,9 +676,9 @@ async function loadLeads() {
             .collection('leads')
             .where('tenant_id', '==', user.uid)
             .where('is_in_crm', '==', false)
-            // Server-side sort: newest leads first. Requires composite index on
-            // (tenant_id ASC, is_in_crm ASC, createdAt DESC) — auto-built by
-            // firestore.indexes.json or on first query with the Firestore console link.
+            // NOTE: No where('type','==','outbound') filter — this is a unified
+            // firehose. Inbound/outbound split is handled client-side by _isInbound().
+            // The only filters are tenant_id + is_in_crm (CRM leads load separately).
             .orderBy('createdAt', 'desc')
             .limit(200)
             .onSnapshot((snapshot) => {
@@ -1955,7 +1963,8 @@ window.requeueFailedLead = async function(leadId, btn) {
                 error: null,
                 error_details: null,
                 processing_attempts: 0,
-                requeue_source: 'manual_ui'
+                requeue_source: 'manual_ui',
+                _delete_fields: ['error', 'error_details']
             })
         });
         if (resp.status === 402) {
@@ -2705,6 +2714,23 @@ window.openNewCampaignModal = async function() {
         return;
     }
     
+    // V23.9: Reset geo cascade and hidden fields before opening modal
+    const geoContinent = document.getElementById('geo-continent-select');
+    const geoCountry   = document.getElementById('geo-country-select');
+    const geoRegion    = document.getElementById('geo-region-select');
+    if (geoContinent) geoContinent.value = '';
+    if (geoCountry)   { geoCountry.value = ''; geoCountry.disabled = true; }
+    if (geoRegion)    { geoRegion.value = ''; geoRegion.disabled = true; }
+    const glHidden  = document.getElementById('edit-camp-gl');
+    const locHidden = document.getElementById('edit-camp-location');
+    if (glHidden)  glHidden.value  = '';
+    if (locHidden) locHidden.value = '';
+    const geoPreview = document.getElementById('geo-compiled-preview');
+    if (geoPreview) geoPreview.textContent = '';
+    // Reset the edit form if it exists
+    const editForm = document.getElementById('edit-campaign-form');
+    if (editForm) editForm.reset();
+
     // Pass control to the Digital Twin Onboarding Flow (View A)
     window.openDTModal();
 };
