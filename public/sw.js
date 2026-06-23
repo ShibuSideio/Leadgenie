@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v23.9.14'; // v23.9.14: full polish — a11y, XSS, SSRF, CSP, perf, memory leak
+const CACHE_NAME = 'sideio-v23.9.15'; // v23.9.15: fix CSP blocking Firebase SDK connections
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=23.9.14',
-    '/styles.css?v=23.9.14',
+    '/app.js?v=23.9.15',
+    '/styles.css?v=23.9.15',
     '/manifest.json'
 ];
 
