@@ -44,8 +44,15 @@ let inboundCache  = [];
 let outboundCache = [];
 
 // Shared predicate — single source of truth for inbound classification.
-// ⚠ SCHEMA NOTE: Update 'inbound' if backend uses a different value.
-const _isInbound = (l) => l.source === 'inbound' || l.sourcing_vector === 'inbound';
+// Catches: lead.is_inbound, lead.type === 'inbound', or lead.source in
+// ['webhook','form','typeform','inbound']. Defaults false if undefined.
+function _isInbound(lead) {
+    if (!lead) return false;
+    if (lead.is_inbound === true) return true;
+    const type   = (lead.type || '').toLowerCase();
+    const source = (lead.source || '').toLowerCase();
+    return type === 'inbound' || ['webhook', 'form', 'typeform', 'inbound'].includes(source);
+}
 
 // Debounced render — coalesces rapid onSnapshot bursts into one paint.
 let _renderRAF = null;
@@ -682,6 +689,7 @@ async function loadLeads() {
                     if (_isInbound(data)) {
                         inboundCache.push(data);
                         _inboundArrived = true;
+                        console.log('[Radar] Routed to Inbound:', data.id, '| source:', data.source, '| type:', data.type);
                     } else {
                         outboundCache.push(data);
                     }
@@ -1903,13 +1911,37 @@ window.recycleRejectedLead = async function(leadId, btn) {
     }
 };
 
-// ── Manual Re-queue for failed leads (V23.7) ─────────────────────────────
+// ── Manual Re-queue for failed leads (V23.7 → V23.9 fix) ─────────────────
 let _requeueDebouncing = false;
 window.requeueFailedLead = async function(leadId, btn) {
     if (_requeueDebouncing) return;
     _requeueDebouncing = true;
     setTimeout(() => { _requeueDebouncing = false; }, 500);
     if (btn) { btn.disabled = true; btn.innerHTML = '⏳ Re-queuing…'; }
+
+    // V23.9: Optimistically swap the card DOM to skeleton state
+    const cardEl = document.getElementById(leadId);
+    if (cardEl) {
+        cardEl.classList.remove('lead-card--failed');
+        cardEl.classList.add('lead-card--processing');
+        const errorBadge = cardEl.querySelector('.lead-error-badge');
+        if (errorBadge) errorBadge.remove();
+        const skel = document.createElement('div');
+        skel.style.cssText = 'padding:20px;display:flex;flex-direction:column;gap:12px;';
+        skel.innerHTML =
+            '<div class="skeleton-block" style="width:140px;height:16px;"></div>' +
+            '<div class="skeleton-block" style="width:100%;height:10px;"></div>' +
+            '<div class="skeleton-block" style="width:60%;height:10px;"></div>' +
+            '<div style="display:flex;align-items:center;gap:6px;margin-top:4px;color:#b45309;font-size:0.8rem;font-weight:500;">' +
+                '<span>⏳</span> <span>Re-queued for processing…</span>' +
+            '</div>';
+        cardEl.appendChild(skel);
+    }
+
+    // V23.9: Evict from local caches to prevent stale re-render
+    _evictLeadFromCaches(leadId);
+    _scheduleRender();
+
     try {
         const user = firebase.auth().currentUser;
         if (!user) { showToast('Session expired. Please sign in again.', 'error'); return; }
@@ -1917,7 +1949,14 @@ window.requeueFailedLead = async function(leadId, btn) {
         const resp  = await fetch(`${API_BASE}/api/leads/${leadId}`, {
             method:  'PUT',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ status: 'queued', lock_entity: null, error: null, requeue_source: 'manual_ui' })
+            body:    JSON.stringify({
+                status: 'queued',
+                lock_entity: null,
+                error: null,
+                error_details: null,
+                processing_attempts: 0,
+                requeue_source: 'manual_ui'
+            })
         });
         if (resp.status === 402) {
             showToast('Insufficient credits to re-queue this lead.', 'error');
@@ -3245,8 +3284,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const dot = document.querySelector('.radar-pulse-dot');
                 if (dot) dot.classList.add('d-none');
             }
-            // Re-render feed with new mode
-            renderLeads();
+            // Re-render feed with new mode (use _scheduleRender for consistency)
+            _scheduleRender();
+            console.log('[Radar] Feed mode switched to:', CURRENT_FEED_MODE, '| inboundCache:', inboundCache.length, '| outboundCache:', outboundCache.length);
         });
     }
 
@@ -3261,9 +3301,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const docId = btn.dataset.leadId;
                 if (docId) copilotAction(docId);
             }
-            // ── Fault Recovery: Re-queue action (V23.7) ──
+            // ── Fault Recovery: Re-queue action (V23.7 → V23.9 fix) ──
             const reqBtn = e.target.closest('[data-action=\"requeue\"]');
             if (reqBtn && !reqBtn.disabled) {
+                e.preventDefault();
+                e.stopPropagation();
                 const leadId = reqBtn.getAttribute('data-lead-id');
                 if (leadId) requeueFailedLead(leadId, reqBtn);
             }
