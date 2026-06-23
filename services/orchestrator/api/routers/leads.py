@@ -75,6 +75,52 @@ def update_lead(uid, tenant_id, user_role, doc_id):
     # we intercept here to: validate credits, reset retry state, and dispatch
     # a fresh Cloud Task. This prevents re-processing without sufficient wallet.
     if data.get("status") == "queued" and lead_dict.get("status") == "failed":
+
+        # ── Terminal domain guard: domains that will NEVER succeed on requeue ──
+        # LinkedIn profiles, Facebook, Instagram etc. block all scrapers.
+        # WalledGarden mode uses Serper snippets but linkedin.com/in/ profiles
+        # yield zero useful data → zombie timeout → infinite requeue loop.
+        _TERMINAL_DOMAINS = {
+            "facebook.com", "instagram.com", "x.com", "twitter.com",
+            "tiktok.com", "pinterest.com", "snapchat.com", "threads.net",
+        }
+        lead_url = (lead_dict.get("url") or "").lower()
+        from urllib.parse import urlparse as _urlparse
+        try:
+            _host = _urlparse(lead_url).hostname or ""
+            _root = ".".join(_host.rsplit(".", 2)[-2:]) if "." in _host else _host
+        except Exception:
+            _root = ""
+
+        # LinkedIn: block profile URLs (/in/, /pub/) but ALLOW /company/ (B2B)
+        if "linkedin.com" in _root and "/company/" not in lead_url:
+            log.info("requeue_blocked_linkedin_profile",
+                     doc_id=doc_id, url=lead_url[:80])
+            return jsonify({
+                "error": "LinkedIn profile pages cannot be processed. "
+                         "Only linkedin.com/company/ pages are supported."
+            }), 422
+
+        if _root in _TERMINAL_DOMAINS:
+            log.info("requeue_blocked_terminal_domain",
+                     doc_id=doc_id, domain=_root)
+            return jsonify({
+                "error": f"This lead's domain ({_root}) blocks automated processing. "
+                         f"Requeuing will not resolve this."
+            }), 422
+
+        # ── Max manual requeue limit: prevent infinite credit drain ──
+        MAX_MANUAL_REQUEUES = 2
+        current_manual_requeues = lead_dict.get("manual_requeue_count", 0)
+        if current_manual_requeues >= MAX_MANUAL_REQUEUES:
+            log.warning("requeue_max_manual_exhausted",
+                        doc_id=doc_id, tenant_id=tenant_id,
+                        attempts=current_manual_requeues)
+            return jsonify({
+                "error": f"This lead has been requeued {current_manual_requeues} times. "
+                         "The issue is likely permanent — please remove or skip this lead."
+            }), 422
+
         # Credit gate: verify tenant has available credits
         user_doc  = _db().collection("users").document(tenant_id).get()
         if user_doc.exists:
@@ -89,15 +135,17 @@ def update_lead(uid, tenant_id, user_role, doc_id):
 
         # Apply clean requeue mutation — V23.9: use DELETE_FIELD to nuke
         # error fields entirely (not just None), preventing worker re-fail.
+        # NOTE: retry_count is NOT reset — it informs the zombie sweep's
+        # MAX_RETRIES check. Only processing_attempts resets for the worker.
         doc_ref.update({
             "status":                 "queued",
             "lock_entity":            None,
             "error":                  firestore.DELETE_FIELD,
             "error_details":          firestore.DELETE_FIELD,
             "credit_settled":         False,
-            "retry_count":            0,
             "processing_attempts":    0,
             "processing_started_at":  None,
+            "manual_requeue_count":   current_manual_requeues + 1,
             "requeue_source":         data.get("requeue_source", "manual_ui"),
             "updatedAt":              firestore.SERVER_TIMESTAMP,
         })

@@ -1989,6 +1989,20 @@ window.requeueFailedLead = async function(leadId, btn) {
             if (btn) { btn.disabled = false; btn.innerHTML = '🔄 Re-queue'; }
             return;
         }
+        if (resp.status === 422) {
+            // Terminal failure — requeue will never succeed for this lead
+            var errBody = {};
+            try { errBody = await resp.json(); } catch(_) {}
+            var terminalMsg = errBody.error || 'This lead cannot be reprocessed.';
+            showToast(terminalMsg, 'error');
+            if (btn) { btn.disabled = false; btn.innerHTML = '⛔ Cannot retry'; btn.style.opacity = '0.5'; }
+            // Restore card from skeleton to failed state
+            if (cardEl) {
+                cardEl.classList.remove('lead-card--processing');
+                cardEl.classList.add('lead-card--failed');
+            }
+            return;
+        }
         if (resp.ok) {
             showToast('Lead re-queued for processing.', 'success');
         } else {
@@ -3019,8 +3033,22 @@ window.createLeadCardV2 = function(docId, lead) {
     // ── Fault Recovery: Error Translation (V23.9) ────────────────────────
     if (lead.status === 'failed') {
         var rawErr = (lead.error || '').toLowerCase();
+        var leadUrl = (lead.url || '').toLowerCase();
         var userMsg = 'Pipeline error. Requeue to try again.';
-        if (rawErr.indexOf('402') !== -1)
+        var isTerminal = false;
+
+        // Terminal domain detection — these leads will never succeed
+        var _TERMINAL_DOMAINS = ['facebook.com','instagram.com','x.com','twitter.com','tiktok.com','pinterest.com','snapchat.com','threads.net'];
+        var _isLinkedInProfile = leadUrl.indexOf('linkedin.com') !== -1 && leadUrl.indexOf('/company/') === -1;
+        var _isTerminalDomain = _TERMINAL_DOMAINS.some(function(d) { return leadUrl.indexOf(d) !== -1; });
+
+        if (_isLinkedInProfile) {
+            userMsg = 'LinkedIn profiles cannot be scraped. Only /company/ pages are supported.';
+            isTerminal = true;
+        } else if (_isTerminalDomain) {
+            userMsg = 'This social platform blocks automated access.';
+            isTerminal = true;
+        } else if (rawErr.indexOf('402') !== -1)
             userMsg = 'Out of Credits \u2014 Top up to retry.';
         else if (rawErr.indexOf('timeout') !== -1 || rawErr.indexOf('playwright') !== -1)
             userMsg = 'Website blocked AI scraper. Requeue to try fallback.';
@@ -3033,9 +3061,10 @@ window.createLeadCardV2 = function(docId, lead) {
         errorBadge.className = 'lead-error-badge';
         errorBadge.innerHTML =
             '<span class="error-icon">\u26a0\ufe0f</span>' +
-            '<span>' + userMsg + '</span>' +
+            '<span>' + _escapeHTML(userMsg) + '</span>' +
+            (isTerminal ? '' :
             '<button class="lead-requeue-btn" data-action="requeue" data-lead-id="' + docId + '">' +
-            '\ud83d\udd04 Re-queue</button>';
+            '\ud83d\udd04 Re-queue</button>');
         card.appendChild(errorBadge);
     }
 

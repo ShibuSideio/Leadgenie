@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v23.9.10'; // v23.9.10: no-website persona fix + cache-control
+const CACHE_NAME = 'sideio-v23.9.11'; // v23.9.11: requeue loop fix + terminal domain guard
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=23.9.10',
-    '/styles.css?v=23.9.10',
+    '/app.js?v=23.9.11',
+    '/styles.css?v=23.9.11',
     '/manifest.json'
 ];
 
