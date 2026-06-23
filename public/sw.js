@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v23.9.12'; // v23.9.12: fix WalledGarden NameError + revert domain blocking
+const CACHE_NAME = 'sideio-v23.9.13'; // v23.9.13: enterprise audit — 10 bug fixes
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=23.9.12',
-    '/styles.css?v=23.9.12',
+    '/app.js?v=23.9.13',
+    '/styles.css?v=23.9.13',
     '/manifest.json'
 ];
 

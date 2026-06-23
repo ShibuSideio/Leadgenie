@@ -54,7 +54,7 @@ log = get_logger("orchestrator.v23.campaigns")
 
 MAX_CHILD_CAMPAIGNS = int(os.environ.get("MAX_CHILD_CAMPAIGNS", 5))
 
-_CAMPAIGN_UPDATE_ALLOWED = {"name", "bio", "keywords", "status", "gl", "location", "persona_id", "drip_interval_minutes", "geo_hierarchy"}
+_CAMPAIGN_UPDATE_ALLOWED = {"name", "bio", "keywords", "status", "gl", "location", "persona_id", "drip_interval_minutes", "geo_hierarchy", "updatedAt", "sourcing_vector"}
 
 # ---------------------------------------------------------------------------
 # FIX (2026-06-21): Campaign field sanitizer — server-side write boundary.

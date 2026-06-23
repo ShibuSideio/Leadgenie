@@ -30,7 +30,7 @@ log = get_logger("orchestrator.v23.leads")
 
 NEG_SIGNAL_REASONS = frozenset({"competitor", "author"})
 
-_LEAD_UPDATE_ALLOWED = {"status", "is_in_crm", "crm_status", "rejection_reason", "deal_value", "follow_up_date", "notes", "crm_notes"}
+_LEAD_UPDATE_ALLOWED = {"status", "is_in_crm", "crm_status", "rejection_reason", "deal_value", "follow_up_date", "notes", "crm_notes", "updatedAt"}
 
 REJECTION_PENALTY_MAP: dict[str, float] = {
     "not_b2b":        -0.25,
@@ -373,7 +373,7 @@ def list_inbound_signals(uid, tenant_id, user_role):
         try:
             query = (
                 _db().collection("inbound_signals")
-                .where(filter=fs.FieldFilter("tenant_id", "==", t_id))
+                .where(filter=FieldFilter("tenant_id", "==", t_id))
             )
             signals = [_sanitize_signal_doc(d) for d in query.stream()]
         except Exception as exc:

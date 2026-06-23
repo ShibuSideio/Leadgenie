@@ -67,8 +67,8 @@ def update_settings(uid, tenant_id, user_role):
             settings_update["wa_token"] = encrypted_tok
         except Exception as e:
             log.warning("kms_encryption_failed_fernet_fallback", error=str(e))
-            from core.config import cipher_suite  # type: ignore[import]
-            settings_update["wa_token"] = cipher_suite.encrypt(wa_token_raw.encode()).decode()
+            from core.config import get_cipher  # type: ignore[import]
+            settings_update["wa_token"] = get_cipher().encrypt(wa_token_raw.encode()).decode()
 
     if settings_update:
         settings_update["updatedAt"] = firestore.SERVER_TIMESTAMP
@@ -91,7 +91,7 @@ def upsert_tenant_profile(uid, tenant_id, user_role):
         return jsonify({"error": err_msg}), status_code
 
     data = request.json or {}
-    _TENANT_PROFILE_ALLOWED = {"company_name", "industry", "website", "knowledge_base", "onboarding_complete", "preferred_geo", "target_personas"}
+    _TENANT_PROFILE_ALLOWED = {"company_name", "industry", "website", "knowledge_base", "onboarding_complete", "preferred_geo", "target_personas", "bio", "keywords"}
     data = {k: v for k, v in data.items() if k in _TENANT_PROFILE_ALLOWED}
     data["tenant_id"] = tenant_id
     data["createdAt"] = firestore.SERVER_TIMESTAMP

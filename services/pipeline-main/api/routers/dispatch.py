@@ -789,8 +789,8 @@ def dispatch():
             if time.monotonic() - _batch_start > _OUTER_TIMEOUT_S:
                 log.error("dispatch_batch_timeout_ceiling",
                           timeout_s=_OUTER_TIMEOUT_S,
-                          processed=len(results),
-                          remaining=len(futures) - len(results),
+                          processed=len(all_results),
+                          remaining=len(futures) - len(all_results),
                           note="Hard 180s ceiling hit. Remaining URLs abandoned.")
                 break
             url = futures[fut]

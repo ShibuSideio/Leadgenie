@@ -2465,7 +2465,7 @@ window.openCrmPanel = function(lead) {
         : notes.slice().reverse().map(n => `
             <div class="crm-note-item">
                 <div class="note-ts">${new Date(n.timestamp?._seconds ? n.timestamp._seconds*1000 : n.timestamp).toLocaleString()}</div>
-                <div class="note-text">${n.text}</div>
+                <div class="note-text">${_escapeHTML(n.text || '')}</div>
             </div>`).join('');
 
     // Pull meeting/asset from user data
@@ -2483,13 +2483,13 @@ window.openCrmPanel = function(lead) {
         <!-- Intent Signal -->
         <div class="crm-panel-section">
             <div class="crm-panel-label">Intent Signal</div>
-            <div class="crm-panel-intent">${lead.intent_signal || lead.pain_point || 'No signal captured.'}</div>
+            <div class="crm-panel-intent">${_escapeHTML(lead.intent_signal || lead.pain_point || 'No signal captured.')}</div>
         </div>
 
         <!-- AI-Drafted DM -->
         <div class="crm-panel-section">
             <div class="crm-panel-label">AI-Drafted Message</div>
-            <div class="crm-panel-dm" id="crm-dm-preview">${lead.dm || 'No draft available.'}</div>
+            <div class="crm-panel-dm" id="crm-dm-preview">${_escapeHTML(lead.dm || 'No draft available.')}</div>
         </div>
 
         <!-- Smart Action Toggles -->
@@ -3350,27 +3350,10 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ── V18: Event Delegation for Copilot Action button ──────────────────────
-    // Single listener on #leads-list handles all .lc-copilot-btn clicks.
-    // Reads lead data from _leadsMap by data-lead-id — zero encoding required.
-    const leadsList = document.getElementById('leads-list');
-    if (leadsList) {
-        leadsList.addEventListener('click', function(e) {
-            const btn = e.target.closest('[data-action=\"copilot\"]');
-            if (btn && !btn.disabled) {
-                const docId = btn.dataset.leadId;
-                if (docId) copilotAction(docId);
-            }
-            // ── Fault Recovery: Re-queue action (V23.7 → V23.9 fix) ──
-            const reqBtn = e.target.closest('[data-action=\"requeue\"]');
-            if (reqBtn && !reqBtn.disabled) {
-                e.preventDefault();
-                e.stopPropagation();
-                const leadId = reqBtn.getAttribute('data-lead-id');
-                if (leadId) requeueFailedLead(leadId, reqBtn);
-            }
-        });
-    }
+    // ── V18 copilot/requeue listener REMOVED ──────────────────────────────────
+    // Duplicate of V23.9 XSS-safe delegated listener at lcDelegatedListener()
+    // (line ~3073). Keeping this caused copilotAction() and requeueFailedLead()
+    // to fire TWICE per click.
 });
 
 // =============================================================================

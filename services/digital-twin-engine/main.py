@@ -261,9 +261,9 @@ def _run_parallel_serper(root_domain: str) -> str:
     texts: list[str] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(_serper_search, q, api_key): q for q in queries}
-        for future in concurrent.futures.as_completed(futures, timeout=7.0):
+        for future in concurrent.futures.as_completed(futures):
             try:
-                result = future.result()
+                result = future.result(timeout=8)
                 texts.append(_extract_text_from_serper(result))
             except Exception as e:
                 print(f"[SERPER] Query failed: {e}")

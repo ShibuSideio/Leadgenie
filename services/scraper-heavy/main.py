@@ -244,15 +244,21 @@ def scrape():
 
         base_url = os.environ.get("PIPELINE_BASE_URL",
                                   "https://lead-pipeline-main-abc.a.run.app")
-        task_def = {
-            "http_request": {
+        sa_email = os.environ.get("SCRAPER_SA_EMAIL", "")
+        finalize_url = f"{base_url}/finalize"
+        http_req = {
                 "http_method": tasks_v2.HttpMethod.POST,
-                "url":         f"{base_url}/finalize",
+                "url":         finalize_url,
                 "headers":     {"Content-Type": "application/json"},
                 "body":        json.dumps(payload).encode(),
-            }
         }
-        _TASKS_CLIENT.create_task(parent=parent, task=task_def)
+        # SF-012 pattern: attach OIDC token so pipeline @require_tasks_oidc passes.
+        if sa_email:
+            http_req["oidc_token"] = {
+                "service_account_email": sa_email,
+                "audience":              base_url,
+            }
+        _TASKS_CLIENT.create_task(parent=parent, task={"http_request": http_req})
     except Exception as hook_e:
         print(f"[SCRAPER] Failed to queue finalize webhook: {hook_e}")
 
