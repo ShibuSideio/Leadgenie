@@ -1272,13 +1272,21 @@ window.saveCampaignAction = async function(payload) {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                name:        cpName,
-                bio:         cpBio,
-                keywords:    cpKeys,
-                gl:          cpGl,
-                location:    cpLoc,
-                persona_id:  window._selectedPersonaId || '',
-                status:      'active'
+                name:             cpName,
+                bio:              cpBio,
+                keywords:         cpKeys,
+                gl:               cpGl,
+                location:         cpLoc,
+                persona_id:       (payload && payload.persona_id) || window._selectedPersonaId || '',
+                persona_bio:      (payload && payload.persona_bio) || '',
+                persona_keywords: (payload && payload.persona_keywords) || '',
+                campaign_focus:     (payload && payload.campaign_focus) || '',
+                pain_point:         (payload && payload.pain_point) || '',
+                unfair_advantage:   (payload && payload.unfair_advantage) || '',
+                human_edited:       (payload && payload.human_edited) || false,
+                target_angle_hook:  (payload && payload.target_angle_hook) || '',
+                target_angle_adv:   (payload && payload.target_angle_adv) || '',
+                status:           'active'
             })
         });
         if (!createResp.ok) throw new Error('Campaign creation failed');
@@ -3685,7 +3693,7 @@ window.saveTenantProfileAction = async function(payload) {
 };
 
 // Natural Language Fallback Launch
-window.dtLaunchFallback = function() {
+window.dtLaunchFallback = async function() {
     const fallbackInp = document.getElementById('dt-intent-fallback');
     const txt = fallbackInp?.value.trim();
     if (!txt || txt.length < 5) {
@@ -3700,19 +3708,89 @@ window.dtLaunchFallback = function() {
 
     closeDTModal();
 
-    // FIX (2026-06-21): Previously wrote bio='Fallback intent processing required.'
-    // as a LITERAL STRING into Firestore. This string then flowed through the
-    // pipeline and produced Serper searches for the error message itself.
-    // Fix: Use the standard CHILD_CAMPAIGN_OVERRIDE sentinel so the backend
-    // synthesizes bio from campaign_focus, and pass the user's free-text input
-    // as campaign_focus (not raw keywords) for proper backend handling.
-    saveCampaignAction({
-        name:           campName,
-        bio:            'CHILD_CAMPAIGN_OVERRIDE',
-        keywords:       txt.substring(0, 120),
-        campaign_focus: txt.substring(0, 250),
-        gl:             ''
-    });
+    // ── Step 0: Disable CTAs + loading state ────────────────────────────────
+    const _twBtns = document.querySelectorAll(
+        '.dt-launch-btn, #dt-launch-btn, [onclick*="dtPrefillAndLaunch"], [onclick*="dtLaunchFallback"]'
+    );
+    _twBtns.forEach(b => { b.disabled = true; b._orig = b.innerHTML; b.innerHTML = '\u23f3 Creating Twin...'; });
+    const _restoreTwin = () => _twBtns.forEach(b => { b.disabled = false; b.innerHTML = b._orig || 'Launch'; });
+
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) { _restoreTwin(); showToast('Session expired.', 'error'); return; }
+        const token = await user.getIdToken(true);
+
+        // ── Step 1: Save tenant profile (same as website-analysis path) ─────
+        // Without this, first-time users have no tenant_profiles doc and
+        // persona migration on next login finds "no_profile" and aborts.
+        showToast('Setting up Master Twin Profile...', 'info');
+        const profileResp = await fetch(`${API_BASE}/api/tenant_profiles`, {
+            method:  'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+                company_name:       txt.substring(0, 100),
+                onboarding_complete: true
+            })
+        });
+        if (!profileResp.ok) {
+            console.warn('[dtLaunchFallback] Tenant profile save failed (non-fatal):', profileResp.status);
+        }
+
+        // ── Step 2: Auto-create persona from free-text (mirrors deployPredictiveCard) ─
+        // Without this, the Persona Vault is empty and the user cannot create
+        // child campaigns or link any persona to this campaign.
+        const personaBio = [
+            `[Who we help]: ${txt}`,
+            `[The problem we solve]: ${txt}`,
+            `[Our unfair advantage / Unique Value]: Our unique positioning in this market`
+        ].join('\n');
+        const personaName = `${txt.substring(0, 40)} Strategy`;
+
+        let savedPersonaId = '';
+        let savedPersonaBio = '';
+        let savedPersonaKeywords = '';
+
+        showToast('Creating AI Agent...', 'info');
+        const pResp = await fetch(`${API_BASE}/api/personas`, {
+            method:  'POST',
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ name: personaName, bio: personaBio, keywords: txt.substring(0, 120) })
+        });
+        if (pResp.ok) {
+            const pJson = await pResp.json();
+            savedPersonaId = pJson.id || '';
+            savedPersonaBio = personaBio;
+            savedPersonaKeywords = txt.substring(0, 120);
+            window._selectedPersonaId = savedPersonaId;
+            window._personasCache = []; // invalidate cache so Persona Vault reloads
+            console.log(`[dtLaunchFallback] Auto-created persona '${personaName}' → ${pJson.id}`);
+        } else {
+            console.warn('[dtLaunchFallback] Persona auto-save failed:', await pResp.text());
+        }
+
+        _restoreTwin();
+
+        // ── Step 3: Create campaign with persona linked ─────────────────────
+        // J-9 FIX: 600ms delay so Firestore write for the new persona settles
+        // before campaign creation reads it for denormalisation.
+        await new Promise(resolve => setTimeout(resolve, 600));
+
+        saveCampaignAction({
+            name:              campName,
+            bio:               'CHILD_CAMPAIGN_OVERRIDE',
+            keywords:          txt.substring(0, 120),
+            campaign_focus:    txt.substring(0, 250),
+            gl:                '',
+            persona_id:        savedPersonaId,
+            persona_bio:       savedPersonaBio,
+            persona_keywords:  savedPersonaKeywords
+        });
+
+    } catch(err) {
+        console.error('[dtLaunchFallback]', err);
+        _restoreTwin();
+        showToast(`Setup failed: ${err.message || 'Network error'}. Please try again.`, 'error');
+    }
 };
 
 // Transition from View A to View D
