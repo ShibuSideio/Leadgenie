@@ -41,8 +41,15 @@ try:
     from google.protobuf import timestamp_pb2
     from google.cloud import bigquery
     from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
-except ImportError:
-    pass  # Handled at startup
+except ImportError as _imp_err:
+    # These are critical runtime dependencies — a missing package will cause
+    # NameError deep in route handlers.  Log at WARNING so the failure is
+    # visible in GCP Cloud Logging instead of silently swallowed.
+    import logging as _fallback_logging
+    _fallback_logging.getLogger("orchestrator.v23.internal").warning(
+        "critical_import_failed: %s — route handlers that depend on this "
+        "package will fail with NameError at invocation time.", _imp_err,
+    )
 
 import random
 

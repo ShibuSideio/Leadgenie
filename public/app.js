@@ -21,9 +21,12 @@ const DT_ENGINE_URL = "";
 // ── P0-XSS: HTML escape helper for server-controlled data in innerHTML ──────
 function _escapeHTML(str) {
     if (!str) return '';
-    const div = document.createElement('div');
-    div.textContent = String(str);
-    return div.innerHTML;
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 
@@ -248,13 +251,55 @@ function handleAuthRejection() {
 
 // ─── MODAL UTILITY — single source of truth for all modal show/hide ──────────
 // All modals now use style.display. Never classList.add/remove('hidden') for modals.
+// V23.10: Focus trapping + focus restore for accessibility (FIX 6).
+
+// Generic focus trap — keeps Tab cycling within the modal.
+function _trapFocus(modalEl) {
+    const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    function _handleKeydown(e) {
+        if (e.key !== 'Tab') return;
+        const focusable = modalEl.querySelectorAll(FOCUSABLE);
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last  = focusable[focusable.length - 1];
+        if (e.shiftKey) {
+            if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+        } else {
+            if (document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+    }
+    modalEl.addEventListener('keydown', _handleKeydown);
+    modalEl._trapCleanup = () => modalEl.removeEventListener('keydown', _handleKeydown);
+}
+
+window._modalPreviousFocus = null;
+
 window.showModal = function(id) {
     const el = document.getElementById(id);
-    if (el) el.classList.add('open'); // .sio-modal-overlay.open => display:flex via CSS
+    if (!el) return;
+    // Save the currently focused element so we can restore it on close
+    window._modalPreviousFocus = document.activeElement;
+    el.classList.add('open'); // .sio-modal-overlay.open => display:flex via CSS
+    // Focus the first focusable element inside the modal
+    requestAnimationFrame(() => {
+        const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+        const firstFocusable = el.querySelector(FOCUSABLE);
+        if (firstFocusable) firstFocusable.focus();
+        _trapFocus(el);
+    });
 };
 window.closeModal = function(id) {
     const el = document.getElementById(id);
-    if (el) el.classList.remove('open');
+    if (el) {
+        el.classList.remove('open');
+        // Remove focus trap listener
+        if (el._trapCleanup) { el._trapCleanup(); el._trapCleanup = null; }
+    }
+    // Restore focus to the element that was focused before the modal opened
+    if (window._modalPreviousFocus && typeof window._modalPreviousFocus.focus === 'function') {
+        window._modalPreviousFocus.focus();
+        window._modalPreviousFocus = null;
+    }
 };
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -267,6 +312,13 @@ auth.onAuthStateChanged(async user => {
         if (appEl)  appEl.style.display  = 'flex';
         loadDashboard();
     } else {
+        // ── Cleanup: unsubscribe Firestore listener to prevent memory leak ──
+        if (unsubscribeLeads) { unsubscribeLeads(); unsubscribeLeads = null; }
+        // Clear waitroom poll if running
+        if (window._waitroomPollInterval) {
+            clearInterval(window._waitroomPollInterval);
+            window._waitroomPollInterval = null;
+        }
         if (authEl) authEl.style.display = '';
         if (appEl)  appEl.style.display  = 'none';
     }
@@ -702,12 +754,12 @@ async function loadLeads() {
                     rawLeadsCache.push(data);
                     _leadsMap.set(doc.id, data);  // O(1) lookup for observer
                     // V23.9: Raw data shape logger — traces ALL leads for Radar debugging
-                    console.log('[Radar Raw DB Shape]', { id: data.id, source: data.source, type: data.type, is_inbound: data.is_inbound, sourcing_vector: data.sourcing_vector });
+                    if (window.SIO_DEBUG) console.log('[Radar Raw DB Shape]', { id: data.id, source: data.source, type: data.type, is_inbound: data.is_inbound, sourcing_vector: data.sourcing_vector });
                     // Route into split caches
                     if (_isInbound(data)) {
                         inboundCache.push(data);
                         _inboundArrived = true;
-                        console.log('[Radar] Routed to Inbound:', data.id, '| source:', data.source, '| type:', data.type);
+                        if (window.SIO_DEBUG) console.log('[Radar] Routed to Inbound:', data.id, '| source:', data.source, '| type:', data.type);
                     } else {
                         outboundCache.push(data);
                     }
@@ -903,10 +955,14 @@ window.pushToCRM = async function(docId, leadStr) {
             showToast('✅ Lead saved to CRM pipeline — view it in the CRM sidebar.', 'success');
             const userUrl = window.currentUserData?.crm_webhook_url;
             if (userUrl) {
-                try {
-                    const lead = JSON.parse(decodeURIComponent(leadStr));
-                    fetch(userUrl, { method:'POST', headers:{'Content-Type':'application/json'}, mode:'no-cors', body: JSON.stringify({event:'lead_pushed', lead}) });
-                } catch(_) {}
+                if (!userUrl.startsWith('https://')) {
+                    showToast('Webhook URL must use HTTPS', 'error');
+                } else {
+                    try {
+                        const lead = JSON.parse(decodeURIComponent(leadStr));
+                        fetch(userUrl, { method:'POST', headers:{'Content-Type':'application/json'}, mode:'no-cors', body: JSON.stringify({event:'lead_pushed', lead}) });
+                    } catch(_) {}
+                }
             }
         }
     } catch(e) {

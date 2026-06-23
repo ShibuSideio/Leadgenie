@@ -50,7 +50,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
-    <link rel="stylesheet" href="styles.css?v=23.9.13">
+    <link rel="stylesheet" href="styles.css?v=23.9.14">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -259,16 +259,16 @@
     <!-- TOP NAV -->
     <nav class="glass-nav">
         <div class="logo">Sideio <span class="logo-mark">&#10022;</span></div>
-        <div class="top-cmd-bar" id="top-cmd-bar">
-            <button class="cmd-btn active" id="tab-dashboard" data-target-view="dashboard" onclick="switchTab('dashboard')">Home</button>
-            <button class="cmd-btn" id="tab-crm" data-target-view="crm" style="display:none;" onclick="switchTab('crm-test')">&#128203; CRM</button>
-            <button class="cmd-btn" id="tab-campaigns" data-target-view="dashboard" onclick="switchTab('target')">Searches</button>
-            <button class="cmd-btn" id="tab-personas" onclick="switchTab('persona-vault')">&#127918; Personas</button>
-            <button class="cmd-btn" id="tab-reports" onclick="switchTab('reports')">Reports</button>
-            <button class="cmd-btn" id="tab-l0-admin" style="display:none;" onclick="switchTab('l0-admin')">Admin</button>
+        <div class="top-cmd-bar" id="top-cmd-bar" role="tablist" aria-label="Main navigation">
+            <button class="cmd-btn active" id="tab-dashboard" data-target-view="dashboard" onclick="switchTab('dashboard')" role="tab" aria-selected="true">Home</button>
+            <button class="cmd-btn" id="tab-crm" data-target-view="crm" style="display:none;" onclick="switchTab('crm-test')" role="tab" aria-selected="false">&#128203; CRM</button>
+            <button class="cmd-btn" id="tab-campaigns" data-target-view="dashboard" onclick="switchTab('target')" role="tab" aria-selected="false">Searches</button>
+            <button class="cmd-btn" id="tab-personas" onclick="switchTab('persona-vault')" role="tab" aria-selected="false">&#127918; Personas</button>
+            <button class="cmd-btn" id="tab-reports" onclick="switchTab('reports')" role="tab" aria-selected="false">Reports</button>
+            <button class="cmd-btn" id="tab-l0-admin" style="display:none;" onclick="switchTab('l0-admin')" role="tab" aria-selected="false">Admin</button>
         </div>
         <div class="user-pill-wrap">
-            <button class="user-pill" id="user-pill-btn" onclick="toggleUserDropdown()">
+            <button class="user-pill" id="user-pill-btn" onclick="toggleUserDropdown()" aria-label="User menu" aria-haspopup="true">
                 <div class="user-avatar" id="user-avatar-initials">?</div>
                 <svg class="user-pill-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
             </button>
@@ -369,11 +369,11 @@
             <!-- ── END INBOUND RADAR BANNER ───────────────────────────────── -->
 
             <!-- ── VIP INBOX: FEED MODE TOGGLE (V23.8) ────────────────────── -->
-            <div id="feed-mode-toggle" class="segmented-control">
-                <button class="toggle-btn active" data-feed-mode="outbound">
+            <div id="feed-mode-toggle" class="segmented-control" role="tablist" aria-label="Feed mode">
+                <button class="toggle-btn active" data-feed-mode="outbound" role="tab" aria-selected="true" aria-label="Outbound Campaigns">
                     &#127919; Outbound Campaigns
                 </button>
-                <button class="toggle-btn radar-btn" data-feed-mode="inbound">
+                <button class="toggle-btn radar-btn" data-feed-mode="inbound" role="tab" aria-selected="false" aria-label="Inbound Radar">
                     &#128225; Inbound Radar <span class="radar-pulse-dot d-none"></span>
                 </button>
             </div>
@@ -381,7 +381,7 @@
 
             <div class="feed-header">
                 <h3 class="feed-title">Lead Intelligence Feed</h3>
-                <select id="campaign-filter" class="feed-filter" onchange="filterLeadsByCampaign(this.value)">
+                <select id="campaign-filter" class="feed-filter" onchange="filterLeadsByCampaign(this.value)" aria-label="Filter leads by campaign">
                     <option value="all">All Searches</option>
                 </select>
             </div>
@@ -447,7 +447,7 @@
                     <div class="roi-title">
                         <span class="roi-dot"></span>
                         ROI Intelligence &mdash; Last
-                        <select class="roi-range-select" id="roi-range-select" onchange="loadROIDashboard(this.value)">
+                        <select class="roi-range-select" id="roi-range-select" onchange="loadROIDashboard(this.value)" aria-label="Select report time range">
                             <option value="7">7 Days</option>
                             <option value="30" selected>30 Days</option>
                             <option value="90">90 Days</option>
@@ -506,12 +506,12 @@
                 <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:var(--text-muted); margin-bottom:16px;">&#128196; Export Report</div>
                 <div style="display:flex; gap:16px; margin-bottom:16px;">
                     <div style="flex:1;">
-                        <label style="font-size:0.8rem; color:var(--text-muted);">Start Date</label>
-                        <input type="date" id="report-start" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px; box-sizing:border-box;">
+                        <label style="font-size:0.8rem; color:var(--text-muted);" for="report-start">Start Date</label>
+                        <input type="date" id="report-start" aria-label="Report start date" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px; box-sizing:border-box;">
                     </div>
                     <div style="flex:1;">
-                        <label style="font-size:0.8rem; color:var(--text-muted);">End Date</label>
-                        <input type="date" id="report-end" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px; box-sizing:border-box;">
+                        <label style="font-size:0.8rem; color:var(--text-muted);" for="report-end">End Date</label>
+                        <input type="date" id="report-end" aria-label="Report end date" style="width:100%; padding:10px; border:1px solid var(--glass-border); border-radius:6px; box-sizing:border-box;">
                     </div>
                 </div>
                 <button class="primary-btn full-width" onclick="showToast('Aggregating Intelligence Arrays...', 'info')">Generate Report</button>
@@ -555,12 +555,12 @@
             </div>
 
             <!-- Tab bar -->
-            <div class="l0-tab-bar">
-                <button class="l0-tab active" id="l0-tab-tenants"     onclick="l0SwitchTab('tenants')">&#128100; Tenants</button>
-                <button class="l0-tab"        id="l0-tab-operations"  onclick="l0SwitchTab('operations')">&#127758; Global Operations</button>
-                <button class="l0-tab"        id="l0-tab-ledger"      onclick="l0SwitchTab('ledger')">&#128203; Shadow Ledger</button>
-                <button class="l0-tab"        id="l0-tab-health"      onclick="l0SwitchTab('health')">&#128200; System Health</button>
-                <button class="l0-tab"        id="l0-tab-serper"      onclick="l0SwitchTab('serper')">&#128269; Query Audit</button>
+            <div class="l0-tab-bar" role="tablist" aria-label="Admin sections">
+                <button class="l0-tab active" id="l0-tab-tenants"     onclick="l0SwitchTab('tenants')" role="tab" aria-selected="true">&#128100; Tenants</button>
+                <button class="l0-tab"        id="l0-tab-operations"  onclick="l0SwitchTab('operations')" role="tab" aria-selected="false">&#127758; Global Operations</button>
+                <button class="l0-tab"        id="l0-tab-ledger"      onclick="l0SwitchTab('ledger')" role="tab" aria-selected="false">&#128203; Shadow Ledger</button>
+                <button class="l0-tab"        id="l0-tab-health"      onclick="l0SwitchTab('health')" role="tab" aria-selected="false">&#128200; System Health</button>
+                <button class="l0-tab"        id="l0-tab-serper"      onclick="l0SwitchTab('serper')" role="tab" aria-selected="false">&#128269; Query Audit</button>
             </div>
 
             <!-- Tab: Tenants (existing content) -->
@@ -694,10 +694,10 @@
                 </div>
                 <!-- Filters -->
                 <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:16px;">
-                    <input type="date" id="serper-filter-from" class="crm-input" style="width:160px;">
+                    <input type="date" id="serper-filter-from" class="crm-input" style="width:160px;" aria-label="Audit log start date">
                     <span style="color:var(--text-muted); font-size:0.85rem;">to</span>
-                    <input type="date" id="serper-filter-to"   class="crm-input" style="width:160px;">
-                    <input type="text" id="serper-filter-campaign" class="crm-input" style="flex:1; min-width:180px;" placeholder="Filter by campaign ID (optional)">
+                    <input type="date" id="serper-filter-to"   class="crm-input" style="width:160px;" aria-label="Audit log end date">
+                    <input type="text" id="serper-filter-campaign" class="crm-input" style="flex:1; min-width:180px;" placeholder="Filter by campaign ID (optional)" aria-label="Filter by campaign ID">
                     <button class="primary-btn" onclick="fetchSerperAuditLogs()" style="padding:9px 22px; min-height:40px;">&#9654; Apply Filter</button>
                 </div>
                 <!-- Top campaigns -->
@@ -776,7 +776,7 @@
 
                     <!-- Field 1: Agent Identity -->
                     <div>
-                        <label style="display:block; font-size:0.8rem; font-weight:700; color:#374151; margin-bottom:6px; letter-spacing:0.3px; text-transform:uppercase;">
+                        <label style="display:block; font-size:0.8rem; font-weight:700; color:#374151; margin-bottom:6px; letter-spacing:0.3px; text-transform:uppercase;" for="persona-name">
                             Agent Name / Strategy
                             <span style="color:#ef4444; margin-left:2px;">*</span>
                         </label>
@@ -790,7 +790,7 @@
 
                     <!-- Field 2: Core Directive -->
                     <div>
-                        <label style="display:block; font-size:0.8rem; font-weight:700; color:#374151; margin-bottom:6px; letter-spacing:0.3px; text-transform:uppercase;">
+                        <label style="display:block; font-size:0.8rem; font-weight:700; color:#374151; margin-bottom:6px; letter-spacing:0.3px; text-transform:uppercase;" for="persona-bio">
                             Your Business Identifier
                             <span style="color:#ef4444; margin-left:2px;">*</span>
                         </label>
@@ -807,7 +807,7 @@
 
                     <!-- Field 3: Targeting Signals Token Input -->
                     <div>
-                        <label style="display:block; font-size:0.8rem; font-weight:700; color:#374151; margin-bottom:6px; letter-spacing:0.3px; text-transform:uppercase;">
+                        <label style="display:block; font-size:0.8rem; font-weight:700; color:#374151; margin-bottom:6px; letter-spacing:0.3px; text-transform:uppercase;" for="persona-tag-input">
                             Pain & Symptom Keywords
                         </label>
                         <p style="margin:0 0 8px; font-size:0.76rem; color:#6b7280; line-height:1.5;">
@@ -883,17 +883,17 @@
     </main>
 
     <!-- MOBILE BOTTOM DOCK -->
-    <nav class="bottom-dock" id="bottom-dock">
-        <button class="dock-btn active" id="dock-tab-dashboard" onclick="switchTab('dashboard')">
+    <nav class="bottom-dock" id="bottom-dock" role="tablist" aria-label="Mobile navigation">
+        <button class="dock-btn active" id="dock-tab-dashboard" onclick="switchTab('dashboard')" role="tab" aria-selected="true" aria-label="Home">
             <span class="dock-icon">&#127968;</span><span class="dock-label">Home</span>
         </button>
-        <button class="dock-btn" id="dock-tab-campaigns" onclick="switchTab('target')">
+        <button class="dock-btn" id="dock-tab-campaigns" onclick="switchTab('target')" role="tab" aria-selected="false" aria-label="Searches">
             <span class="dock-icon">&#128269;</span><span class="dock-label">Searches</span>
         </button>
-        <button class="dock-btn" id="dock-tab-reports" onclick="switchTab('reports')">
+        <button class="dock-btn" id="dock-tab-reports" onclick="switchTab('reports')" role="tab" aria-selected="false" aria-label="Reports">
             <span class="dock-icon">&#128202;</span><span class="dock-label">Reports</span>
         </button>
-        <button class="dock-btn" onclick="openSettingsModal()">
+        <button class="dock-btn" onclick="openSettingsModal()" aria-label="Settings">
             <span class="dock-icon">&#9881;</span><span class="dock-label">Settings</span>
         </button>
     </nav>
@@ -906,7 +906,7 @@
 <div id="crm-side-panel" class="crm-side-panel">
     <div class="crm-panel-header">
         <h3 id="crm-panel-title">Lead Dossier</h3>
-        <button class="crm-panel-close" onclick="closeCrmPanel()">&#10005;</button>
+        <button class="crm-panel-close" onclick="closeCrmPanel()" aria-label="Close lead dossier">&#10005;</button>
     </div>
     <div class="crm-panel-body" id="crm-panel-body"></div>
 </div>
@@ -917,14 +917,14 @@
 ════════════════════════════════════════════ -->
 <div id="dt-onboarding-modal" class="sio-modal-overlay">
     <div class="sio-modal-box">
-        <button class="sio-modal-close" onclick="closeDTModal()">&#10005;</button>
+        <button class="sio-modal-close" onclick="closeDTModal()" aria-label="Close onboarding modal">&#10005;</button>
 
         <!-- VIEW A: URL Input -->
         <div id="dt-view-a" class="sio-view active" style="text-align:center; padding:20px 0;">
             <div style="font-size:2.5rem; color:var(--primary); margin-bottom:12px;">&#10022;</div>
             <h2 style="font-size:2rem; font-weight:700; letter-spacing:-0.02em; margin-bottom:12px; color:#111827;">Let's build your pipeline.</h2>
             <p style="font-size:1.1rem; color:#4b5563; margin-bottom:32px; max-width:85%; margin-left:auto; margin-right:auto;">Drop your website link below. I'll read through your offering and map out exactly who we should target first.</p>
-            <input type="text" id="dt-url-input"
+            <input type="text" id="dt-url-input" aria-label="Your website URL"
                 style="width:100%; max-width:400px; height:60px; font-size:1.1rem; text-align:center; border-radius:30px; border:2px solid #e2e8f0; padding:0 20px; font-family:'Inter',sans-serif; outline:none; display:block; margin:0 auto 20px;"
                 placeholder="e.g. sideio.com"
                 onkeydown="if(event.key==='Enter') dtStartAnalysis();">
@@ -969,7 +969,7 @@
             <div style="font-size:1.8rem; color:var(--primary); margin-bottom:12px;">&#10022;</div>
             <h2 style="font-size:1.6rem; font-weight:700; margin-bottom:8px; color:#111827;">Who are your clients?</h2>
             <p style="color:#64748b; font-size:1rem; margin-bottom:24px; line-height:1.5;">Describe them in plain English. No website required.</p>
-            <textarea id="dt-intent-fallback"
+            <textarea id="dt-intent-fallback" aria-label="Describe your ideal clients"
                 style="width:100%; min-height:100px; border:2px solid #e2e8f0; border-radius:12px; padding:14px 16px; font-family:'Inter',sans-serif; font-size:1rem; outline:none; resize:vertical; margin-bottom:20px;"
                 placeholder="e.g. Local service businesses in the UK that need more customers..."
                 onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();dtLaunchFallback();}"></textarea>
@@ -983,7 +983,7 @@
 ════════════════════════════════════════════ -->
 <div id="child-campaign-modal" class="sio-modal-overlay">
     <div class="sio-modal-box" style="max-width:500px;">
-        <button class="sio-modal-close" onclick="closeModal('child-campaign-modal')">&#10005;</button>
+        <button class="sio-modal-close" onclick="closeModal('child-campaign-modal')" aria-label="Close campaign modal">&#10005;</button>
         <div style="text-align:center; margin-bottom:20px;">
             <div style="font-size:2rem; color:var(--primary); margin-bottom:8px;">&#10022;</div>
             <h2 style="font-size:1.8rem; font-weight:700; color:#111827; margin-bottom:8px;">Market Opportunities Detected</h2>
@@ -994,7 +994,7 @@
 
             <!-- ── PERSONA SELECTOR (always visible) ─────────────────────── -->
             <div style="margin-bottom:18px; background:linear-gradient(135deg,rgba(79,70,229,0.05),rgba(124,58,237,0.05)); border:1.5px solid rgba(79,70,229,0.2); border-radius:12px; padding:16px;">
-                <label style="font-size:0.75rem; font-weight:700; color:#4338ca; display:block; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.4px;">&#129302; AI Agent / Persona <span style="color:#ef4444;">*</span></label>
+                <label style="font-size:0.75rem; font-weight:700; color:#4338ca; display:block; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.4px;" for="cc-persona-select">&#129302; AI Agent / Persona <span style="color:#ef4444;">*</span></label>
                 <select id="cc-persona-select"
                     onchange="onCcPersonaChange(this.value)"
                     style="width:100%; padding:10px 12px; border:1.5px solid #c7d2fe; border-radius:8px; font-family:'Inter',sans-serif; font-size:0.88rem; color:#111827; background:#fff; cursor:pointer; outline:none; appearance:auto;">
@@ -1019,16 +1019,16 @@
                     <span>Select a Persona above to auto-load your ICP strategy, or fill in the fields below manually.</span>
                 </div>
                 <div style="margin-top:14px; margin-bottom:14px;">
-                    <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;">1. Product / Service Focus</label>
-                    <input type="text" id="cc-focus" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. Enterprise SEO Audit">
+                    <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;" for="cc-focus">1. Product / Service Focus</label>
+                    <input type="text" id="cc-focus" aria-label="Product or service focus" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. Enterprise SEO Audit">
                 </div>
                 <div style="margin-bottom:14px;">
-                    <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;">2. Core Pain Point</label>
-                    <textarea id="cc-pain" style="width:100%; min-height:72px; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; resize:vertical; box-sizing:border-box;" placeholder="What keeps them up at night?"></textarea>
+                    <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;" for="cc-pain">2. Core Pain Point</label>
+                    <textarea id="cc-pain" aria-label="Core pain point" style="width:100%; min-height:72px; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; resize:vertical; box-sizing:border-box;" placeholder="What keeps them up at night?"></textarea>
                 </div>
                 <div style="margin-bottom:14px;">
-                    <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;">3. Unfair Advantage</label>
-                    <textarea id="cc-advantage" style="width:100%; min-height:72px; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; resize:vertical; box-sizing:border-box;" placeholder="Why should they choose you?"></textarea>
+                    <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:6px;" for="cc-advantage">3. Unfair Advantage</label>
+                    <textarea id="cc-advantage" aria-label="Unfair advantage" style="width:100%; min-height:72px; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; resize:vertical; box-sizing:border-box;" placeholder="Why should they choose you?"></textarea>
                 </div>
             </div>
 
@@ -1037,19 +1037,19 @@
                 <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; color:#6b7280; margin-bottom:14px;">Campaign Settings</div>
 
                 <div style="margin-bottom:14px;">
-                    <label style="font-size:0.8rem; font-weight:600; color:#374151; display:block; margin-bottom:6px;">Campaign Name <span style="color:#ef4444;">*</span></label>
-                    <input type="text" id="cc-name" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. Kochi Infopark Q3 Push">
+                    <label style="font-size:0.8rem; font-weight:600; color:#374151; display:block; margin-bottom:6px;" for="cc-name">Campaign Name <span style="color:#ef4444;">*</span></label>
+                    <input type="text" id="cc-name" aria-label="Campaign name" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. Kochi Infopark Q3 Push">
                 </div>
 
                 <div style="margin-bottom:14px;">
-                    <label style="font-size:0.8rem; font-weight:600; color:#374151; display:block; margin-bottom:6px;">Target Geography <span style="color:#ef4444;">*</span></label>
-                    <input type="text" id="cc-location" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. India, New York, Worldwide">
+                    <label style="font-size:0.8rem; font-weight:600; color:#374151; display:block; margin-bottom:6px;" for="cc-location">Target Geography <span style="color:#ef4444;">*</span></label>
+                    <input type="text" id="cc-location" aria-label="Target geography" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. India, New York, Worldwide">
                 </div>
 
                 <div style="margin-bottom:20px;">
-                    <label style="font-size:0.8rem; font-weight:600; color:#374151; display:block; margin-bottom:4px;">Additional Keywords <span style="font-weight:400; color:#9ca3af;">(optional)</span></label>
+                    <label style="font-size:0.8rem; font-weight:600; color:#374151; display:block; margin-bottom:4px;" for="cc-extra-keywords">Additional Keywords <span style="font-weight:400; color:#9ca3af;">(optional)</span></label>
                     <p style="font-size:0.72rem; color:#9ca3af; margin:0 0 6px;">Merged with your Persona's base keywords to sharpen this campaign's targeting.</p>
-                    <input type="text" id="cc-extra-keywords" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. fintech, Series A, remote-first">
+                    <input type="text" id="cc-extra-keywords" aria-label="Additional keywords" style="width:100%; padding:10px; border:1px solid #d1d5db; border-radius:8px; font-family:'Inter',sans-serif; box-sizing:border-box;" placeholder="e.g. fintech, Series A, remote-first">
                 </div>
             </div>
 
@@ -1072,14 +1072,14 @@
 ════════════════════════════════════════════ -->
 <div id="settings-modal" class="sio-modal-overlay" onclick="if(event.target===this)closeModal('settings-modal')">
     <div class="sio-modal-box settings-modal-panel">
-        <button class="sio-modal-close" onclick="closeModal('settings-modal')">&#10005;</button>
+        <button class="sio-modal-close" onclick="closeModal('settings-modal')" aria-label="Close settings">&#10005;</button>
         <div style="font-size:1.8rem; margin-bottom:8px; display:block;">&#9881;&#65039;</div>
         <h2 style="font-size:1.5rem; font-weight:700; margin-bottom:24px;">Integrations &amp; Settings</h2>
         <div class="settings-section">
             <h3 class="settings-section-title">CRM Webhook</h3>
             <p class="settings-section-desc">Automatically push converted leads to your CRM, Make.com, or Zapier flow.</p>
-            <label class="settings-label">Webhook URL</label>
-            <input type="text" id="crm-webhook-url" class="settings-input" placeholder="https://hook.make.com/...">
+            <label class="settings-label" for="crm-webhook-url">Webhook URL</label>
+            <input type="text" id="crm-webhook-url" class="settings-input" placeholder="https://hook.make.com/..." aria-label="CRM webhook URL">
             <button class="primary-btn" style="margin-top:12px; width:100%;" onclick="saveCRMWebhook()">Save Integration</button>
         </div>
     </div>
@@ -1090,7 +1090,7 @@
 ════════════════════════════════════════════ -->
 <div id="edit-campaign-modal" class="sio-modal-overlay" onclick="if(event.target===this)closeEditModal()">
     <div class="sio-modal-box" style="max-width:480px;">
-        <button class="sio-modal-close" onclick="closeEditModal()">&#10005;</button>
+        <button class="sio-modal-close" onclick="closeEditModal()" aria-label="Close edit campaign">&#10005;</button>
         <input type="hidden" id="edit-camp-id">
 
         <div style="font-size:1.4rem; color:var(--primary); margin-bottom:8px;">&#9881;&#65039;</div>
@@ -1098,7 +1098,7 @@
         <p style="font-size:0.9rem; color:#6b7280; margin-bottom:24px;">Update your targeting parameters. Changes take effect on the next scrape cycle.</p>
 
         <div class="edit-field-group">
-            <label class="edit-field-label">Campaign Name</label>
+            <label class="edit-field-label" for="edit-camp-name">Campaign Name</label>
             <input type="text" id="edit-camp-name" class="edit-field-input" placeholder="e.g. UK SaaS Founders">
         </div>
 
@@ -1126,14 +1126,14 @@
         </div>
 
         <div class="edit-field-group" id="edit-bio-group">
-            <label class="edit-field-label">Product Bio <span style="color:#9ca3af; font-weight:400;">(What you sell)</span></label>
+            <label class="edit-field-label" for="edit-camp-bio">Product Bio <span style="color:#9ca3af; font-weight:400;">(What you sell)</span></label>
             <textarea id="edit-camp-bio" class="edit-field-input edit-field-textarea" rows="3" placeholder="e.g. We build AI-powered outbound tools for B2B SaaS companies looking to scale pipeline."></textarea>
             <!-- Shown by JS when persona is locked -->
             <p id="edit-bio-lock-hint" style="display:none; margin:6px 0 0; font-size:0.75rem; color:#7c3aed; font-style:italic;"></p>
         </div>
 
         <div class="edit-field-group" id="edit-keys-group">
-            <label class="edit-field-label">Target Keywords</label>
+            <label class="edit-field-label" for="edit-camp-keys">Target Keywords</label>
             <textarea id="edit-camp-keys" class="edit-field-input edit-field-textarea" rows="3" placeholder="e.g. digital marketing agency, SEO consultant, growth hacker"></textarea>
             <!-- Shown by JS when persona is locked -->
             <p id="edit-keys-lock-hint" style="display:none; margin:6px 0 0; font-size:0.75rem; color:#7c3aed; font-style:italic;"></p>
@@ -1142,13 +1142,13 @@
         <div class="edit-field-group">
             <label class="edit-field-label">Geographic Targeting</label>
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                <select id="geo-continent-select" class="edit-field-input geo-cascade-select" style="flex:1; min-width:120px; cursor:pointer;">
+                <select id="geo-continent-select" class="edit-field-input geo-cascade-select" style="flex:1; min-width:120px; cursor:pointer;" aria-label="Select continent">
                     <option value="">🌍 Continent</option>
                 </select>
-                <select id="geo-country-select" class="edit-field-input geo-cascade-select" style="flex:1; min-width:120px; cursor:pointer;" disabled>
+                <select id="geo-country-select" class="edit-field-input geo-cascade-select" style="flex:1; min-width:120px; cursor:pointer;" disabled aria-label="Select country">
                     <option value="">🏳️ Country</option>
                 </select>
-                <select id="geo-region-select" class="edit-field-input geo-cascade-select" style="flex:1; min-width:120px; cursor:pointer;" disabled>
+                <select id="geo-region-select" class="edit-field-input geo-cascade-select" style="flex:1; min-width:120px; cursor:pointer;" disabled aria-label="Select region">
                     <option value="">📍 Region</option>
                 </select>
             </div>
@@ -1207,7 +1207,7 @@
 ════════════════════════════════════════════ -->
 <div id="rejection-modal" class="sio-modal-overlay" onclick="if(event.target===this)closeModal('rejection-modal')">
     <div class="sio-modal-box" style="max-width:420px; text-align:center;">
-        <button class="sio-modal-close" onclick="closeModal('rejection-modal')">&#10005;</button>
+        <button class="sio-modal-close" onclick="closeModal('rejection-modal')" aria-label="Close rejection modal">&#10005;</button>
         <div style="font-size:2rem; margin-bottom:8px;">&#128683;</div>
         <h2 style="font-size:1.3rem; font-weight:700; margin-bottom:6px; color:#111827;">Why is this lead not a fit?</h2>
         <p style="font-size:0.88rem; color:#6b7280; margin-bottom:20px; line-height:1.5;">Your answer trains the AI so it never shows you leads like this again.</p>
@@ -1252,7 +1252,7 @@
 ════════════════════════════════════════════ -->
 <div id="unit-economics-modal" class="sio-modal-overlay">
     <div class="sio-modal-box" style="max-width:480px;">
-        <button class="sio-modal-close" onclick="closeModal('unit-economics-modal')">&#10005;</button>
+        <button class="sio-modal-close" onclick="closeModal('unit-economics-modal')" aria-label="Close unit economics">&#10005;</button>
         <div style="margin-bottom:6px; font-size:1.1rem;">&#9881;&#65039;</div>
         <h2 style="font-size:1.3rem; font-weight:700; margin-bottom:4px; letter-spacing:-0.02em;">Configure Unit Economics</h2>
         <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:24px; line-height:1.5;">Set your actual cost and deal metrics to get a hyper-personalised ROI report. Conservative industry benchmarks are used by default.</p>
@@ -1309,6 +1309,6 @@
         });
     }
 </script>
-<script src="app.js?v=23.9.13"></script>
+<script src="app.js?v=23.9.14"></script>
 </body>
 </html>

@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v23.9.13'; // v23.9.13: enterprise audit — 10 bug fixes
+const CACHE_NAME = 'sideio-v23.9.14'; // v23.9.14: full polish — a11y, XSS, SSRF, CSP, perf, memory leak
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=23.9.13',
-    '/styles.css?v=23.9.13',
+    '/app.js?v=23.9.14',
+    '/styles.css?v=23.9.14',
     '/manifest.json'
 ];
 
