@@ -443,7 +443,7 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
         return jsonify({"error": "Signal not found"}), 404
 
     sig = signal_snap.to_dict() or {}
-    if sig.get("tenant_id") != uid:
+    if sig.get("tenant_id") != tenant_id:
         return jsonify({"error": "Forbidden"}), 403
 
     # Update signal status
@@ -460,7 +460,7 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
         company  = sig.get("company_name") or "Unknown Company"
         lead_ref.set({
             "uid":                uid,
-            "tenant_id":          uid,
+            "tenant_id":          tenant_id,
             "url":                sig.get("source_url", ""),
             "company":            company,
             "company_name":       company,
@@ -469,10 +469,13 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
             "score":              round(sig.get("intent_score", 0.5) * 100),
             "source":             "inbound_radar",
             "status":             "new",
+            "is_in_crm":          False,
+            "credit_settled":     True,
             "fit_score":          sig.get("intent_score", 0.5),
             "intent_label":       sig.get("intent_label", "EXPRESSING_PAIN"),
             "inbound_signal_id":  sig.get("signal_id", ""),
             "inbound_platform":   sig.get("source_platform", "web"),
+            "campaign_id":        sig.get("matched_campaign_id", ""),
             "matched_campaigns":  (
                 [sig["matched_campaign_id"]]
                 if sig.get("matched_campaign_id") else []

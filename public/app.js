@@ -1348,15 +1348,20 @@ window.saveCampaignAction = async function(payload) {
                 }
             }, 1000);
             // Also dismiss the banner immediately when the first lead arrives via onSnapshot
-            const _origRender = window.renderLeads;
-            window.renderLeads = function() {
-                if (rawLeadsCache.length > 0) {
-                    clearInterval(_bannerTick);
-                    banner.remove();
-                    window.renderLeads = _origRender;
-                }
-                _origRender.apply(this, arguments);
-            };
+            // Guard: don't nest patches if saveCampaignAction is called again before leads arrive
+            if (!window.renderLeads._ignitionPatched) {
+                const _origRender = window.renderLeads;
+                window.renderLeads = function() {
+                    if (rawLeadsCache.length > 0) {
+                        clearInterval(_bannerTick);
+                        banner.remove();
+                        window.renderLeads = _origRender;
+                        delete window.renderLeads._ignitionPatched;
+                    }
+                    _origRender.apply(this, arguments);
+                };
+                window.renderLeads._ignitionPatched = true;
+            }
         }
 
         const targetUrlsInput = document.getElementById('camp-target-urls');
