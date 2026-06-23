@@ -33,7 +33,10 @@
       },
       {
         "source": "**/*.css",
-        "headers": [{ "key": "Content-Type", "value": "text/css; charset=utf-8" }]
+        "headers": [
+          { "key": "Content-Type",  "value": "text/css; charset=utf-8" },
+          { "key": "Cache-Control", "value": "no-cache, must-revalidate" }
+        ]
       },
       {
         "source": "/manifest.json",

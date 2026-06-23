@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v13'; // v13: evict broken manifest.json cache from v23.5 deploy
+const CACHE_NAME = 'sideio-v23.9.9'; // v23.9.9: force re-cache after V23.9 UI overhaul (skeleton, kanban, dossier, XSS fixes)
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js',
-    '/styles.css',
+    '/app.js?v=23.9.9',
+    '/styles.css?v=23.9.9',
     '/manifest.json'
 ];
 
