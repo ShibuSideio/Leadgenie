@@ -264,6 +264,7 @@ class WalledGardenHook:
         # This silently abandoned any futures not yet complete — no text collected.
         # Fix: iterate without outer timeout; each future already has a 6s httpx
         # timeout internally. Add individual fut.result(timeout=8) per future.
+        queries = self._build_queries(url, root_domain, persona_summary)
         all_texts: list[str] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             futures = {pool.submit(self._run_serper, q): q for q in queries}
