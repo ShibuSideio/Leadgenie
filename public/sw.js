@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.0.1'; // V24.0.1: CRM tab visibility fix + Serper enrichment blacklist
+const CACHE_NAME = 'sideio-v24.0.2'; // V24.0.2: CSP fix + wallet log guard
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=24.0.1',
-    '/styles.css?v=24.0.1',
+    '/app.js?v=24.0.2',
+    '/styles.css?v=24.0.2',
     '/manifest.json'
 ];
 

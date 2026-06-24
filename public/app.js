@@ -521,7 +521,7 @@ async function loadMe() {
             const consumed  = Number(w.consumed_credits   || data.consumed_credits   || 0) || 0;
             const credits   = allocated - consumed;
             window.activeWallet = { allocated_credits: allocated, consumed_credits: consumed };
-            console.log('[WALLET] payload.wallet:', payload.wallet, '| data.wallet:', data.wallet,
+            if (window.SIO_DEBUG) console.log('[WALLET] payload.wallet:', payload.wallet, '| data.wallet:', data.wallet,
                         '| allocated:', allocated, '| consumed:', consumed, '| balance:', credits);
             const el = document.getElementById('wallet-balance');
             if (el) el.innerText = credits.toLocaleString();
@@ -2805,7 +2805,7 @@ window.openNewCampaignModal = async function() {
     const allocated = Number(aw.allocated_credits || ud.allocated_credits || 0) || 0;
     const consumed  = Number(aw.consumed_credits  || ud.consumed_credits  || 0) || 0;
     const remaining = allocated - consumed;
-    console.log('[DEBUG WALLET] window.activeWallet:', aw,
+    if (window.SIO_DEBUG) console.log('[DEBUG WALLET] window.activeWallet:', aw,
                 '| currentUserData:', ud,
                 '| allocated:', allocated, '| consumed:', consumed, '| remaining:', remaining);
     if (remaining <= 0) {
