@@ -303,6 +303,29 @@ def cron_sweep():
     if not ok:
         return jsonify({"error": err}), 401 if "Missing" in err else 403
 
+    # ── Kill Switch Gate (V24.1) ──────────────────────────────────────────────
+    # If the admin has activated the global kill switch via POST /api/l0/kill-switch,
+    # skip ALL campaign processing and return 200 (so Cloud Scheduler doesn't retry).
+    try:
+        _ks_doc = _db().collection("system_telemetry").document("kill_switch").get()
+        _ks_data = _ks_doc.to_dict() or {} if _ks_doc.exists else {}
+        if _ks_data.get("active") is True:
+            log.info(
+                "kill_switch_active",
+                activated_by=_ks_data.get("activated_by", "unknown"),
+                activated_at=str(_ks_data.get("activated_at", "")),
+                message="Sweep aborted — kill switch is engaged.",
+            )
+            return jsonify({
+                "message": "Kill switch active — sweep skipped.",
+                "kill_switch_active": True,
+                "activated_by": _ks_data.get("activated_by", "unknown"),
+            }), 200
+    except Exception as _ks_err:
+        # Fail-open: if we can't read the kill switch, proceed with sweep
+        log.warning("kill_switch_read_failed", error=str(_ks_err),
+                    fallback="Proceeding with sweep despite kill-switch read failure.")
+
     now_utc = datetime.datetime.now(datetime.timezone.utc)
 
     # ── Task 1: OIDC config pre-flight ────────────────────────────────────────

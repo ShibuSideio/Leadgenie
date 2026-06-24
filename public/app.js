@@ -567,10 +567,6 @@ async function loadMe() {
                 if (tosModal) tosModal.style.display = 'flex';
             }
 
-            const hookInput = document.getElementById('crm-webhook-url');
-            if (hookInput && data.crm_webhook_url) {
-                hookInput.value = data.crm_webhook_url;
-            }
             window.currentUserData = data;
 
             // ── V23.5: Inbound Radar widget bootstrap ────────────────────────────
@@ -1061,20 +1057,7 @@ window.filterLeadsByCampaign = function(campaignId) {
     renderLeads();
 };
 
-// CRM Webhook save — called by "Save Integration" button in settings modal
-window.saveCRMWebhook = async function() {
-    const url = document.getElementById('crm-webhook-url')?.value?.trim();
-    if (!url) { showToast('Please enter a webhook URL.', 'error'); return; }
-    try {
-        const success = await performApiMutation('/api/me', 'PUT', { crm_webhook_url: url });
-        if (success) {
-            if (window.currentUserData) window.currentUserData.crm_webhook_url = url;
-            showToast('CRM integration saved!', 'success');
-        }
-    } catch(err) {
-        showToast('Failed to save webhook URL.', 'error');
-    }
-};
+
 
 window.updateCampaignAction = async function(id) {
     const nameInput = document.getElementById(`edit-camp-name-${id}`);
@@ -1479,6 +1462,31 @@ window.switchTab = function(tabName) {
         const l0Tab = document.getElementById('tab-l0-admin');
         if (l0Tab) l0Tab.classList.add('active');
         fetchL0Telemetry();
+        // Fetch pending users badge
+        (async function() {
+            try {
+                var user = firebase.auth().currentUser;
+                if (!user) return;
+                var token = await user.getIdToken();
+                var resp = await fetch(API_BASE + '/api/l0/pending-count', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                if (resp.ok) {
+                    var json = await resp.json();
+                    var count = (json.data || {}).pending_count || 0;
+                    var tabBtn = document.getElementById('tab-l0-admin');
+                    if (tabBtn && count > 0) {
+                        var existing = tabBtn.querySelector('.admin-badge');
+                        if (existing) existing.remove();
+                        var badge = document.createElement('span');
+                        badge.className = 'admin-badge';
+                        badge.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:0.65rem;font-weight:700;margin-left:6px;padding:0 5px;';
+                        badge.textContent = count;
+                        tabBtn.appendChild(badge);
+                    }
+                }
+            } catch(e) { /* silent — badge is non-critical */ }
+        })();
     } else if (tabName === 'macro') {
         show('view-macro');
         if (typeof fetchMacroTrends === 'function') fetchMacroTrends();
@@ -1767,10 +1775,7 @@ window.mintCredentials = async function(tenantId) {
     }
 };
 
-window.sendEmailReport = function() {
-    showToast('Connecting to Cloud Run SMTP queue...', 'info');
-    setTimeout(() => { showToast('Enterprise PDF dispatched to your registered email.', 'success'); }, 1500);
-};
+
 
 // =============================================================================
 // L0 SUPER ADMIN — TAB SYSTEM
@@ -1784,7 +1789,7 @@ window.l0SwitchTab = function(tab) {
         return;
     }
     // Hide all panels, deactivate all tab buttons
-    ['tenants','operations','ledger','health','serper'].forEach(t => {
+    ['tenants','operations','ledger','health','serper','radar','credits','audit'].forEach(t => {
         const panel = document.getElementById(`l0-panel-${t}`);
         const btn   = document.getElementById(`l0-tab-${t}`);
         if (panel) panel.classList.remove('active');
@@ -1802,6 +1807,9 @@ window.l0SwitchTab = function(tab) {
     if (tab === 'ledger')     fetchShadowLedger();
     if (tab === 'health')     fetchSystemHealth();
     if (tab === 'serper')     fetchSerperAuditLogs();
+    if (tab === 'radar')      fetchRadarStatus();
+    if (tab === 'credits')    fetchCreditTrends();
+    if (tab === 'audit')      fetchAuditLog();
 };
 
 window.l0RefreshCurrentTab = function() {
@@ -2280,6 +2288,9 @@ window.fetchSystemHealth = async function() {
                 : 'N/A';
         }
 
+        // Load kill switch state from health data
+        loadKillSwitchState(d);
+
         showToast('System health loaded.', 'success');
     } catch(err) {
         console.error('[System Health]', err);
@@ -2287,6 +2298,204 @@ window.fetchSystemHealth = async function() {
         showToast('System health load failed: ' + err.message, 'error');
     }
 };
+
+// =============================================================================
+// L0 ADMIN — RADAR STATUS
+// =============================================================================
+window.fetchRadarStatus = async function() {
+    var tableBody = document.getElementById('l0-radar-table');
+    if (tableBody) tableBody.innerHTML = '<tr><td colspan="6" style="padding:20px; text-align:center; color:var(--text-muted);">&#8987; Loading radar data&hellip;</td></tr>';
+    try {
+        var user = firebase.auth().currentUser;
+        if (!user) return;
+        var token = await user.getIdToken();
+        var resp = await fetch(API_BASE + '/api/l0/radar-status', {
+            headers: { 'Authorization': 'Bearer ' + token }
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        var json = await resp.json();
+        var rows = json.data || [];
+        if (rows.length === 0) {
+            if (tableBody) tableBody.innerHTML = '<tr><td colspan="6" style="padding:20px; text-align:center; color:var(--text-muted);">No radar data available.</td></tr>';
+            return;
+        }
+        var html = '';
+        rows.forEach(function(r) {
+            var tenantShort = _escapeHTML((r.tenant_id || '').substring(0, 8));
+            var statusColor = r.status === 'active' ? '#10b981' : r.status === 'paused' ? '#f59e0b' : '#6b7280';
+            html += '<tr style="border-bottom:1px solid var(--glass-border);">' +
+                '<td style="padding:10px 12px; font-family:monospace; font-size:0.78rem;">' + tenantShort + '</td>' +
+                '<td style="padding:10px 12px;">' + _escapeHTML(r.email || '\u2014') + '</td>' +
+                '<td style="padding:10px 12px;"><span style="color:' + statusColor + '; font-weight:600;">' + _escapeHTML(r.status || 'unknown') + '</span></td>' +
+                '<td style="padding:10px 12px; font-size:0.8rem; color:var(--text-muted);">' + _escapeHTML(r.last_run || '\u2014') + '</td>' +
+                '<td style="padding:10px 12px; text-align:center; font-weight:600;">' + (r.signals_per_week != null ? r.signals_per_week : '\u2014') + '</td>' +
+                '<td style="padding:10px 12px; font-size:0.8rem;">' + _escapeHTML(r.top_keywords || '\u2014') + '</td>' +
+                '</tr>';
+        });
+        if (tableBody) tableBody.innerHTML = html;
+        showToast('Radar status loaded.', 'success');
+    } catch(err) {
+        console.error('[Radar]', err);
+        if (tableBody) tableBody.innerHTML = '<tr><td colspan="6" style="padding:20px; text-align:center; color:#ef4444;">Error: ' + _escapeHTML(err.message) + '</td></tr>';
+        showToast('Radar load failed: ' + err.message, 'error');
+    }
+};
+
+// =============================================================================
+// L0 ADMIN — CREDIT TRENDS
+// =============================================================================
+window.fetchCreditTrends = async function() {
+    var chartEl = document.getElementById('l0-credit-chart');
+    var tableBody = document.getElementById('l0-credit-table');
+    var totalEl = document.getElementById('l0-credits-total-30d');
+    var avgEl = document.getElementById('l0-credits-daily-avg');
+    var projEl = document.getElementById('l0-credits-projected');
+    if (tableBody) tableBody.innerHTML = '<tr><td colspan="3" style="padding:20px; text-align:center; color:var(--text-muted);">&#8987; Loading credit data&hellip;</td></tr>';
+    try {
+        var user = firebase.auth().currentUser;
+        if (!user) return;
+        var token = await user.getIdToken();
+        var resp = await fetch(API_BASE + '/api/l0/credit-trends', {
+            headers: { 'Authorization': 'Bearer ' + token }
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        var json = await resp.json();
+        var days = json.data || [];
+        var summary = json.summary || {};
+
+        // Summary stats
+        if (totalEl) totalEl.textContent = (summary.total_credits_30d || 0).toLocaleString();
+        if (avgEl) avgEl.textContent = (summary.daily_avg || 0).toFixed(1);
+        if (projEl) projEl.textContent = (summary.projected_monthly || 0).toLocaleString();
+
+        // CSS Bar Chart
+        if (chartEl && days.length > 0) {
+            var maxCredits = Math.max.apply(null, days.map(function(d) { return d.credits || 0; })) || 1;
+            var chartHtml = '';
+            days.forEach(function(d) {
+                var pct = Math.round(((d.credits || 0) / maxCredits) * 100);
+                var barH = Math.max(4, pct);
+                chartHtml += '<div style="flex:1; min-width:8px; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%;" title="' + _escapeHTML(d.date || '') + ': ' + (d.credits || 0) + ' credits">' +
+                    '<div style="width:100%; max-width:24px; height:' + barH + '%; background:linear-gradient(180deg,#7c3aed,#4f46e5); border-radius:4px 4px 0 0; transition:height 0.3s;"></div>' +
+                    '</div>';
+            });
+            chartEl.innerHTML = chartHtml;
+        } else if (chartEl) {
+            chartEl.innerHTML = '<div style="color:var(--text-muted); font-size:0.85rem; width:100%; text-align:center; align-self:center;">No chart data available.</div>';
+        }
+
+        // Detail Table
+        if (days.length === 0) {
+            if (tableBody) tableBody.innerHTML = '<tr><td colspan="3" style="padding:20px; text-align:center; color:var(--text-muted);">No credit data available.</td></tr>';
+            return;
+        }
+        var html = '';
+        days.forEach(function(d) {
+            html += '<tr style="border-bottom:1px solid var(--glass-border);">' +
+                '<td style="padding:10px 12px;">' + _escapeHTML(d.date || '\u2014') + '</td>' +
+                '<td style="padding:10px 12px; text-align:right; font-weight:600;">' + (d.credits || 0).toLocaleString() + '</td>' +
+                '<td style="padding:10px 12px; text-align:right;">' + (d.query_count || 0).toLocaleString() + '</td>' +
+                '</tr>';
+        });
+        if (tableBody) tableBody.innerHTML = html;
+        showToast('Credit trends loaded.', 'success');
+    } catch(err) {
+        console.error('[Credit Trends]', err);
+        if (tableBody) tableBody.innerHTML = '<tr><td colspan="3" style="padding:20px; text-align:center; color:#ef4444;">Error: ' + _escapeHTML(err.message) + '</td></tr>';
+        showToast('Credit trends load failed: ' + err.message, 'error');
+    }
+};
+
+// =============================================================================
+// L0 ADMIN — AUDIT TRAIL
+// =============================================================================
+window.fetchAuditLog = async function() {
+    var tableBody = document.getElementById('l0-audit-table');
+    if (tableBody) tableBody.innerHTML = '<tr><td colspan="5" style="padding:20px; text-align:center; color:var(--text-muted);">&#8987; Loading audit trail&hellip;</td></tr>';
+    try {
+        var user = firebase.auth().currentUser;
+        if (!user) return;
+        var token = await user.getIdToken();
+        var resp = await fetch(API_BASE + '/api/l0/audit-log', {
+            headers: { 'Authorization': 'Bearer ' + token }
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        var json = await resp.json();
+        var entries = json.data || [];
+        if (entries.length === 0) {
+            if (tableBody) tableBody.innerHTML = '<tr><td colspan="5" style="padding:20px; text-align:center; color:var(--text-muted);">No audit entries found.</td></tr>';
+            return;
+        }
+        var html = '';
+        entries.forEach(function(e) {
+            var ts = e.timestamp ? new Date(e.timestamp).toLocaleString() : '\u2014';
+            html += '<tr style="border-bottom:1px solid var(--glass-border);">' +
+                '<td style="padding:10px 12px; font-size:0.8rem; color:var(--text-muted); white-space:nowrap;">' + _escapeHTML(ts) + '</td>' +
+                '<td style="padding:10px 12px;">' + _escapeHTML(e.admin || '\u2014') + '</td>' +
+                '<td style="padding:10px 12px;"><span style="background:rgba(79,70,229,0.1); color:#4f46e5; padding:2px 8px; border-radius:4px; font-size:0.78rem; font-weight:600;">' + _escapeHTML(e.action || '\u2014') + '</span></td>' +
+                '<td style="padding:10px 12px; font-size:0.85rem;">' + _escapeHTML(e.target || '\u2014') + '</td>' +
+                '<td style="padding:10px 12px; font-size:0.8rem; color:var(--text-muted); max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + _escapeHTML(e.details || '\u2014') + '</td>' +
+                '</tr>';
+        });
+        if (tableBody) tableBody.innerHTML = html;
+        showToast('Audit trail loaded.', 'success');
+    } catch(err) {
+        console.error('[Audit Trail]', err);
+        if (tableBody) tableBody.innerHTML = '<tr><td colspan="5" style="padding:20px; text-align:center; color:#ef4444;">Error: ' + _escapeHTML(err.message) + '</td></tr>';
+        showToast('Audit trail load failed: ' + err.message, 'error');
+    }
+};
+
+// =============================================================================
+// L0 ADMIN — KILL SWITCH
+// =============================================================================
+window.toggleKillSwitch = async function(action) {
+    if (!action) action = 'pause';
+    var confirmMsg = action === 'pause'
+        ? 'Are you sure you want to PAUSE all pipelines? This will stop all lead processing immediately.'
+        : 'Are you sure you want to RESUME all pipelines?';
+    if (!confirm(confirmMsg)) return;
+    try {
+        var user = firebase.auth().currentUser;
+        if (!user) return;
+        var token = await user.getIdToken();
+        var resp = await fetch(API_BASE + '/api/l0/kill-switch', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: action })
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        var json = await resp.json();
+        var newState = (json.data || {}).state || action;
+        _renderKillSwitchButton(newState === 'paused' || action === 'pause');
+        showToast(action === 'pause' ? 'All pipelines PAUSED.' : 'Pipelines RESUMED.', action === 'pause' ? 'error' : 'success');
+    } catch(err) {
+        console.error('[Kill Switch]', err);
+        showToast('Kill switch failed: ' + err.message, 'error');
+    }
+};
+
+window.loadKillSwitchState = function(healthData) {
+    if (!healthData) return;
+    var isPaused = healthData.pipelines_paused === true;
+    _renderKillSwitchButton(isPaused);
+};
+
+function _renderKillSwitchButton(isPaused) {
+    var btn = document.getElementById('l0-kill-switch-btn');
+    if (!btn) return;
+    if (isPaused) {
+        btn.textContent = '\u2705 Resume All Pipelines';
+        btn.dataset.action = 'resume';
+        btn.style.background = '#059669';
+        btn.style.boxShadow = '0 4px 14px rgba(5,150,105,0.3)';
+    } else {
+        btn.textContent = '\ud83d\uded1 Emergency Pause All Pipelines';
+        btn.dataset.action = 'pause';
+        btn.style.background = '#dc2626';
+        btn.style.boxShadow = '0 4px 14px rgba(220,38,38,0.3)';
+    }
+}
 
 window.loadMoreLeads = function() {
     showToast('Historical offset cursors must be mapped in Orchestrator Endpoint v2.', 'info');
@@ -2507,7 +2716,7 @@ const PLATFORM_META = {
     reddit:    { icon: '&#x1F47E;', label: 'Open Reddit'      },
     quora:     { icon: '&#x1F4AC;', label: 'Open Quora'       },
     phone:     { icon: '&#x1F4DE;', label: 'Call'             },
-    whatsapp:  { icon: '&#x1F4AC;', label: 'WhatsApp'         },
+
     website:   { icon: '&#x1F310;', label: 'Visit Website'    },
     other:     { icon: '&#x1F4CB;', label: 'Contact'          },
 };

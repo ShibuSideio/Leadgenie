@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.0.3'; // V24.0.3: Agent modal UI redesign
+const CACHE_NAME = 'sideio-v24.1.0'; // V24.1.0: Admin audit trail, radar, credit trends, kill switch
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=24.0.3',
-    '/styles.css?v=24.0.3',
+    '/app.js?v=24.1.0',
+    '/styles.css?v=24.1.0',
     '/manifest.json'
 ];
 

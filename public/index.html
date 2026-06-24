@@ -50,7 +50,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
-    <link rel="stylesheet" href="styles.css?v=24.0.3">
+    <link rel="stylesheet" href="styles.css?v=24.1.0">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -295,7 +295,7 @@
                 <!-- Actions -->
                 <div class="ud-divider"></div>
                 <button class="ud-item" onclick="dtReanalyzeWebsite();">&#128269; Re-analyze My Website</button>
-                <button class="ud-item" onclick="openSettingsModal(); toggleUserDropdown();">&#128279; Webhook Integration</button>
+
                 <button class="ud-item" onclick="openSettingsModal(); toggleUserDropdown();">&#9881;&#65039; Settings</button>
                 <div class="ud-divider"></div>
                 <button class="ud-item ud-item-danger" onclick="firebase.auth().signOut()">Sign Out</button>
@@ -517,7 +517,7 @@
                 <button class="primary-btn full-width" onclick="showToast('Aggregating Intelligence Arrays...', 'info')">Generate Report</button>
                 <div style="display:flex; gap:8px; margin-top:12px;">
                     <button class="secondary-btn full-width" style="font-size:0.8rem;" onclick="window.print()">Download PDF</button>
-                    <button class="secondary-btn full-width" style="font-size:0.8rem;" onclick="sendEmailReport()">Email Report</button>
+
                 </div>
             </div>
         </section>
@@ -561,6 +561,9 @@
                 <button class="l0-tab"        id="l0-tab-ledger"      onclick="l0SwitchTab('ledger')" role="tab" aria-selected="false">&#128203; Shadow Ledger</button>
                 <button class="l0-tab"        id="l0-tab-health"      onclick="l0SwitchTab('health')" role="tab" aria-selected="false">&#128200; System Health</button>
                 <button class="l0-tab"        id="l0-tab-serper"      onclick="l0SwitchTab('serper')" role="tab" aria-selected="false">&#128269; Query Audit</button>
+                <button class="l0-tab"        id="l0-tab-radar"       onclick="l0SwitchTab('radar')" role="tab" aria-selected="false" aria-label="Radar status">&#128225; Radar</button>
+                <button class="l0-tab"        id="l0-tab-credits"     onclick="l0SwitchTab('credits')" role="tab" aria-selected="false" aria-label="Credit trends">&#128202; Credit Trends</button>
+                <button class="l0-tab"        id="l0-tab-audit"       onclick="l0SwitchTab('audit')" role="tab" aria-selected="false" aria-label="Audit trail">&#128220; Audit Trail</button>
             </div>
 
             <!-- Tab: Tenants (existing content) -->
@@ -665,6 +668,12 @@
                 <div style="text-align:center; margin-top:24px;">
                     <button class="primary-btn" onclick="fetchSystemHealth()" style="min-height:44px;">&#8635; Load System Telemetry</button>
                 </div>
+                <!-- Kill Switch -->
+                <div id="l0-kill-switch-container" style="margin-top:24px; text-align:center; padding:20px; background:#fff; border-radius:16px; border:2px solid #fecaca; box-shadow:0 2px 12px rgba(0,0,0,0.05);">
+                    <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:14px;">&#128680; Pipeline Emergency Control</div>
+                    <button id="l0-kill-switch-btn" class="primary-btn" onclick="toggleKillSwitch(this.dataset.action)" data-action="pause" aria-label="Emergency pipeline toggle" style="min-height:50px; font-size:1rem; font-weight:700; padding:14px 36px; border-radius:12px; background:#dc2626; border:none; color:#fff; cursor:pointer; transition:all 0.2s; box-shadow:0 4px 14px rgba(220,38,38,0.3);">&#128721; Emergency Pause All Pipelines</button>
+                    <p style="margin-top:10px; font-size:0.72rem; color:var(--text-muted);">Immediately halts all active pipeline processing across all tenants.</p>
+                </div>
             </div>
 
             <!-- Tab: Serper Query Audit (static shell — JS populates tbody on l0SwitchTab('serper')) -->
@@ -724,6 +733,95 @@
                     </table>
                 </div>
             </div><!-- /l0-panel-serper -->
+
+            <!-- Tab: Radar -->
+            <div id="l0-panel-radar" class="l0-panel">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:16px; margin-bottom:12px;">
+                    <div style="font-size:0.85rem; color:var(--text-muted);">Tenant radar status &mdash; pipeline activity, signals, and keyword concentration.</div>
+                    <button class="secondary-btn" onclick="fetchRadarStatus()" style="font-size:0.8rem;" aria-label="Refresh radar">&#8635; Refresh</button>
+                </div>
+                <div class="stats-box" style="background:#fff; padding:0; overflow:hidden;">
+                    <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.85rem;">
+                        <thead style="background:rgba(79,70,229,0.05); border-bottom:1px solid var(--glass-border);">
+                            <tr>
+                                <th style="padding:10px 12px;">Tenant</th>
+                                <th style="padding:10px 12px;">Email</th>
+                                <th style="padding:10px 12px;">Status</th>
+                                <th style="padding:10px 12px;">Last Run</th>
+                                <th style="padding:10px 12px; text-align:center;">Signals/Week</th>
+                                <th style="padding:10px 12px;">Top Keywords</th>
+                            </tr>
+                        </thead>
+                        <tbody id="l0-radar-table">
+                            <tr><td colspan="6" style="padding:20px; text-align:center; color:var(--text-muted);">Click Refresh or switch to this tab to load data.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Tab: Credit Trends -->
+            <div id="l0-panel-credits" class="l0-panel">
+                <div style="margin-top:16px; margin-bottom:16px;">
+                    <div style="font-size:0.85rem; color:var(--text-muted); margin-bottom:16px;">Platform-wide credit usage trends &mdash; 30-day rolling window.</div>
+                    <!-- Summary Stats -->
+                    <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:20px;">
+                        <div class="stats-box" style="background:#fff; text-align:center;">
+                            <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:6px;">Total Credits (30d)</div>
+                            <div id="l0-credits-total-30d" style="font-size:1.6rem; font-weight:700; color:var(--primary);">&#8212;</div>
+                        </div>
+                        <div class="stats-box" style="background:#fff; text-align:center;">
+                            <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:6px;">Daily Average</div>
+                            <div id="l0-credits-daily-avg" style="font-size:1.6rem; font-weight:700; color:#10b981;">&#8212;</div>
+                        </div>
+                        <div class="stats-box" style="background:#fff; text-align:center;">
+                            <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:6px;">Projected Monthly</div>
+                            <div id="l0-credits-projected" style="font-size:1.6rem; font-weight:700; color:#f59e0b;">&#8212;</div>
+                        </div>
+                    </div>
+                    <!-- CSS Bar Chart -->
+                    <div style="font-size:0.72rem; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; color:var(--text-muted); margin-bottom:10px;">&#128202; Daily Credit Usage</div>
+                    <div id="l0-credit-chart" style="display:flex; align-items:flex-end; gap:3px; height:120px; padding:10px; background:#fff; border-radius:12px; border:1px solid var(--glass-border); margin-bottom:20px; overflow-x:auto;"></div>
+                    <!-- Detail Table -->
+                    <div class="stats-box" style="background:#fff; padding:0; overflow:hidden;">
+                        <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.85rem;">
+                            <thead style="background:rgba(79,70,229,0.05); border-bottom:1px solid var(--glass-border);">
+                                <tr>
+                                    <th style="padding:10px 12px;">Date</th>
+                                    <th style="padding:10px 12px; text-align:right;">Credits Used</th>
+                                    <th style="padding:10px 12px; text-align:right;">Query Count</th>
+                                </tr>
+                            </thead>
+                            <tbody id="l0-credit-table">
+                                <tr><td colspan="3" style="padding:20px; text-align:center; color:var(--text-muted);">Loading credit data...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab: Audit Trail -->
+            <div id="l0-panel-audit" class="l0-panel">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:16px; margin-bottom:12px;">
+                    <div style="font-size:0.85rem; color:var(--text-muted);">Admin action log &mdash; all L0 operations are recorded here.</div>
+                    <button class="secondary-btn" onclick="fetchAuditLog()" style="font-size:0.8rem;" aria-label="Refresh audit log">&#8635; Refresh</button>
+                </div>
+                <div class="stats-box" style="background:#fff; padding:0; overflow:hidden;">
+                    <table style="width:100%; text-align:left; border-collapse:collapse; font-size:0.85rem;">
+                        <thead style="background:rgba(220,38,38,0.05); border-bottom:1px solid var(--glass-border);">
+                            <tr>
+                                <th style="padding:10px 12px;">Time</th>
+                                <th style="padding:10px 12px;">Admin</th>
+                                <th style="padding:10px 12px;">Action</th>
+                                <th style="padding:10px 12px;">Target</th>
+                                <th style="padding:10px 12px;">Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="l0-audit-table">
+                            <tr><td colspan="5" style="padding:20px; text-align:center; color:var(--text-muted);">Click Refresh to load audit trail.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
 
         </section>
 
@@ -1173,11 +1271,7 @@
         <div style="font-size:1.8rem; margin-bottom:8px; display:block;">&#9881;&#65039;</div>
         <h2 style="font-size:1.5rem; font-weight:700; margin-bottom:24px;">Integrations &amp; Settings</h2>
         <div class="settings-section">
-            <h3 class="settings-section-title">CRM Webhook</h3>
-            <p class="settings-section-desc">Automatically push converted leads to your CRM, Make.com, or Zapier flow.</p>
-            <label class="settings-label" for="crm-webhook-url">Webhook URL</label>
-            <input type="text" id="crm-webhook-url" class="settings-input" placeholder="https://hook.make.com/..." aria-label="CRM webhook URL">
-            <button class="primary-btn" style="margin-top:12px; width:100%;" onclick="saveCRMWebhook()">Save Integration</button>
+            <p class="settings-section-desc" style="color:var(--text-muted); text-align:center; padding:20px 0;">No integrations configured.</p>
         </div>
     </div>
 </div>
@@ -1422,6 +1516,6 @@
         });
     }
 </script>
-<script src="app.js?v=24.0.3"></script>
+<script src="app.js?v=24.1.0"></script>
 </body>
 </html>

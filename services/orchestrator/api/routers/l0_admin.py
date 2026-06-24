@@ -12,6 +12,10 @@ Routes:
   POST /api/l0/users/<uid>/approve
   GET  /api/l0/system-health
   GET  /api/l0/shadow-ledger
+  GET  /api/l0/audit-log
+  GET  /api/l0/radar-status
+  POST /api/l0/kill-switch
+  GET  /api/l0/credit-trends
   GET  /api/internal/l0/operations-telemetry
 """
 from __future__ import annotations
@@ -80,6 +84,27 @@ def _sanitize(doc) -> dict:
     raw["id"] = doc.id
     # Build a new dict (do NOT mutate while iterating)
     return {k: _safe_val(v) for k, v in raw.items()}
+
+
+def _write_audit_log(action: str, target_uid: str, admin_uid: str, payload: dict):
+    """Write an entry to the admin_audit_log Firestore collection.
+
+    Called after every admin mutation (suspend, approve, mint) succeeds.
+    Never raises — errors are logged but do not fail the parent request.
+    """
+    from google.cloud import firestore
+    try:
+        _db().collection("admin_audit_log").add({
+            "action": action,
+            "target_uid": target_uid,
+            "admin_uid": admin_uid,
+            "timestamp": firestore.SERVER_TIMESTAMP,
+            "payload": payload,
+            "ip": request.remote_addr or "unknown",
+        })
+    except Exception as exc:
+        log.error("audit_log_write_failed", action=action, target_uid=target_uid,
+                  admin_uid=admin_uid, error=str(exc))
 
 
 # =============================================================================
@@ -183,6 +208,7 @@ def suspend_user(uid, tenant_id, user_role):
     if not target_uid:
         return jsonify({"error": "Missing uid"}), 400
     _db().collection("users").document(target_uid).update({"is_active": target_state})
+    _write_audit_log("suspend", target_uid, uid, data)
     return jsonify({"status": "success", "message": "Suspension toggled."}), 200
 
 
@@ -201,6 +227,7 @@ def mint_credits(uid, tenant_id, user_role, target_tenant):
         {"wallet.allocated_credits": firestore.Increment(int(amount))}
     )
     log.info("credits_minted", target=target_tenant, amount=int(amount))
+    _write_audit_log("mint", target_tenant, uid, request.json or {})
     return jsonify({"status": "success", "message": f"Minted {int(amount)} credits."}), 200
 
 
@@ -222,6 +249,7 @@ def approve_user(uid, tenant_id, user_role, target_tenant):
         "wallet.allocated_credits": firestore.Increment(amount),
     })
     log.info("user_approved", target=target_tenant, credits=amount, days=days)
+    _write_audit_log("approve", target_tenant, uid, payload)
     return jsonify({"status": "success", "message": f"Approved with {amount} credits for {days} days."}), 200
 
 
@@ -463,3 +491,142 @@ def get_ops_telemetry(uid, tenant_id, user_role):
         _ops_cache[CACHE_KEY] = {"data": payload, "cached_at": now}
 
     return jsonify({"status": "success", "cache_hit": False, "data": payload}), 200
+ 
+ 
+# =============================================================================
+# GET /api/l0/audit-log
+# =============================================================================
+@bp.route("/api/l0/audit-log", methods=["GET"])
+@require_auth
+@require_super_admin
+def get_audit_log(uid, tenant_id, user_role):
+    """Return the last 100 admin audit log entries, sorted by timestamp desc."""
+    db = _db()
+    try:
+        from google.cloud import firestore
+        docs = (
+            db.collection("admin_audit_log")
+              .order_by("timestamp", direction=firestore.Query.DESCENDING)
+              .limit(100)
+              .stream()
+        )
+        logs = []
+        for doc in docs:
+            d = doc.to_dict() or {}
+            logs.append({
+                "action": d.get("action", ""),
+                "target_uid": d.get("target_uid", ""),
+                "admin_uid": d.get("admin_uid", ""),
+                "timestamp": _safe_val(d.get("timestamp")),
+                "payload": _safe_val(d.get("payload", {})),
+            })
+        return jsonify({"logs": logs}), 200
+    except Exception as exc:
+        log.error("audit_log_read_failed", error=str(exc))
+        return jsonify({"error": "Failed to read audit log", "message": str(exc)}), 500
+
+
+# =============================================================================
+# GET /api/l0/radar-status
+# =============================================================================
+@bp.route("/api/l0/radar-status", methods=["GET"])
+@require_auth
+@require_super_admin
+def get_radar_status(uid, tenant_id, user_role):
+    """Return inbound radar status for all users with radar enabled."""
+    db = _db()
+    try:
+        docs = (
+            db.collection("users")
+              .where(filter=FieldFilter("inbound_radar.enabled", "==", True))
+              .stream()
+        )
+        results = []
+        for doc in docs:
+            d = doc.to_dict() or {}
+            radar = d.get("inbound_radar") or {}
+            results.append({
+                "uid": doc.id[:8],
+                "email": d.get("email", ""),
+                "enabled": radar.get("enabled", False),
+                "last_ran_at": _safe_val(radar.get("last_ran_at")),
+                "signals_this_week": radar.get("signals_this_week", 0),
+                "top_pain_keywords": radar.get("top_pain_keywords", []),
+            })
+        return jsonify({"status": "success", "data": results}), 200
+    except Exception as exc:
+        log.error("radar_status_read_failed", error=str(exc))
+        return jsonify({"error": "Failed to read radar status", "message": str(exc)}), 500
+
+
+# =============================================================================
+# POST /api/l0/kill-switch
+# =============================================================================
+@bp.route("/api/l0/kill-switch", methods=["POST"])
+@require_auth
+@require_super_admin
+def kill_switch(uid, tenant_id, user_role):
+    """Pause or resume all campaign processing via a system-wide kill switch."""
+    from google.cloud import firestore
+    data = request.json or {}
+    action = data.get("action")
+    if action not in ("pause", "resume"):
+        return jsonify({"error": "Invalid action. Must be 'pause' or 'resume'."}), 400
+
+    db = _db()
+    try:
+        if action == "pause":
+            db.collection("system_telemetry").document("kill_switch").set({
+                "active": True,
+                "activated_by": uid,
+                "activated_at": firestore.SERVER_TIMESTAMP,
+            })
+            log.info("kill_switch_activated", admin_uid=uid)
+            _write_audit_log("kill_switch_pause", "system", uid, data)
+            return jsonify({"status": "success", "message": "System paused."}), 200
+        else:
+            db.collection("system_telemetry").document("kill_switch").set({
+                "active": False,
+                "deactivated_by": uid,
+                "deactivated_at": firestore.SERVER_TIMESTAMP,
+            })
+            log.info("kill_switch_deactivated", admin_uid=uid)
+            _write_audit_log("kill_switch_resume", "system", uid, data)
+            return jsonify({"status": "success", "message": "System resumed."}), 200
+    except Exception as exc:
+        log.error("kill_switch_failed", action=action, error=str(exc))
+        return jsonify({"error": "Kill switch operation failed", "message": str(exc)}), 500
+
+
+# =============================================================================
+# GET /api/l0/credit-trends
+# =============================================================================
+@bp.route("/api/l0/credit-trends", methods=["GET"])
+@require_auth
+@require_super_admin
+def get_credit_trends(uid, tenant_id, user_role):
+    """Query BigQuery serper_audit_logs for 30-day credit usage trends."""
+    try:
+        from google.cloud import bigquery
+        bq = bigquery.Client(project=PROJECT_ID, location="asia-south1")
+        sql = """
+            SELECT DATE(timestamp) AS day,
+                   SUM(credit_cost) AS credits_used,
+                   COUNT(*)         AS query_count
+            FROM `lead-sniper-prod.swarm_analytics.serper_audit_logs`
+            WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+            GROUP BY day
+            ORDER BY day
+        """
+        rows = bq.query(sql).result()
+        trends = []
+        for row in rows:
+            trends.append({
+                "day": row.day.isoformat() if hasattr(row.day, "isoformat") else str(row.day),
+                "credits_used": int(row.credits_used or 0),
+                "query_count": int(row.query_count or 0),
+            })
+        return jsonify({"trends": trends}), 200
+    except Exception as exc:
+        log.error("credit_trends_query_failed", error=str(exc))
+        return jsonify({"error": "Credit trends query failed", "message": str(exc)}), 500
