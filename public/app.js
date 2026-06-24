@@ -5273,7 +5273,7 @@ window.loadAgents = async function loadAgents() {
         var agents = await resp.json();
 
         if (!agents.length) {
-            container.innerHTML = '<p class="sio-muted">No research agents yet. Create one to automate lead discovery.</p>';
+            container.innerHTML = '<p style="font-size:0.85rem;color:#9ca3af;text-align:center;padding:16px;">No research agents yet. Create one to automate lead discovery.</p>';
             return;
         }
 
@@ -5300,14 +5300,14 @@ window.loadAgents = async function loadAgents() {
                     '<span>\u{1F550} Last: ' + lastRan + '</span>' +
                 '</div>' +
                 '<div class="agent-actions">' +
-                    '<button class="sio-btn sio-btn-sm sio-btn-primary" onclick="runAgentNow(\'' + _escapeHTML(a.id) + '\')" aria-label="Run agent now">\u25B6 Run Now</button>' +
-                    '<button class="sio-btn sio-btn-sm sio-btn-secondary" onclick="toggleAgent(\'' + _escapeHTML(a.id) + '\', \'' + toggleTarget + '\')" aria-label="Toggle agent">' + toggleLabel + '</button>' +
-                    '<button class="sio-btn sio-btn-sm sio-btn-danger" onclick="deleteAgent(\'' + _escapeHTML(a.id) + '\')" aria-label="Delete agent">\u{1F5D1}</button>' +
+                    '<button style="padding:5px 12px;border-radius:8px;border:none;background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;font-family:Inter,sans-serif;font-size:0.75rem;font-weight:600;cursor:pointer;" onclick="runAgentNow(\'' + _escapeHTML(a.id) + '\')" aria-label="Run agent now">\u25B6 Run Now</button>' +
+                    '<button style="padding:5px 12px;border-radius:8px;border:1px solid #d1d5db;background:#fff;color:#374151;font-family:Inter,sans-serif;font-size:0.75rem;font-weight:500;cursor:pointer;" onclick="toggleAgent(\'' + _escapeHTML(a.id) + '\', \'' + toggleTarget + '\')" aria-label="Toggle agent">' + toggleLabel + '</button>' +
+                    '<button style="padding:5px 12px;border-radius:8px;border:1px solid rgba(255,59,48,0.2);background:rgba(255,59,48,0.08);color:#dc2626;font-family:Inter,sans-serif;font-size:0.75rem;font-weight:500;cursor:pointer;" onclick="deleteAgent(\'' + _escapeHTML(a.id) + '\')" aria-label="Delete agent">\u{1F5D1}</button>' +
                 '</div>' +
             '</div>';
         }).join('');
     } catch (err) {
-        container.innerHTML = '<p class="sio-muted">Failed to load agents.</p>';
+        container.innerHTML = '<p style="font-size:0.85rem;color:#9ca3af;text-align:center;padding:16px;">Failed to load agents.</p>';
         if (window.SIO_DEBUG) console.error('[V24.0 Agents]', err);
     }
 };

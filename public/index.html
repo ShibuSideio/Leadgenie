@@ -50,7 +50,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
-    <link rel="stylesheet" href="styles.css?v=24.0.2">
+    <link rel="stylesheet" href="styles.css?v=24.0.3">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -750,58 +750,96 @@
             <div id="agents-panel" class="agents-panel" style="margin-top:20px;">
                 <div class="agents-header">
                     <h3>&#129302; Research Agents</h3>
-                    <button type="button" class="sio-btn sio-btn-primary sio-btn-sm"
-                            onclick="showCreateAgentModal()" aria-label="Create new research agent">
+                    <button type="button"
+                            onclick="showCreateAgentModal()" aria-label="Create new research agent"
+                            style="padding:8px 16px; border-radius:10px; border:none; background:linear-gradient(135deg,#7c3aed,#4f46e5); color:#fff; font-family:'Inter',sans-serif; font-size:0.82rem; font-weight:600; cursor:pointer; box-shadow:0 2px 8px rgba(124,58,237,0.25); transition:transform 0.15s;">
                         + New Agent
                     </button>
                 </div>
                 <div id="agents-list" class="agents-list">
-                    <p class="sio-muted">Loading agents...</p>
+                    <p style="font-size:0.85rem;color:#9ca3af;text-align:center;padding:16px;">Loading agents...</p>
                 </div>
             </div>
         </section>
 
         <!-- V24.0: Create Agent Modal -->
-        <div id="create-agent-modal" class="sio-modal-overlay" style="display:none;" role="dialog" aria-label="Create Research Agent">
-            <div class="sio-modal" style="max-width:500px;">
-                <div class="sio-modal-header">
-                    <h3>&#129302; Create Research Agent</h3>
-                    <button class="sio-modal-close" onclick="closeModal('create-agent-modal')" aria-label="Close">&#10005;</button>
+        <div id="create-agent-modal" class="sio-modal-overlay" style="display:none;" role="dialog" aria-label="Create Research Agent" onclick="if(event.target===this)closeModal('create-agent-modal')">
+            <div class="sio-modal-box" style="max-width:500px;">
+                <button class="sio-modal-close" onclick="closeModal('create-agent-modal')" aria-label="Close">&#10005;</button>
+
+                <!-- Header -->
+                <div style="text-align:center; margin-bottom:24px;">
+                    <div style="width:56px; height:56px; border-radius:16px; background:linear-gradient(135deg,#7c3aed,#4f46e5); display:flex; align-items:center; justify-content:center; margin:0 auto 14px; font-size:1.5rem; box-shadow:0 8px 24px rgba(124,58,237,0.25);">🤖</div>
+                    <h2 style="font-size:1.35rem; font-weight:700; color:#111827; margin:0 0 6px;">Create Research Agent</h2>
+                    <p style="color:#6b7280; font-size:0.85rem; margin:0;">Deploy an autonomous agent to discover leads on autopilot</p>
                 </div>
-                <div class="sio-modal-body">
-                    <div class="sio-form-group">
-                        <label for="agent-name" class="sio-label">Agent Name</label>
-                        <input type="text" id="agent-name" class="sio-input"
-                               placeholder="e.g. Kochi Marketing Finder" aria-label="Agent name" maxlength="128">
+
+                <!-- Form Fields -->
+                <div style="display:flex; flex-direction:column; gap:16px; margin-bottom:24px;">
+
+                    <!-- Agent Name -->
+                    <div>
+                        <label for="agent-name" style="display:block; font-size:0.75rem; font-weight:600; color:#374151; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">Agent Name <span style="color:#ef4444;">*</span></label>
+                        <input type="text" id="agent-name"
+                               placeholder="e.g. Kochi Marketing Finder"
+                               maxlength="128"
+                               aria-label="Agent name"
+                               style="width:100%; padding:10px 14px; border:1.5px solid #d1d5db; border-radius:10px; font-family:'Inter',sans-serif; font-size:0.88rem; color:#111827; background:#fff; outline:none; transition:border-color 0.2s; box-sizing:border-box;"
+                               onfocus="this.style.borderColor='#7c3aed'" onblur="this.style.borderColor='#d1d5db'">
                     </div>
-                    <div class="sio-form-group">
-                        <label for="agent-prompt" class="sio-label">Research Prompt</label>
-                        <textarea id="agent-prompt" class="sio-input" rows="3"
+
+                    <!-- Research Prompt -->
+                    <div>
+                        <label for="agent-prompt" style="display:block; font-size:0.75rem; font-weight:600; color:#374151; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">Research Prompt <span style="color:#ef4444;">*</span></label>
+                        <textarea id="agent-prompt" rows="3"
                                   placeholder="e.g. Find companies in Kochi that posted about needing marketing help"
-                                  aria-label="Research prompt" maxlength="1000"></textarea>
+                                  maxlength="1000"
+                                  aria-label="Research prompt"
+                                  style="width:100%; padding:10px 14px; border:1.5px solid #d1d5db; border-radius:10px; font-family:'Inter',sans-serif; font-size:0.88rem; color:#111827; background:#fff; outline:none; resize:vertical; min-height:72px; transition:border-color 0.2s; box-sizing:border-box;"
+                                  onfocus="this.style.borderColor='#7c3aed'" onblur="this.style.borderColor='#d1d5db'"></textarea>
+                        <p style="margin:4px 0 0; font-size:0.72rem; color:#9ca3af;">Gemini will convert this into 3 optimized search queries automatically.</p>
                     </div>
-                    <div class="sio-form-group">
-                        <label for="agent-schedule" class="sio-label">Schedule</label>
-                        <select id="agent-schedule" class="sio-input" aria-label="Agent schedule">
-                            <option value="daily">Daily</option>
-                            <option value="biweekly">Twice a Week</option>
-                            <option value="weekly" selected>Weekly</option>
-                        </select>
+
+                    <!-- Schedule + Max Results (side by side) -->
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div>
+                            <label for="agent-schedule" style="display:block; font-size:0.75rem; font-weight:600; color:#374151; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">Schedule</label>
+                            <select id="agent-schedule" aria-label="Agent schedule"
+                                    style="width:100%; padding:10px 14px; border:1.5px solid #d1d5db; border-radius:10px; font-family:'Inter',sans-serif; font-size:0.88rem; color:#111827; background:#fff; cursor:pointer; outline:none; appearance:auto; box-sizing:border-box;">
+                                <option value="daily">Daily</option>
+                                <option value="biweekly">Twice a Week</option>
+                                <option value="weekly" selected>Weekly</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="agent-max-results" style="display:block; font-size:0.75rem; font-weight:600; color:#374151; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">Max Results</label>
+                            <input type="number" id="agent-max-results" value="10" min="1" max="25" aria-label="Max results"
+                                   style="width:100%; padding:10px 14px; border:1.5px solid #d1d5db; border-radius:10px; font-family:'Inter',sans-serif; font-size:0.88rem; color:#111827; background:#fff; outline:none; box-sizing:border-box;">
+                        </div>
                     </div>
-                    <div class="sio-form-group">
-                        <label for="agent-max-results" class="sio-label">Max Results per Run</label>
-                        <input type="number" id="agent-max-results" class="sio-input" value="10" min="1" max="25" aria-label="Max results">
-                    </div>
-                    <div class="sio-form-group">
-                        <label for="agent-persona" class="sio-label">Link to Persona (Optional)</label>
-                        <select id="agent-persona" class="sio-input" aria-label="Linked persona">
+
+                    <!-- Link to Persona -->
+                    <div>
+                        <label for="agent-persona" style="display:block; font-size:0.75rem; font-weight:600; color:#374151; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:6px;">Link to Persona <span style="font-weight:400; color:#9ca3af;">(Optional)</span></label>
+                        <select id="agent-persona" aria-label="Linked persona"
+                                style="width:100%; padding:10px 14px; border:1.5px solid #d1d5db; border-radius:10px; font-family:'Inter',sans-serif; font-size:0.88rem; color:#111827; background:#fff; cursor:pointer; outline:none; appearance:auto; box-sizing:border-box;">
                             <option value="">None</option>
                         </select>
                     </div>
                 </div>
-                <div class="sio-modal-footer">
-                    <button type="button" class="sio-btn sio-btn-primary" onclick="createAgent()" aria-label="Create agent">Create Agent</button>
-                    <button type="button" class="sio-btn sio-btn-secondary" onclick="closeModal('create-agent-modal')" aria-label="Cancel">Cancel</button>
+
+                <!-- Footer Actions -->
+                <div style="display:flex; gap:10px; justify-content:flex-end;">
+                    <button type="button" onclick="closeModal('create-agent-modal')" aria-label="Cancel"
+                            style="padding:10px 20px; border-radius:10px; border:1.5px solid #d1d5db; background:#fff; color:#374151; font-family:'Inter',sans-serif; font-size:0.88rem; font-weight:500; cursor:pointer; transition:background 0.15s;">
+                        Cancel
+                    </button>
+                    <button type="button" onclick="createAgent()" aria-label="Create agent"
+                            style="padding:10px 24px; border-radius:10px; border:none; background:linear-gradient(135deg,#7c3aed,#4f46e5); color:#fff; font-family:'Inter',sans-serif; font-size:0.88rem; font-weight:600; cursor:pointer; box-shadow:0 4px 14px rgba(124,58,237,0.3); transition:transform 0.15s, box-shadow 0.15s;"
+                            onmouseenter="this.style.transform='translateY(-1px)';this.style.boxShadow='0 6px 20px rgba(124,58,237,0.4)'"
+                            onmouseleave="this.style.transform='translateY(0)';this.style.boxShadow='0 4px 14px rgba(124,58,237,0.3)'">
+                        🚀 Create Agent
+                    </button>
                 </div>
             </div>
         </div>
@@ -1384,6 +1422,6 @@
         });
     }
 </script>
-<script src="app.js?v=24.0.2"></script>
+<script src="app.js?v=24.0.3"></script>
 </body>
 </html>

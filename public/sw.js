@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.0.2'; // V24.0.2: CSP fix + wallet log guard
+const CACHE_NAME = 'sideio-v24.0.3'; // V24.0.3: Agent modal UI redesign
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=24.0.2',
-    '/styles.css?v=24.0.2',
+    '/app.js?v=24.0.3',
+    '/styles.css?v=24.0.3',
     '/manifest.json'
 ];
 
