@@ -51,9 +51,26 @@ SOCIAL_DOMAINS: set[str] = {
 }
 
 _ENRICHMENT_SOCIAL_BLACKLIST = [
+    # Social platforms
     "reddit.com", "facebook.com", "instagram.com", "youtube.com",
     "linkedin.com", "quora.com", "twitter.com", "x.com", "medium.com",
+    "tiktok.com", "pinterest.com", "tumblr.com", "snapchat.com",
+    # Community forums — not B2B leads
+    "team-bhp.com", "skyscrapercity.com", "airliners.net",
+    "stackexchange.com", "stackoverflow.com", "serverfault.com",
+    "hackernews.com", "news.ycombinator.com", "slashdot.org",
+    "discourse.org", "proboards.com", "phpbb.com", "vbulletin.com",
+    # Content/wiki/education — not B2B leads
+    "wikipedia.org", "wikia.com", "fandom.com", "archive.org",
+    "academia.edu", "researchgate.net", "slideshare.net",
 ]
+
+# V24.0: Domain suffixes that indicate non-business entities.
+# Skip Places API for these — they never return GMB results.
+_NON_BUSINESS_SUFFIXES = (
+    ".edu", ".ac.in", ".ernet.in", ".gov", ".gov.in", ".mil",
+    ".org",  # most .org are non-profits/foundations, not GMB-listed
+)
 
 # FIX (2026-06-21): Replaced dead platform-specific B2C list with archetype-based
 # detection. The old list contained labels ("Reddit B2C", etc.) that could never
@@ -533,14 +550,21 @@ def deep_context_serper_dork(
             pass
         return {}
 
-    tasks = [
-        ("https://google.serper.dev/places",  {"q": domain, "num": 3}),
+    # V24.0 FIX: Skip Places API for non-business domains (forums, .edu, .ac.in).
+    # Querying "airliners.net" or "ncsi.iisc.ernet.in" as a Places search is
+    # pointless — they're websites, not physical businesses. 1 credit wasted each.
+    skip_places = any(domain.endswith(sfx) for sfx in _NON_BUSINESS_SUFFIXES)
+
+    tasks = []
+    if not skip_places:
+        tasks.append(("https://google.serper.dev/places",  {"q": domain, "num": 3}))
+    tasks.extend([
         ("https://google.serper.dev/search",  {"q": f'company profile OR social media "{domain}"', "num": 3}),
         ("https://google.serper.dev/search",  {
             "q": f'job openings OR careers "{domain}"',
             "num": 3,
         }),
-    ]
+    ])
 
     with _cf.ThreadPoolExecutor(max_workers=3) as pool:
         futures = [pool.submit(_fetch_parallel, url, body) for url, body in tasks]
@@ -551,7 +575,17 @@ def deep_context_serper_dork(
             except Exception:
                 results.append({})
 
-    gmb_data, social_data, hiring_data = results[0], results[1], results[2]
+    gmb_data = {}
+    social_data = {}
+    hiring_data = {}
+    if skip_places:
+        # Only 2 tasks (social + hiring), no Places
+        social_data, hiring_data = results[0], results[1] if len(results) > 1 else {}
+    else:
+        # 3 tasks (places + social + hiring)
+        gmb_data = results[0]
+        social_data = results[1] if len(results) > 1 else {}
+        hiring_data = results[2] if len(results) > 2 else {}
 
     for place in gmb_data.get("places", []):
         context_data.append(

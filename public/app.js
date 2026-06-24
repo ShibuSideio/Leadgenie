@@ -506,6 +506,12 @@ async function loadMe() {
                     l0Tab.classList.remove('hidden');
                     l0Tab.style.display = 'inline-block';
                 }
+                // V24.0 FIX: CRM tab was hidden until user clicked Admin first
+                // (reveal was inside fetchL0Telemetry). Now revealed at auth time.
+                const crmTab = document.getElementById('tab-crm');
+                if (crmTab) {
+                    crmTab.style.display = 'inline-block';
+                }
             }
 
             // Defensive dual-path: check nested wallet map AND flattened root

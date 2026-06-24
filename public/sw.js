@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.0.0'; // V24.0: Signal Stacking + Evidence Dossier + Competitive Intel + Intelligence Mesh + Agent Marketplace
+const CACHE_NAME = 'sideio-v24.0.1'; // V24.0.1: CRM tab visibility fix + Serper enrichment blacklist
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=24.0.0',
-    '/styles.css?v=24.0.0',
+    '/app.js?v=24.0.1',
+    '/styles.css?v=24.0.1',
     '/manifest.json'
 ];
 
