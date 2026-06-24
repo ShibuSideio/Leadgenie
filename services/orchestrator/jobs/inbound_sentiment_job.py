@@ -124,14 +124,26 @@ def run() -> dict:
 def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
     """Run signal detection for a single tenant. Returns written signals."""
     # Fetch this tenant's active campaigns (limit 5 — don't over-burn Serper quota)
+    # Canonical field is tenant_id (used by cron/sweep and all other paths).
+    # Fallback to uid for backward compatibility with legacy campaign docs.
     campaigns = [
         {**c.to_dict(), "campaign_id": c.id}
         for c in db.collection("campaigns")
-        .where(filter=firestore.FieldFilter("uid", "==", uid))
+        .where(filter=firestore.FieldFilter("tenant_id", "==", uid))
         .where(filter=firestore.FieldFilter("status", "==", "active"))
         .limit(5)
         .stream()
     ]
+    if not campaigns:
+        # Fallback: try legacy 'uid' field
+        campaigns = [
+            {**c.to_dict(), "campaign_id": c.id}
+            for c in db.collection("campaigns")
+            .where(filter=firestore.FieldFilter("uid", "==", uid))
+            .where(filter=firestore.FieldFilter("status", "==", "active"))
+            .limit(5)
+            .stream()
+        ]
 
     if not campaigns:
         log.info("inbound_job_no_active_campaigns", uid=uid[:8])

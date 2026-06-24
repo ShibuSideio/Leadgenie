@@ -814,7 +814,39 @@ steps:
         --oidc-token-audience=$$ORCH_URL \
         --quiet
     fi
-    echo "[SCHEDULER] All 3 V23 Cloud Scheduler jobs provisioned. Build: $COMMIT_SHA"
+    echo "[SCHEDULER] ontology-decay OK"
+
+    # ------------------------------------------------------------------
+    # Job 4: Inbound Sentiment Radar — every 6 hours at :30 offset
+    # V24.0: Triggers /api/internal/inbound-sentiment-run on orchestrator
+    # Scans for tenants with inbound_radar.enabled=true and runs
+    # InboundSentimentService per active campaign.
+    # ------------------------------------------------------------------
+    if gcloud scheduler jobs describe inbound-sentiment-radar \
+        --location=asia-south1 --project=$PROJECT_ID --quiet 2>/dev/null; then
+      gcloud scheduler jobs update http inbound-sentiment-radar \
+        --location=asia-south1 \
+        --schedule='30 */6 * * *' \
+        --uri="$$ORCH_URL/api/internal/inbound-sentiment-run" \
+        --message-body='{}' \
+        --http-method=POST \
+        --oidc-service-account-email=$$SA \
+        --oidc-token-audience=$$ORCH_URL \
+        --quiet
+    else
+      gcloud scheduler jobs create http inbound-sentiment-radar \
+        --location=asia-south1 \
+        --schedule='30 */6 * * *' \
+        --uri="$$ORCH_URL/api/internal/inbound-sentiment-run" \
+        --message-body='{}' \
+        --http-method=POST \
+        --oidc-service-account-email=$$SA \
+        --oidc-token-audience=$$ORCH_URL \
+        --quiet
+    fi
+    echo "[SCHEDULER] inbound-sentiment-radar OK"
+
+    echo "[SCHEDULER] All 4 V24 Cloud Scheduler jobs provisioned. Build: $COMMIT_SHA"
     echo "[SCHEDULER] Zombie jobs purged from pipeline: autonomous-engine-trigger"
 
 # =============================================================================
