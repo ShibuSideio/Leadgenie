@@ -2000,3 +2000,201 @@ body {
         font-size: 0.82rem;
     }
 }
+
+/* ── V24.0: Evidence Dossier ─────────────────────────────────────────── */
+.evidence-dossier {
+    margin: 8px 0;
+    border: 1px solid rgba(0,0,0,0.06);
+    border-radius: 8px;
+    overflow: hidden;
+    transition: all 0.2s ease;
+}
+.evidence-dossier .evidence-header {
+    padding: 8px 12px;
+    font-size: 0.78rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(0,0,0,0.02);
+    user-select: none;
+    color: var(--text-muted, #64748b);
+}
+.evidence-dossier .evidence-header:hover {
+    background: rgba(0,0,0,0.04);
+}
+.evidence-dossier .evidence-toggle {
+    transition: transform 0.2s;
+    font-size: 0.65rem;
+}
+.evidence-dossier.open .evidence-toggle {
+    transform: rotate(90deg);
+}
+.evidence-dossier .evidence-body {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+    padding: 0 12px;
+}
+.evidence-dossier.open .evidence-body {
+    max-height: 500px;
+    padding: 8px 12px;
+}
+.evidence-entry {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 5px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.04);
+    font-size: 0.75rem;
+}
+.evidence-entry:last-child { border-bottom: none; }
+.evidence-icon { flex-shrink: 0; font-size: 0.85rem; }
+.evidence-type {
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--primary, #4f46e5);
+    min-width: 100px;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.evidence-text {
+    flex: 1;
+    color: var(--text-muted, #64748b);
+    line-height: 1.4;
+}
+.evidence-conf {
+    flex-shrink: 0;
+    color: var(--text-muted, #64748b);
+    font-size: 0.7rem;
+    font-weight: 500;
+}
+
+/* ── V24.0: Competitive Intelligence ─────────────────────────────────── */
+.competitor-results {
+    margin-top: 12px;
+}
+.competitor-card {
+    background: rgba(79, 70, 229, 0.04);
+    border: 1px solid rgba(79, 70, 229, 0.15);
+    border-radius: 10px;
+    padding: 16px;
+}
+.competitor-card h4 {
+    margin: 0 0 6px 0;
+    font-size: 1rem;
+    color: var(--text-main, #0f172a);
+}
+.competitor-product {
+    font-size: 0.85rem;
+    color: var(--text-muted, #64748b);
+    margin-bottom: 12px;
+}
+.competitor-section {
+    margin-bottom: 12px;
+}
+.competitor-section h5 {
+    font-size: 0.8rem;
+    margin: 0 0 6px 0;
+    color: var(--text-main, #0f172a);
+}
+.competitor-section ul {
+    margin: 0;
+    padding-left: 20px;
+}
+.competitor-section li {
+    font-size: 0.8rem;
+    color: var(--text-muted, #64748b);
+    margin-bottom: 4px;
+    line-height: 1.4;
+}
+.query-list code {
+    font-size: 0.72rem;
+    background: rgba(0,0,0,0.04);
+    padding: 2px 6px;
+    border-radius: 4px;
+    word-break: break-all;
+}
+
+/* ── V24.0: Research Agents Marketplace ──────────────────────────────── */
+.agents-panel { padding: 0 16px; }
+.agents-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+.agents-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    color: var(--text-primary, #fff);
+}
+.agents-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.agent-card {
+    background: var(--card-bg, rgba(255,255,255,0.04));
+    border: 1px solid var(--border, rgba(255,255,255,0.08));
+    border-radius: 10px;
+    padding: 14px;
+    transition: border-color 0.2s;
+}
+.agent-card:hover {
+    border-color: var(--accent, #7c5cff);
+}
+.agent-card.agent-paused {
+    opacity: 0.65;
+}
+.agent-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+.agent-status { font-size: 0.7rem; }
+.agent-name {
+    font-size: 0.9rem;
+    color: var(--text-primary, #fff);
+    flex: 1;
+}
+.agent-schedule-badge {
+    font-size: 0.68rem;
+    background: rgba(124,92,255,0.12);
+    color: var(--accent, #7c5cff);
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-weight: 500;
+}
+.agent-prompt-preview {
+    font-size: 0.8rem;
+    color: var(--text-secondary, #aaa);
+    margin: 4px 0 8px;
+    line-height: 1.4;
+}
+.agent-stats {
+    display: flex;
+    gap: 16px;
+    font-size: 0.75rem;
+    color: var(--text-muted, #888);
+    margin-bottom: 8px;
+}
+.agent-actions {
+    display: flex;
+    gap: 6px;
+}
+.sio-btn-sm {
+    padding: 4px 10px;
+    font-size: 0.75rem;
+    border-radius: 6px;
+}
+.sio-btn-danger {
+    background: rgba(255,59,48,0.12);
+    color: #ff3b30;
+    border: 1px solid rgba(255,59,48,0.2);
+}
+.sio-btn-danger:hover {
+    background: rgba(255,59,48,0.2);
+}

@@ -2,6 +2,7 @@
 digital-twin-engine / main.py
 =============================================================================
 POST /api/analyze-website
+POST /api/analyze-competitor   (V24.0 — Competitive Intelligence)
 POST /health
 
 Pipeline (< 8 s total budget):
@@ -691,6 +692,182 @@ def analyze_website():
 
     print(f"[DT] Success for {root_domain}: {len(normalised_targets)} personas, gl={detected_gl!r}")
     return jsonify(response_payload), 200
+
+
+# =============================================================================
+# V24.0: COMPETITIVE INTELLIGENCE — MOVE 6
+# Analyze a competitor domain and generate anti-competitor queries to
+# find their churning/dissatisfied customers. Add-on to existing campaigns.
+# =============================================================================
+
+# V24.0: Competitive Intelligence schema — analyze competitor and generate
+# anti-competitor queries for finding their churning customers.
+_COMPETITOR_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "competitor_name": {
+            "type": "STRING",
+            "description": "The competitor's brand/company name.",
+        },
+        "competitor_product": {
+            "type": "STRING",
+            "description": "1-2 sentences: what they actually sell (no marketing fluff).",
+        },
+        "competitor_weaknesses": {
+            "type": "ARRAY",
+            "description": "3-5 weaknesses, limitations, or common complaints.",
+            "items": {"type": "STRING"},
+        },
+        "anti_competitor_queries": {
+            "type": "ARRAY",
+            "description": (
+                "5 Google Boolean dork queries to find people expressing "
+                "dissatisfaction with this competitor. Use Anti-SEO protocol: "
+                "target raw forum posts, complaint threads, review sites. "
+                "Include negative operators to exclude the competitor's own marketing."
+            ),
+            "items": {"type": "STRING"},
+        },
+        "churn_signals_to_watch": {
+            "type": "ARRAY",
+            "description": "3-5 behavioral signals indicating someone is about to leave this competitor.",
+            "items": {"type": "STRING"},
+        },
+    },
+    "required": [
+        "competitor_name", "competitor_product", "competitor_weaknesses",
+        "anti_competitor_queries", "churn_signals_to_watch",
+    ],
+}
+
+
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=8),
+    stop=stop_after_attempt(3),
+    retry=retry_if_exception_type(ResourceExhausted),
+)
+def _call_gemini_competitor(root_domain: str, text_blob: str, tenant_bio: str, tenant_keywords: str) -> dict:
+    """V24.0: Analyze a competitor and generate anti-competitor intelligence."""
+    safe_blob = text_blob[:6_000]
+    prompt = f"""You are an elite Competitive Intelligence analyst. Analyze the competitor domain: {root_domain}
+
+Their website/search data:
+---
+{safe_blob}
+---
+
+YOUR CLIENT (the company trying to win customers FROM this competitor):
+Bio: {tenant_bio}
+Keywords: {tenant_keywords}
+
+TASK 1 — COMPETITOR PROFILE:
+Extract competitor_name and competitor_product. Be brutally specific. Strip all marketing language.
+
+TASK 2 — WEAKNESSES:
+Identify 3-5 real weaknesses, limitations, pricing complaints, or missing features. Use evidence from the text, reviews, or common industry knowledge.
+
+TASK 3 — ANTI-COMPETITOR QUERIES (CRITICAL):
+Generate exactly 5 Google Boolean dork queries designed to find people who are:
+- Complaining about this competitor on forums, Reddit, Quora
+- Looking for alternatives
+- Expressing frustration with specific features
+- Publicly churning (cancellation posts, migration threads)
+
+Rules for queries:
+- Use site: operators for forums (site:reddit.com, site:quora.com, site:g2.com)
+- Use negative operators (-site:{root_domain}) to exclude competitor's own content
+- Target raw pain language: "frustrated", "alternative to", "switched from", "looking for replacement"
+- Include the competitor name in quotes
+
+TASK 4 — CHURN SIGNALS:
+List 3-5 behavioral signals that indicate someone is about to leave this competitor (e.g., "posted job listing for role that replaces this tool", "asked about data export").
+
+Return ONLY valid JSON. No markdown."""
+
+    model = GenerativeModel(
+        "gemini-2.5-flash",
+        system_instruction=(
+            "You are an elite Competitive Intelligence engine. "
+            "You analyze competitor products to find their vulnerabilities "
+            "and generate OSINT search queries to find their dissatisfied customers. "
+            "Be ruthlessly specific. Never hallucinate."
+        ),
+    )
+    config = GenerationConfig(
+        response_mime_type="application/json",
+        response_schema=_COMPETITOR_SCHEMA,
+        temperature=0.2,
+    )
+
+    def _invoke():
+        return model.generate_content(prompt, generation_config=config)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_invoke)
+        try:
+            response = future.result(timeout=10.0)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError("Gemini competitor analysis timed out (10s)")
+
+    return json.loads(response.text)
+
+
+@app.route("/api/analyze-competitor", methods=["POST"])
+def analyze_competitor():
+    """V24.0: Competitive Intelligence — analyze a competitor to generate
+    anti-competitor search queries for finding their churning customers.
+
+    Input:  {competitor_url, tenant_bio, tenant_keywords}
+    Output: {competitor_name, competitor_product, competitor_weaknesses,
+             anti_competitor_queries, churn_signals_to_watch}
+    """
+    # ── Auth ──────────────────────────────────────────────────────────────────
+    uid = _verify_firebase_token(request)
+    if not uid:
+        return jsonify({"error": "Unauthorized"}), HTTPStatus.UNAUTHORIZED
+
+    body = request.get_json(force=True, silent=True) or {}
+    competitor_url = (body.get("competitor_url") or "").strip()
+    tenant_bio = (body.get("tenant_bio") or "").strip()
+    tenant_keywords = (body.get("tenant_keywords") or "").strip()
+
+    if not competitor_url:
+        return jsonify({"error": "competitor_url is required"}), HTTPStatus.BAD_REQUEST
+
+    # ── SSRF Guard (reuse existing _extract_root_domain) ──────────────────────
+    root_domain, ssrf_error = _extract_root_domain(competitor_url)
+    if ssrf_error:
+        print(f"[COMPETITOR] SSRF rejected URL '{competitor_url}': {ssrf_error}")
+        return jsonify({"error": f"Invalid or unsafe URL: {ssrf_error}"}), HTTPStatus.BAD_REQUEST
+
+    print(f"[COMPETITOR] Analyzing competitor domain: {root_domain} for uid={uid}")
+
+    # ── Serper Acquisition (reuse existing _run_parallel_serper) ──────────────
+    try:
+        text_blob = _run_parallel_serper(root_domain)
+        print(f"[COMPETITOR] Serper text length: {len(text_blob)} chars")
+    except Exception as e:
+        print(f"[COMPETITOR] Serper acquisition failed for {root_domain}: {e}")
+        return jsonify({"error": f"Serper acquisition failed: {e}"}), HTTPStatus.BAD_GATEWAY
+
+    if len(text_blob.strip()) < 20:
+        return jsonify({"error": "Insufficient public data found for this competitor domain."}), HTTPStatus.UNPROCESSABLE_ENTITY
+
+    # ── Gemini Competitor Analysis ────────────────────────────────────────────
+    try:
+        result = _call_gemini_competitor(root_domain, text_blob, tenant_bio, tenant_keywords)
+    except TimeoutError:
+        print(f"[COMPETITOR] Gemini timed out for {root_domain}")
+        return jsonify({"error": "Analysis timed out"}), HTTPStatus.GATEWAY_TIMEOUT
+    except ResourceExhausted:
+        print(f"[COMPETITOR] Gemini quota exhausted for {root_domain}")
+        return jsonify({"error": "AI quota exceeded. Please retry in a few seconds."}), HTTPStatus.TOO_MANY_REQUESTS
+    except Exception as e:
+        print(f"[COMPETITOR] Gemini analysis failed for {root_domain}: {e}")
+        return jsonify({"error": f"Analysis failed: {e}"}), HTTPStatus.INTERNAL_SERVER_ERROR
+
+    print(f"[COMPETITOR] Success for {root_domain}: {result.get('competitor_name', 'N/A')}")
+    return jsonify(result), HTTPStatus.OK
 
 
 # =============================================================================

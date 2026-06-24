@@ -52,6 +52,7 @@ from services.serper_service import (  # type: ignore[import]
 from services.gemini_service import pre_filter_gemini, final_score_and_dm  # type: ignore[import]
 from services.prism_pipeline import PrismPipeline                           # type: ignore[import]
 from services.query_brain import _is_consumer_archetype  # type: ignore[import]
+from services.intelligence_mesh import enrich_signals  # type: ignore[import]  # V24.0
 # SF-002 FIX: PrismPipeline is now imported from the standalone
 # services/prism_pipeline.py module (zero import-time side effects).
 # The previous importlib.exec_module(main.py) approach executed 3185 lines
@@ -738,6 +739,10 @@ def dispatch():
                 "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
                 "company_name":                 evaluation.get("company_name"),
                 "dossier_text":                 None,
+                # V24.0: Explainable Scoring fields
+                "score_reasoning":              evaluation.get("score_reasoning", ""),
+                "confidence_level":             evaluation.get("confidence_level", "SPECULATIVE"),
+                "evidence_chain":               evaluation.get("evidence_chain", []),
                 "sourcing_vector":              sourcing_vector,
                 "confidence_tier":              url_to_tier.get(url, "High"),
                 "prism_mode":                   prism_mode,
@@ -759,6 +764,33 @@ def dispatch():
                 pain_point=evaluation.get("pain_point", ""),
                 prism_mode=prism_mode,
             )
+
+            # V24.0: Intelligence Mesh enrichment (non-blocking, 3s timeout)
+            try:
+                from services.serper_service import search_serper  # type: ignore[import]
+                company_for_mesh = evaluation.get("company_name")
+                domain_for_mesh = extract_root_domain(url) if url else None
+                if domain_for_mesh:
+                    mesh_signals = enrich_signals(
+                        company_name=company_for_mesh,
+                        domain=domain_for_mesh,
+                        serper_fn=search_serper,
+                        timeout_s=3.0,
+                    )
+                    if mesh_signals:
+                        for i, sig in enumerate(mesh_signals[:5]):
+                            _db().collection("leads").document(lead_id) \
+                                .collection("signals").document(f"mesh_{i}") \
+                                .set({
+                                    **sig,
+                                    "campaign_id": campaign_id,
+                                    "detected_at": datetime.datetime.now(datetime.timezone.utc),
+                                }, merge=True)
+                        log.info("mesh_signals_written", lead_id=lead_id,
+                                 signal_count=len(mesh_signals))
+            except Exception as mesh_err:
+                log.warning("mesh_enrichment_failed", lead_id=lead_id,
+                           error=str(mesh_err))
 
             if score >= 8:
                 _maybe_notify_whatsapp(tenant_id, url, lead_id, score, evaluation)

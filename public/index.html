@@ -50,7 +50,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
-    <link rel="stylesheet" href="styles.css?v=23.9.15">
+    <link rel="stylesheet" href="styles.css?v=24.0.0">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -745,7 +745,66 @@
                     &#8987; Loading personas&hellip;
                 </div>
             </div>
+
+            <!-- V24.0: Research Agents Marketplace -->
+            <div id="agents-panel" class="agents-panel" style="margin-top:20px;">
+                <div class="agents-header">
+                    <h3>&#129302; Research Agents</h3>
+                    <button type="button" class="sio-btn sio-btn-primary sio-btn-sm"
+                            onclick="showCreateAgentModal()" aria-label="Create new research agent">
+                        + New Agent
+                    </button>
+                </div>
+                <div id="agents-list" class="agents-list">
+                    <p class="sio-muted">Loading agents...</p>
+                </div>
+            </div>
         </section>
+
+        <!-- V24.0: Create Agent Modal -->
+        <div id="create-agent-modal" class="sio-modal-overlay" style="display:none;" role="dialog" aria-label="Create Research Agent">
+            <div class="sio-modal" style="max-width:500px;">
+                <div class="sio-modal-header">
+                    <h3>&#129302; Create Research Agent</h3>
+                    <button class="sio-modal-close" onclick="closeModal('create-agent-modal')" aria-label="Close">&#10005;</button>
+                </div>
+                <div class="sio-modal-body">
+                    <div class="sio-form-group">
+                        <label for="agent-name" class="sio-label">Agent Name</label>
+                        <input type="text" id="agent-name" class="sio-input"
+                               placeholder="e.g. Kochi Marketing Finder" aria-label="Agent name" maxlength="128">
+                    </div>
+                    <div class="sio-form-group">
+                        <label for="agent-prompt" class="sio-label">Research Prompt</label>
+                        <textarea id="agent-prompt" class="sio-input" rows="3"
+                                  placeholder="e.g. Find companies in Kochi that posted about needing marketing help"
+                                  aria-label="Research prompt" maxlength="1000"></textarea>
+                    </div>
+                    <div class="sio-form-group">
+                        <label for="agent-schedule" class="sio-label">Schedule</label>
+                        <select id="agent-schedule" class="sio-input" aria-label="Agent schedule">
+                            <option value="daily">Daily</option>
+                            <option value="biweekly">Twice a Week</option>
+                            <option value="weekly" selected>Weekly</option>
+                        </select>
+                    </div>
+                    <div class="sio-form-group">
+                        <label for="agent-max-results" class="sio-label">Max Results per Run</label>
+                        <input type="number" id="agent-max-results" class="sio-input" value="10" min="1" max="25" aria-label="Max results">
+                    </div>
+                    <div class="sio-form-group">
+                        <label for="agent-persona" class="sio-label">Link to Persona (Optional)</label>
+                        <select id="agent-persona" class="sio-input" aria-label="Linked persona">
+                            <option value="">None</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="sio-modal-footer">
+                    <button type="button" class="sio-btn sio-btn-primary" onclick="createAgent()" aria-label="Create agent">Create Agent</button>
+                    <button type="button" class="sio-btn sio-btn-secondary" onclick="closeModal('create-agent-modal')" aria-label="Cancel">Cancel</button>
+                </div>
+            </div>
+        </div>
 
         <!-- PERSONA AI AGENT BUILDER MODAL -->
         <div id="persona-modal-overlay" style="display:none; position:fixed; inset:0; background:rgba(15,15,30,0.65); backdrop-filter:blur(6px); z-index:9000; display:none; align-items:center; justify-content:center; padding:16px;" onclick="if(event.target===this)closePersonaModal()">
@@ -1158,6 +1217,22 @@
             <input type="hidden" id="edit-camp-location">
         </div>
 
+        <!-- V24.0: Competitive Intelligence Add-on -->
+        <div class="sio-form-group" id="competitive-intel-section">
+            <label for="competitor-url-input" class="edit-field-label">🔍 Competitive Intelligence (Optional)</label>
+            <div style="display:flex;gap:8px;">
+                <input type="url" id="competitor-url-input" class="edit-field-input"
+                       placeholder="Paste competitor URL to find their churning customers"
+                       aria-label="Competitor URL for intelligence analysis">
+                <button type="button" id="analyze-competitor-btn" class="secondary-btn"
+                        onclick="analyzeCompetitor()" aria-label="Analyze competitor"
+                        style="white-space:nowrap;padding:8px 14px;">
+                    Analyze
+                </button>
+            </div>
+            <div id="competitor-results" class="competitor-results" style="display:none;"></div>
+        </div>
+
         <div style="display:flex; gap:12px;">
             <button class="primary-btn" style="flex:2; padding:14px; font-size:1rem; border-radius:12px;" onclick="saveEditedCampaign()">Update Engine</button>
             <button class="secondary-btn" style="flex:1; padding:14px; font-size:1rem; border-radius:12px;" onclick="closeEditModal()">Cancel</button>
@@ -1309,6 +1384,6 @@
         });
     }
 </script>
-<script src="app.js?v=23.9.15"></script>
+<script src="app.js?v=24.0.0"></script>
 </body>
 </html>

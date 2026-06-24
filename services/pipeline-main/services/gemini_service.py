@@ -223,12 +223,32 @@ _SCORE_SCHEMA = {
         "company_size_tier":            {"type": "STRING"},
         "primary_objection_hypothesis": {"type": "STRING"},
         "company_name":                 {"type": "STRING"},
+        "score_reasoning":              {"type": "STRING"},
+        "confidence_level":             {"type": "STRING", "enum": ["HIGH", "MEDIUM", "SPECULATIVE"]},
+        "evidence_chain": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "signal_type": {
+                        "type": "STRING",
+                        "enum": ["PAIN_EXPRESSION", "HIRING_INTENT", "COMPETITOR_CHURN",
+                                 "TECH_STACK_MATCH", "COMMUNITY_MENTION", "REVIEW_SIGNAL",
+                                 "FUNDING_EVENT", "GENERAL_FIT"],
+                    },
+                    "evidence": {"type": "STRING"},
+                    "confidence": {"type": "NUMBER"},
+                },
+                "required": ["signal_type", "evidence", "confidence"],
+            },
+        },
     },
     "required": [
         "matched_campaigns", "dm", "pain_point", "icebreaker_angle",
         "intent_signal", "hiring_intent_found", "tech_stack_found",
         "contact_endpoints", "decision_maker_name", "decision_maker_title",
         "company_size_tier", "primary_objection_hypothesis",
+        "score_reasoning", "confidence_level", "evidence_chain",
     ],
 }
 
@@ -318,6 +338,15 @@ Identify the campaign with the HIGHEST match score.
 - PHONE DEDUPLICATION: Max 2 numbers.
 {social_uri_rule}
 
+# STEP 4 — EVIDENCE DOSSIER
+For each piece of evidence you used to score this lead, create an evidence_chain entry:
+- signal_type: classify as PAIN_EXPRESSION, HIRING_INTENT, COMPETITOR_CHURN, TECH_STACK_MATCH, COMMUNITY_MENTION, REVIEW_SIGNAL, FUNDING_EVENT, or GENERAL_FIT
+- evidence: the exact quote or fact from the text (max 100 chars)
+- confidence: 0.0-1.0 how confident you are this signal is real
+Also provide:
+- score_reasoning: 1-2 sentences explaining WHY this lead scored the way it did
+- confidence_level: HIGH (multiple converging signals), MEDIUM (clear single signal), SPECULATIVE (weak/indirect signals)
+
 CONTEXTUAL DORKING DATA:
 {context_payload}
 
@@ -370,6 +399,9 @@ DETECTED TECH STACK:
                 "company_size_tier":            data.get("company_size_tier", "Unknown"),
                 "primary_objection_hypothesis": data.get("primary_objection_hypothesis", "Unknown"),
                 "company_name": data.get("company_name") or None,
+                "score_reasoning": data.get("score_reasoning", ""),
+                "confidence_level": data.get("confidence_level", "SPECULATIVE"),
+                "evidence_chain": data.get("evidence_chain", []),
             }
 
         matched.sort(key=lambda x: x.get("raw_score", 0), reverse=True)
@@ -401,6 +433,9 @@ DETECTED TECH STACK:
             "company_size_tier":            data.get("company_size_tier", "Unknown"),
             "primary_objection_hypothesis": data.get("primary_objection_hypothesis", "Unknown"),
             "company_name":                 data.get("company_name") or None,
+            "score_reasoning": data.get("score_reasoning", ""),
+            "confidence_level": data.get("confidence_level", "SPECULATIVE"),
+            "evidence_chain": data.get("evidence_chain", []),
         }
 
     except Exception as exc:

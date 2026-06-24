@@ -24,6 +24,7 @@ Blueprint Registry:
   /api/admin/telemetry/serper-logs      -> api/routers/serper_telemetry.py
   /api/settings, /api/tenant_profiles (POST), /api/analyze-website
                                         -> api/routers/settings.py
+  /api/visitor-signals (POST)           -> api/routers/visitor_signals.py
 """
 from __future__ import annotations
 
@@ -55,6 +56,10 @@ from api.routers.l0_admin import bp as l0_admin_bp      # type: ignore[import]
 from api.routers.internal import bp as internal_bp      # type: ignore[import]
 from api.routers.settings import bp as settings_bp      # type: ignore[import]
 from api.routers.serper_telemetry import bp as serper_telemetry_bp  # type: ignore[import]
+from api.routers.agents import agents_bp                           # type: ignore[import]
+
+# ── Phase 4 Blueprints (V24 — website visitor intent) ─────────────────────────
+from api.routers.visitor_signals import visitor_bp  # type: ignore[import]
 
 log = get_logger("orchestrator.v23")
 
@@ -106,6 +111,10 @@ def create_app() -> Flask:
     app.register_blueprint(internal_bp)
     app.register_blueprint(settings_bp)
     app.register_blueprint(serper_telemetry_bp)
+    app.register_blueprint(agents_bp)
+
+    # ── Phase 4 (V24 — website visitor intent) ────────────────────────────────
+    app.register_blueprint(visitor_bp)
 
     @app.errorhandler(Exception)
     def handle_unhandled(exc: Exception):

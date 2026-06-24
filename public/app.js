@@ -1489,6 +1489,7 @@ window.switchTab = function(tabName) {
         show('view-persona-vault');
         activateNav('tab-personas', 'dock-tab-personas');
         loadPersonaVault();
+        loadAgents();
     }
 };
 
@@ -2990,8 +2991,13 @@ window.createLeadCardV2 = function(docId, lead) {
     var signal  = _escapeHTML(lead.intent_signal || lead.pain_point || '');
     var dm      = _escapeHTML(lead.dm || '');
     var timeAgo = fcTimeAgo(lead.createdAt || lead.promotedAt);
-    var srcLbl  = (lead.sourcing_vector || lead.source || '').indexOf('Autonomous') !== -1
-        ? 'AI Match' : (lead.source || 'Web Signal');
+    var srcLbl  = '';
+    if (lead.origin_engine === 'research_agent') {
+        srcLbl = '\u{1F916} Research Agent';
+    } else {
+        srcLbl = (lead.sourcing_vector || lead.source || '').indexOf('Autonomous') !== -1
+            ? 'AI Match' : (lead.source || 'Web Signal');
+    }
 
     var pm = lead.prism_mode || '';
     var prismBadge = '';
@@ -3016,6 +3022,38 @@ window.createLeadCardV2 = function(docId, lead) {
     var bHTML = badges.map(function(x) {
         return '<span class="lc-badge" style="background:'+x.bg+';color:'+x.c+';border-color:'+x.b+'">'+x.t+'</span>';
     }).join('');
+
+    // ── V24.0: Evidence Dossier (collapsible confidence breakdown) ────────
+    var evidenceChain = lead.evidence_chain || [];
+    var scoreReasoning = _escapeHTML(lead.score_reasoning || '');
+    var confidenceLevel = lead.confidence_level || 'SPECULATIVE';
+    var confIcon = confidenceLevel === 'HIGH' ? '🟢' : confidenceLevel === 'MEDIUM' ? '🟡' : '🔴';
+    var dossierHtml = '';
+    if (evidenceChain.length > 0 || scoreReasoning) {
+        var signalIcons = {
+            'PAIN_EXPRESSION': '🔴', 'HIRING_INTENT': '💼', 'COMPETITOR_CHURN': '🔄',
+            'TECH_STACK_MATCH': '⚙️', 'COMMUNITY_MENTION': '💬', 'FIRST_PARTY_VISIT': '🏠',
+            'REVIEW_SIGNAL': '⭐', 'FUNDING_EVENT': '💰', 'GENERAL_FIT': '🎯'
+        };
+        var evidenceItems = evidenceChain.map(function(e) {
+            var icon = signalIcons[e.signal_type] || '📌';
+            var conf = Math.round((e.confidence || 0) * 100);
+            return '<div class="evidence-entry">' +
+                '<span class="evidence-icon">' + icon + '</span>' +
+                '<span class="evidence-type">' + _escapeHTML((e.signal_type || '').replace(/_/g, ' ')) + '</span>' +
+                '<span class="evidence-text">' + _escapeHTML(e.evidence || '') + '</span>' +
+                '<span class="evidence-conf">' + conf + '%</span>' +
+            '</div>';
+        }).join('');
+        dossierHtml = '<div class="evidence-dossier">' +
+            '<div class="evidence-header" onclick="this.parentElement.classList.toggle(\'open\')">' +
+                '<span class="evidence-toggle">▶</span>' +
+                ' ' + confIcon + ' <strong>' + _escapeHTML(confidenceLevel) + '</strong> — ' + (scoreReasoning || 'Score breakdown') +
+            '</div>' +
+            '<div class="evidence-body">' + evidenceItems + '</div>' +
+        '</div>';
+    }
+    // ── END Evidence Dossier ─────────────────────────────────────────────
 
     var expandId   = 'lc-expand-'  + docId;
     var moreId     = 'lc-more-'    + docId;
@@ -3050,6 +3088,7 @@ window.createLeadCardV2 = function(docId, lead) {
         '</div>' +
         (signal ? '<div class="lc-signal">'+signal+'</div>' : '') +
         '<div class="lc-badges">'+prismBadge+bHTML+'</div>' +
+        dossierHtml +
         // XSS-FIX: expand btn — data-action delegation
         '<button class="lc-expand-btn" data-action="expand" data-lead-id="'+docId+'">' +
             '<span id="lc-expand-icon-'+docId+'">&#x2193;</span> See opening message' +
@@ -5048,3 +5087,283 @@ async function toggleInboundRadar(enable) {
         showToast(`Failed to toggle radar: ${err.message}`, 'error');
     }
 }
+
+// ── V24.0: Competitive Intelligence ──────────────────────────────────
+window.analyzeCompetitor = async function analyzeCompetitor() {
+    const urlInput = document.getElementById('competitor-url-input');
+    const resultsDiv = document.getElementById('competitor-results');
+    const btn = document.getElementById('analyze-competitor-btn');
+    const url = (urlInput?.value || '').trim();
+
+    if (!url) { showToast('Enter a competitor URL', 'error'); return; }
+    if (!url.startsWith('https://')) { showToast('URL must start with https://', 'error'); return; }
+
+    btn.disabled = true;
+    btn.textContent = 'Analyzing...';
+    resultsDiv.style.display = 'none';
+
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) { showToast('Not authenticated', 'error'); return; }
+        const token = await user.getIdToken();
+
+        // Get current tenant bio/keywords for context
+        const meSnap = await firebase.firestore().collection('tenant_profiles').doc(user.uid).get();
+        const me = meSnap.data() || {};
+
+        const DT_URL = window._dtEngineUrl || 'https://digital-twin-engine-222247989819.asia-south1.run.app';
+        const resp = await fetch(`${DT_URL}/api/analyze-competitor`, {
+            method: 'POST',
+            headers: {'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                competitor_url: url,
+                tenant_bio: me.bio || '',
+                tenant_keywords: me.keywords || ''
+            })
+        });
+
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+
+        // Render results
+        const weaknesses = (data.competitor_weaknesses || []).map(w =>
+            `<li>${_escapeHTML(w)}</li>`
+        ).join('');
+        const queries = (data.anti_competitor_queries || []).map(q =>
+            `<li><code>${_escapeHTML(q)}</code></li>`
+        ).join('');
+        const signals = (data.churn_signals_to_watch || []).map(s =>
+            `<li>${_escapeHTML(s)}</li>`
+        ).join('');
+
+        resultsDiv.innerHTML = `
+            <div class="competitor-card">
+                <h4>🎯 ${_escapeHTML(data.competitor_name || 'Unknown')}</h4>
+                <p class="competitor-product">${_escapeHTML(data.competitor_product || '')}</p>
+                <div class="competitor-section">
+                    <h5>⚠️ Weaknesses</h5>
+                    <ul>${weaknesses}</ul>
+                </div>
+                <div class="competitor-section">
+                    <h5>🔍 Anti-Competitor Queries</h5>
+                    <ul class="query-list">${queries}</ul>
+                </div>
+                <div class="competitor-section">
+                    <h5>📡 Churn Signals to Watch</h5>
+                    <ul>${signals}</ul>
+                </div>
+                <button type="button" class="sio-btn sio-btn-primary"
+                    onclick="applyCompetitorQueries()"
+                    aria-label="Apply competitor queries to campaign">
+                    Apply Queries to Campaign
+                </button>
+            </div>
+        `;
+        resultsDiv.style.display = 'block';
+
+        // Store data for later use
+        window._lastCompetitorData = data;
+        showToast('Competitor analysis complete', 'success');
+    } catch (err) {
+        console.error('[V24.0 CompetitorIntel] Analysis failed:', err);
+        showToast(`Analysis failed: ${err.message}`, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Analyze';
+    }
+};
+
+window.applyCompetitorQueries = function applyCompetitorQueries() {
+    const data = window._lastCompetitorData;
+    if (!data) return;
+
+    // Append anti-competitor queries to campaign keywords
+    const keywordsInput = document.getElementById('edit-camp-keys') ||
+                          document.getElementById('cc-extra-keywords');
+    if (keywordsInput && data.anti_competitor_queries) {
+        const existing = keywordsInput.value.trim();
+        const newQueries = data.anti_competitor_queries.join(', ');
+        keywordsInput.value = existing ? `${existing}, ${newQueries}` : newQueries;
+    }
+
+    showToast('Competitor queries applied to keywords', 'success');
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// V24.0: RESEARCH AGENTS MARKETPLACE
+// ══════════════════════════════════════════════════════════════════════════════
+
+window.showCreateAgentModal = function showCreateAgentModal() {
+    // Populate persona dropdown from cached personas
+    var select = document.getElementById('agent-persona');
+    if (select && window._personasCache) {
+        select.innerHTML = '<option value="">None</option>';
+        window._personasCache.forEach(function(p) {
+            select.innerHTML += '<option value="' + _escapeHTML(p.id) + '">' + _escapeHTML(p.name || 'Unnamed') + '</option>';
+        });
+    }
+    var modal = document.getElementById('create-agent-modal');
+    if (modal) modal.style.display = 'flex';
+};
+
+window.createAgent = async function createAgent() {
+    var nameEl = document.getElementById('agent-name');
+    var promptEl = document.getElementById('agent-prompt');
+    var scheduleEl = document.getElementById('agent-schedule');
+    var maxResultsEl = document.getElementById('agent-max-results');
+    var personaEl = document.getElementById('agent-persona');
+
+    var name = nameEl ? nameEl.value.trim() : '';
+    var prompt = promptEl ? promptEl.value.trim() : '';
+    var schedule = scheduleEl ? scheduleEl.value : 'weekly';
+    var maxResults = parseInt(maxResultsEl ? maxResultsEl.value : '10', 10);
+    var personaId = personaEl ? personaEl.value : '';
+
+    if (!name) { showToast('Agent name is required', 'error'); return; }
+    if (!prompt) { showToast('Research prompt is required', 'error'); return; }
+
+    try {
+        var user = firebase.auth().currentUser;
+        if (!user) { showToast('Not authenticated', 'error'); return; }
+        var token = await user.getIdToken();
+
+        var resp = await fetch('/api/agents', {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            body: JSON.stringify({ name: name, prompt: prompt, schedule: schedule, max_results: maxResults, persona_id: personaId })
+        });
+
+        if (!resp.ok) {
+            var err = await resp.json().catch(function() { return {}; });
+            throw new Error(err.error || 'HTTP ' + resp.status);
+        }
+
+        closeModal('create-agent-modal');
+        showToast('Research agent created!', 'success');
+        loadAgents();
+    } catch (err) {
+        showToast('Failed: ' + err.message, 'error');
+    }
+};
+
+window.loadAgents = async function loadAgents() {
+    var container = document.getElementById('agents-list');
+    if (!container) return;
+
+    try {
+        var user = firebase.auth().currentUser;
+        if (!user) return;
+        var token = await user.getIdToken();
+
+        var resp = await fetch('/api/agents', {
+            headers: {'Authorization': 'Bearer ' + token}
+        });
+
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        var agents = await resp.json();
+
+        if (!agents.length) {
+            container.innerHTML = '<p class="sio-muted">No research agents yet. Create one to automate lead discovery.</p>';
+            return;
+        }
+
+        container.innerHTML = agents.map(function(a) {
+            var statusClass = a.status === 'active' ? 'agent-active' : 'agent-paused';
+            var statusIcon = a.status === 'active' ? '\u{1F7E2}' : '\u23F8\uFE0F';
+            var lastRan = a.last_ran_at ? new Date(a.last_ran_at).toLocaleDateString() : 'Never';
+            var scheduleMap = {daily: 'Daily', biweekly: 'Twice/Week', weekly: 'Weekly'};
+            var scheduleLabel = scheduleMap[a.schedule] || a.schedule;
+            var promptText = a.prompt || '';
+            var promptPreview = _escapeHTML(promptText.substring(0, 120)) + (promptText.length > 120 ? '...' : '');
+            var toggleLabel = a.status === 'active' ? '\u23F8 Pause' : '\u25B6 Resume';
+            var toggleTarget = a.status === 'active' ? 'paused' : 'active';
+
+            return '<div class="agent-card ' + statusClass + '" data-agent-id="' + _escapeHTML(a.id) + '">' +
+                '<div class="agent-card-header">' +
+                    '<span class="agent-status">' + statusIcon + '</span>' +
+                    '<strong class="agent-name">' + _escapeHTML(a.name) + '</strong>' +
+                    '<span class="agent-schedule-badge">' + scheduleLabel + '</span>' +
+                '</div>' +
+                '<p class="agent-prompt-preview">' + promptPreview + '</p>' +
+                '<div class="agent-stats">' +
+                    '<span>\u{1F4CA} ' + (a.total_leads_found || 0) + ' leads found</span>' +
+                    '<span>\u{1F550} Last: ' + lastRan + '</span>' +
+                '</div>' +
+                '<div class="agent-actions">' +
+                    '<button class="sio-btn sio-btn-sm sio-btn-primary" onclick="runAgentNow(\'' + _escapeHTML(a.id) + '\')" aria-label="Run agent now">\u25B6 Run Now</button>' +
+                    '<button class="sio-btn sio-btn-sm sio-btn-secondary" onclick="toggleAgent(\'' + _escapeHTML(a.id) + '\', \'' + toggleTarget + '\')" aria-label="Toggle agent">' + toggleLabel + '</button>' +
+                    '<button class="sio-btn sio-btn-sm sio-btn-danger" onclick="deleteAgent(\'' + _escapeHTML(a.id) + '\')" aria-label="Delete agent">\u{1F5D1}</button>' +
+                '</div>' +
+            '</div>';
+        }).join('');
+    } catch (err) {
+        container.innerHTML = '<p class="sio-muted">Failed to load agents.</p>';
+        if (window.SIO_DEBUG) console.error('[V24.0 Agents]', err);
+    }
+};
+
+window.runAgentNow = async function runAgentNow(agentId) {
+    try {
+        var user = firebase.auth().currentUser;
+        if (!user) return;
+        var token = await user.getIdToken();
+        showToast('Running agent...', 'info');
+
+        var resp = await fetch('/api/agents/' + encodeURIComponent(agentId) + '/run', {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer ' + token}
+        });
+
+        var result = await resp.json();
+        if (resp.ok) {
+            showToast('Agent complete: ' + (result.leads_created || 0) + ' leads found', 'success');
+            loadAgents();
+        } else {
+            throw new Error(result.error || 'Run failed');
+        }
+    } catch (err) {
+        showToast('Agent run failed: ' + err.message, 'error');
+    }
+};
+
+window.toggleAgent = async function toggleAgent(agentId, newStatus) {
+    try {
+        var user = firebase.auth().currentUser;
+        if (!user) return;
+        var token = await user.getIdToken();
+
+        await fetch('/api/agents/' + encodeURIComponent(agentId), {
+            method: 'PUT',
+            headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+            body: JSON.stringify({ status: newStatus })
+        });
+
+        showToast('Agent ' + newStatus, 'success');
+        loadAgents();
+    } catch (err) {
+        showToast('Failed: ' + err.message, 'error');
+    }
+};
+
+window.deleteAgent = async function deleteAgent(agentId) {
+    if (!confirm('Delete this research agent?')) return;
+    try {
+        var user = firebase.auth().currentUser;
+        if (!user) return;
+        var token = await user.getIdToken();
+
+        await fetch('/api/agents/' + encodeURIComponent(agentId), {
+            method: 'DELETE',
+            headers: {'Authorization': 'Bearer ' + token}
+        });
+
+        showToast('Agent deleted', 'success');
+        loadAgents();
+    } catch (err) {
+        showToast('Failed: ' + err.message, 'error');
+    }
+};

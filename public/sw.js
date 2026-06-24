@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v23.9.15'; // v23.9.15: fix CSP blocking Firebase SDK connections
+const CACHE_NAME = 'sideio-v24.0.0'; // V24.0: Signal Stacking + Evidence Dossier + Competitive Intel + Intelligence Mesh + Agent Marketplace
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=23.9.15',
-    '/styles.css?v=23.9.15',
+    '/app.js?v=24.0.0',
+    '/styles.css?v=24.0.0',
     '/manifest.json'
 ];
 
