@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.1.0'; // V24.1.0: Admin audit trail, radar, credit trends, kill switch
+const CACHE_NAME = 'sideio-v24.1.1'; // V24.1.1: CRM access for all users
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=24.1.0',
-    '/styles.css?v=24.1.0',
+    '/app.js?v=24.1.1',
+    '/styles.css?v=24.1.1',
     '/manifest.json'
 ];
 

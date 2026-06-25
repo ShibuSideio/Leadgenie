@@ -499,18 +499,18 @@ async function loadMe() {
                 if (waitroom) waitroom.style.display = 'none';
             }
 
-            // Force display properties explicitly beyond just CSS class removal
+            // V24.1.1: CRM is user-facing — visible to ALL authenticated users.
+            const crmTab = document.getElementById('tab-crm');
+            if (crmTab) {
+                crmTab.style.display = 'inline-block';
+            }
+
+            // Admin tab: super_admin only
             if (data.role === 'super_admin') {
                 const l0Tab = document.getElementById('tab-l0-admin');
                 if (l0Tab) {
                     l0Tab.classList.remove('hidden');
                     l0Tab.style.display = 'inline-block';
-                }
-                // V24.0 FIX: CRM tab was hidden until user clicked Admin first
-                // (reveal was inside fetchL0Telemetry). Now revealed at auth time.
-                const crmTab = document.getElementById('tab-crm');
-                if (crmTab) {
-                    crmTab.style.display = 'inline-block';
                 }
             }
 
@@ -1491,8 +1491,7 @@ window.switchTab = function(tabName) {
         show('view-macro');
         if (typeof fetchMacroTrends === 'function') fetchMacroTrends();
     } else if (tabName === 'crm-test') {
-        const isAdmin = window.currentUserData?.role === 'super_admin';
-        if (!isAdmin) { showToast('CRM module is restricted to L0 administrators.', 'error'); return; }
+        // V24.1.1: CRM is available to all authenticated users
         show('view-crm-test');
         // Activate both the hidden cmd-btn and ensure no other tab is active
         document.querySelectorAll('.cmd-btn').forEach(b => b.classList.remove('active'));
@@ -1507,16 +1506,10 @@ window.switchTab = function(tabName) {
     }
 };
 
-// V15: Hash-based hidden route for #crm-test (L0 admin only)
+// V24.1.1: Hash-based route for #crm-test (all authenticated users)
 window.addEventListener('hashchange', () => {
-
     if (window.location.hash === '#crm-test' && firebase.auth().currentUser) {
-        // Gate: only super_admin can access
-        if (window.currentUserData?.role === 'super_admin') {
-            switchTab('crm-test');
-        } else {
-            console.warn('[CRM] Access denied: not super_admin');
-        }
+        switchTab('crm-test');
     }
 });
 if (window.location.hash === '#crm-test') {
@@ -1551,11 +1544,7 @@ window.fetchL0Telemetry = async function() {
             // Reveal admin tab — uses style="display:none" (not hidden class)
             const adminTabEl = document.getElementById('tab-l0-admin');
             if (adminTabEl) adminTabEl.style.display = '';
-            // Reveal CRM tab for super_admin
-            if (window.currentUserData?.role === 'super_admin') {
-                const crmTabEl = document.getElementById('tab-crm');
-                if (crmTabEl) crmTabEl.style.display = '';
-            }
+            // V24.1.1: CRM tab visible to all users (revealed at auth time)
             const payload = await response.json();
             window.l0TelemetryCache.macro = payload.data.macro || {};
             window.l0TelemetryCache.tenants = payload.data.tenants || [];
