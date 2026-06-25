@@ -492,7 +492,8 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 # FIX (V23.6): Strip trailing AND {location} suffixes the LLM appends
                 # despite prompt constraints. Catches: AND Oman, AND Kerala, AND "Dubai"
                 _TRAILING_AND_GEO = _re.compile(
-                    r'\s+AND\s+["\']?[A-Z][A-Za-z\s\-]+["\']?\s*$'
+                    r'\s+AND\s+["\']?[A-Za-z][A-Za-z\s\-]+["\']?\s*$',
+                    _re.IGNORECASE
                 )
                 _sanitized_dorks = []
                 for _dork in ctx.symptom_dorks:
@@ -620,6 +621,30 @@ Return ONLY the JSON object. No explanation, no markdown."""
         _excl_titles = " ".join(f'-intitle:"{t}"' for t in ctx.neg_title_frags[:5] if t)
         blacklist += " " + _excl_titles
         log.info("neg_rlhf_titles_injected", count=len(ctx.neg_title_frags[:5]))
+
+    # V24.1.1: Cap blacklist length to prevent query explosion.
+    # With all sources (base + persona signals + shield domains/entities + RLHF domains/titles),
+    # the blacklist can exceed 500 chars, pushing total query length past 700+ chars.
+    # This causes: (a) Serper response times >10s, (b) possible 0-result returns,
+    # (c) wasted credits on queries that are too constrained to match anything.
+    # Cap at 350 chars — enough for base + ~15 exclusions. Trim from tail (RLHF additions
+    # are appended last and least critical).
+    _MAX_BLACKLIST_LEN = 350
+    if len(blacklist) > _MAX_BLACKLIST_LEN:
+        _original_len = len(blacklist)
+        # Split into tokens, rebuild from front, stop when budget exhausted
+        _bl_tokens = blacklist.split()
+        _capped = []
+        _running = 0
+        for _t in _bl_tokens:
+            if _running + len(_t) + 1 > _MAX_BLACKLIST_LEN:
+                break
+            _capped.append(_t)
+            _running += len(_t) + 1
+        blacklist = " ".join(_capped)
+        log.info("blacklist_length_capped",
+                 original=_original_len, capped=len(blacklist),
+                 tokens_kept=len(_capped), tokens_total=len(_bl_tokens))
 
     if not ctx.has_local_history:
         ctx.pain_points = []

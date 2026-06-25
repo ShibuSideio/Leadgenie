@@ -939,17 +939,37 @@ def finalize():
                 contact_endpoints.append({"platform": "other", "uri": ph})
                 existing_uris.add(ph)
 
-        doc_ref.set({
-            "score":       score,
-            "dm":          evaluation.get("dm", ""),
-            "pain_point":  evaluation.get("pain_point", ""),
-            "contact_endpoints": contact_endpoints,
-            "status":      "new",
-        }, merge=True)
+        # V24.1.1 FIX: Write full lead payload matching _process_single_url().
+        # Previously only wrote 4 fields — CRM displayed blank company_name,
+        # decision_maker, intent_signal, etc. for scraper-heavy leads.
+        lead_payload = {
+            "score":                        score,
+            "dm":                           evaluation.get("dm", ""),
+            "pain_point":                   evaluation.get("pain_point", ""),
+            "contact_endpoints":            contact_endpoints,
+            "status":                       "new",
+            "intent_signal":                evaluation.get("intent_signal", ""),
+            "hiring_intent_found":          evaluation.get("hiring_intent_found", "No"),
+            "tech_stack_found":             tech_stack,
+            "icebreaker_angle":             evaluation.get("icebreaker_angle", ""),
+            "decision_maker_name":          evaluation.get("decision_maker_name", "Unknown"),
+            "decision_maker_title":         evaluation.get("decision_maker_title", "Unknown"),
+            "company_size_tier":            evaluation.get("company_size_tier", "Unknown"),
+            "primary_objection_hypothesis": evaluation.get("primary_objection_hypothesis", "Unknown"),
+            "company_name":                 evaluation.get("company_name"),
+            "matched_campaign_ids":         evaluation.get("matched_campaign_ids", []),
+            "score_reasoning":              evaluation.get("score_reasoning", ""),
+            "confidence_level":             evaluation.get("confidence_level", "SPECULATIVE"),
+            "evidence_chain":               evaluation.get("evidence_chain", []),
+            "origin_engine":                "scraper-heavy",
+        }
+        doc_ref.set(lead_payload, merge=True)
         _settle_credit(tenant_id, "success", lead_id=lead_id)
         log.info("finalize_lead_written", lead_id=lead_id[:24], score=score)
     else:
         doc_ref.delete()
+        # V24.1.1 FIX: Settle credit on failure path too (was missing — accounting gap)
+        _settle_credit(tenant_id, "failure", lead_id=lead_id)
         log.info("finalize_score_gate_drop", lead_id=lead_id[:24], score=score)
         lock_entity = lead_data.get("lock_entity")
         if lock_entity:
@@ -1044,9 +1064,17 @@ def _defer_to_scraper_heavy(url: str, lead_id: str, tenant_id: str,
                 "url":         SCRAPER_HEAVY_URL,
                 "headers":     {"Content-Type": "application/json"},
                 "body":        body,
+                # V24.1.1 FIX: Attach OIDC token mirroring _settle_credit() pattern.
+                # Without this, scraper-heavy rejects all deferred tasks with 401,
+                # silently dropping leads that need JS rendering (SPAs, WAF-blocked).
+                **({"oidc_token": {
+                    "service_account_email": ORCHESTRATOR_SA_EMAIL,
+                    "audience": SCRAPER_HEAVY_URL,
+                }} if ORCHESTRATOR_SA_EMAIL else {}),
             }
         })
-        log.info("dispatch_deferred_to_scraper_heavy", url=url[:80])
+        log.info("dispatch_deferred_to_scraper_heavy", url=url[:80],
+                 oidc_configured=bool(ORCHESTRATOR_SA_EMAIL))
     except Exception as defer_err:
         log.warning("dispatch_scraper_heavy_defer_failed",
                     url=url[:80], error=str(defer_err))

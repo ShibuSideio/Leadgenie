@@ -63,13 +63,36 @@ _ENRICHMENT_SOCIAL_BLACKLIST = [
     # Content/wiki/education — not B2B leads
     "wikipedia.org", "wikia.com", "fandom.com", "archive.org",
     "academia.edu", "researchgate.net", "slideshare.net",
+    # V24.1.1: Hobby/consumer domains observed in Serper logs
+    "collegeconfidential.com", "nameberry.com", "garden.org",
+    "contra.com",       # freelancer marketplace, not a B2B lead
+    "gasoccerforum.com", "realcavsfans.com",
+    "dukebasketballreport.com", "thecardboard.org",
+    "volleytalk.com",   # catches volleytalk.proboards.com too
+    # Classifieds / directories / reviews — not B2B leads
+    "yelp.com", "yellowpages.com", "bbb.org", "trustpilot.com",
+    "glassdoor.com", "indeed.com", "monster.com",
 ]
 
+# V24.1.1: Forum subdomain prefixes — if domain starts with any of these,
+# it's almost certainly a community forum, not a business website.
+_FORUM_PREFIXES = (
+    "forum.", "forums.", "talk.", "community.", "discuss.",
+    "board.", "boards.", "bbs.", "chat.",
+)
+
+# V24.1.1: Keywords in domain name that strongly indicate non-business.
+# Matched as substring: "gasoccerforum.com" contains "forum".
+_FORUM_DOMAIN_KEYWORDS = (
+    "forum", "fans", "proboards", "phpbb", "vbulletin",
+    "boards", "fansite", "fandom",
+)
+
 # V24.0: Domain suffixes that indicate non-business entities.
-# Skip Places API for these — they never return GMB results.
+# V24.1.1: .org now skips ALL enrichment (not just Places).
 _NON_BUSINESS_SUFFIXES = (
     ".edu", ".ac.in", ".ernet.in", ".gov", ".gov.in", ".mil",
-    ".org",  # most .org are non-profits/foundations, not GMB-listed
+    ".org",  # most .org are non-profits/foundations, not B2B leads
 )
 
 # FIX (2026-06-21): Replaced dead platform-specific B2C list with archetype-based
@@ -110,14 +133,26 @@ def extract_root_domain(url: str) -> str:
 
 
 def filter_serper_noise(serper_results: list) -> list:
-    """Remove enterprise, noise-path, and bot-page results from Serper output."""
+    """Remove enterprise, noise-path, and bot-page results from Serper output.
+
+    V24.1.1 FIX: Uses proper domain extraction and path-segment matching
+    instead of substring. Prevents false positives like 'caribm.com' matching
+    'ibm.com' or '/doctrine' matching '/docs'.
+    """
     clean = []
     for r in serper_results:
         link    = r.get("link", "").lower()
         snippet = r.get("snippet", "").lower()
-        if any(d in link for d in _ENTERPRISE_DOMAINS):
+        # V24.1.1: Use root domain extraction instead of substring match
+        link_domain = extract_root_domain(link)
+        if link_domain in _ENTERPRISE_DOMAINS:
             continue
-        if any(p in link for p in _NOISE_PATHS):
+        # V24.1.1: Path-segment matching — check that the path segment starts with noise prefix
+        try:
+            link_path = urlparse(link).path.lower()
+        except Exception:
+            link_path = ""
+        if any(link_path.startswith(p) or f"{p}/" in link_path for p in _NOISE_PATHS):
             continue
         if any(s in snippet for s in _NOISE_SNIPPETS):
             continue
@@ -441,7 +476,7 @@ def search_serper(
         wait=wait_exponential(multiplier=2, min=4, max=32),
         stop=stop_after_attempt(4),
         retry=retry_if_exception(_is_rate_limited),
-        reraise=False,
+        reraise=True,  # V24.1.1 FIX: reraise=False returned None on exhaustion → TypeError on len()
     )
     def _do_post():
         r = httpx.post(url, headers=headers, data=payload, timeout=30)
@@ -454,6 +489,8 @@ def search_serper(
 
     try:
         results = _do_post()
+        if results is None:
+            results = []  # V24.1.1: guard against tenacity edge cases
         # ── V23.4: Async audit telemetry — zero-latency fire-and-forget ──────
         _async_serper_audit(
             campaign_id       = campaign_id,
@@ -466,8 +503,14 @@ def search_serper(
         )
         return results
     except Exception as exc:
-        log.error("serper_all_retries_exhausted", query=query[:60], error=str(exc))
-        update_circuit_telemetry("serper_429")
+        # V24.1.1 FIX: Determine actual failure status instead of hardcoding 429
+        _fail_code = 429
+        if hasattr(exc, 'response') and hasattr(exc.response, 'status_code'):
+            _fail_code = exc.response.status_code
+        log.error("serper_all_retries_exhausted", query=query[:60],
+                  error=str(exc), status_code=_fail_code)
+        if _fail_code == 429:
+            update_circuit_telemetry("serper_429")
         # ── Audit row for failed call ─────────────────────────────────────────
         _async_serper_audit(
             campaign_id       = campaign_id,
@@ -475,7 +518,7 @@ def search_serper(
             raw_query         = query,
             serper_parameters = payload_dict,
             result_count      = 0,
-            status_code       = 429,
+            status_code       = _fail_code,
             error_message     = str(exc)[:500],
             engine            = "search",
         )
@@ -527,6 +570,23 @@ def deep_context_serper_dork(
         if blocked in cleaned:
             log.info("enrichment_gated_social", domain=domain)
             return "", False
+
+    # V24.1.1: Forum prefix detection — "forum.example.com", "talk.site.com", etc.
+    if any(cleaned.startswith(p) for p in _FORUM_PREFIXES):
+        log.info("enrichment_gated_forum_prefix", domain=domain, prefix=cleaned.split(".")[0])
+        return "", False
+
+    # V24.1.1: Forum keyword detection — "gasoccerforum.com" contains "forum"
+    if any(kw in cleaned for kw in _FORUM_DOMAIN_KEYWORDS):
+        log.info("enrichment_gated_forum_keyword", domain=domain)
+        return "", False
+
+    # V24.1.1: Non-business suffixes (.edu, .gov, .org) skip ALL enrichment.
+    # Previously only skipped Places; now skips social + hiring queries too.
+    # These domains never produce B2B leads and waste 2-3 credits each.
+    if any(cleaned.endswith(sfx) for sfx in _NON_BUSINESS_SUFFIXES):
+        log.info("enrichment_gated_non_business_suffix", domain=domain)
+        return "", False
 
     if _is_consumer_archetype(sourcing_vector):
         log.info("enrichment_gated_consumer_archetype", domain=domain, vector=sourcing_vector)
