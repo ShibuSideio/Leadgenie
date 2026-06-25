@@ -1151,7 +1151,7 @@ def t_query_brain_imports_without_db_call():
     sys.modules.pop(key, None)
 
     assert hasattr(mod, "generate_smart_query"),  "generate_smart_query not exported"
-    assert hasattr(mod, "VECTOR_PLATFORM_MAP"),    "VECTOR_PLATFORM_MAP not exported"
+    assert hasattr(mod, "_is_consumer_archetype"), "_is_consumer_archetype not exported"
 
 
 def t_gcs_task_purged():
