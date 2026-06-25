@@ -101,6 +101,8 @@ _NON_BUSINESS_SUFFIXES = (
 # NOTE: Defined inline (not imported from query_brain) because the smoke test
 # harness loads serper_service.py via importlib in an isolated namespace where
 # cross-module imports are unavailable.
+# IMPORTANT (V24.1.1): This MUST stay in sync with query_brain._CONSUMER_ARCHETYPES.
+# If a new archetype is added to one, it must be added to both.
 _CONSUMER_ARCHETYPES: frozenset = frozenset({"B2C", "B2B2C", "D2C"})
 
 def _is_consumer_archetype(vector: str) -> bool:
@@ -159,15 +161,24 @@ def filter_serper_noise(serper_results: list) -> list:
         clean.append(r)
     return clean
 
+# V24.1.1: Check env var for Serper paid tier (skips social domain stripping)
+_SERPER_PAID_TIER = os.getenv("SERPER_PAID_TIER", "").lower() in ("true", "1", "yes")
+
 
 def sanitize_query(query: str) -> str:
-    """Sanitize the search query to remove any patterns blocked by Serper free tier.
+    """Sanitize the search query to remove patterns blocked by Serper free tier.
 
-    Specifically, filters out tokens containing forbidden social domains or their names,
-    adjusting parentheses and logical operators (AND/OR/NOT) to prevent syntax errors.
+    V24.1.1 FIX: When SERPER_PAID_TIER=true, social domain stripping is skipped
+    entirely. Paid tier supports site:linkedin.com and similar queries. On free
+    tier, stripping is still active but now logs when positive site: operators
+    are removed (to diagnose query degradation).
     """
     if not query:
         return ""
+
+    # V24.1.1: Skip sanitization entirely on paid tier
+    if _SERPER_PAID_TIER:
+        return query
 
     forbidden = ["linkedin", "facebook", "twitter", "instagram", "reddit", "quora", "youtube", "x.com"]
 
@@ -187,6 +198,11 @@ def sanitize_query(query: str) -> str:
                 is_forbidden = True
                 break
         if is_forbidden:
+            # V24.1.1: Log when positive site: operators are stripped
+            if token_lower.startswith("site:"):
+                log.warning("sanitize_query_positive_site_stripped",
+                            token=token[:80], query=query[:100],
+                            note="Set SERPER_PAID_TIER=true to preserve social site: operators.")
             continue
         clean_tokens.append(token)
 
@@ -362,7 +378,7 @@ def _push_serper_audit(
             "engine":             engine,
             "serper_status_code": status_code,
             "error_message":      error_message or None,
-            "timestamp":          _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp":          _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
         # ── Zero-Trust OIDC — attach identity token ──────────────────────────
@@ -588,10 +604,6 @@ def deep_context_serper_dork(
         log.info("enrichment_gated_non_business_suffix", domain=domain)
         return "", False
 
-    if _is_consumer_archetype(sourcing_vector):
-        log.info("enrichment_gated_consumer_archetype", domain=domain, vector=sourcing_vector)
-        return "", False
-
     api_key = _get_serper_api_key()
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     context_data: list[str] = []
@@ -610,21 +622,32 @@ def deep_context_serper_dork(
             pass
         return {}
 
-    # V24.0 FIX: Skip Places API for non-business domains (forums, .edu, .ac.in).
-    # Querying "airliners.net" or "ncsi.iisc.ernet.in" as a Places search is
-    # pointless — they're websites, not physical businesses. 1 credit wasted each.
-    skip_places = any(domain.endswith(sfx) for sfx in _NON_BUSINESS_SUFFIXES)
+    # V24.1.1 FIX (W3): Consumer vectors get lightweight enrichment instead of
+    # being blanket-blocked. B2C leads now receive GMB + review context instead of
+    # zero context, reducing the scoring bias against consumer leads.
+    _is_consumer = _is_consumer_archetype(sourcing_vector)
 
     tasks = []
-    if not skip_places:
+    if _is_consumer:
+        # Consumer enrichment: GMB (local presence) + review signals (consumer sentiment)
+        # Skip company profile and hiring queries — they produce B2B noise for B2C leads.
         tasks.append(("https://google.serper.dev/places",  {"q": domain, "num": 3}))
-    tasks.extend([
-        ("https://google.serper.dev/search",  {"q": f'company profile OR social media "{domain}"', "num": 3}),
-        ("https://google.serper.dev/search",  {
-            "q": f'job openings OR careers "{domain}"',
-            "num": 3,
-        }),
-    ])
+        tasks.append(("https://google.serper.dev/search",  {
+            "q": f'reviews OR complaints OR "customer experience" "{domain}"', "num": 3,
+        }))
+        log.info("enrichment_consumer_path", domain=domain, vector=sourcing_vector)
+    else:
+        # B2B enrichment: Places + company profile + hiring intent (3 queries)
+        # NOTE: Non-business suffixes (.edu, .gov, .org) already returned early
+        # above, so Places is always relevant here.
+        tasks.append(("https://google.serper.dev/places",  {"q": domain, "num": 3}))
+        tasks.extend([
+            ("https://google.serper.dev/search",  {"q": f'company profile OR social media "{domain}"', "num": 3}),
+            ("https://google.serper.dev/search",  {
+                "q": f'job openings OR careers "{domain}"',
+                "num": 3,
+            }),
+        ])
 
     with _cf.ThreadPoolExecutor(max_workers=3) as pool:
         futures = [pool.submit(_fetch_parallel, url, body) for url, body in tasks]
@@ -635,17 +658,9 @@ def deep_context_serper_dork(
             except Exception:
                 results.append({})
 
-    gmb_data = {}
-    social_data = {}
-    hiring_data = {}
-    if skip_places:
-        # Only 2 tasks (social + hiring), no Places
-        social_data, hiring_data = results[0], results[1] if len(results) > 1 else {}
-    else:
-        # 3 tasks (places + social + hiring)
-        gmb_data = results[0]
-        social_data = results[1] if len(results) > 1 else {}
-        hiring_data = results[2] if len(results) > 2 else {}
+    # Parse results based on enrichment path
+    gmb_data = results[0] if results else {}
+    hiring_intent = False
 
     for place in gmb_data.get("places", []):
         context_data.append(
@@ -654,21 +669,30 @@ def deep_context_serper_dork(
             f"Address: {place.get('address', 'N/A')}"
         )
 
-    for org in social_data.get("organic", []):
-        context_data.append(f"[SOCIAL] {org.get('snippet', '')}")
+    if _is_consumer:
+        # Consumer path: results[1] = review/complaint search
+        review_data = results[1] if len(results) > 1 else {}
+        for org in review_data.get("organic", []):
+            context_data.append(f"[REVIEW] {org.get('snippet', '')}")
+    else:
+        # B2B path: results[1] = social, results[2] = hiring
+        social_data = results[1] if len(results) > 1 else {}
+        hiring_data = results[2] if len(results) > 2 else {}
 
-    hiring_sigs = [
-        "we are hiring", "job description", "apply today",
-        "openings", "careers", "looking for", "lakh", "lpa", "fresher",
-    ]
-    hiring_intent = False
-    for job in hiring_data.get("organic", []):
-        snippet_lc = job.get("snippet", "").lower()
-        context_data.append(f"[HIRING] {snippet_lc}")
-        if any(sig in snippet_lc for sig in hiring_sigs):
-            hiring_intent = True
+        for org in social_data.get("organic", []):
+            context_data.append(f"[SOCIAL] {org.get('snippet', '')}")
 
-    # BUG-S2 FIX: Single batched Firestore write for all 3 Serper calls.
+        hiring_sigs = [
+            "we are hiring", "job description", "apply today",
+            "openings", "careers", "looking for", "lakh", "lpa", "fresher",
+        ]
+        for job in hiring_data.get("organic", []):
+            snippet_lc = job.get("snippet", "").lower()
+            context_data.append(f"[HIRING] {snippet_lc}")
+            if any(sig in snippet_lc for sig in hiring_sigs):
+                hiring_intent = True
+
+    # BUG-S2 FIX: Single batched Firestore write for all Serper calls.
     try:
         from google.cloud import firestore as _fs  # type: ignore[import]
         get_db().collection("usage_metrics").document(tenant_id).set(

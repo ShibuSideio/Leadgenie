@@ -29,7 +29,6 @@ log = get_logger("pipeline.query_brain")
 # Constants
 # ---------------------------------------------------------------------------
 
-VECTOR_PLATFORM_MAP: dict[str, list[str]] = {}
 
 # FIX (2026-06-20): Removed hardcoded "B2B" from schema description.
 # The word "B2B" in the schema primed Gemini to hallucinate corporate
@@ -213,52 +212,59 @@ def generate_smart_query(
             log.warning("query_brain_rlhf_fetch_failed", error=str(exc))
 
     # ── Step 1b: Negative RLHF — Shadow Ledger rejection footprints ───────────
-    try:
-        from google.cloud.firestore_v1.base_query import FieldFilter as _FF2  # noqa: PLC0415
-        import concurrent.futures as _cf
+    # V24.1.1 FIX: Apply same consumer guard as positive RLHF (Step 1).
+    # Without campaign_id, consumer vectors would fetch B2B rejected domains
+    # and exclude valid B2C leads.
+    if _skip_rlhf:
+        log.info("query_brain_neg_rlhf_skipped_consumer",
+                 vector=ctx.sourcing_vector, tenant_id=ctx.tenant_id[:10])
+    else:
+        try:
+            from google.cloud.firestore_v1.base_query import FieldFilter as _FF2  # noqa: PLC0415
+            import concurrent.futures as _cf
 
-        def _fetch_rejections():
-            _db  = get_db()
-            q_rej = _db.collection("leads").where(filter=_FF2("tenant_id", "==", ctx.tenant_id))
-            if ctx.campaign_id:
-                q_rej = q_rej.where(filter=_FF2("campaign_id", "==", ctx.campaign_id))
-            q_rej = q_rej.where(filter=_FF2("status", "==", "rejected")).limit(30)
-            docs_rej  = list(q_rej.stream())
-            _domains:      list[str] = []
-            _title_frags:  list[str] = []
-            JUNK_TITLE_PATTERNS = [
-                "jobs", "careers", "hiring", "directory", "listing",
-                "aggregator", "yellow pages", "just dial",
-            ]
-            for d in docs_rej:
-                dd = d.to_dict() or {}
-                domain = (
-                    dd.get("target_domain")
-                    or dd.get("domain")
-                    or ""
-                ).strip().lower()
-                if domain and domain not in ("n/a", "unknown", "") and "." in domain:
-                    _domains.append(domain)
-                title = (dd.get("title") or dd.get("raw_query") or "").lower()
-                for pattern in JUNK_TITLE_PATTERNS:
-                    if pattern in title and pattern not in _title_frags:
-                        _title_frags.append(pattern)
-            return _domains, _title_frags
+            def _fetch_rejections():
+                _db  = get_db()
+                q_rej = _db.collection("leads").where(filter=_FF2("tenant_id", "==", ctx.tenant_id))
+                if ctx.campaign_id:
+                    q_rej = q_rej.where(filter=_FF2("campaign_id", "==", ctx.campaign_id))
+                q_rej = q_rej.where(filter=_FF2("status", "==", "rejected")).limit(30)
+                docs_rej  = list(q_rej.stream())
+                _domains:      list[str] = []
+                _title_frags:  list[str] = []
+                JUNK_TITLE_PATTERNS = [
+                    "jobs", "careers", "hiring", "directory", "listing",
+                    "aggregator", "yellow pages", "just dial",
+                ]
+                for d in docs_rej:
+                    dd = d.to_dict() or {}
+                    domain = (
+                        dd.get("target_domain")
+                        or dd.get("domain")
+                        or ""
+                    ).strip().lower()
+                    if domain and domain not in ("n/a", "unknown", "") and "." in domain:
+                        _domains.append(domain)
+                    title = (dd.get("title") or dd.get("raw_query") or "").lower()
+                    for pattern in JUNK_TITLE_PATTERNS:
+                        if pattern in title and pattern not in _title_frags:
+                            _title_frags.append(pattern)
+                return _domains, _title_frags
 
-        with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
-            _fut = _pool.submit(_fetch_rejections)
-            ctx.neg_domains, ctx.neg_title_frags = _fut.result(timeout=2.0)
+            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+                _fut = _pool.submit(_fetch_rejections)
+                ctx.neg_domains, ctx.neg_title_frags = _fut.result(timeout=2.0)
 
-        if ctx.neg_domains or ctx.neg_title_frags:
-            log.info(
-                "query_brain_neg_rlhf_loaded",
-                domains=len(ctx.neg_domains),
-                title_frags=len(ctx.neg_title_frags),
-                tenant_id=ctx.tenant_id[:10],
-                campaign_id=ctx.campaign_id,
-            )
-    except Exception as _neg_exc:
-        log.debug("query_brain_neg_rlhf_failed", error=str(_neg_exc))
+            if ctx.neg_domains or ctx.neg_title_frags:
+                log.info(
+                    "query_brain_neg_rlhf_loaded",
+                    domains=len(ctx.neg_domains),
+                    title_frags=len(ctx.neg_title_frags),
+                    tenant_id=ctx.tenant_id[:10],
+                    campaign_id=ctx.campaign_id,
+                )
+        except Exception as _neg_exc:
+            log.debug("query_brain_neg_rlhf_failed", error=str(_neg_exc))
 
     _p_cat = (ctx.persona_category or "general").strip() or "general"
     if ctx.campaign_id:
@@ -374,25 +380,26 @@ def generate_smart_query(
         _is_consumer_vector = _is_consumer_archetype(vector_label)
 
         if _is_consumer_vector:
-            # ── CONSUMER PROMPT (V23.6 — Unified OSINT / Anti-SEO) ─────────
-            unified_prompt = f"""You are the Sideio Query Brain, operating as an elite OSINT investigator. Your goal is to find raw, hidden, unpolished web footprints of people or businesses experiencing specific pain points.
+            # ── CONSUMER PROMPT (V24.1.1 — Differentiated from Standard) ───
+            unified_prompt = f"""You are the Sideio Query Brain, operating as an elite OSINT investigator for CONSUMER ({vector_label}) campaigns. Your goal is to find raw, unpolished web footprints of individual consumers or local businesses experiencing specific pain points.
 
 # TASK 1 — RLHF HISTORICAL MINING
 Extract up to 3 short trend phrases from successful lead pain_points. Context domain: {vector_label}.
 Data: {history_ctx}
 CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for historical_phrases. Do NOT synthesize placeholder data.
 
-# TASK 2 — SYMPTOM DORKING (ANTI-SEO PROTOCOL)
+# TASK 2 — CONSUMER SYMPTOM DORKING (ANTI-SEO PROTOCOL)
 Target Pain Point / Bio: '{ctx.bio}'.
-Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW, unfiltered web footprints of prospects experiencing this problem.
-Rule: Focus purely on symptoms, complaints, and unpolished data (e.g., filetype:pdf, inurl:forum, intitle:"help with").
-Rule: You MUST bypass SEO-optimized directories, aggregators, and marketing blogs.
-Rule: Every single query MUST include this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
-Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end of a query. Weave the geographic context organically into the search operators (e.g., intitle:"Oman" or site:.om). The Serper API handles geo-bounding separately.
+Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW consumer complaints, reviews, and community discussions about this problem.
+Rule: Target consumer-facing sources: Google Maps reviews, social media threads, neighbourhood forums, local Q&A boards, consumer complaint pages (e.g., inurl:review, inurl:complaint, site:trustpilot.com, site:mouthshut.com, site:consumercomplaints.in).
+Rule: DO NOT use B2B-style operators like filetype:pdf, filetype:pptx, inurl:whitepaper, intitle:"case study". These are corporate research patterns, not consumer signals.
+Rule: You MUST bypass SEO-optimized directories and marketing blogs: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
+Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end. Weave geography into operators organically (e.g., intitle:"Kochi" or inurl:kerala).
+Rule: NEVER use B2B jargon: "lead generation", "pipeline", "go-to-market", "product-market fit", "enterprise sales", "SaaS", "B2B", "stakeholder alignment", "brand story", "unclear positioning".
 
-# TASK 3 — INTENT EXPANSION
+# TASK 3 — CONSUMER INTENT EXPANSION
 Audience: '{kw_str}'. Context: '{vector_label}'.
-Translate the pain point into exactly 3 natural-language conversational queries that a frustrated person or operator might ask on a niche forum, help board, or community group. Do not use generic commercial keywords.
+Generate exactly 3 natural-language queries that a frustrated INDIVIDUAL CONSUMER would type into Google, post on a community forum, or ask in a local WhatsApp/Facebook group. Think: personal complaints, "looking for recommendations", "anyone else having this problem", "worst experience with". These must sound like real people, not corporate professionals.
 
 Return ONLY the JSON object. No explanation, no markdown."""
         else:
@@ -719,13 +726,5 @@ Return ONLY the JSON object. No explanation, no markdown."""
     for sd in ctx.symptom_dorks:
         _bl = _deconflict_blacklist(sd, blacklist)
         smart_queries.append(f"{sd} {_bl}")
-
-    if ctx.sourcing_vector and ctx.sourcing_vector in VECTOR_PLATFORM_MAP:
-        for dork in VECTOR_PLATFORM_MAP[ctx.sourcing_vector]:
-            _bl = _deconflict_blacklist(f"{dork}{historical_str}", blacklist)
-            smart_queries.append(f"{dork}{historical_str} {_bl}")
-        log.info("synaptic_router_dorks_appended",
-                 count=len(VECTOR_PLATFORM_MAP[ctx.sourcing_vector]),
-                 vector=ctx.sourcing_vector)
 
     return smart_queries

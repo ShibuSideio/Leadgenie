@@ -31,7 +31,7 @@ def seed(project_id: str = PROJECT_ID) -> None:
     from google.cloud import firestore  # type: ignore[import]
     db = firestore.Client(project=project_id)
 
-    now_iso = datetime.datetime.utcnow().isoformat() + "Z"
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
 
     # ── 1. Tenant document ──────────────────────────────────────────────────
     db.collection("users").document(TENANT_ID).set({

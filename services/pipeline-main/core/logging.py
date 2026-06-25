@@ -33,7 +33,7 @@ class _GCPJsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D102
         payload: dict[str, Any] = {
-            "time":     datetime.datetime.utcnow().isoformat() + "Z",
+            "time":     datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z",
             "severity": self._SEVERITY_MAP.get(record.levelno, "DEFAULT"),
             "logger":   record.name,
             "message":  record.getMessage(),

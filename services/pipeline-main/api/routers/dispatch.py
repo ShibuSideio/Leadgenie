@@ -406,22 +406,14 @@ def dispatch():
         try:
             cache_key = hashlib.sha256(f"{tenant_id}_{dedupe_target}".encode()).hexdigest()
             cdoc = _db().collection("scraped_cache").document(cache_key).get()
-            found_snippet = "No"
             txt = ""
             if cdoc.exists:
                 txt = cdoc.to_dict().get("text", "")
                 if txt:
                     snippet_map[batch_url] = txt
-                    found_snippet = "Yes"
-            
-            # Temporary Debug Log Injection
-            log.info("DEBUG_CACHE_LOOKUP", 
-                     url=batch_url[:80], 
-                     cache_key=cache_key, 
-                     found=found_snippet, 
-                     snippet_preview=txt[:100] if txt else "")
+
         except Exception as err:
-            log.warning("dispatch_cache_lookup_debug_error", url=batch_url[:80], error=str(err))
+            log.warning("dispatch_cache_lookup_error", url=batch_url[:80], error=str(err))
 
     # ── TRACE-7: Confidence Tiering Gate (pre_filter_gemini) ────────────────
     log.info("TRACE-7: Calling pre_filter_gemini.", url_count=len(batch_urls))
@@ -441,17 +433,7 @@ def dispatch():
     high_urls   = tiered.get("High", [])
     medium_urls = tiered.get("Medium", [])
 
-    # Log Filter Decisions
-    for u in batch_urls:
-        decision = "Low"
-        if u in high_urls:
-            decision = "High"
-        elif u in medium_urls:
-            decision = "Medium"
-        log.info("DEBUG_FILTER_DECISION", 
-                 url=u[:80], 
-                 decision=decision, 
-                 has_snippet=bool(snippet_map.get(u)))
+
 
     # Velocity gate (Medium URLs)
     # BUG-3 FIX: Replace deprecated positional where() with FieldFilter.
@@ -1026,7 +1008,7 @@ def _shadow_track_bq(
                 "pain_point":      (pain_point or "")[:1000],
                 "prism_mode":      prism_mode,
                 "stage":           "dispatch",  # differentiates from produce-side rows
-                "timestamp":       _dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "timestamp":       _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
             errors = get_bq_client().insert_rows_json(
                 "lead-sniper-prod.swarm_analytics.shadow_track_events",

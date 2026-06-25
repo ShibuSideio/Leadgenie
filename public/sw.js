@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.1.1'; // V24.1.1: CRM access for all users
+const CACHE_NAME = 'sideio-v24.1.2'; // V24.1.2: Pipeline hardening — all deferred items implemented
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=24.1.1',
-    '/styles.css?v=24.1.1',
+    '/app.js?v=24.1.2',
+    '/styles.css?v=24.1.2',
     '/manifest.json'
 ];
 
