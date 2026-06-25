@@ -391,7 +391,7 @@ CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for his
 # TASK 2 — CONSUMER SYMPTOM DORKING (ANTI-SEO PROTOCOL)
 Target Pain Point / Bio: '{ctx.bio}'.
 Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW consumer complaints, reviews, and community discussions about this problem.
-Rule: Target consumer-facing sources: Google Maps reviews, social media threads, neighbourhood forums, local Q&A boards, consumer complaint pages (e.g., inurl:review, inurl:complaint, site:trustpilot.com, site:mouthshut.com, site:consumercomplaints.in).
+Rule: Target consumer-facing sources: Google Maps reviews, social media threads, neighbourhood forums, local Q&A boards, consumer complaint pages (e.g., inurl:review, inurl:complaint, inurl:customer-review, inurl:feedback, site:mouthshut.com, site:consumercomplaints.in).
 Rule: DO NOT use B2B-style operators like filetype:pdf, filetype:pptx, inurl:whitepaper, intitle:"case study". These are corporate research patterns, not consumer signals.
 Rule: You MUST bypass SEO-optimized directories and marketing blogs: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end. Weave geography into operators organically (e.g., intitle:"Kochi" or inurl:kerala).
@@ -470,7 +470,12 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 "The target audience for this campaign is end consumers / individual buyers. "
                 "When generating symptom_dorks and translated_queries, lean towards pain signals "
                 "found in community forums, social threads, review complaint pages, and niche "
-                f"Q&A boards relevant to the {vector_label} vertical.\n"
+                f"Q&A boards relevant to the {vector_label} vertical.\n\n"
+                "CONSUMER ANTI-B2B OVERRIDE:\n"
+                "DO NOT use filetype: operators (filetype:pdf, filetype:pptx, filetype:doc) in symptom_dorks. "
+                "These are corporate research patterns that return whitepapers and slide decks, not consumer signals. "
+                "For consumer campaigns, use inurl:review, inurl:complaint, inurl:customer-review, inurl:feedback, "
+                "and site: operators targeting consumer review platforms instead.\n"
             )
 
         try:

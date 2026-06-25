@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sideio-v24.1.2'; // V24.1.2: Pipeline hardening — all deferred items implemented
+const CACHE_NAME = 'sideio-v24.1.3'; // V24.1.3: Consumer prompt hardening — filetype: override, trustpilot blacklist clash, enrichment docstring
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',

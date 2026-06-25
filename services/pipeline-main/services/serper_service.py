@@ -551,16 +551,18 @@ def deep_context_serper_dork(
     sourcing_vector: str = "B2B",
     source_url: str = "",
 ) -> tuple[str, bool]:
-    """Fetch contextual GMB / social / hiring signals for a domain via Serper.
+    """Fetch contextual enrichment signals for a domain via Serper.
 
-    V14.4 HOTFIX: Gatekeeper skips social domains and B2C vectors.
-    linkedin.com/company/ URLs bypass the social blacklist — treated as B2B.
+    V24.1.2: B2B domains receive Places + company profile + hiring queries
+    (3 credits). Consumer vectors (B2C/B2B2C/D2C) receive Places + review/
+    complaint queries (2 credits). Social domains and non-business suffixes
+    (.edu, .gov, .org) are gated and receive no enrichment.
 
     Args:
         domain:          Root domain string.
         tenant_id:       Tenant UID for usage metering.
         sourcing_vector: Campaign sourcing vector label.
-        source_url:      Full original URL (used for linkedin company detection).
+        source_url:      Full original URL (used for domain extraction).
 
     Returns:
         ``(context_data_string, hiring_intent_found)``
