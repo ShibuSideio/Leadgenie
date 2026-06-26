@@ -230,6 +230,109 @@ async function initGeoCascade(existingGeoHierarchy, existingGl, existingLocation
     _updateGeoPreview();
 }
 
+// =============================================================================
+// GENERIC GEO CASCADE — works with any ID prefix (e.g. 'cc-geo', 'geo')
+// Used by: Launch Campaign modal (cc-geo-*), Edit Campaign modal (geo-*-select)
+// =============================================================================
+async function initGeoCascadeFor(prefix, existingGeoHierarchy, existingGl, existingLocation) {
+    const data = await loadGeoData();
+    const continentEl = document.getElementById(prefix + '-continent');
+    const countryEl   = document.getElementById(prefix + '-country');
+    const regionEl    = document.getElementById(prefix + '-region');
+    const previewEl   = document.getElementById(prefix + '-preview');
+    const locHidden   = document.getElementById(prefix === 'cc-geo' ? 'cc-location' : 'edit-camp-location');
+    const glHidden    = document.getElementById(prefix === 'cc-geo' ? 'cc-gl' : 'edit-camp-gl');
+
+    if (!continentEl || !countryEl || !regionEl) return;
+
+    function updatePreview() {
+        const continent = continentEl.value || '';
+        const country   = countryEl.value   || '';
+        const region    = regionEl.value    || '';
+        const compiled  = _compileGeoString(continent, country, region);
+        if (previewEl) previewEl.textContent = compiled ? `📍 ${compiled}` : '';
+        if (glHidden)  glHidden.value  = _resolveGlCode(country) || '';
+        if (locHidden) locHidden.value = compiled;
+    }
+
+    // Populate continents
+    continentEl.innerHTML = '<option value="">🌍 Continent</option>';
+    data.continents.forEach(c => {
+        continentEl.innerHTML += `<option value="${c.name}">${c.name}</option>`;
+    });
+    _resetSelect(countryEl, '🏳️ Country');
+    _resetSelect(regionEl,  '📍 Region');
+
+    continentEl.onchange = function() {
+        const cName = this.value;
+        _resetSelect(countryEl, '🏳️ Country');
+        _resetSelect(regionEl,  '📍 Region');
+        if (!cName) { updatePreview(); return; }
+        const continent = data.continents.find(c => c.name === cName);
+        if (!continent) { updatePreview(); return; }
+        countryEl.disabled = false;
+        continent.countries.forEach(co => {
+            countryEl.innerHTML += `<option value="${co.name}">${co.name}</option>`;
+        });
+        updatePreview();
+    };
+
+    countryEl.onchange = function() {
+        const coName = this.value;
+        _resetSelect(regionEl, '📍 Region');
+        if (!coName) { updatePreview(); return; }
+        const continentName = continentEl.value;
+        const continent = data.continents.find(c => c.name === continentName);
+        const country   = continent?.countries.find(co => co.name === coName);
+        if (!country || !country.regions || country.regions.length === 0) {
+            updatePreview();
+            return;
+        }
+        regionEl.disabled = false;
+        country.regions.forEach(r => {
+            regionEl.innerHTML += `<option value="${r}">${r}</option>`;
+        });
+        updatePreview();
+    };
+
+    regionEl.onchange = function() { updatePreview(); };
+
+    // ── Hydrate from existing data ──────────────────────────────────────
+    if (existingGeoHierarchy && existingGeoHierarchy.continent) {
+        continentEl.value = existingGeoHierarchy.continent;
+        continentEl.onchange();
+        if (existingGeoHierarchy.country) {
+            countryEl.value = existingGeoHierarchy.country;
+            countryEl.onchange();
+            if (existingGeoHierarchy.region) {
+                regionEl.value = existingGeoHierarchy.region;
+                regionEl.onchange();
+            }
+        }
+    } else if (existingGl) {
+        for (const cont of data.continents) {
+            const match = cont.countries.find(co => co.gl === existingGl);
+            if (match) {
+                continentEl.value = cont.name;
+                continentEl.onchange();
+                countryEl.value = match.name;
+                countryEl.onchange();
+                if (existingLocation) {
+                    const regionMatch = match.regions?.find(
+                        r => existingLocation.toLowerCase().includes(r.toLowerCase())
+                    );
+                    if (regionMatch) {
+                        regionEl.value = regionMatch;
+                        regionEl.onchange();
+                    }
+                }
+                break;
+            }
+        }
+    }
+    updatePreview();
+}
+
 // Toast — defined as function declaration so it is hoisted and available
 // everywhere, including in loadLeads which runs before window.showToast assignment.
 function showToast(message, type = 'info') {
@@ -1331,6 +1434,7 @@ window.saveCampaignAction = async function(payload) {
                 human_edited:       (payload && payload.human_edited) || false,
                 target_angle_hook:  (payload && payload.target_angle_hook) || '',
                 target_angle_adv:   (payload && payload.target_angle_adv) || '',
+                geo_hierarchy:      (payload && payload.geo_hierarchy) || {},
                 status:           'active'
             })
         });
@@ -4131,6 +4235,8 @@ window.openChildCampaignModal = async function() {
     const modal = document.getElementById('child-campaign-modal');
     if (modal) {
         showModal('child-campaign-modal');
+        // V24.1.4: Initialize geo cascade for launch form (cc-geo-* elements)
+        initGeoCascadeFor('cc-geo', null, '', '');
         const fallbackCont = document.getElementById('cc-custom-fallback-container');
         if (fallbackCont) fallbackCont.style.display = 'none'; // FIX T2: no .hidden CSS rule
         const cardsEl = document.getElementById('cc-recommendation-cards');
@@ -4340,10 +4446,10 @@ window.showCcCustomFallback = function() {
     const f = document.getElementById('cc-custom-fallback-container');
     if (f) f.style.display = 'block';
 
-    // Pre-fill geography from DT state
-    const locEl = document.getElementById('cc-location');
-    if (locEl && !locEl.value && window._dtState?.extractedGl) {
-        locEl.value = window._dtState.extractedGl;
+    // Pre-fill geography from DT state via cascade
+    const extractedGl = window._dtState?.extractedGl || '';
+    if (extractedGl) {
+        initGeoCascadeFor('cc-geo', null, extractedGl, '');
     }
 
     // Reset form to clean state (persona-unselected)
@@ -4358,7 +4464,8 @@ window.showCcCustomFallback = function() {
 window.saveChildCampaign = async function() {
     const personaSel   = document.getElementById('cc-persona-select');
     const nameEl       = document.getElementById('cc-name');
-    const locEl        = document.getElementById('cc-location');
+    const locEl        = document.getElementById('cc-location');   // hidden, synced by cascade
+    const glEl         = document.getElementById('cc-gl');         // hidden, synced by cascade
     const extraKeysEl  = document.getElementById('cc-extra-keywords');
     // Legacy fields (visible only when no persona)
     const focusEl      = document.getElementById('cc-focus');
@@ -4368,7 +4475,13 @@ window.saveChildCampaign = async function() {
     const selPid     = personaSel?.value    || '';
     const campName   = (nameEl?.value       || '').trim();
     const loc        = (locEl?.value        || '').trim();
+    const gl         = (glEl?.value         || '').trim();
     const extraKeys  = (extraKeysEl?.value  || '').trim();
+
+    // Build structured geo_hierarchy from cascade selects
+    const ccContinent = document.getElementById('cc-geo-continent')?.value || '';
+    const ccCountry   = document.getElementById('cc-geo-country')?.value   || '';
+    const ccRegion    = document.getElementById('cc-geo-region')?.value    || '';
 
     // ── Validation ────────────────────────────────────────────────────────────
     if (!selPid) {
@@ -4381,9 +4494,9 @@ window.saveChildCampaign = async function() {
         nameEl?.focus();
         return;
     }
-    if (!loc) {
-        showToast('Target Geography is required.', 'error');
-        locEl?.focus();
+    if (!ccContinent) {
+        showToast('Target Geography is required. Please select at least a continent.', 'error');
+        document.getElementById('cc-geo-continent')?.focus();
         return;
     }
 
@@ -4410,8 +4523,9 @@ window.saveChildCampaign = async function() {
         campaign_focus:    campName,
         pain_point:        pain,
         unfair_advantage:  adv,
-        gl:                '',
-        location:          loc
+        gl:                gl,
+        location:          loc,
+        geo_hierarchy:     { continent: ccContinent, country: ccCountry, region: ccRegion }
     });
 };
 
