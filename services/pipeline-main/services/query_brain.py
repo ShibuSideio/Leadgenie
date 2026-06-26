@@ -717,8 +717,25 @@ Return ONLY the JSON object. No explanation, no markdown."""
 
     if ctx.intents:
         for tq in ctx.intents:
-            _bl = _deconflict_blacklist(f'"{tq}"{historical_str}', blacklist)
-            smart_queries.append(f'"{tq}"{historical_str} {_bl}')
+            # V24.1.3 FIX: Don't exact-match quote long conversational queries.
+            # TASK 3 generates forum-style questions like:
+            #   "How do I find trustworthy education consultants in India?"
+            # Wrapping 15+ word sentences in quotes guarantees 0 Serper results
+            # because no webpage contains that exact sentence. Short phrases
+            # (≤ 10 words) benefit from quoting (precision). Long sentences
+            # benefit from unquoted natural-language matching (recall).
+            _word_count = len(tq.split())
+            if _word_count <= 10:
+                _tq_expr = f'"{tq}"'
+            else:
+                _tq_expr = tq
+                log.info("query_brain_long_intent_unquoted",
+                         words=_word_count, intent=tq[:80],
+                         campaign_id=ctx.campaign_id,
+                         note="Intent > 10 words — running as natural-language query "
+                              "instead of exact-match to preserve Serper recall.")
+            _bl = _deconflict_blacklist(f'{_tq_expr}{historical_str}', blacklist)
+            smart_queries.append(f'{_tq_expr}{historical_str} {_bl}')
         log.info("query_brain_assembled",
                  count=len(ctx.intents), mode=_router_mode,
                  vector=ctx.sourcing_vector or "B2B",

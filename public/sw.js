@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sideio-v24.1.3'; // V24.1.3: Consumer prompt hardening — filetype: override, trustpilot blacklist clash, enrichment docstring
+const CACHE_NAME = 'sideio-v24.1.4'; // V24.1.4: Fix translated_query exact-match quoting destroying recall on long sentences
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
