@@ -208,7 +208,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --cache-from=gcr.io/$PROJECT_ID/lead-orchestrator:latest
+  - --no-cache
   - -t
   - gcr.io/$PROJECT_ID/lead-orchestrator:$COMMIT_SHA
   - -t
@@ -220,7 +220,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --cache-from=gcr.io/$PROJECT_ID/lead-pipeline-main:latest
+  - --no-cache
   - -t
   - gcr.io/$PROJECT_ID/lead-pipeline-main:$COMMIT_SHA
   - -t
@@ -232,7 +232,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --cache-from=gcr.io/$PROJECT_ID/scraper-heavy:latest
+  - --no-cache
   - -t
   - gcr.io/$PROJECT_ID/scraper-heavy:$COMMIT_SHA
   - -t
@@ -244,7 +244,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --cache-from=gcr.io/$PROJECT_ID/whatsapp-webhook:latest
+  - --no-cache
   - -t
   - gcr.io/$PROJECT_ID/whatsapp-webhook:$COMMIT_SHA
   - -t
@@ -256,7 +256,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --cache-from=gcr.io/$PROJECT_ID/email-summary:latest
+  - --no-cache
   - -t
   - gcr.io/$PROJECT_ID/email-summary:$COMMIT_SHA
   - -t
@@ -268,7 +268,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --cache-from=gcr.io/$PROJECT_ID/autonomous-engine:latest
+  - --no-cache
   - -t
   - gcr.io/$PROJECT_ID/autonomous-engine:$COMMIT_SHA
   - -t
@@ -280,7 +280,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --cache-from=gcr.io/$PROJECT_ID/digital-twin-engine:latest
+  - --no-cache
   - -t
   - gcr.io/$PROJECT_ID/digital-twin-engine:$COMMIT_SHA
   - -t
@@ -293,7 +293,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --cache-from=gcr.io/$PROJECT_ID/shadow-learner-aggregator:latest
+  - --no-cache
   - -t
   - gcr.io/$PROJECT_ID/shadow-learner-aggregator:$COMMIT_SHA
   - -t
