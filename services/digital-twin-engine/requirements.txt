@@ -1,42 +1,36 @@
 # =============================================================================
-# Digital Twin Engine — Direct-dependency pins only (V23.4 final 2026-04-20)
+# Digital Twin Engine — Pinned dependencies (V24.1.6 2026-06-27)
 # Base image: python:3.10-slim
-#
-# V23.4 additions (2026-04-20):
-#   + No new pip deps. WAF fail-fast hardening uses only httpx (already pinned)
-#     and stdlib (re, ipaddress). DT engine --timeout raised to 60s in cloudbuild.
-#   + Flask/gunicorn bumped to match orchestrator + pipeline-main (consistency).
 #
 # INTENTIONALLY MINIMAL: avoids Playwright/BeautifulSoup heavy deps.
 # httpx used for lightweight meta-fallback scrape (not full DOM).
 # =============================================================================
 
 # ── Web framework ─────────────────────────────────────────────────────────────
-# Pinned to match orchestrator + pipeline-main for Docker layer consistency
 Flask==3.0.3
 gunicorn==22.0.0
 flask-cors==4.0.1
 
 # ── HTTP client ───────────────────────────────────────────────────────────────
-httpx>=0.26.0
+httpx==0.28.1
 
 # ── GCP services ─────────────────────────────────────────────────────────────
-google-cloud-secret-manager>=2.16.2
-google-cloud-aiplatform>=1.45.0
+google-cloud-secret-manager==2.29.0
+google-cloud-aiplatform==1.158.0
 
 # ── Vertex AI ─────────────────────────────────────────────────────────────────
-vertexai>=1.45.0
+vertexai==1.71.1
 
 # ── Firebase / Auth ───────────────────────────────────────────────────────────
-firebase-admin>=6.5.0
-google-auth>=2.22.0
+firebase-admin==6.5.0
+google-auth==2.55.0
 
 # ── gRPC ──────────────────────────────────────────────────────────────────────
-grpcio>=1.60.0
+grpcio==1.81.1
 
 # ── API core + proto ──────────────────────────────────────────────────────────
-google-api-core>=2.17.1
-protobuf>=4.25.0
+google-api-core==2.31.0
+protobuf==6.33.6
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 tenacity==8.2.3

@@ -1,6 +1,6 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V24.1.5 Enterprise Build Pipeline
-# Deploy trigger: 2026-06-27 | Docker cache optimization
+# cloudbuild.yaml — Sideio Leads V24.1.6 Enterprise Build Pipeline
+# Deploy trigger: 2026-06-27 | Dependency pinning for reproducible builds
 #
 # Changes from V23.5.2 (2026-04-30):
 #
