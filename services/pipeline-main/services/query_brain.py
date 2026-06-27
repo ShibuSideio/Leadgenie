@@ -717,6 +717,13 @@ Return ONLY the JSON object. No explanation, no markdown."""
 
     if ctx.intents:
         for tq in ctx.intents:
+            # V24.1.4 FIX: Skip empty intents from Gemini. An empty tq produces
+            # a blacklist-only query ("" + historical + blacklist) = credit waste.
+            if not tq or not tq.strip():
+                log.warning("query_brain_empty_intent_skipped",
+                            campaign_id=ctx.campaign_id,
+                            note="Gemini returned empty translated_query — skipping.")
+                continue
             # V24.1.3 FIX: Don't exact-match quote long conversational queries.
             # TASK 3 generates forum-style questions like:
             #   "How do I find trustworthy education consultants in India?"
@@ -742,10 +749,17 @@ Return ONLY the JSON object. No explanation, no markdown."""
                  is_consumer=_is_consumer)
     elif kw_str:
         for kw in ctx.target_audience or []:
+            if not kw or not kw.strip():
+                continue
             _bl = _deconflict_blacklist(f'("{kw}"){historical_str}', blacklist)
             smart_queries.append(f'("{kw}"){historical_str} {_bl}')
 
     for sd in ctx.symptom_dorks:
+        if not sd or not sd.strip():
+            log.warning("query_brain_empty_dork_skipped",
+                        campaign_id=ctx.campaign_id,
+                        note="Gemini returned empty symptom_dork — skipping.")
+            continue
         _bl = _deconflict_blacklist(sd, blacklist)
         smart_queries.append(f"{sd} {_bl}")
 

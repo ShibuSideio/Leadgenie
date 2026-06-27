@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sideio-v24.1.4'; // V24.1.4: Fix translated_query exact-match quoting destroying recall on long sentences
+const CACHE_NAME = 'sideio-v24.1.5'; // V24.1.5: Guard empty Gemini intents/dorks — prevent blacklist-only queries
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
