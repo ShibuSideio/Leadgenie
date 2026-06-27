@@ -1,6 +1,6 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V23.5.0 Enterprise Build Pipeline
-# Deploy trigger: 2026-06-13 | Inbound Sentiment Radar
+# cloudbuild.yaml — Sideio Leads V24.1.5 Enterprise Build Pipeline
+# Deploy trigger: 2026-06-27 | Docker cache optimization
 #
 # Changes from V23.5.2 (2026-04-30):
 #
@@ -208,7 +208,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --no-cache
+  - --cache-from=gcr.io/$PROJECT_ID/lead-orchestrator:latest
   - -t
   - gcr.io/$PROJECT_ID/lead-orchestrator:$COMMIT_SHA
   - -t
@@ -220,7 +220,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --no-cache
+  - --cache-from=gcr.io/$PROJECT_ID/lead-pipeline-main:latest
   - -t
   - gcr.io/$PROJECT_ID/lead-pipeline-main:$COMMIT_SHA
   - -t
@@ -232,7 +232,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --no-cache
+  - --cache-from=gcr.io/$PROJECT_ID/scraper-heavy:latest
   - -t
   - gcr.io/$PROJECT_ID/scraper-heavy:$COMMIT_SHA
   - -t
@@ -244,7 +244,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --no-cache
+  - --cache-from=gcr.io/$PROJECT_ID/whatsapp-webhook:latest
   - -t
   - gcr.io/$PROJECT_ID/whatsapp-webhook:$COMMIT_SHA
   - -t
@@ -256,7 +256,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --no-cache
+  - --cache-from=gcr.io/$PROJECT_ID/email-summary:latest
   - -t
   - gcr.io/$PROJECT_ID/email-summary:$COMMIT_SHA
   - -t
@@ -268,7 +268,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --no-cache
+  - --cache-from=gcr.io/$PROJECT_ID/autonomous-engine:latest
   - -t
   - gcr.io/$PROJECT_ID/autonomous-engine:$COMMIT_SHA
   - -t
@@ -280,7 +280,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --no-cache
+  - --cache-from=gcr.io/$PROJECT_ID/digital-twin-engine:latest
   - -t
   - gcr.io/$PROJECT_ID/digital-twin-engine:$COMMIT_SHA
   - -t
@@ -293,7 +293,7 @@ steps:
   name: 'gcr.io/cloud-builders/docker'
   args:
   - build
-  - --no-cache
+  - --cache-from=gcr.io/$PROJECT_ID/shadow-learner-aggregator:latest
   - -t
   - gcr.io/$PROJECT_ID/shadow-learner-aggregator:$COMMIT_SHA
   - -t
