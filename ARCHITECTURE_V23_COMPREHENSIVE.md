@@ -1,7 +1,7 @@
-# Sideio Lead Sniper — V23 Comprehensive Architecture Reference
+# Sideio Lead Sniper — V24.1.5 Comprehensive Architecture Reference
 ## Full Technical Specification for Engineering Teams
 
-> **Version:** V23.7 (Updated 2026-06-21 — Fault Recovery + State Alignment + Retry Escalation Topology)
+> **Version:** V24.1.5 (Updated 2026-06-27 — Query Hardening + Enrichment Gating + Geo Cascade + Docker Cache Optimization)
 > **Codebase mapped:** `D:\.gemini\antigravity\scratch\sideio_leads`
 > **Document purpose:** Complete intern-grade rebuild reference — maps architecture to current live code
 
@@ -36,6 +36,8 @@
 - [Appendix C: V23.5 Changelog — Sourcing Vector Archetype Refactor](#appendix-c-v235-changelog--sourcing-vector-archetype-refactor)
 - [Appendix D: Schema Boundary Isolation (V23.5)](#appendix-d-schema-boundary-isolation-v235)
 - [Appendix E: V23.7 Changelog — Fault Recovery & State Alignment](#appendix-e-v237-changelog--fault-recovery--state-alignment)
+- [Appendix F: V23.8–V24.0 Changelog — Inbound Radar + L0 Admin + Kill Switch](#appendix-f-v238v240-changelog--inbound-radar--l0-admin--kill-switch)
+- [Appendix G: V24.1.x Changelog — Query Pipeline Hardening + Enrichment Gating + Geo Cascade + Docker Cache](#appendix-g-v241x-changelog--query-pipeline-hardening--enrichment-gating--geo-cascade--docker-cache)
 
 ---
 
@@ -1324,51 +1326,92 @@ WhatsApp token is KMS-encrypted at rest (see Section 5.4). Button replies handle
 
 ## 17. CI/CD PIPELINE
 
-File: `cloudbuild.yaml`
+File: `cloudbuild.yaml` (V24.1.5)
 Trigger: Push to `main` branch
+Machine: `E2_HIGHCPU_8` (8 vCPUs)
+Timeout: 3600s
 
-### 17.1 Build Steps (Parallelized)
+### 17.1 Build Phases (V24.1.5 — Docker Cache Optimized)
 
 ```
-Step Group 1 (parallel -- all fire at once):
-  syntax-check-appjs          -> node:20-slim validation
-  python-v23-smoke-gate       -> local_smoke_tests.py (fails fast on config errors)
-  build-orchestrator          -> gcr.io/$PROJECT_ID/lead-orchestrator
-  build-pipeline-main         -> gcr.io/$PROJECT_ID/lead-pipeline-main
-  build-scraper-heavy         -> gcr.io/$PROJECT_ID/scraper-heavy
-  build-whatsapp-webhook      -> gcr.io/$PROJECT_ID/whatsapp-webhook
-  build-email-summary         -> gcr.io/$PROJECT_ID/email-summary
-  build-autonomous-engine     -> gcr.io/$PROJECT_ID/autonomous-engine
-  firebase-deploy             -> Firebase Hosting + Firestore rules/indexes
+Phase 0 — QA Gates (parallel, fire immediately):
+  syntax-check-appjs            -> node:20-slim: node --check + critical fn declarations
+  python-v23-smoke-gate         -> python:3.11-slim: 126 tests (69 V23.4 + 57 V23.5)
 
-Step Group 2 (parallel -- after Group 1):
-  push all Docker images to GCR
+Barrier:
+  gate-passed                   -> Both QA gates must pass before any Docker build starts
 
-Step Group 3 (parallel -- after Group 2):
-  deploy-orchestrator         -> Cloud Run Service (allow-unauthenticated)
-  deploy-pipeline-main        -> Cloud Run Service (no-allow-unauthenticated, SA: lead-pipeline-sa)
-  deploy-scraper-heavy        -> Cloud Run Service (2Gi memory)
-  deploy-whatsapp-webhook     -> Cloud Run Service (allow-unauthenticated)
-  deploy-email-summary        -> Cloud Run Service (no-allow-unauthenticated)
-  deploy-autonomous-engine    -> Cloud Run Job (gcloud run jobs deploy)
+Phase 1 — Parallel Docker Builds (all waitFor: gate-passed):
+  build-orchestrator            -> gcr.io/$PROJECT_ID/lead-orchestrator          (python:3.11-slim)
+  build-pipeline-main           -> gcr.io/$PROJECT_ID/lead-pipeline-main         (python:3.11-slim)
+  build-scraper-heavy           -> gcr.io/$PROJECT_ID/scraper-heavy              (playwright/python:v1.42.0-jammy)
+  build-whatsapp-webhook        -> gcr.io/$PROJECT_ID/whatsapp-webhook           (python:3.10-slim)
+  build-email-summary           -> gcr.io/$PROJECT_ID/email-summary              (python:3.10-slim)
+  build-autonomous-engine       -> gcr.io/$PROJECT_ID/autonomous-engine          (python:3.11-slim)
+  build-digital-twin-engine     -> gcr.io/$PROJECT_ID/digital-twin-engine        (python:3.10-slim)
+  build-shadow-learner          -> gcr.io/$PROJECT_ID/shadow-learner-aggregator  (python:3.11-slim)
+  firebase-deploy               -> node:20-slim: npm install firebase-tools + deploy hosting+firestore
 
-Step Final (sequential):
-  gcloud-job-provision-autonomous-engine  -> Create/update Cloud Run Job
-  gcloud-job-scheduler-autonomous-engine  -> Create/update Cloud Scheduler (idempotent)
+  Docker cache strategy (V24.1.5): --cache-from=gcr.io/$PROJECT_ID/<service>:latest
+  Pulls the :latest image as layer cache source. pip install layer reused when
+  requirements.txt is unchanged (~99% of commits). Replaced --no-cache which
+  forced full pip downloads on every build.
+
+Phase 2 — Parallel Image Pushes (each waitFor: its build step):
+  push-orchestrator, push-pipeline-main, push-scraper-heavy, push-whatsapp-webhook,
+  push-email-summary, push-autonomous-engine, push-digital-twin-engine, push-shadow-learner
+  All images tagged: :$COMMIT_SHA AND :latest (enables rollback + cache source)
+
+Phase 3 — Deploy Cloud Run Services (each waitFor: its push step):
+  deploy-orchestrator             -> 512Mi, 1 CPU, max 10, concurrency 80, allow-unauthenticated
+  deploy-orchestrator-v23-preview -> Same image, --no-traffic, --tag=v23-preview (UAT)
+  deploy-pipeline-main            -> 512Mi, 1 CPU, max 5, concurrency 4, no-allow-unauth
+  deploy-pipeline-main-v23-preview -> Same image, --no-traffic, --tag=v23-preview (UAT)
+  deploy-scraper-heavy            -> 2Gi, 2 CPU, max 3, concurrency 1
+  deploy-whatsapp-webhook         -> 128Mi, 1 CPU, max 5, concurrency 80
+  deploy-email-summary            -> 128Mi, 1 CPU, max 3, concurrency 10
+  deploy-digital-twin-engine      -> 512Mi, 1 CPU, max 5, concurrency 4, timeout 60s
+
+Phase 4 — Cloud Run Jobs (waitFor: their push steps):
+  deploy-autonomous-engine-job    -> 512Mi, 1 CPU, task-timeout 3600s, max-retries 0
+  deploy-shadow-learner-job       -> 512Mi, 1 CPU, task-timeout 3600s, max-retries 1
+  Both use describe→update (exists) / create (new) idempotent pattern.
+
+Phase 5 — Cloud Scheduler (waitFor: deploy-orchestrator + deploy-autonomous-engine-job):
+  pipeline-sweep                  -> */5 * * * *    (every 5 min — Cartographer heartbeat)
+  ai-reflection                   -> 0 2 * * 0     (weekly Sunday 02:00 UTC)
+  ontology-decay                  -> 0 0 1 * *     (1st of month 00:00 UTC)
+  inbound-sentiment-radar         -> 30 */6 * * *   (every 6h at :30 — V24.0)
+  All use idempotent describe→update/create pattern with OIDC SA tokens.
 ```
 
-### 17.2 Smoke Gate Assertions (`local_smoke_tests.py`)
+> **Critical Rules (§17):**
+> - `--update-env-vars` on Cloud Run Services (never `--set-env-vars` — preserves console-set secrets)
+> - `--set-env-vars` on Cloud Run Jobs (no console-managed secrets on jobs)
+> - `--platform=managed` on all deploy commands (prevents interactive gcloud prompts)
+> - `--quiet` on all gcloud write commands (suppresses confirmation prompts)
+> - `firebase-sa.json` explicitly deleted after Firebase deploy (security hygiene)
 
-- `SERPER_API_KEY_NAME` must be exactly `SERPER_API_KEY` (uppercase). Lowercase causes 403.
-- All Blueprint modules importable
-- Config constants resolve correctly
+### 17.2 Smoke Gate Assertions (126 tests total)
+
+**Phase 0a — JS Gate (`syntax-check-appjs`):**
+- Layer 1: `node --check public/app.js` — catches SyntaxErrors
+- Layer 2: 10 critical function declarations verified (loadLeads, loadMe, loadCampaigns, etc.)
+
+**Phase 0b — Python Gate (`python-v23-smoke-gate`):**
+- Generates disposable Fernet key for test isolation
+- `local_smoke_tests.py` — 71 tests across 9 phases (imports, pure-fn, exceptions, logging, config, concurrency, timestamps, OIDC, pipeline-main)
+- `test_v23_5_inbound_radar.py` — 57 tests across 5 phases (ISS class, job, routes, schema, frontend)
 
 ### 17.3 Idempotent Scheduler Provisioning
 
 ```bash
-gcloud scheduler jobs create http lead-sniper-nightly --schedule="0 2 * * *" --quiet || \
-gcloud scheduler jobs update http lead-sniper-nightly --schedule="0 2 * * *" --quiet
-# Prevents Cloud Build failure on 2nd+ deploys when job already exists
+# Pattern used for all 4 scheduler jobs:
+if gcloud scheduler jobs describe <job-name> ... 2>/dev/null; then
+  gcloud scheduler jobs update http <job-name> ...
+else
+  gcloud scheduler jobs create http <job-name> ...
+fi
 ```
 
 ---
@@ -1993,3 +2036,226 @@ Leads stuck in `processing` for >15 minutes were immediately killed to terminal 
 - Schema names `status`, `lock_entity`, `tenant_id` unchanged
 - No React/Vue/NPM dependencies introduced (Vanilla JS PWA)
 - All existing RLHF, Shadow Tracker, and Negative Signal flows untouched
+
+---
+
+## Appendix F: V23.8–V24.0 Changelog — Inbound Radar + L0 Admin + Kill Switch
+
+> Added: 2026-06-27 | Versions: V23.5.0, V23.8, V24.0–V24.0.4
+
+### F.1 Inbound Sentiment Radar (V23.5.0)
+
+A fully autonomous OSINT listening system that discovers inbound buying signals across the open web without requiring platform OAuth tokens.
+
+**New Service Class:** `InboundSentimentService` (`services/orchestrator/services/inbound_sentiment_service.py`)
+
+| Feature | Detail |
+|---------|--------|
+| Signal Modes | 7-mode round-robin: `active_intent`, `pain_expression`, `competitor_churn`, `hiring_signals`, `review_signals`, `trend_signals`, `community_signals` |
+| Search Engine | Serper API (Google Search proxy) — no platform OAuth |
+| Scoring | Gemini 2.5 Flash intent classification with 4 labels |
+| Dedup | `sha256(url)` hash as `signal_id` — stable across runs |
+| Discard Threshold | `intent_score < 0.30` — signals below this are dropped |
+| RLHF Boost Gate | `intent_score >= 0.70` — triggers BQ RLHF weight update |
+| Noise Filter | `GLOBAL_NEGATIVE` strips ad copy, legal boilerplate, cookie banners |
+
+**New Job:** `inbound_sentiment_job.py` (`services/orchestrator/jobs/`)
+- `run()` iterates all tenants with `inbound_radar.enabled = true`
+- Writes `inbound_signals` docs to Firestore per tenant
+- Updates BigQuery RLHF events for high-confidence signals
+
+**New API Routes:**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/internal/inbound-sentiment-run` | CRON trigger (Cloud Scheduler, every 6h) |
+| GET | `/api/inbound-signals` | List signals for current tenant (filterable by status) |
+| PUT | `/api/inbound-signals/<id>/status` | Promote signal to lead, dismiss, or review |
+| GET | `/api/me` | Extended with 4-key `inbound_radar` stats block |
+| PUT | `/api/me` | Accepts `inbound_radar_enabled` toggle |
+
+**New Firestore Schema:**
+
+| Collection / Field | Type | Purpose |
+|---|---|---|
+| `inbound_signals` | Collection | Per-tenant signal documents |
+| `.signal_id` | String | `sha256(url)` — dedup key |
+| `.intent_score` | Float (3dp) | Gemini confidence `[0.0, 1.0]` |
+| `.intent_label` | String | One of 4 labels from Gemini |
+| `.status` | String | `new` → `reviewed` / `converted_to_lead` / `dismissed` |
+| `.source_url` | String | Original URL from Serper |
+| `.tenant_id` | String | Tenant isolation |
+| `.campaign_id` | String | Source campaign |
+| `.created_at` | Timestamp | Signal discovery time |
+
+**Frontend (V23.8):**
+- `#inbound-radar-banner` — dashboard widget with signal count
+- `#inbound-signals-panel` — hidden by default, toggle via feed mode
+- `CURRENT_FEED_MODE` — toggleable between `outbound` (campaigns) and `inbound` (radar signals)
+- 4 JS functions: `_renderInboundRadarBanner()`, `loadInboundSignals()`, `updateSignalStatus()`, `toggleInboundRadar()`
+- `INTENT_COLORS` map — 4 label colour schemes for signal cards
+
+**Test Suite:** 57 tests across Phases 10-14 (`test_v23_5_inbound_radar.py`)
+
+### F.2 L0 Admin Routes (V24.0–V24.0.4)
+
+New admin-level operational routes in `services/orchestrator/api/routers/l0_admin.py`:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/l0/system-health` | System health dashboard data |
+| GET | `/api/l0/shadow-ledger` | Shadow tracker ledger view |
+| GET | `/api/l0/audit-log` | Admin audit log entries |
+| GET | `/api/l0/radar-status` | Inbound radar status per tenant |
+| POST | `/api/l0/kill-switch` | Activate/deactivate global kill switch |
+| GET | `/api/l0/credit-trends` | Credit usage trend data |
+| GET | `/api/internal/l0/operations-telemetry` | Geo heatmap + domain matrix (BQ-backed) |
+
+**Admin Audit Log:** All admin mutations are tracked in the `admin_audit_log` Firestore collection via `_write_audit_log()`.
+
+### F.3 Kill Switch (V24.1)
+
+Global emergency stop for the cron sweep pipeline.
+
+**Location:** `services/orchestrator/api/routers/internal.py` (cron_sweep function)
+
+**Mechanism:**
+1. Admin activates via `POST /api/l0/kill-switch` → sets `system_telemetry/kill_switch.active = True`
+2. Every cron sweep checks this Firestore doc before processing campaigns
+3. If `active == True`: sweep returns HTTP 200 with `kill_switch_active: true` (Cloud Scheduler doesn't retry)
+4. **Fail-open design:** If the Firestore read fails, the sweep proceeds normally (logged as warning)
+
+**Firestore Schema:**
+
+| Document | Field | Type | Purpose |
+|----------|-------|------|---------|
+| `system_telemetry/kill_switch` | `active` | Boolean | Kill switch state |
+| | `activated_by` | String | Admin email |
+| | `activated_at` | Timestamp | Activation time |
+
+---
+
+## Appendix G: V24.1.x Changelog — Query Pipeline Hardening + Enrichment Gating + Geo Cascade + Docker Cache
+
+> Added: 2026-06-27 | Versions: V24.1.0–V24.1.5
+
+### G.1 Serper Enrichment Gating (V24.0.1, V24.1.1)
+
+**File:** `services/pipeline-main/services/serper_service.py`
+
+Prevents credit waste by skipping 3-query enrichment (places + company + hiring) for domains that are not businesses.
+
+**Three-Layer Gating:**
+
+| Layer | Constant | Logic | Examples |
+|-------|----------|-------|---------|
+| Non-Business Suffixes | `_NON_BUSINESS_SUFFIXES` | TLD endswith | `.edu`, `.ac.in`, `.gov`, `.org`, `.mil` |
+| Forum Prefixes | `_FORUM_PREFIXES` | Hostname startswith | `forum.`, `forums.`, `talk.`, `community.`, `discuss.`, `groups.`, `board.`, `boards.` |
+| Forum Domain Keywords | `_FORUM_DOMAIN_KEYWORDS` | Substring match | `forum`, `fans`, `proboards`, `invisionfree`, `phpbb` |
+| Social/Consumer Blacklist | `_ENRICHMENT_SOCIAL_BLACKLIST` | Exact match set | `reddit.com`, `quora.com`, `stackoverflow.com` + V24.1.1 hobby domains |
+
+**Domain Extraction Fix (V24.1.1):** Proper TLD-aware extraction prevents `caribm.com` from matching the `ibm.com` blacklist entry.
+
+### G.2 Query Brain Hardening (V24.1.1–V24.1.5)
+
+**File:** `services/pipeline-main/services/query_brain.py`
+
+#### G.2.1 Blacklist Length Cap (V24.1.1)
+
+```python
+_MAX_BLACKLIST_LEN = 350  # characters
+```
+
+Prevents Serper query explosion from combined blacklist sources (base + persona signals + neg-shield domains + RLHF). Trims from tail — RLHF additions are least critical.
+
+#### G.2.2 Consumer Prompt Hardening (V24.1.3)
+
+When `is_consumer == True` (B2C/D2C campaigns), the Gemini prompt now:
+- Removes `filetype:pptx OR filetype:doc` operators (consumer forums don't have slide decks)
+- Adds `site:trustpilot.com OR site:g2.com` to the operator palette
+- Uses `OR site:.edu` appended to symptom dorks for consumer research
+
+#### G.2.3 Conditional Intent Quoting (V24.1.3)
+
+```python
+_word_count = len(tq.split())
+if _word_count <= 10:
+    _tq_expr = f'"{tq}"'    # Short phrase: exact-match quotes (precision)
+else:
+    _tq_expr = tq            # Long sentence: unquoted natural-language (recall)
+```
+
+**Rationale:** Gemini TASK 3 generates forum-style questions like *"How do I find trustworthy education consultants in India?"*. Wrapping 15+ word sentences in exact-match quotes guarantees 0 Serper results.
+
+#### G.2.4 Empty Intent Guard (V24.1.5)
+
+All 3 query assembly loops guard against empty strings from Gemini:
+- `intents` → `query_brain_empty_intent_skipped` warning
+- `keywords` → silent skip
+- `symptom_dorks` → `query_brain_empty_dork_skipped` warning
+
+An empty `translated_query` previously produced a blacklist-only search (zero positive terms), wasting 1 Serper credit.
+
+### G.3 Geo Cascade UI (V24.1.4)
+
+**File:** `public/app.js` — `initGeoCascadeFor(prefix, existingGeoHierarchy, existingGl, existingLocation)`
+
+Replaced the hardcoded text input for campaign geography with a 3-tier cascade dropdown:
+
+```
+Continent → Country → Region
+```
+
+| Feature | Detail |
+|---------|--------|
+| Reusable initializer | `initGeoCascadeFor(prefix, ...)` works for both launch (`cc-`) and edit (`geo-`) forms |
+| DOM targeting | `{prefix}-continent`, `{prefix}-country`, `{prefix}-region` |
+| State hydration | Populates from existing `geoHierarchy`, `gl`, or `location` fields |
+| Persistence | `saveChildCampaign` and `saveCampaignAction` persist `geo_hierarchy` as structured object |
+| Hidden field sync | Writes to hidden `cc-location` and `cc-gl` fields for backward compatibility |
+
+**Backend:** `services/orchestrator/api/routers/campaigns.py` — `geo_hierarchy` in allowed create/update payload.
+
+### G.4 CRM Tab Visibility Fix (V24.1.1)
+
+CRM tab was restricted to admin users only. Fixed to be visible to all authenticated users.
+
+### G.5 Dead Code Removal (V24.1.2)
+
+- Legacy `VECTOR_PLATFORM_MAP` removed (replaced by archetype system)
+- Unused import paths in dispatch.py cleaned
+- Orphaned consumer branch stubs in query_brain.py removed
+- Smoke test updated to verify removal
+
+### G.6 Cloud Build Docker Cache Optimization (V24.1.5)
+
+**File:** `cloudbuild.yaml`
+
+Replaced `--no-cache` with `--cache-from=gcr.io/$PROJECT_ID/<service>:latest` on all 8 Docker build steps.
+
+| Metric | Before (`--no-cache`) | After (`--cache-from`) |
+|--------|----------------------|------------------------|
+| pip install per service | 60-90s (full download) | 0-2s (cache hit) |
+| Concurrent network load | ~2.1 GB | ~200 MB (changed layers only) |
+| Typical build time | 8+ min (under contention) | ~2-3 min |
+
+### G.7 Version Tags
+
+| Version | Commit | Change |
+|---------|--------|--------|
+| V24.1.0 | `f4cb664` | Admin hardening + new tabs + removals |
+| V24.1.1 | `68609b9` | Query pipeline hardening — 8 critical fixes |
+| V24.1.2 | `8372f71` | Dead code removal + deferred audit items |
+| V24.1.3 | `50bb578` | Consumer prompt hardening |
+| V24.1.4 | `4995127` | Geo cascade dropdowns + conditional quoting |
+| V24.1.5 | `8b0405e` | Empty intent guard + Docker cache optimization |
+
+### G.8 Design Invariants Preserved
+
+- PRISM pipeline (`prism_pipeline.py`) untouched
+- Firestore security rules unchanged
+- RLHF Shadow Tracker and Negative Signal flows unchanged
+- No React/Vue/NPM dependencies (Vanilla JS PWA)
+- All OIDC service-to-service auth paths unchanged
+- Smoke test suite expanded (never reduced)
+
