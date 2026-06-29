@@ -25,8 +25,9 @@ google-cloud-secret-manager==2.29.0
 google-cloud-tasks==2.23.0
 
 # ── Vertex AI ─────────────────────────────────────────────────────────────────
+# vertexai is a thin wrapper: each version requires the EXACT same aiplatform.
 vertexai==1.71.1
-google-cloud-aiplatform==1.158.0
+google-cloud-aiplatform==1.71.1
 
 # ── gRPC — pinned to binary-compatible version ────────────────────────────────
 grpcio==1.81.1

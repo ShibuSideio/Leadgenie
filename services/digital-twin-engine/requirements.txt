@@ -16,10 +16,11 @@ httpx==0.28.1
 
 # ── GCP services ─────────────────────────────────────────────────────────────
 google-cloud-secret-manager==2.29.0
-google-cloud-aiplatform==1.158.0
 
 # ── Vertex AI ─────────────────────────────────────────────────────────────────
+# vertexai is a thin wrapper: each version requires the EXACT same aiplatform.
 vertexai==1.71.1
+google-cloud-aiplatform==1.71.1
 
 # ── Firebase / Auth ───────────────────────────────────────────────────────────
 firebase-admin==6.5.0
@@ -28,9 +29,8 @@ google-auth==2.55.0
 # ── gRPC ──────────────────────────────────────────────────────────────────────
 grpcio==1.81.1
 
-# ── API core + proto ──────────────────────────────────────────────────────────
-google-api-core==2.31.0
-protobuf==6.33.6
+# ── API core + proto (transitive — resolved by pip from aiplatform) ───────────
+# Do NOT pin: versions depend on the aiplatform release.
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 tenacity==8.2.3
