@@ -1,6 +1,6 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V24.1.6 Enterprise Build Pipeline
-# Deploy trigger: 2026-06-27 | Dependency pinning for reproducible builds
+# cloudbuild.yaml — Sideio Leads V24.1.8 Enterprise Build Pipeline
+# Deploy trigger: 2026-06-29 | Restored original deps + Dockerfile hardening
 #
 # Changes from V23.5.2 (2026-04-30):
 #

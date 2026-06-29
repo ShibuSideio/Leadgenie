@@ -1,16 +1,18 @@
 # =============================================================================
-# Orchestrator — Pinned dependencies (V24.1.6 2026-06-27)
+# Orchestrator — Direct-dependency pins only (V23.4 final 2026-04-20)
 # Base image: python:3.10-slim
 #
-# PINNING PHILOSOPHY:
-#   All direct deps pinned to ==exact to guarantee reproducible builds.
-#   Versions frozen from the last successful 3-min build (6/25 commit 4dd390d).
-#   Prevents pip resolver backtracking from upstream GCP version bumps
-#   (e.g. google-cloud-firestore 2.28.0 tightened protobuf bounds, adding
-#   ~4 min of resolver overhead per build × 8 services).
+# V23.4 additions (2026-04-20):
+#   + No new pip deps. Serper audit telemetry (internal.py, serper_telemetry.py)
+#     uses only threading, datetime, json, os (all stdlib).
+#     httpx (already pinned) handles the broker POST in serper_service.py.
+#     WAF hardening in settings.py uses only httpx (already pinned).
 #
-#   To update: run `pip install --upgrade <pkg>` locally, test, then
-#   update the pin here. Never use >= in CI — it creates non-deterministic builds.
+# PINNING PHILOSOPHY (learned from 4 failed builds):
+#   Only pin packages your code DIRECTLY imports. Pinning transitive deps
+#   creates cross-package protobuf/grpcio conflicts that are impossible to
+#   manually resolve as the GCP ecosystem updates.
+#   --prefer-binary in the Dockerfile prevents source compilation.
 # =============================================================================
 
 # ── Web framework (direct: Flask app) ─────────────────────────────────────────
@@ -22,29 +24,30 @@ gunicorn==22.0.0
 firebase-admin==6.5.0
 
 # ── GCP services (direct imports) ─────────────────────────────────────────────
-google-cloud-firestore==2.27.0
-google-cloud-tasks==2.23.0
-google-cloud-secret-manager==2.29.0
-google-cloud-kms==3.14.0
-google-cloud-bigquery==3.42.1
-google-cloud-bigquery-storage==2.39.0
-google-cloud-storage==3.12.0
+google-cloud-firestore>=2.14.0
+google-cloud-tasks>=2.16.3
+google-cloud-secret-manager>=2.20.0
+google-cloud-kms>=2.21.3
+google-cloud-bigquery>=3.17.2
+google-cloud-bigquery-storage>=2.25.0
+google-cloud-storage>=2.14.0
 
 # ── Vertex AI (direct imports — vertexai module is inside this package) ───────
-google-cloud-aiplatform==1.158.0
+google-cloud-aiplatform>=1.45.0
 
-# ── gRPC — pinned to binary-compatible version ────────────────────────────────
-grpcio==1.81.1
+# ── gRPC — floor only, let pip find a binary-compatible version ───────────────
+# No upper bound. The Dockerfile --prefer-binary flag prevents source builds.
+grpcio>=1.60.0
 
 # ── HTTP client (direct import) ───────────────────────────────────────────────
-httpx==0.28.1
+httpx>=0.26.0
 
 # ── Crypto (direct import — Fernet) ──────────────────────────────────────────
-cryptography==49.0.0
+cryptography>=38.0.0
 
 # ── Data validation (direct import) ──────────────────────────────────────────
-pydantic==2.13.4
+pydantic>=2.7.0
 
 # ── Utilities (direct imports) ────────────────────────────────────────────────
 PyPDF2==3.0.1
-cachetools==7.1.4
+cachetools>=5.3.0
