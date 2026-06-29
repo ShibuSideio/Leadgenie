@@ -29,9 +29,11 @@ google-cloud-storage>=2.14.0
 google-cloud-secret-manager>=2.16.2
 google-cloud-tasks>=2.16.3
 
-# —— Vertex AI —————————————————————————————————————————————————————————————————————————————————
+# —— Vertex AI —————————————————————————————————————————————————————————————————
+# vertexai pulls google-cloud-aiplatform==X.Y.Z (exact match) as a transitive
+# dep. Do NOT list aiplatform separately — it forces pip to backtrack through
+# every version between latest (1.158) and the vertexai-required version (1.71).
 vertexai>=1.49.0
-google-cloud-aiplatform>=1.45.0
 
 # ── gRPC — floor only ─────────────────────────────────────────────────────────
 grpcio>=1.60.0

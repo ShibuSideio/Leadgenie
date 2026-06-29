@@ -22,9 +22,10 @@ httpx>=0.26.0
 
 # ── GCP services ─────────────────────────────────────────────────────────────
 google-cloud-secret-manager>=2.16.2
-google-cloud-aiplatform>=1.45.0
 
 # ── Vertex AI ─────────────────────────────────────────────────────────────────
+# vertexai pulls google-cloud-aiplatform==X.Y.Z (exact match) as a transitive
+# dep. Do NOT list aiplatform separately — it causes pip resolver backtracking.
 vertexai>=1.45.0
 
 # ── Firebase / Auth ───────────────────────────────────────────────────────────
