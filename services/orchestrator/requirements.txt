@@ -1,27 +1,9 @@
-# =============================================================================
-# Orchestrator — Exact-pinned dependencies (V24.1.9 2026-06-29)
-# Base image: python:3.11-slim
-#
-# PINNING PHILOSOPHY (V24.1.9 — learned from 12 failed builds):
-#   Pin ALL direct deps to ==exact. The >= floor strategy causes pip resolver
-#   backtracking when Google publishes new GCP packages with tighter transitive
-#   constraints (e.g., firestore 2.28.0 raised protobuf floor to >=6.33.5).
-#   Transitive deps are NOT pinned — pip resolves them from the narrow ranges
-#   defined by the exact direct pins. This is fast (zero backtracking).
-#
-# TO UPGRADE: Run `pip install --upgrade <pkg>` locally, test, then update
-#   the version here. Never use >= in production builds.
-# =============================================================================
-
-# -- Web framework --
+# Orchestrator -- Exact-pinned (V24.1.9 2026-06-29) | python:3.11-slim
+# Pin ALL direct deps to ==exact to eliminate pip resolver backtracking.
 Flask==3.0.3
 flask-cors==4.0.1
 gunicorn==22.0.0
-
-# -- Firebase / Auth --
 firebase-admin==6.5.0
-
-# -- GCP services --
 google-cloud-firestore==2.27.0
 google-cloud-tasks==2.23.0
 google-cloud-secret-manager==2.29.0
@@ -29,22 +11,10 @@ google-cloud-kms==3.14.0
 google-cloud-bigquery==3.42.1
 google-cloud-bigquery-storage==2.39.0
 google-cloud-storage==3.12.0
-
-# -- Vertex AI (no vertexai wrapper -- direct aiplatform import) --
 google-cloud-aiplatform==1.158.0
-
-# -- gRPC --
 grpcio==1.81.1
-
-# -- HTTP client --
 httpx==0.28.1
-
-# -- Crypto (Fernet) --
 cryptography==49.0.0
-
-# -- Data validation --
 pydantic==2.13.4
-
-# -- Utilities --
 PyPDF2==3.0.1
 cachetools==7.1.4

@@ -1,5 +1,4 @@
-# Email-summary — Exact-pinned (V24.1.9 2026-06-29) | python:3.10-slim
-
+# Email-summary -- Exact-pinned (V24.1.9 2026-06-29) | python:3.10-slim
 google-cloud-firestore==2.27.0
 google-cloud-secret-manager==2.29.0
 grpcio==1.81.1

@@ -1,7 +1,5 @@
-# Digital-twin-engine — Exact-pinned (V24.1.9 2026-06-29) | python:3.10-slim
+# Digital-twin-engine -- Exact-pinned (V24.1.9 2026-06-29) | python:3.10-slim
 # vertexai==1.71.1 pulls google-cloud-aiplatform==1.71.1 as locked transitive.
-# Do NOT list google-cloud-aiplatform or google-api-core/protobuf separately.
-
 Flask==3.0.3
 gunicorn==22.0.0
 flask-cors==4.0.1

@@ -1,7 +1,6 @@
-# Pipeline-main — Exact-pinned (V24.1.9 2026-06-29) | python:3.11-slim
+# Pipeline-main -- Exact-pinned (V24.1.9 2026-06-29) | python:3.11-slim
 # vertexai==1.71.1 pulls google-cloud-aiplatform==1.71.1 as locked transitive.
 # Do NOT list google-cloud-aiplatform separately.
-
 Flask==3.0.3
 flask-cors==4.0.1
 gunicorn==22.0.0
