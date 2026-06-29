@@ -1,9 +1,11 @@
-google-cloud-firestore>=2.14.0
-google-cloud-aiplatform>=1.45.0
-firebase-admin>=6.5.0
-pydantic>=2.0.0
-httpx>=0.26.0
-tenacity>=8.2.3
-feedparser>=6.0.11
-google-auth>=2.22.0
-grpcio>=1.60.0
+# Autonomous-engine — Exact-pinned (V24.1.9 2026-06-29) | python:3.11-slim
+
+google-cloud-firestore==2.27.0
+google-cloud-aiplatform==1.158.0
+firebase-admin==6.5.0
+pydantic==2.13.4
+httpx==0.28.1
+tenacity==9.1.4
+feedparser==6.0.12
+google-auth==2.55.0
+grpcio==1.81.1

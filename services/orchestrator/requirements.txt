@@ -1,53 +1,50 @@
 # =============================================================================
-# Orchestrator — Direct-dependency pins only (V23.4 final 2026-04-20)
-# Base image: python:3.10-slim
+# Orchestrator � Exact-pinned dependencies (V24.1.9 2026-06-29)
+# Base image: python:3.11-slim
 #
-# V23.4 additions (2026-04-20):
-#   + No new pip deps. Serper audit telemetry (internal.py, serper_telemetry.py)
-#     uses only threading, datetime, json, os (all stdlib).
-#     httpx (already pinned) handles the broker POST in serper_service.py.
-#     WAF hardening in settings.py uses only httpx (already pinned).
+# PINNING PHILOSOPHY (V24.1.9 � learned from 12 failed builds):
+#   Pin ALL direct deps to ==exact. The >= floor strategy causes pip resolver
+#   backtracking when Google publishes new GCP packages with tighter transitive
+#   constraints (e.g., firestore 2.28.0 raised protobuf floor to >=6.33.5).
+#   Transitive deps are NOT pinned � pip resolves them from the narrow ranges
+#   defined by the exact direct pins. This is fast (zero backtracking).
 #
-# PINNING PHILOSOPHY (learned from 4 failed builds):
-#   Only pin packages your code DIRECTLY imports. Pinning transitive deps
-#   creates cross-package protobuf/grpcio conflicts that are impossible to
-#   manually resolve as the GCP ecosystem updates.
-#   --prefer-binary in the Dockerfile prevents source compilation.
+# TO UPGRADE: Run `pip install --upgrade <pkg>` locally, test, then update
+#   the version here. Never use >= in production builds.
 # =============================================================================
 
-# ── Web framework (direct: Flask app) ─────────────────────────────────────────
+# -- Web framework --
 Flask==3.0.3
 flask-cors==4.0.1
 gunicorn==22.0.0
 
-# ── Firebase / Auth (direct imports) ─────────────────────────────────────────
+# -- Firebase / Auth --
 firebase-admin==6.5.0
 
-# ── GCP services (direct imports) ─────────────────────────────────────────────
-google-cloud-firestore>=2.14.0
-google-cloud-tasks>=2.16.3
-google-cloud-secret-manager>=2.20.0
-google-cloud-kms>=2.21.3
-google-cloud-bigquery>=3.17.2
-google-cloud-bigquery-storage>=2.25.0
-google-cloud-storage>=2.14.0
+# -- GCP services --
+google-cloud-firestore==2.27.0
+google-cloud-tasks==2.23.0
+google-cloud-secret-manager==2.29.0
+google-cloud-kms==3.14.0
+google-cloud-bigquery==3.42.1
+google-cloud-bigquery-storage==2.39.0
+google-cloud-storage==3.12.0
 
-# ── Vertex AI (direct imports — vertexai module is inside this package) ───────
-google-cloud-aiplatform>=1.45.0
+# -- Vertex AI (no vertexai wrapper -- direct aiplatform import) --
+google-cloud-aiplatform==1.158.0
 
-# ── gRPC — floor only, let pip find a binary-compatible version ───────────────
-# No upper bound. The Dockerfile --prefer-binary flag prevents source builds.
-grpcio>=1.60.0
+# -- gRPC --
+grpcio==1.81.1
 
-# ── HTTP client (direct import) ───────────────────────────────────────────────
-httpx>=0.26.0
+# -- HTTP client --
+httpx==0.28.1
 
-# ── Crypto (direct import — Fernet) ──────────────────────────────────────────
-cryptography>=38.0.0
+# -- Crypto (Fernet) --
+cryptography==49.0.0
 
-# ── Data validation (direct import) ──────────────────────────────────────────
-pydantic>=2.7.0
+# -- Data validation --
+pydantic==2.13.4
 
-# ── Utilities (direct imports) ────────────────────────────────────────────────
+# -- Utilities --
 PyPDF2==3.0.1
-cachetools>=5.3.0
+cachetools==7.1.4

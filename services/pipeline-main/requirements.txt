@@ -1,57 +1,24 @@
-# =============================================================================
-# Pipeline-main — Direct-dependency pins only (V23.4 final 2026-04-20)
-# Base image: python:3.11-slim
-#
-# V23.4 additions (2026-04-20):
-#   + No new pip deps. Serper audit telemetry (serper_service.py) uses
-#     only threading, os (stdlib) + httpx (already pinned) for the
-#     daemon-threaded broker POST to ORCHESTRATOR_URL.
-#
-# V23.3 additions (2026-04-18):
-#   + google-auth: required by middleware/oidc.py for JWT decode + certs fetch
-#   + requests: google-auth transport dependency (HTTP cert fetch)
-#   + vertexai: explicit alias for google-cloud-aiplatform (resolves 'import vertexai')
-# =============================================================================
+# Pipeline-main � Exact-pinned (V24.1.9 2026-06-29) | python:3.11-slim
+# vertexai==1.71.1 pulls google-cloud-aiplatform==1.71.1 as locked transitive.
+# Do NOT list google-cloud-aiplatform separately.
 
-# ── Web framework ──────────────────────────────────────────────────────────────
 Flask==3.0.3
 flask-cors==4.0.1
 gunicorn==22.0.0
-
-# ── Firebase / Auth ───────────────────────────────────────────────────────────
 firebase-admin==6.5.0
-
-# ── GCP services ──────────────────────────────────────────────────────────────
-google-cloud-firestore>=2.14.0
-google-cloud-bigquery>=3.17.2
-google-cloud-bigquery-storage>=2.25.0
-google-cloud-storage>=2.14.0
-google-cloud-secret-manager>=2.16.2
-google-cloud-tasks>=2.16.3
-
-# —— Vertex AI —————————————————————————————————————————————————————————————————
-# vertexai pulls google-cloud-aiplatform==X.Y.Z (exact match) as a transitive
-# dep. Do NOT list aiplatform separately — it forces pip to backtrack through
-# every version between latest (1.158) and the vertexai-required version (1.71).
-vertexai>=1.49.0
-
-# ── gRPC — floor only ─────────────────────────────────────────────────────────
-grpcio>=1.60.0
-
-# ── HTTP / Scraping ────────────────────────────────────────────────────────────
-httpx>=0.26.0
-beautifulsoup4>=4.12.0
-
-# —— Auth (OIDC middleware — V23 Zero-Trust) —————————————————————————————————————————————————
-requests>=2.31.0
-google-auth>=2.28.0
-
-# —— Crypto —————————————————————————————————————————————————————————————————————————————————
-cryptography>=38.0.0
-
-# ── Data validation ───────────────────────────────────────────────────────────
-pydantic>=2.7.0
-
-# ── Utilities ─────────────────────────────────────────────────────────────────
-tenacity>=8.2.3
+google-cloud-firestore==2.27.0
+google-cloud-bigquery==3.42.1
+google-cloud-bigquery-storage==2.39.0
+google-cloud-storage==3.12.0
+google-cloud-secret-manager==2.29.0
+google-cloud-tasks==2.23.0
+vertexai==1.71.1
+grpcio==1.81.1
+httpx==0.28.1
+beautifulsoup4==4.15.0
+requests==2.34.2
+google-auth==2.55.0
+cryptography==49.0.0
+pydantic==2.13.4
+tenacity==9.1.4
 PyPDF2==3.0.1

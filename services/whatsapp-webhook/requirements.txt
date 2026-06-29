@@ -1,6 +1,8 @@
-google-cloud-firestore>=2.14.0
-google-cloud-secret-manager>=2.16.0
-grpcio>=1.60.0
+# Whatsapp-webhook — Exact-pinned (V24.1.9 2026-06-29) | python:3.10-slim
+
+google-cloud-firestore==2.27.0
+google-cloud-secret-manager==2.29.0
+grpcio==1.81.1
 Flask==3.0.0
 gunicorn==21.2.0
-httpx>=0.26.0
+httpx==0.28.1

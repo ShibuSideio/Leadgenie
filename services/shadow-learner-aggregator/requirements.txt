@@ -1,4 +1,6 @@
-google-cloud-bigquery>=3.17.2
-google-cloud-firestore>=2.14.0
-google-cloud-storage>=2.14.0
-google-auth>=2.22.0
+# Shadow-learner-aggregator — Exact-pinned (V24.1.9 2026-06-29) | python:3.11-slim
+
+google-cloud-bigquery==3.42.1
+google-cloud-firestore==2.27.0
+google-cloud-storage==3.12.0
+google-auth==2.55.0
