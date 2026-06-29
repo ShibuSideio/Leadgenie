@@ -3494,16 +3494,16 @@ window.createLeadCardV2 = function(docId, lead) {
     // ── Fault Recovery: Error Translation (V23.9) ────────────────────────
     if (lead.status === 'failed') {
         var rawErr = (lead.error || '').toLowerCase();
-        var userMsg = 'Pipeline error. Requeue to try again.';
+        var userMsg = isPdf ? 'Pipeline error.' : 'Pipeline error. Requeue to try again.';
 
         if (rawErr.indexOf('402') !== -1)
             userMsg = 'Out of Credits \u2014 Top up to retry.';
         else if (rawErr.indexOf('timeout') !== -1 || rawErr.indexOf('playwright') !== -1)
-            userMsg = 'Website blocked AI scraper. Requeue to try fallback.';
+            userMsg = isPdf ? 'Website blocked download or scraper.' : 'Website blocked AI scraper. Requeue to try fallback.';
         else if (rawErr.indexOf('zombie') !== -1)
-            userMsg = 'Processing timed out. Requeue to retry.';
+            userMsg = isPdf ? 'Processing timed out.' : 'Processing timed out. Requeue to retry.';
         else if (rawErr.indexOf('rate') !== -1 || rawErr.indexOf('429') !== -1)
-            userMsg = 'Rate limited by source. Requeue in a few minutes.';
+            userMsg = isPdf ? 'Rate limited by source.' : 'Rate limited by source. Requeue in a few minutes.';
         else if (rawErr.indexOf('requeued') !== -1 && rawErr.indexOf('times') !== -1)
             userMsg = rawErr;  // Pass through max-requeue message from backend
 
@@ -3512,8 +3512,8 @@ window.createLeadCardV2 = function(docId, lead) {
         errorBadge.innerHTML =
             '<span class="error-icon">\u26a0\ufe0f</span>' +
             '<span>' + _escapeHTML(userMsg) + '</span>' +
-            '<button class="lead-requeue-btn" data-action="requeue" data-lead-id="' + docId + '">' +
-            '\ud83d\udd04 Re-queue</button>';
+            (isPdf ? '' : '<button class="lead-requeue-btn" data-action="requeue" data-lead-id="' + docId + '">' +
+            '\ud83d\udd04 Re-queue</button>');
         card.appendChild(errorBadge);
     }
 
@@ -3591,6 +3591,9 @@ window.createLeadCardV2 = function(docId, lead) {
             if (chevron) chevron.innerHTML = isExpanded ? '&#x25B2;' : '&#x25BC;';
             btn.childNodes[btn.childNodes.length - 1].textContent =
                 isExpanded ? ' Hide Dossier' : ' View Full Dossier & Tags';
+        } else if (action === 'requeue') {
+            if (!docId || btn.disabled) return;
+            window.requeueFailedLead(docId, btn);
         }
     });
 })();

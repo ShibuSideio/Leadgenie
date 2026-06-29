@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.1.11'; // V24.1.11: Specialized lead cards
+const CACHE_NAME = 'sideio-v24.1.12'; // V24.1.12: Omit requeue for PDF failed cards and restore requeue click handler
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=24.1.11',
-    '/styles.css?v=24.1.11',
+    '/app.js?v=24.1.12',
+    '/styles.css?v=24.1.12',
     '/manifest.json'
 ];
 
