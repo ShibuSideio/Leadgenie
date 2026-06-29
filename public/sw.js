@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.1.15'; // V24.1.15: Clean failed PDF cards & Region multiselect checkboxes
+const CACHE_NAME = 'sideio-v24.1.16'; // V24.1.16: Refined PDF leads design and local telemetry lag fix
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=24.1.15',
-     '/styles.css?v=24.1.15',
+     '/app.js?v=24.1.16',
+     '/styles.css?v=24.1.16',
      '/manifest.json'
  ];
 

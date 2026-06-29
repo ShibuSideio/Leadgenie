@@ -3566,16 +3566,18 @@ function _prismDossierHTML(lead) {
 window.createLeadCardV2 = function(docId, lead) {
     // Store lead in O(1) lookup cache — eliminates all encoding for copilot action
     _leadsMap.set(docId, lead);
+
+    var rawUrl = (lead.url || lead.source_url || '').toLowerCase();
+    var isPdf = rawUrl.split('?')[0].endsWith('.pdf');
+
     var card = document.createElement('div');
     card.className = 'lead-card-v2';
     card.id = docId;
     // ── Status-aware card styling (V23.7) ──
-    if (lead.status === 'failed') card.classList.add('lead-card--failed');
+    if (lead.status === 'failed' && !isPdf) card.classList.add('lead-card--failed');
     if (lead.status === 'processing' || lead.status === 'queued') card.classList.add('lead-card--processing');
 
     // ── Source-aware card styling (V24.1.11) ──
-    var rawUrl = (lead.url || lead.source_url || '').toLowerCase();
-    var isPdf = rawUrl.split('?')[0].endsWith('.pdf');
     
     var hostname = '';
     try { hostname = rawUrl ? new URL(rawUrl).hostname.replace('www.','') : ''; } catch(e) {}
@@ -3657,22 +3659,17 @@ window.createLeadCardV2 = function(docId, lead) {
                 ? 'AI Match' : (lead.source || 'Web Signal');
         }
 
-        var rawErr = (lead.error || '').toLowerCase();
-        var userMsg = isPdf ? 'Pipeline error.' : 'Pipeline error. Requeue to try again.';
-
-        if (rawErr.indexOf('402') !== -1)
-            userMsg = 'Out of Credits — Top up to retry.';
-        else if (rawErr.indexOf('timeout') !== -1 || rawErr.indexOf('playwright') !== -1)
-            userMsg = isPdf ? 'Website blocked download or scraper.' : 'Website blocked AI scraper. Requeue to try fallback.';
-        else if (rawErr.indexOf('zombie') !== -1)
-            userMsg = isPdf ? 'Processing timed out.' : 'Processing timed out. Requeue to retry.';
-        else if (rawErr.indexOf('rate') !== -1 || rawErr.indexOf('429') !== -1)
-            userMsg = isPdf ? 'Rate limited by source.' : 'Rate limited by source. Requeue in a few minutes.';
-        else if (rawErr.indexOf('requeued') !== -1 && lead.error)
-            userMsg = lead.error;
-
+        var scoreBadgeHTML = '';
+        var bannerHTML = '';
         var btnHTML = '';
+
         if (isPdf) {
+            scoreBadgeHTML = '<span class="lc-badge" style="background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe;font-weight:700;font-size:0.75rem;padding:4px 8px;border-radius:6px;">PDF Prospect</span>';
+            bannerHTML = 
+                '<div class="lead-error-badge" style="margin: 12px 0; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 10px 14px; display: flex; align-items: center; gap: 8px; color: #0369a1; font-size: 0.82rem; font-weight: 500;">' +
+                    '<span>ℹ️</span>' +
+                    '<span>We found this prospect for you from a PDF document. Open the PDF to review.</span>' +
+                '</div>';
             btnHTML = 
                 '<button class="lc-contact-btn lc-copilot-btn" data-action="open-pdf" data-lead-id="' + docId + '">' +
                     '📂 Open PDF Document' +
@@ -3681,6 +3678,26 @@ window.createLeadCardV2 = function(docId, lead) {
                     '🚫 Skip Lead' +
                 '</button>';
         } else {
+            var rawErr = (lead.error || '').toLowerCase();
+            var userMsg = 'Pipeline error. Requeue to try again.';
+
+            if (rawErr.indexOf('402') !== -1)
+                userMsg = 'Out of Credits — Top up to retry.';
+            else if (rawErr.indexOf('timeout') !== -1 || rawErr.indexOf('playwright') !== -1)
+                userMsg = 'Website blocked AI scraper. Requeue to try fallback.';
+            else if (rawErr.indexOf('zombie') !== -1)
+                userMsg = 'Processing timed out. Requeue to retry.';
+            else if (rawErr.indexOf('rate') !== -1 || rawErr.indexOf('429') !== -1)
+                userMsg = 'Rate limited by source. Requeue in a few minutes.';
+            else if (rawErr.indexOf('requeued') !== -1 && lead.error)
+                userMsg = lead.error;
+
+            scoreBadgeHTML = '<span class="lc-badge" style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;font-weight:700;font-size:0.75rem;padding:4px 8px;border-radius:6px;">Failed</span>';
+            bannerHTML = 
+                '<div class="lead-error-badge" style="margin: 12px 0; background: rgba(239, 68, 68, 0.06); border: 1px solid rgba(239, 68, 68, 0.18); border-radius: 8px; padding: 10px 14px; display: flex; align-items: center; gap: 8px; color: #b91c1c; font-size: 0.82rem; font-weight: 500;">' +
+                    '<span class="error-icon">⚠️</span>' +
+                    '<span>' + _escapeHTML(userMsg) + '</span>' +
+                '</div>';
             btnHTML = 
                 '<button class="lc-contact-btn lc-copilot-btn" data-action="requeue" data-lead-id="' + docId + '">' +
                     '🔄 Re-queue Lead' +
@@ -3697,13 +3714,10 @@ window.createLeadCardV2 = function(docId, lead) {
                     '<div class="lc-meta"><span>'+srcLbl+'</span>'+(timeAgo?' &middot; '+timeAgo:'')+'</div>' +
                 '</div>' +
                 '<div class="lc-score-wrap" style="align-items: center;">' +
-                    '<span class="lc-badge" style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;font-weight:700;font-size:0.75rem;padding:4px 8px;border-radius:6px;">Failed</span>' +
+                    scoreBadgeHTML +
                 '</div>' +
             '</div>' +
-            '<div class="lead-error-badge" style="margin: 12px 0; background: rgba(239, 68, 68, 0.06); border: 1px solid rgba(239, 68, 68, 0.18); border-radius: 8px; padding: 10px 14px; display: flex; align-items: center; gap: 8px; color: #b91c1c; font-size: 0.82rem; font-weight: 500;">' +
-                '<span class="error-icon">⚠️</span>' +
-                '<span>' + _escapeHTML(userMsg) + '</span>' +
-            '</div>' +
+            bannerHTML +
             '<div class="lc-actions-primary" style="margin-top: 14px; gap: 8px; display: flex; align-items: center;">' +
                 btnHTML +
             '</div>';

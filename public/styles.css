@@ -2208,8 +2208,8 @@ body {
 
 /* Specialized Lead Card Variations */
 .lead-card--pdf {
-    border-left: 4px solid #ef4444 !important;
-    background: linear-gradient(to right, #fef2f2, #ffffff) !important;
+    border-left: 4px solid #6366f1 !important;
+    background: linear-gradient(to right, #eef2ff, #ffffff) !important;
 }
 .lead-card--social {
     border-left: 4px solid #0284c7 !important;

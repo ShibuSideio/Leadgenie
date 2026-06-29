@@ -83,17 +83,23 @@ def parse_base_path(url: str) -> str:
 # SERVICE ACCOUNT EMAIL (GCE metadata)
 # =============================================================================
 def get_service_account_email() -> str:
+    from core.config import ORCHESTRATOR_SA_EMAIL
+    if ORCHESTRATOR_SA_EMAIL:
+        return ORCHESTRATOR_SA_EMAIL
+
     url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
     for attempt in range(1, 4):
         try:
             req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=1.0) as resp:
                 return resp.read().decode("utf-8")
         except Exception as e:
+            err_msg = str(e).lower()
+            if "getaddrinfo failed" in err_msg or "name or service not known" in err_msg or "timed out" in err_msg or attempt == 3:
+                print(f"[SA EMAIL] Fast-fail metadata fetch: {e}")
+                break
             print(f"[SA EMAIL] Attempt {attempt} failed: {e}")
-            if attempt < 3:
-                time.sleep(1.5 ** attempt)
-    print("[SA EMAIL] Critical: metadata fetch permanently failed.")
+            time.sleep(0.5 * attempt)
     return ""
 
 
@@ -402,9 +408,12 @@ def _enqueue_bq_telemetry_task(tenant_id: str, lead_dict: dict, status: str):
             "raw_signal_payload": json.dumps(stripped),
         }
         from google.cloud import tasks_v2 as tv2
+        sa_email     = get_service_account_email().strip()
+        if not sa_email:
+            print("[BQ TASK] Local development detected (no SA email). Skipping telemetry task enqueue.")
+            return
         clients      = _tc()
         queue_path   = clients.queue_path(PROJECT_ID, LOCATION, QUEUE)
-        sa_email     = get_service_account_email().strip()
         target_url   = f"{ORCHESTRATOR_URL}/api/internal/telemetry/bq-push"
         task: dict   = {
             "http_request": {
