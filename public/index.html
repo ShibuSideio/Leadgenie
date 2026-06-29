@@ -50,7 +50,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
-    <link rel="stylesheet" href="styles.css?v=24.1.12">
+    <link rel="stylesheet" href="styles.css?v=24.1.13">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -327,31 +327,30 @@
             </div>
 
             <div class="kpi-tiles" id="kpi-tiles">
-                <div class="kpi-tile kpi-hot">
-                    <div class="kpi-icon">&#128293;</div>
-                    <div class="kpi-value" id="kpi-new-count">&#8212;</div>
+                <div class="kpi-tile kpi-tile--new">
+                    <div class="kpi-icon">🔥</div>
+                    <div class="kpi-value" id="kpi-new-count">—</div>
                     <div class="kpi-label">New Leads</div>
+                    <div class="kpi-subtext" id="kpi-new-subtext">Discovered: 0 &middot; Ignored: 0</div>
                 </div>
-                <div class="kpi-tile kpi-active">
-                    <div class="kpi-icon">&#128172;</div>
-                    <div class="kpi-value" id="kpi-contacted-count">&#8212;</div>
+                <div class="kpi-tile kpi-tile--contacted">
+                    <div class="kpi-icon">💬</div>
+                    <div class="kpi-value" id="kpi-contacted-count">—</div>
                     <div class="kpi-label">Contacted</div>
+                    <div class="kpi-subtext" id="kpi-contacted-subtext">Out of 0 actionable leads</div>
                 </div>
-                <div class="kpi-tile kpi-won">
-                    <div class="kpi-icon">&#127942;</div>
-                    <div class="kpi-value" id="kpi-won-count">&#8212;</div>
+                <div class="kpi-tile kpi-tile--converted">
+                    <div class="kpi-icon">🏆</div>
+                    <div class="kpi-value" id="kpi-won-count">—</div>
                     <div class="kpi-label">Converted</div>
+                    <div class="kpi-subtext" id="kpi-converted-subtext">Success rate: 0.0%</div>
                 </div>
-            </div>
-
-            <div class="mini-stats-bar" id="mini-stats-bar">
-                <span>Discovered: <strong id="stat-discovered">0</strong></span>
-                <span class="mstat-div">&#183;</span>
-                <span>Actionable: <strong id="stat-actionable">0</strong></span>
-                <span class="mstat-div">&#183;</span>
-                <span>Ignored: <strong id="stat-ignored">0</strong></span>
-                <span class="mstat-div">&#183;</span>
-                <span>Value: <strong id="stat-value">&#x20b9;&nbsp;0</strong></span>
+                <div class="kpi-tile kpi-tile--value">
+                    <div class="kpi-icon">💰</div>
+                    <div class="kpi-value" id="kpi-value-count">₹ 0</div>
+                    <div class="kpi-label">Pipeline Value</div>
+                    <div class="kpi-subtext">Potential revenue in pipeline</div>
+                </div>
             </div>
 
 
@@ -389,9 +388,7 @@
             <div id="leads-list" class="leads-list">
                 <div class="lead-card pulse">Connecting to intelligence engine...</div>
             </div>
-            <div class="load-more-row">
-                <button class="secondary-btn" onclick="loadMoreLeads()" style="padding:10px 24px;">Load Older Leads</button>
-            </div>
+            <div id="leads-pagination" class="sio-pagination"></div>
 
             <!-- ── V23.5 INBOUND SIGNALS PANEL ───────────────────────────── -->
             <div id="inbound-signals-panel" style="
@@ -431,6 +428,7 @@
                     </tbody>
                 </table>
             </div>
+            <div id="campaigns-pagination" class="sio-pagination"></div>
         </section>
 
         <!-- REPORTS VIEW -->
@@ -843,6 +841,7 @@
                     &#8987; Loading personas&hellip;
                 </div>
             </div>
+            <div id="personas-pagination" class="sio-pagination" style="margin-top:16px;"></div>
 
             <!-- V24.0: Research Agents Marketplace -->
             <div id="agents-panel" class="agents-panel" style="margin-top:20px;">
@@ -1530,6 +1529,6 @@
         });
     }
 </script>
-<script src="app.js?v=24.1.12"></script>
+<script src="app.js?v=24.1.13"></script>
 </body>
 </html>

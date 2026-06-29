@@ -1,11 +1,11 @@
-const CACHE_NAME = 'sideio-v24.1.12'; // V24.1.12: Omit requeue for PDF failed cards and restore requeue click handler
+const CACHE_NAME = 'sideio-v24.1.13'; // V24.1.13: Dashboard metrics redesign and paginated feeds
 const ASSETS_TO_CACHE = [
-    '/',
-    '/index.html',
-    '/app.js?v=24.1.12',
-    '/styles.css?v=24.1.12',
-    '/manifest.json'
-];
+     '/',
+     '/index.html',
+     '/app.js?v=24.1.13',
+     '/styles.css?v=24.1.13',
+     '/manifest.json'
+ ];
 
 self.addEventListener('install', event => {
     self.skipWaiting(); // Force the waiting service worker to become the active service worker.

@@ -720,6 +720,10 @@ async function _runPersonaMigration() {
 window._campaignsStore = new Map();
 
 // Dynamic Campaign Hydration via REST API
+window.campaignsCurrentPage = 0;
+const CAMPAIGNS_PAGE_SIZE = 10;
+window._cachedCampaigns = [];
+
 async function loadCampaigns() {
     const feed      = document.getElementById('active-campaign-feed');
     const tableBody = document.getElementById('campaign-list-table');
@@ -758,51 +762,18 @@ async function loadCampaigns() {
         }
 
         campaigns.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        window._cachedCampaigns = campaigns;
 
         let activeCount = 0;
-        let tableRows   = '';
         let filterOpts  = '<option value="all">All Searches</option>';
 
         campaigns.forEach(camp => {
-            const id       = camp.id;
-            const isActive = camp.status === 'active';
-            if (isActive) activeCount++;
-
-            const statusColor = isActive ? '#25D366' : '#ef4444';
-            const statusBadge = `<span style="font-size:0.75rem;padding:2px 8px;border-radius:4px;border:1px solid ${statusColor};color:${statusColor};">${(camp.status || 'unknown').toUpperCase()}</span>`;
-            const geoWarn     = (camp.gl && camp.location) ? '' : '<span style="color:#ea580c;font-size:0.75rem;display:block;margin-top:4px;">&#9888; Location Missing: Edit to set targeting</span>';
-
-            // Truncate keywords for display only
-            const kw = (camp.keywords || 'N/A');
-            const kwDisplay = kw.length > 80 ? kw.substring(0, 80) + '\u2026' : kw;
-
-            // ── CRITICAL: only data-campaign-id on the button, zero data in onclick ──
-            tableRows += `
-                <tr style="border-bottom:1px solid var(--glass-border);">
-                    <td style="padding:12px;">
-                        <strong>${camp.name || 'Untitled'}</strong>
-                        ${geoWarn}
-                    </td>
-                    <td style="padding:12px;">
-                        <span style="color:var(--text-muted);font-size:0.85rem;">${kwDisplay}</span>
-                    </td>
-                    <td style="padding:12px;">${statusBadge}</td>
-                    <td style="padding:12px;text-align:right;white-space:nowrap;">
-                        <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;margin-right:4px;"
-                            data-campaign-id="${id}"
-                            onclick="openEditModal(this.dataset.campaignId)">Edit</button>
-                        <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;border-color:${statusColor};color:${statusColor};"
-                            onclick="toggleCampaignStatus('${id}','${camp.status}')">${isActive ? 'Pause' : 'Resume'}</button>
-                    </td>
-                </tr>`;
-
-            filterOpts += `<option value="${id}">${camp.name}</option>`;
+            if (camp.status === 'active') activeCount++;
+            filterOpts += `<option value="${camp.id}">${camp.name}</option>`;
         });
 
-        if (tableBody) tableBody.innerHTML = tableRows;
-
-        // Sync global counter — consumed by initializeDashboardState / renderExpansionState
         window.activeCampaignCount = activeCount;
+        renderCampaignsTable(campaigns, activeCount);
         renderExpansionState(activeCount);
 
         if (filterSel) {
@@ -823,6 +794,73 @@ async function loadCampaigns() {
         if (tableBody) tableBody.innerHTML = '<tr><td colspan="4" style="padding:16px; text-align:center; color: #ef4444;">API Connection Error</td></tr>';
     }
 }
+
+function renderCampaignsTable(campaigns, activeCount) {
+    const tableBody = document.getElementById('campaign-list-table');
+    const pagEl = document.getElementById('campaigns-pagination');
+    if (!tableBody) return;
+
+    const pageCount = Math.ceil(campaigns.length / CAMPAIGNS_PAGE_SIZE) || 1;
+    if (window.campaignsCurrentPage >= pageCount) window.campaignsCurrentPage = pageCount - 1;
+    if (window.campaignsCurrentPage < 0) window.campaignsCurrentPage = 0;
+
+    const startIndex = window.campaignsCurrentPage * CAMPAIGNS_PAGE_SIZE;
+    const pageCampaigns = campaigns.slice(startIndex, startIndex + CAMPAIGNS_PAGE_SIZE);
+
+    let tableRows = '';
+    pageCampaigns.forEach(camp => {
+        const id       = camp.id;
+        const isActive = camp.status === 'active';
+        const statusColor = isActive ? '#25D366' : '#ef4444';
+        const statusBadge = `<span style="font-size:0.75rem;padding:2px 8px;border-radius:4px;border:1px solid ${statusColor};color:${statusColor};">${(camp.status || 'unknown').toUpperCase()}</span>`;
+        const geoWarn     = (camp.gl && camp.location) ? '' : '<span style="color:#ea580c;font-size:0.75rem;display:block;margin-top:4px;">&#9888; Location Missing: Edit to set targeting</span>';
+
+        const kw = (camp.keywords || 'N/A');
+        const kwDisplay = kw.length > 80 ? kw.substring(0, 80) + '\u2026' : kw;
+
+        tableRows += `
+            <tr style="border-bottom:1px solid var(--glass-border);">
+                <td style="padding:12px;">
+                    <strong>${camp.name || 'Untitled'}</strong>
+                    ${geoWarn}
+                </td>
+                <td style="padding:12px;">
+                    <span style="color:var(--text-muted);font-size:0.85rem;">${kwDisplay}</span>
+                </td>
+                <td style="padding:12px;">${statusBadge}</td>
+                <td style="padding:12px;text-align:right;white-space:nowrap;">
+                    <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;margin-right:4px;"
+                        data-campaign-id="${id}"
+                        onclick="openEditModal(this.dataset.campaignId)">Edit</button>
+                    <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;border-color:${statusColor};color:${statusColor};"
+                        onclick="toggleCampaignStatus('${id}','${camp.status}')">${isActive ? 'Pause' : 'Resume'}</button>
+                </td>
+            </tr>`;
+    });
+
+    tableBody.innerHTML = tableRows;
+
+    if (!pagEl) return;
+    if (pageCount <= 1) {
+        pagEl.innerHTML = '';
+        return;
+    }
+
+    let html = '';
+    html += `<button class="sio-page-btn" ${window.campaignsCurrentPage === 0 ? 'disabled' : ''} onclick="changeCampaignsPage(${window.campaignsCurrentPage - 1})">&larr; Prev</button>`;
+    for (let i = 0; i < pageCount; i++) {
+        html += `<button class="sio-page-btn ${i === window.campaignsCurrentPage ? 'active' : ''}" onclick="changeCampaignsPage(${i})">${i + 1}</button>`;
+    }
+    html += `<button class="sio-page-btn" ${window.campaignsCurrentPage === pageCount - 1 ? 'disabled' : ''} onclick="changeCampaignsPage(${window.campaignsCurrentPage + 1})">Next &rarr;</button>`;
+    pagEl.innerHTML = html;
+}
+
+window.changeCampaignsPage = function(pageIndex) {
+    window.campaignsCurrentPage = pageIndex;
+    if (window._cachedCampaigns) {
+        renderCampaignsTable(window._cachedCampaigns, window.activeCampaignCount);
+    }
+};
 
 
 
@@ -886,27 +924,6 @@ async function loadLeads() {
                 rawLeadsCache.sort(_sortChron);
                 inboundCache.sort(_sortChron);
                 outboundCache.sort(_sortChron);
-                // ── KPI counters (read from rawLeadsCache for global totals) ─
-                let cNew = 0, cContact = 0, cConvert = 0;
-                let cDiscovered = rawLeadsCache.length, cActionable = 0, cIgnored = 0;
-                let cFailed = 0, cProcessing = 0;
-                rawLeadsCache.forEach(l => {
-                    if (l.status === 'ignored') { cIgnored++; return; }
-                    if (l.status === 'failed')  { cFailed++; return; }
-                    if (l.status === 'processing' || l.status === 'queued') { cProcessing++; return; }
-                    if (l.status === 'new' || !l.status) cActionable++;
-                    if (l.status === 'contacted') { cContact++; }
-                    else if (l.status === 'converted') { cConvert++; }
-                    else { cNew++; }
-                });
-                const elDisc = document.getElementById('stat-discovered');
-                const elAct  = document.getElementById('stat-actionable');
-                const elIgn  = document.getElementById('stat-ignored');
-                const elFail = document.getElementById('stat-failed');
-                if (elDisc) elDisc.innerText = cDiscovered;
-                if (elAct)  elAct.innerText  = cActionable;
-                if (elIgn)  elIgn.innerText  = cIgnored;
-                if (elFail) elFail.innerText = cFailed;
                 fcUpdateKPIs(rawLeadsCache);
                 _scheduleRender();  // V23.9: debounced via rAF
             }, async (error) => {
@@ -962,9 +979,10 @@ let virtualObserver = new IntersectionObserver((entries) => {
     });
 }, { rootMargin: '600px' });
 
+window.leadsCurrentPage = 0;
+const LEADS_PAGE_SIZE = 10;
+
 function renderLeads() {
-    // ── V23.9: Read directly from pre-routed split cache ────────────────────
-    // No filter pass needed — onSnapshot already routes into inbound/outbound.
     const baseData = (CURRENT_FEED_MODE === 'inbound') ? inboundCache : outboundCache;
 
     const filteredLeads = baseData.filter(lead => {
@@ -977,22 +995,73 @@ function renderLeads() {
         }
         return true;
     });
+
+    const pagEl = document.getElementById('leads-pagination');
+
     if (filteredLeads.length === 0) {
         leadsList.innerHTML = '<div class="lead-card" style="text-align:center;padding:40px;border:none;background:transparent;box-shadow:none;"><div style="font-size:3rem;margin-bottom:12px;opacity:0.8;">🎯</div><h3 style="color:var(--text-main);margin-bottom:8px;">Hunting for leads...</h3><p style="color:var(--text-muted);font-size:0.95rem;line-height:1.5;">We are actively scanning the web. Check back in a few minutes.</p></div>';
+        if (pagEl) pagEl.innerHTML = '';
         return;
     }
+
+    const pageCount = Math.ceil(filteredLeads.length / LEADS_PAGE_SIZE) || 1;
+    if (window.leadsCurrentPage >= pageCount) window.leadsCurrentPage = pageCount - 1;
+    if (window.leadsCurrentPage < 0) window.leadsCurrentPage = 0;
+
+    const startIndex = window.leadsCurrentPage * LEADS_PAGE_SIZE;
+    const pageLeads = filteredLeads.slice(startIndex, startIndex + LEADS_PAGE_SIZE);
+
     leadsList.innerHTML = '';
     virtualObserver.disconnect();
-    filteredLeads.forEach(lead => {
-        const wrapper = document.createElement('div');
-        wrapper.className = 'lead-card';
-        wrapper.style.minHeight = '180px';
-        wrapper.id = lead.id || lead.doc_id;
-        wrapper.setAttribute('data-lead-id', lead.id || lead.doc_id);
-        leadsList.appendChild(wrapper);
-        virtualObserver.observe(wrapper);
+
+    pageLeads.forEach(lead => {
+        const docId = lead.id || lead.doc_id;
+        const cardEl = window.createLeadCardV2(docId, lead);
+        leadsList.appendChild(cardEl);
     });
+
+    renderLeadsPagination(filteredLeads.length);
 }
+
+function renderLeadsPagination(totalCount) {
+    const pagEl = document.getElementById('leads-pagination');
+    if (!pagEl) return;
+
+    const pageCount = Math.ceil(totalCount / LEADS_PAGE_SIZE) || 1;
+    if (pageCount <= 1) {
+        pagEl.innerHTML = '';
+        return;
+    }
+
+    let html = '';
+    html += `<button class="sio-page-btn" ${window.leadsCurrentPage === 0 ? 'disabled' : ''} onclick="changeLeadsPage(${window.leadsCurrentPage - 1})">&larr; Prev</button>`;
+
+    for (let i = 0; i < pageCount; i++) {
+        if (pageCount > 8) {
+            if (i === 0 || i === pageCount - 1 || Math.abs(i - window.leadsCurrentPage) <= 1) {
+                html += `<button class="sio-page-btn ${i === window.leadsCurrentPage ? 'active' : ''}" onclick="changeLeadsPage(${i})">${i + 1}</button>`;
+            } else if (i === 1 && window.leadsCurrentPage > 2) {
+                html += `<span class="sio-page-info">&hellip;</span>`;
+            } else if (i === pageCount - 2 && window.leadsCurrentPage < pageCount - 3) {
+                html += `<span class="sio-page-info">&hellip;</span>`;
+            }
+        } else {
+            html += `<button class="sio-page-btn ${i === window.leadsCurrentPage ? 'active' : ''}" onclick="changeLeadsPage(${i})">${i + 1}</button>`;
+        }
+    }
+
+    html += `<button class="sio-page-btn" ${window.leadsCurrentPage === pageCount - 1 ? 'disabled' : ''} onclick="changeLeadsPage(${window.leadsCurrentPage + 1})">Next &rarr;</button>`;
+    pagEl.innerHTML = html;
+}
+
+window.changeLeadsPage = function(pageIndex) {
+    window.leadsCurrentPage = pageIndex;
+    renderLeads();
+    const leadsListEl = document.getElementById('leads-list');
+    if (leadsListEl) {
+        leadsListEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+};
 
 // =============================================================================
 // TOAST UI ENGINE
@@ -1157,6 +1226,7 @@ window.toggleCampaignStatus = async function(id, currentStatus) {
 // Campaign filter dropdown — called by onchange="filterLeadsByCampaign(this.value)"
 window.filterLeadsByCampaign = function(campaignId) {
     currentCampaignFilter = campaignId || 'all';
+    window.leadsCurrentPage = 0;
     renderLeads();
 };
 
@@ -1552,13 +1622,16 @@ window.switchTab = function(tabName) {
     if (tabName === 'dashboard') {
         show('view-dashboard');
         activateNav('tab-dashboard', 'dock-tab-dashboard');
+        window.leadsCurrentPage = 0;
+        renderLeads();
     } else if (tabName === 'target') {
         show('view-target');
         activateNav('tab-campaigns', 'dock-tab-campaigns');
+        window.campaignsCurrentPage = 0;
+        loadCampaigns();
     } else if (tabName === 'reports') {
         show('view-reports');
         activateNav('tab-reports', 'dock-tab-reports');
-        // ROI data loads on-demand when user navigates to Reports
         const savedRange = document.getElementById('roi-range-select')?.value || 30;
         loadROIDashboard(savedRange);
     } else if (tabName === 'l0-admin') {
@@ -1566,7 +1639,6 @@ window.switchTab = function(tabName) {
         const l0Tab = document.getElementById('tab-l0-admin');
         if (l0Tab) l0Tab.classList.add('active');
         fetchL0Telemetry();
-        // Fetch pending users badge
         (async function() {
             try {
                 var user = firebase.auth().currentUser;
@@ -1589,15 +1661,13 @@ window.switchTab = function(tabName) {
                         tabBtn.appendChild(badge);
                     }
                 }
-            } catch(e) { /* silent — badge is non-critical */ }
+            } catch(e) {}
         })();
     } else if (tabName === 'macro') {
         show('view-macro');
         if (typeof fetchMacroTrends === 'function') fetchMacroTrends();
     } else if (tabName === 'crm-test') {
-        // V24.1.1: CRM is available to all authenticated users
         show('view-crm-test');
-        // Activate both the hidden cmd-btn and ensure no other tab is active
         document.querySelectorAll('.cmd-btn').forEach(b => b.classList.remove('active'));
         const crmBtn = document.getElementById('tab-crm');
         if (crmBtn) crmBtn.classList.add('active');
@@ -1605,6 +1675,7 @@ window.switchTab = function(tabName) {
     } else if (tabName === 'persona-vault') {
         show('view-persona-vault');
         activateNav('tab-personas', 'dock-tab-personas');
+        window.personasCurrentPage = 0;
         loadPersonaVault();
         loadAgents();
     }
@@ -3149,16 +3220,43 @@ function fcUpdateGreeting(firstName) {
 }
 
 function fcUpdateKPIs(leadsArray) {
-    const counts = { new: 0, contacted: 0, converted: 0 };
+    let cNew = 0, cContacted = 0, cConverted = 0;
+    let cDiscovered = leadsArray.length;
+    let cIgnored = 0;
+    let cActionable = 0;
+    let cValue = 0;
+
     leadsArray.forEach(l => {
-        if (l.status === 'new' || l.status === 'processing') counts.new++;
-        else if (l.status === 'contacted' || l.status === 'replied') counts.contacted++;
-        else if (l.status === 'converted') counts.converted++;
+        if (l.status === 'ignored') {
+            cIgnored++;
+        } else {
+            if (l.status === 'converted') {
+                cConverted++;
+            } else if (l.status === 'contacted' || l.status === 'replied') {
+                cContacted++;
+            } else {
+                cNew++;
+            }
+            cActionable++;
+            cValue += Number(l.estimated_value || 0);
+        }
     });
-    const setEl = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v || '0'; };
-    setEl('kpi-new-count',       counts.new);
-    setEl('kpi-contacted-count', counts.contacted);
-    setEl('kpi-won-count',       counts.converted);
+
+    const setEl = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+    
+    setEl('kpi-new-count', cNew);
+    setEl('kpi-contacted-count', cContacted);
+    setEl('kpi-won-count', cConverted);
+    
+    let valueStr = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(cValue);
+    setEl('kpi-value-count', valueStr);
+
+    const setHtml = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
+    setHtml('kpi-new-subtext', `Discovered: ${cDiscovered} &middot; Ignored: ${cIgnored}`);
+    setHtml('kpi-contacted-subtext', `Out of ${cActionable} actionable leads`);
+    
+    let rate = cActionable > 0 ? ((cConverted / cActionable) * 100).toFixed(1) : '0.0';
+    setHtml('kpi-converted-subtext', `Conversion rate: ${rate}%`);
 }
 
 // =============================================================================
@@ -3803,6 +3901,7 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.classList.add('active');
             // Update global mode
             CURRENT_FEED_MODE = btn.dataset.feedMode || 'outbound';
+            window.leadsCurrentPage = 0;
             // Clear radar pulse dot when switching to inbound
             if (CURRENT_FEED_MODE === 'inbound') {
                 const dot = document.querySelector('.radar-pulse-dot');
@@ -4711,6 +4810,9 @@ window._personasCache = [];
 window._selectedPersonaId = '';
 
 // ── loadPersonaVault ──────────────────────────────────────────────────────────
+window.personasCurrentPage = 0;
+const PERSONAS_PAGE_SIZE = 8;
+
 window.loadPersonaVault = async function() {
     const grid = document.getElementById('persona-grid');
     if (!grid) return;
@@ -4728,27 +4830,63 @@ window.loadPersonaVault = async function() {
         const list  = json.data || [];
 
         window._personasCache = list;
-
-        if (list.length === 0) {
-            grid.innerHTML = `
-                <div style="text-align:center; color:var(--text-muted); padding:64px 20px; grid-column:1/-1;">
-                    <div style="font-size:3rem; margin-bottom:12px;">&#127918;</div>
-                    <div style="font-size:1.05rem; font-weight:600; margin-bottom:8px;">No Personas Yet</div>
-                    <div style="font-size:0.85rem; margin-bottom:20px; max-width:360px; margin-left:auto; margin-right:auto;">
-                        Create named AI agent personas with unique pitches and keywords.
-                        Attach them to campaigns so each search uses the right voice.
-                    </div>
-                    <button class="primary-btn" onclick="openPersonaModal()" style="min-height:44px; padding:10px 28px;">
-                        &#43; Create Your First Persona
-                    </button>
-                </div>`;
-            return;
-        }
-
-        grid.innerHTML = list.map(p => _buildPersonaCard(p)).join('');
+        renderPersonasGrid(list);
     } catch(err) {
         console.error('[Persona Vault]', err);
         if (grid) grid.innerHTML = `<div style="text-align:center;color:#ef4444;padding:32px;grid-column:1/-1;">Failed to load personas: ${_escapeHTML(err.message)}</div>`;
+    }
+};
+
+function renderPersonasGrid(personas) {
+    const grid = document.getElementById('persona-grid');
+    const pagEl = document.getElementById('personas-pagination');
+    if (!grid) return;
+
+    if (personas.length === 0) {
+        grid.innerHTML = `
+            <div style="text-align:center; color:var(--text-muted); padding:64px 20px; grid-column:1/-1;">
+                <div style="font-size:3rem; margin-bottom:12px;">&#127918;</div>
+                <div style="font-size:1.05rem; font-weight:600; margin-bottom:8px;">No Personas Yet</div>
+                <div style="font-size:0.85rem; margin-bottom:20px; max-width:360px; margin-left:auto; margin-right:auto;">
+                    Create named AI agent personas with unique pitches and keywords.
+                    Attach them to campaigns so each search uses the right voice.
+                </div>
+                <button class="primary-btn" onclick="openPersonaModal()" style="min-height:44px; padding:10px 28px;">
+                    &#43; Create Your First Persona
+                </button>
+            </div>`;
+        if (pagEl) pagEl.innerHTML = '';
+        return;
+    }
+
+    const pageCount = Math.ceil(personas.length / PERSONAS_PAGE_SIZE) || 1;
+    if (window.personasCurrentPage >= pageCount) window.personasCurrentPage = pageCount - 1;
+    if (window.personasCurrentPage < 0) window.personasCurrentPage = 0;
+
+    const startIndex = window.personasCurrentPage * PERSONAS_PAGE_SIZE;
+    const pagePersonas = personas.slice(startIndex, startIndex + PERSONAS_PAGE_SIZE);
+
+    grid.innerHTML = pagePersonas.map(p => _buildPersonaCard(p)).join('');
+
+    if (!pagEl) return;
+    if (pageCount <= 1) {
+        pagEl.innerHTML = '';
+        return;
+    }
+
+    let html = '';
+    html += `<button class="sio-page-btn" ${window.personasCurrentPage === 0 ? 'disabled' : ''} onclick="changePersonasPage(${window.personasCurrentPage - 1})">&larr; Prev</button>`;
+    for (let i = 0; i < pageCount; i++) {
+        html += `<button class="sio-page-btn ${i === window.personasCurrentPage ? 'active' : ''}" onclick="changePersonasPage(${i})">${i + 1}</button>`;
+    }
+    html += `<button class="sio-page-btn" ${window.personasCurrentPage === pageCount - 1 ? 'disabled' : ''} onclick="changePersonasPage(${window.personasCurrentPage + 1})">Next &rarr;</button>`;
+    pagEl.innerHTML = html;
+}
+
+window.changePersonasPage = function(pageIndex) {
+    window.personasCurrentPage = pageIndex;
+    if (window._personasCache) {
+        renderPersonasGrid(window._personasCache);
     }
 };
 
