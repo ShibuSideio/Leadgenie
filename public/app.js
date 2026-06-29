@@ -3190,6 +3190,10 @@ var _PRISM_PLATFORM_META = {
 
 function _copilotBtnLabel(lead) {
     var url = lead.url || lead.source_url || '';
+    var rawUrl = url.toLowerCase();
+    var isPdf = rawUrl.split('?')[0].endsWith('.pdf');
+    if (isPdf) return '&#x1F4CB; Copy Pitch & Open PDF &#x2197;';
+
     var hostname = '';
     try { hostname = new URL(url).hostname.replace('www.', '').toLowerCase(); } catch(e) {}
     var domains = Object.keys(_PRISM_PLATFORM_META);
@@ -3199,6 +3203,7 @@ function _copilotBtnLabel(lead) {
     var mode = (lead.prism_mode || '').toLowerCase();
     if (mode.indexOf('walledgarden') !== -1) return '&#x1F4CB; Copy Reply & Open Platform &#x2197;';
     if (mode === 'b2b2c')                    return '&#x1F4CB; Copy Pitch & Open Distributor &#x2197;';
+    if (lead.source === 'inbound_radar')     return '&#x1F4CB; Copy Pitch & View Signal &#x2197;';
     return '&#x1F4CB; Copy Pitch & Open Website &#x2197;';
 }
 
@@ -3268,6 +3273,32 @@ window.createLeadCardV2 = function(docId, lead) {
     if (lead.status === 'failed') card.classList.add('lead-card--failed');
     if (lead.status === 'processing' || lead.status === 'queued') card.classList.add('lead-card--processing');
 
+    // ── Source-aware card styling (V24.1.11) ──
+    var rawUrl = (lead.url || lead.source_url || '').toLowerCase();
+    var isPdf = rawUrl.split('?')[0].endsWith('.pdf');
+    
+    var hostname = '';
+    try { hostname = rawUrl ? new URL(rawUrl).hostname.replace('www.','') : ''; } catch(e) {}
+    var SOCIAL_DOMAINS = ['linkedin.com', 'twitter.com', 'x.com', 'reddit.com', 'facebook.com', 'instagram.com'];
+    var isSocial = (lead.prism_mode || '').indexOf('WalledGarden') !== -1 || 
+                   (lead.prism_mode || '').indexOf('walledgarden') !== -1 ||
+                   SOCIAL_DOMAINS.some(function(d) { return hostname.indexOf(d) !== -1; });
+                   
+    var isRadar = lead.source === 'inbound_radar';
+    var isAI = lead.origin_engine === 'autonomous' || 
+               (lead.sourcing_vector || '').indexOf('Autonomous') !== -1 ||
+               lead.origin_engine === 'research_agent';
+
+    if (isPdf) {
+        card.classList.add('lead-card--pdf');
+    } else if (isSocial) {
+        card.classList.add('lead-card--social');
+    } else if (isRadar) {
+        card.classList.add('lead-card--radar');
+    } else if (isAI) {
+        card.classList.add('lead-card--ai');
+    }
+
     // ── V23.9: Skeleton card for queued/processing leads ─────────────────
     // Returns a clean shimmer placeholder instead of the full card body.
     if (lead.status === 'queued' || lead.status === 'processing') {
@@ -3293,6 +3324,22 @@ window.createLeadCardV2 = function(docId, lead) {
     try { var raw = lead.url || lead.source_url || ''; hostname = raw ? new URL(raw).hostname.replace('www.','') : ''; } catch(e) {}
     if (!displayName) displayName = _escapeHTML(hostname) || 'Unknown Company';
 
+    var titlePrefix = '';
+    var titleSuffix = ' &#8599;';
+    if (isPdf) {
+        titlePrefix = '📄 ';
+        titleSuffix = '';
+    } else if (isSocial) {
+        titlePrefix = '💬 ';
+        titleSuffix = '';
+    } else if (isRadar) {
+        titlePrefix = '📡 ';
+        titleSuffix = '';
+    } else if (isAI) {
+        titlePrefix = '🔮 ';
+        titleSuffix = '';
+    }
+
     var score   = lead.score || 0;
     var heatPct = Math.round((score / 10) * 100);
     var emoji   = getScoreEmoji(score);
@@ -3300,8 +3347,14 @@ window.createLeadCardV2 = function(docId, lead) {
     var dm      = _escapeHTML(lead.dm || '');
     var timeAgo = fcTimeAgo(lead.createdAt || lead.promotedAt);
     var srcLbl  = '';
-    if (lead.origin_engine === 'research_agent') {
+    if (isPdf) {
+        srcLbl = '📄 PDF Document';
+    } else if (lead.origin_engine === 'research_agent') {
         srcLbl = '\u{1F916} Research Agent';
+    } else if (isSocial) {
+        srcLbl = '💬 Social Signal';
+    } else if (isRadar) {
+        srcLbl = '📡 Radar Signal';
     } else {
         srcLbl = (lead.sourcing_vector || lead.source || '').indexOf('Autonomous') !== -1
             ? 'AI Match' : (lead.source || 'Web Signal');
@@ -3385,7 +3438,7 @@ window.createLeadCardV2 = function(docId, lead) {
     card.innerHTML =
         '<div class="lc-header">' +
             '<div class="lc-left">' +
-                '<div class="lc-company-name"><a href="'+(lead.url||lead.source_url||'#')+'" target="_blank" rel="noopener noreferrer">'+displayName+' &#8599;</a></div>' +
+                '<div class="lc-company-name"><a href="'+(lead.url||lead.source_url||'#')+'" target="_blank" rel="noopener noreferrer">'+titlePrefix+displayName+titleSuffix+'</a></div>' +
                 '<div class="lc-meta"><span>'+srcLbl+'</span>'+(timeAgo?' &middot; '+timeAgo:'')+' </div>' +
             '</div>' +
             '<div class="lc-score-wrap">' +

@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.1.5'; // V24.1.5: Guard empty Gemini intents/dorks — prevent blacklist-only queries
+const CACHE_NAME = 'sideio-v24.1.11'; // V24.1.11: Specialized lead cards
 const ASSETS_TO_CACHE = [
     '/',
     '/index.html',
-    '/app.js?v=24.1.2',
-    '/styles.css?v=24.1.2',
+    '/app.js?v=24.1.11',
+    '/styles.css?v=24.1.11',
     '/manifest.json'
 ];
 

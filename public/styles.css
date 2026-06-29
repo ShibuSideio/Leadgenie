@@ -2198,3 +2198,22 @@ body {
 .sio-btn-danger:hover {
     background: rgba(255,59,48,0.2);
 }
+
+/* Specialized Lead Card Variations */
+.lead-card--pdf {
+    border-left: 4px solid #ef4444 !important;
+    background: linear-gradient(to right, #fef2f2, #ffffff) !important;
+}
+.lead-card--social {
+    border-left: 4px solid #0284c7 !important;
+    background: linear-gradient(to right, #f0f9ff, #ffffff) !important;
+}
+.lead-card--radar {
+    border-left: 4px solid #f59e0b !important;
+    background: linear-gradient(to right, #fffbeb, #ffffff) !important;
+}
+.lead-card--ai {
+    border-left: 4px solid #7c3aed !important;
+    background: linear-gradient(to right, #faf5ff, #ffffff) !important;
+}
+
