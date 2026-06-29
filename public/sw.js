@@ -1,11 +1,12 @@
-const CACHE_NAME = 'sideio-v24.1.16'; // V24.1.16: Refined PDF leads design and local telemetry lag fix
+const CACHE_NAME = 'sideio-v24.1.17'; // V24.1.17: Admin feature fixes and scrolling responsive tabs
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=24.1.16',
-     '/styles.css?v=24.1.16',
+     '/app.js?v=24.1.17',
+     '/styles.css?v=24.1.17',
      '/manifest.json'
  ];
+
 
 self.addEventListener('install', event => {
     self.skipWaiting(); // Force the waiting service worker to become the active service worker.

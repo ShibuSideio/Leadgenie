@@ -152,6 +152,24 @@ def get_l0_telemetry(uid, tenant_id, user_role):
 
 
 # =============================================================================
+# GET /api/l0/pending-count
+# =============================================================================
+@bp.route("/api/l0/pending-count", methods=["GET"])
+@require_auth
+@require_super_admin
+def get_pending_count(uid, tenant_id, user_role):
+    """Return the count of user registrations pending admin approval."""
+    db = _db()
+    try:
+        res = db.collection("users").where(filter=FieldFilter("approval_status", "==", "pending")).count().get()
+        count = res[0][0].value
+        return jsonify({"status": "success", "data": {"pending_count": count}}), 200
+    except Exception as exc:
+        log.error("pending_count_failed", error=str(exc))
+        return jsonify({"error": "Failed to count pending users", "message": str(exc)}), 500
+
+
+# =============================================================================
 # GET /api/l0/trends
 # =============================================================================
 @bp.route("/api/l0/trends", methods=["GET"])
@@ -544,19 +562,36 @@ def get_radar_status(uid, tenant_id, user_role):
         results = []
         for doc in docs:
             d = doc.to_dict() or {}
-            radar = d.get("inbound_radar") or {}
+            radar = d.get("inbound_radar")
+            if not isinstance(radar, dict):
+                radar = {}
+            enabled = radar.get("enabled", False)
+            status = "active" if enabled else "paused"
+            
+            top_k = radar.get("top_pain_keywords", [])
+            if isinstance(top_k, list):
+                top_keywords = ", ".join(top_k)
+            else:
+                top_keywords = str(top_k) if top_k else ""
+
             results.append({
                 "uid": doc.id[:8],
+                "tenant_id": d.get("tenant_id", doc.id),
                 "email": d.get("email", ""),
-                "enabled": radar.get("enabled", False),
+                "enabled": enabled,
+                "status": status,
                 "last_ran_at": _safe_val(radar.get("last_ran_at")),
+                "last_run": _safe_val(radar.get("last_ran_at")),
                 "signals_this_week": radar.get("signals_this_week", 0),
-                "top_pain_keywords": radar.get("top_pain_keywords", []),
+                "signals_per_week": radar.get("signals_this_week", 0),
+                "top_pain_keywords": top_k,
+                "top_keywords": top_keywords,
             })
         return jsonify({"status": "success", "data": results}), 200
     except Exception as exc:
         log.error("radar_status_read_failed", error=str(exc))
         return jsonify({"error": "Failed to read radar status", "message": str(exc)}), 500
+
 
 
 # =============================================================================
@@ -609,24 +644,49 @@ def get_credit_trends(uid, tenant_id, user_role):
     try:
         from google.cloud import bigquery
         bq = bigquery.Client(project=PROJECT_ID, location="asia-south1")
-        sql = """
+        sql = f"""
             SELECT DATE(timestamp) AS day,
                    SUM(credit_cost) AS credits_used,
                    COUNT(*)         AS query_count
-            FROM `lead-sniper-prod.swarm_analytics.serper_audit_logs`
+            FROM `{PROJECT_ID}.swarm_analytics.serper_audit_logs`
             WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
             GROUP BY day
             ORDER BY day
         """
         rows = bq.query(sql).result()
         trends = []
+        total_credits = 0
         for row in rows:
+            day_str = row.day.isoformat() if hasattr(row.day, "isoformat") else str(row.day)
+            credits_val = int(row.credits_used or 0)
+            query_count_val = int(row.query_count or 0)
+            
+            total_credits += credits_val
+            
             trends.append({
-                "day": row.day.isoformat() if hasattr(row.day, "isoformat") else str(row.day),
-                "credits_used": int(row.credits_used or 0),
-                "query_count": int(row.query_count or 0),
+                "day": day_str,
+                "date": day_str,
+                "credits_used": credits_val,
+                "credits": credits_val,
+                "query_count": query_count_val,
             })
-        return jsonify({"trends": trends}), 200
+        
+        num_days = len(trends)
+        daily_avg = (total_credits / num_days) if num_days > 0 else 0.0
+        projected = daily_avg * 30
+        
+        summary = {
+            "total_credits_30d": total_credits,
+            "daily_avg": daily_avg,
+            "projected_monthly": int(projected)
+        }
+        
+        return jsonify({
+            "trends": trends,
+            "data": trends,
+            "summary": summary
+        }), 200
     except Exception as exc:
         log.error("credit_trends_query_failed", error=str(exc))
         return jsonify({"error": "Credit trends query failed", "message": str(exc)}), 500
+

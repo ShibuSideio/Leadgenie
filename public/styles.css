@@ -1738,11 +1738,18 @@ body {
     border-radius: 14px;
     padding: 4px;
     margin-bottom: 20px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+.l0-tab-bar::-webkit-scrollbar {
+    display: none;
 }
 
 .l0-tab {
-    flex: 1;
+    flex: 1 0 auto;
     min-width: 100px;
     background: transparent;
     border: none;

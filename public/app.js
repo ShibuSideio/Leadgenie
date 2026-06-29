@@ -2164,7 +2164,10 @@ window.l0SwitchTab = function(tab) {
     const activePanel = document.getElementById(`l0-panel-${tab}`);
     const activeBtn   = document.getElementById(`l0-tab-${tab}`);
     if (activePanel) activePanel.classList.add('active');
-    if (activeBtn)   activeBtn.classList.add('active');
+    if (activeBtn) {
+        activeBtn.classList.add('active');
+        activeBtn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    }
     window._l0ActiveTab = tab;
 
     // Auto-load data on first tab switch
