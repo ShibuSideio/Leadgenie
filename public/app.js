@@ -108,6 +108,10 @@ function _resetSelect(el, placeholder) {
     el.innerHTML = `<option value="">${placeholder}</option>`;
     el.disabled = true;
     el.value = '';
+    const container = document.getElementById(el.id + '-container');
+    if (container && typeof container.reset === 'function') {
+        container.reset();
+    }
 }
 
 function _updateGeoPreview() {
@@ -129,6 +133,164 @@ function _compileGeoString(continent, country, region) {
     return parts.join(', ');
 }
 
+// ── V24.1.15: Custom Multiselect Checkbox Dropdown Helper ─────────────────
+function setupCustomMultiselect(selectId, containerId, triggerId, dropdownId) {
+    const selectEl = document.getElementById(selectId);
+    const containerEl = document.getElementById(containerId);
+    const triggerEl = document.getElementById(triggerId);
+    const dropdownEl = document.getElementById(dropdownId);
+    if (!selectEl || !containerEl || !triggerEl || !dropdownEl) return;
+
+    // Toggle dropdown visibility
+    triggerEl.addEventListener('click', function(e) {
+        if (triggerEl.classList.contains('disabled')) return;
+        
+        // Close other custom multiselects first
+        document.querySelectorAll('.custom-multiselect-container').forEach(c => {
+            if (c !== containerEl) c.classList.remove('open');
+        });
+        
+        containerEl.classList.toggle('open');
+        e.stopPropagation();
+    });
+
+    // Close when clicking outside
+    document.addEventListener('click', function(e) {
+        if (!containerEl.contains(e.target)) {
+            containerEl.classList.remove('open');
+        }
+    });
+
+    containerEl.populateRegions = function(regions, selectedValues = []) {
+        dropdownEl.innerHTML = '';
+        triggerEl.classList.remove('disabled');
+        
+        if (!regions || regions.length === 0) {
+            triggerEl.classList.add('disabled');
+            triggerEl.querySelector('.trigger-label').textContent = '📍 Region';
+            return;
+        }
+
+        // Add "All" option
+        const allOptionDiv = document.createElement('div');
+        allOptionDiv.className = 'custom-multiselect-option select-all';
+        
+        const allCheckbox = document.createElement('input');
+        allCheckbox.type = 'checkbox';
+        allCheckbox.id = `${selectId}-opt-all`;
+        
+        const allLabel = document.createElement('label');
+        allLabel.htmlFor = allCheckbox.id;
+        allLabel.textContent = '🌍 All';
+        
+        allOptionDiv.appendChild(allCheckbox);
+        allOptionDiv.appendChild(allLabel);
+        dropdownEl.appendChild(allOptionDiv);
+
+        // Divider
+        const divider = document.createElement('div');
+        divider.className = 'custom-multiselect-divider';
+        dropdownEl.appendChild(divider);
+
+        // Add each region
+        const optionCheckboxes = [];
+        regions.forEach((r, idx) => {
+            const optDiv = document.createElement('div');
+            optDiv.className = 'custom-multiselect-option';
+            
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.value = r;
+            cb.id = `${selectId}-opt-${idx}`;
+            
+            const label = document.createElement('label');
+            label.htmlFor = cb.id;
+            label.textContent = r;
+            
+            optDiv.appendChild(cb);
+            optDiv.appendChild(label);
+            dropdownEl.appendChild(optDiv);
+            optionCheckboxes.push(cb);
+            
+            // Check if initially selected
+            if (selectedValues.includes(r) || selectedValues.includes('All')) {
+                cb.checked = true;
+            }
+        });
+
+        // If 'All' is in selectedValues, or all checkboxes are checked:
+        if (selectedValues.includes('All') || (optionCheckboxes.length > 0 && optionCheckboxes.every(c => c.checked))) {
+            allCheckbox.checked = true;
+            optionCheckboxes.forEach(c => c.checked = true);
+        }
+
+        // Handle check changes
+        function updateSelection() {
+            const checkedValues = optionCheckboxes.filter(c => c.checked).map(c => c.value);
+            let displayVal = '📍 Region';
+            let selectVal = '';
+
+            if (allCheckbox.checked && checkedValues.length === optionCheckboxes.length) {
+                displayVal = '📍 All';
+                selectVal = 'All';
+            } else if (checkedValues.length === optionCheckboxes.length) {
+                allCheckbox.checked = true;
+                displayVal = '📍 All';
+                selectVal = 'All';
+            } else if (checkedValues.length > 0) {
+                allCheckbox.checked = false;
+                displayVal = '📍 ' + checkedValues.join(', ');
+                selectVal = checkedValues.join(', ');
+            } else {
+                allCheckbox.checked = false;
+                displayVal = '📍 Region';
+                selectVal = '';
+            }
+
+            triggerEl.querySelector('.trigger-label').textContent = displayVal;
+            
+            // Set value on the hidden select
+            selectEl.innerHTML = selectVal ? `<option value="${selectVal}">${selectVal}</option>` : '<option value="">📍 Region</option>';
+            selectEl.value = selectVal;
+
+            if (typeof selectEl.onchange === 'function') {
+                selectEl.onchange();
+            } else {
+                selectEl.dispatchEvent(new Event('change'));
+            }
+        }
+
+        // Checkbox click handlers
+        allCheckbox.addEventListener('change', function() {
+            const isChecked = allCheckbox.checked;
+            optionCheckboxes.forEach(c => c.checked = isChecked);
+            updateSelection();
+        });
+
+        optionCheckboxes.forEach(cb => {
+            cb.addEventListener('change', function() {
+                if (!cb.checked) {
+                    allCheckbox.checked = false;
+                } else if (optionCheckboxes.every(c => c.checked)) {
+                    allCheckbox.checked = true;
+                }
+                updateSelection();
+            });
+        });
+
+        // Also run once initially to set the trigger label
+        updateSelection();
+    };
+
+    containerEl.reset = function() {
+        dropdownEl.innerHTML = '';
+        triggerEl.classList.add('disabled');
+        triggerEl.querySelector('.trigger-label').textContent = '📍 Region';
+        containerEl.classList.remove('open');
+    };
+}
+
+
 function _resolveGlCode(countryName) {
     if (!_geoDataCache || !countryName) return '';
     for (const c of _geoDataCache.continents) {
@@ -144,6 +306,15 @@ async function initGeoCascade(existingGeoHierarchy, existingGl, existingLocation
     const countryEl   = document.getElementById('geo-country-select');
     const regionEl    = document.getElementById('geo-region-select');
     if (!continentEl || !countryEl || !regionEl) return;
+
+    // Set target selected regions for hydration
+    if (existingGeoHierarchy && existingGeoHierarchy.region) {
+        regionEl._targetSelectedRegions = existingGeoHierarchy.region.split(',').map(s => s.trim());
+    } else if (existingLocation) {
+        regionEl._targetSelectedRegions = [existingLocation];
+    } else {
+        regionEl._targetSelectedRegions = [];
+    }
 
     // Populate continents
     continentEl.innerHTML = '<option value="">🌍 Continent</option>';
@@ -181,10 +352,15 @@ async function initGeoCascade(existingGeoHierarchy, existingGl, existingLocation
             return;
         }
         regionEl.disabled = false;
-        country.regions.forEach(r => {
-            regionEl.innerHTML += `<option value="${r}">${r}</option>`;
-        });
-        _updateGeoPreview();
+        const container = document.getElementById(regionEl.id + '-container');
+        if (container && typeof container.populateRegions === 'function') {
+            container.populateRegions(country.regions || [], regionEl._targetSelectedRegions || []);
+        } else {
+            country.regions.forEach(r => {
+                regionEl.innerHTML += `<option value="${r}">${r}</option>`;
+            });
+            _updateGeoPreview();
+        }
     };
 
     regionEl.onchange = function() {
@@ -199,7 +375,7 @@ async function initGeoCascade(existingGeoHierarchy, existingGl, existingLocation
         if (existingGeoHierarchy.country) {
             countryEl.value = existingGeoHierarchy.country;
             countryEl.onchange();
-            if (existingGeoHierarchy.region) {
+            if (existingGeoHierarchy.region && !document.getElementById(regionEl.id + '-container')) {
                 regionEl.value = existingGeoHierarchy.region;
                 regionEl.onchange();
             }
@@ -219,8 +395,14 @@ async function initGeoCascade(existingGeoHierarchy, existingGl, existingLocation
                         r => existingLocation.toLowerCase().includes(r.toLowerCase())
                     );
                     if (regionMatch) {
-                        regionEl.value = regionMatch;
-                        regionEl.onchange();
+                        regionEl._targetSelectedRegions = [regionMatch];
+                        const container = document.getElementById(regionEl.id + '-container');
+                        if (container && typeof container.populateRegions === 'function') {
+                            container.populateRegions(match.regions || [], [regionMatch]);
+                        } else {
+                            regionEl.value = regionMatch;
+                            regionEl.onchange();
+                        }
                     }
                 }
                 break;
@@ -244,6 +426,15 @@ async function initGeoCascadeFor(prefix, existingGeoHierarchy, existingGl, exist
     const glHidden    = document.getElementById(prefix === 'cc-geo' ? 'cc-gl' : 'edit-camp-gl');
 
     if (!continentEl || !countryEl || !regionEl) return;
+
+    // Set target selected regions for hydration
+    if (existingGeoHierarchy && existingGeoHierarchy.region) {
+        regionEl._targetSelectedRegions = existingGeoHierarchy.region.split(',').map(s => s.trim());
+    } else if (existingLocation) {
+        regionEl._targetSelectedRegions = [existingLocation];
+    } else {
+        regionEl._targetSelectedRegions = [];
+    }
 
     function updatePreview() {
         const continent = continentEl.value || '';
@@ -289,10 +480,15 @@ async function initGeoCascadeFor(prefix, existingGeoHierarchy, existingGl, exist
             return;
         }
         regionEl.disabled = false;
-        country.regions.forEach(r => {
-            regionEl.innerHTML += `<option value="${r}">${r}</option>`;
-        });
-        updatePreview();
+        const container = document.getElementById(regionEl.id + '-container');
+        if (container && typeof container.populateRegions === 'function') {
+            container.populateRegions(country.regions || [], regionEl._targetSelectedRegions || []);
+        } else {
+            country.regions.forEach(r => {
+                regionEl.innerHTML += `<option value="${r}">${r}</option>`;
+            });
+            updatePreview();
+        }
     };
 
     regionEl.onchange = function() { updatePreview(); };
@@ -304,7 +500,7 @@ async function initGeoCascadeFor(prefix, existingGeoHierarchy, existingGl, exist
         if (existingGeoHierarchy.country) {
             countryEl.value = existingGeoHierarchy.country;
             countryEl.onchange();
-            if (existingGeoHierarchy.region) {
+            if (existingGeoHierarchy.region && !document.getElementById(regionEl.id + '-container')) {
                 regionEl.value = existingGeoHierarchy.region;
                 regionEl.onchange();
             }
@@ -322,8 +518,14 @@ async function initGeoCascadeFor(prefix, existingGeoHierarchy, existingGl, exist
                         r => existingLocation.toLowerCase().includes(r.toLowerCase())
                     );
                     if (regionMatch) {
-                        regionEl.value = regionMatch;
-                        regionEl.onchange();
+                        regionEl._targetSelectedRegions = [regionMatch];
+                        const container = document.getElementById(regionEl.id + '-container');
+                        if (container && typeof container.populateRegions === 'function') {
+                            container.populateRegions(match.regions || [], [regionMatch]);
+                        } else {
+                            regionEl.value = regionMatch;
+                            regionEl.onchange();
+                        }
                     }
                 }
                 break;
@@ -3417,6 +3619,98 @@ window.createLeadCardV2 = function(docId, lead) {
         return card;
     }
 
+    // ── V24.1.15: Clean failed leads layout ───────────────────────────────
+    if (lead.status === 'failed') {
+        var displayName = _escapeHTML(lead.company_name || '');
+        var hostname = '';
+        try { var raw = lead.url || lead.source_url || ''; hostname = raw ? new URL(raw).hostname.replace('www.','') : ''; } catch(e) {}
+        if (!displayName) displayName = _escapeHTML(hostname) || 'Unknown Company';
+
+        var titlePrefix = '';
+        var titleSuffix = ' &#8599;';
+        if (isPdf) {
+            titlePrefix = '📄 ';
+            titleSuffix = '';
+        } else if (isSocial) {
+            titlePrefix = '💬 ';
+            titleSuffix = '';
+        } else if (isRadar) {
+            titlePrefix = '📡 ';
+            titleSuffix = '';
+        } else if (isAI) {
+            titlePrefix = '🔮 ';
+            titleSuffix = '';
+        }
+
+        var timeAgo = fcTimeAgo(lead.createdAt || lead.promotedAt);
+        var srcLbl  = '';
+        if (isPdf) {
+            srcLbl = '📄 PDF Document';
+        } else if (lead.origin_engine === 'research_agent') {
+            srcLbl = '🤖 Research Agent';
+        } else if (isSocial) {
+            srcLbl = '💬 Social Signal';
+        } else if (isRadar) {
+            srcLbl = '📡 Radar Signal';
+        } else {
+            srcLbl = (lead.sourcing_vector || lead.source || '').indexOf('Autonomous') !== -1
+                ? 'AI Match' : (lead.source || 'Web Signal');
+        }
+
+        var rawErr = (lead.error || '').toLowerCase();
+        var userMsg = isPdf ? 'Pipeline error.' : 'Pipeline error. Requeue to try again.';
+
+        if (rawErr.indexOf('402') !== -1)
+            userMsg = 'Out of Credits — Top up to retry.';
+        else if (rawErr.indexOf('timeout') !== -1 || rawErr.indexOf('playwright') !== -1)
+            userMsg = isPdf ? 'Website blocked download or scraper.' : 'Website blocked AI scraper. Requeue to try fallback.';
+        else if (rawErr.indexOf('zombie') !== -1)
+            userMsg = isPdf ? 'Processing timed out.' : 'Processing timed out. Requeue to retry.';
+        else if (rawErr.indexOf('rate') !== -1 || rawErr.indexOf('429') !== -1)
+            userMsg = isPdf ? 'Rate limited by source.' : 'Rate limited by source. Requeue in a few minutes.';
+        else if (rawErr.indexOf('requeued') !== -1 && lead.error)
+            userMsg = lead.error;
+
+        var btnHTML = '';
+        if (isPdf) {
+            btnHTML = 
+                '<button class="lc-contact-btn lc-copilot-btn" data-action="open-pdf" data-lead-id="' + docId + '">' +
+                    '📂 Open PDF Document' +
+                '</button>' +
+                '<button class="lc-reject-btn-failed" data-action="reject" data-lead-id="' + docId + '" style="padding: 8px 16px; border: 1px solid #fca5a5; background: #fff; border-radius: 8px; font-size: 0.8rem; font-weight: 600; color: #dc2626; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center;">' +
+                    '🚫 Skip Lead' +
+                '</button>';
+        } else {
+            btnHTML = 
+                '<button class="lc-contact-btn lc-copilot-btn" data-action="requeue" data-lead-id="' + docId + '">' +
+                    '🔄 Re-queue Lead' +
+                '</button>' +
+                '<button class="lc-reject-btn-failed" data-action="reject" data-lead-id="' + docId + '" style="padding: 8px 16px; border: 1px solid #fca5a5; background: #fff; border-radius: 8px; font-size: 0.8rem; font-weight: 600; color: #dc2626; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center;">' +
+                    '🚫 Skip Lead' +
+                '</button>';
+        }
+
+        card.innerHTML =
+            '<div class="lc-header" style="margin-bottom: 12px;">' +
+                '<div class="lc-left">' +
+                    '<div class="lc-company-name"><a href="'+(lead.url||lead.source_url||'#')+'" target="_blank" rel="noopener noreferrer">'+titlePrefix+displayName+titleSuffix+'</a></div>' +
+                    '<div class="lc-meta"><span>'+srcLbl+'</span>'+(timeAgo?' &middot; '+timeAgo:'')+'</div>' +
+                '</div>' +
+                '<div class="lc-score-wrap" style="align-items: center;">' +
+                    '<span class="lc-badge" style="background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;font-weight:700;font-size:0.75rem;padding:4px 8px;border-radius:6px;">Failed</span>' +
+                '</div>' +
+            '</div>' +
+            '<div class="lead-error-badge" style="margin: 12px 0; background: rgba(239, 68, 68, 0.06); border: 1px solid rgba(239, 68, 68, 0.18); border-radius: 8px; padding: 10px 14px; display: flex; align-items: center; gap: 8px; color: #b91c1c; font-size: 0.82rem; font-weight: 500;">' +
+                '<span class="error-icon">⚠️</span>' +
+                '<span>' + _escapeHTML(userMsg) + '</span>' +
+            '</div>' +
+            '<div class="lc-actions-primary" style="margin-top: 14px; gap: 8px; display: flex; align-items: center;">' +
+                btnHTML +
+            '</div>';
+
+        return card;
+    }
+
     var displayName = _escapeHTML(lead.company_name || '');
     var hostname = '';
     try { var raw = lead.url || lead.source_url || ''; hostname = raw ? new URL(raw).hostname.replace('www.','') : ''; } catch(e) {}
@@ -3644,6 +3938,16 @@ window.createLeadCardV2 = function(docId, lead) {
         if (action === 'copilot') {
             if (!docId) return;
             window.copilotAction(docId);
+
+        } else if (action === 'open-pdf') {
+            if (!docId) return;
+            var lead = _leadsMap.get(docId);
+            var url = lead ? (lead.url || lead.source_url || '') : '';
+            if (url && url !== '#') {
+                window.open(url, '_blank', 'noopener,noreferrer');
+            } else {
+                showToast('PDF URL not available.', 'error');
+            }
 
         } else if (action === 'crm') {
             if (!docId || btn.disabled) return;
@@ -3874,8 +4178,11 @@ window.agreeToTerms = async function() {
     }
 };
 
-// Close settings modal on overlay click
 document.addEventListener('DOMContentLoaded', () => {
+    // Setup custom multiselect region dropdowns (V24.1.15)
+    setupCustomMultiselect('cc-geo-region', 'cc-geo-region-container', 'cc-geo-region-trigger', 'cc-geo-region-dropdown');
+    setupCustomMultiselect('geo-region-select', 'geo-region-select-container', 'geo-region-select-trigger', 'geo-region-select-dropdown');
+
     const settingsOverlay = document.getElementById('settings-modal');
     if (settingsOverlay) {
         settingsOverlay.addEventListener('click', (e) => {

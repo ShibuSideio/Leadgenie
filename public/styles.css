@@ -2273,3 +2273,101 @@ body {
     margin: 0 10px;
 }
 
+/* Custom Multiselect Checkbox Dropdown */
+.custom-multiselect-container {
+    position: relative;
+    font-family: 'Inter', sans-serif;
+}
+.custom-multiselect-trigger {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #fff;
+    cursor: pointer;
+    font-size: 0.875rem;
+    color: #374151;
+    min-height: 40px;
+    box-sizing: border-box;
+    user-select: none;
+}
+.custom-multiselect-trigger.disabled {
+    background: #f3f4f6;
+    color: #9ca3af;
+    cursor: not-allowed;
+    border-color: #e5e7eb;
+}
+.custom-multiselect-trigger:focus-within {
+    outline: 2px solid #6366f1;
+    outline-offset: -1px;
+}
+.custom-multiselect-trigger .trigger-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-right: 6px;
+}
+.custom-multiselect-trigger .trigger-arrow {
+    font-size: 0.65rem;
+    color: #6b7280;
+    transition: transform 0.2s ease;
+}
+.custom-multiselect-container.open .trigger-arrow {
+    transform: rotate(180deg);
+}
+.custom-multiselect-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    width: 100%;
+    min-width: 180px;
+    max-height: 200px;
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    z-index: 1001;
+    display: none;
+    padding: 6px 0;
+    box-sizing: border-box;
+}
+.custom-multiselect-container.open .custom-multiselect-dropdown {
+    display: block;
+}
+.custom-multiselect-option {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: #374151;
+    gap: 8px;
+    user-select: none;
+}
+.custom-multiselect-option:hover {
+    background: #f3f4f6;
+}
+.custom-multiselect-option input[type="checkbox"] {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+    accent-color: #4f46e5;
+}
+.custom-multiselect-option label {
+    cursor: pointer;
+    flex-grow: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin: 0;
+}
+.custom-multiselect-divider {
+    height: 1px;
+    background: #e5e7eb;
+    margin: 4px 0;
+}
+
+

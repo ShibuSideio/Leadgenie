@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.1.14'; // V24.1.14: Competitor shield & Inbound Radar blending
+const CACHE_NAME = 'sideio-v24.1.15'; // V24.1.15: Clean failed PDF cards & Region multiselect checkboxes
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=24.1.14',
-     '/styles.css?v=24.1.14',
+     '/app.js?v=24.1.15',
+     '/styles.css?v=24.1.15',
      '/manifest.json'
  ];
 
