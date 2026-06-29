@@ -139,11 +139,12 @@ High Confidence: Raw, unpolished footprints. This includes niche forum complaint
 
 Medium Confidence: Ambiguous intent, but highly relevant industry or location.
 
-Low Confidence: SEO-optimized listicles, directories (Yelp, G2, etc.), marketing blogs, generic news articles, or clear competitors. High polish usually means low lead value.
+Low Confidence: SEO-optimized listicles, directories (Yelp, G2, etc.), marketing blogs, generic news articles, or clear competitors/vendors offering matching lead generation, email outreach, or B2B data services themselves. High polish or competitor offerings mean Low Confidence.
 
 # STEP 2 — UNIVERSAL RULES
 SOCIAL PLATFORM RULE: Evaluate the SPECIFIC POST intent, not the platform's general purpose.
 GEO RULE: Wrong region → Low.
+COMPETITOR RULE: If the snippet or URL belongs to a competitor offering the same or similar services as described in the USER BIO, classify it as Low Confidence.
 
 Snippets: {json.dumps(snippets)}"""
 
@@ -327,6 +328,10 @@ PLATFORM: {platform.upper()}
 # STEP 1 — CROSS-POLLINATION EVALUATION MATRIX
 Evaluate the text DOM against EACH campaign below. Score 1-10. Return only campaigns where score >= 4.
 {campaigns_str}
+
+SELLER EXCLUSION RULE: If the target company sells or advertises B2B lead generation, cold email marketing, B2B databases/data scraping, or outbound agency/sales services themselves, they are a competitor. You MUST score them 0 (or <4) for any campaign, excluding them.
+
+GENERIC B2B RULE: Simply presenting standard services publicly (e.g. software development, IT services, consulting, agency work) does not indicate active buying intent. Grade them strictly as GENERAL_FIT with a score <= 3 (which will exclude them), unless there is a specific active intent signal (e.g., job postings for SDRs/sales, or active complaints).
 
 # STEP 2 — OUTREACH COPILOT DRAFT
 Identify the campaign with the HIGHEST match score.

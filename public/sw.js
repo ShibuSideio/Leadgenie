@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.1.13'; // V24.1.13: Dashboard metrics redesign and paginated feeds
+const CACHE_NAME = 'sideio-v24.1.14'; // V24.1.14: Competitor shield & Inbound Radar blending
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=24.1.13',
-     '/styles.css?v=24.1.13',
+     '/app.js?v=24.1.14',
+     '/styles.css?v=24.1.14',
      '/manifest.json'
  ];
 

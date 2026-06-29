@@ -95,28 +95,28 @@ SIGNAL_MODES: dict[int, dict] = {
     0: {
         "name": "active_intent",
         "templates": [
-            '"{pain_keyword}" "looking for" "tool" OR "software" OR "solution"',
-            '"{pain_keyword}" "recommendation" OR "suggest" OR "what do you use"',
-            '"{industry}" "we need" OR "anyone using" OR "best tool for"',
-            '"{pain_keyword}" "vendor" OR "RFP" OR "evaluation"',
+            'site:reddit' + '.com/r/sales OR site:reddit' + '.com/r/startups "{pain_keyword}" "looking for" OR "recommend" OR "any thoughts"',
+            'site:reddit' + '.com OR site:quora' + '.com "{pain_keyword}" "looking for tool" OR "software suggestion" OR "what do you use"',
+            '"{pain_keyword}" inurl:forum OR inurl:community "help" OR "RFP" OR "vendor"',
+            'site:reddit' + '.com OR site:quora' + '.com "{industry}" "we need" OR "best tool for"',
         ],
     },
     1: {
         "name": "pain_expression",
         "templates": [
-            '"{pain_keyword}" "struggling" OR "frustrated" OR "nightmare"',
-            '"{industry}" "problem" OR "issue" OR "failing" OR "broken process"',
-            '"{pain_keyword}" "manually" OR "spreadsheet" OR "no visibility"',
-            '"{pain_keyword}" "wasting time" OR "inefficient" OR "error-prone"',
+            'site:reddit' + '.com OR site:quora' + '.com "{pain_keyword}" "struggling" OR "frustrated" OR "nightmare" OR "broken process"',
+            'site:reddit' + '.com OR site:quora' + '.com "{pain_keyword}" "wasting time" OR "inefficient" OR "no visibility"',
+            '"{pain_keyword}" inurl:forum OR inurl:community "manually" OR "spreadsheet" OR "failing"',
+            'site:reddit' + '.com OR site:quora' + '.com "{industry}" "problem" OR "issue" OR "failing"',
         ],
     },
     2: {
         "name": "competitor_churn",
         "templates": [
-            '"{competitor}" "alternative" OR "switch" OR "better than"',
-            '"{competitor}" "cancel" OR "leaving" OR "disappointed"',
-            '"{industry}" "looking for alternative to" OR "fed up with"',
-            '"{pain_keyword}" "not satisfied" OR "switched from" OR "replaced"',
+            'site:reddit' + '.com OR site:quora' + '.com OR site:twitter' + '.com "{competitor}" "alternative" OR "switch" OR "better than"',
+            'site:reddit' + '.com OR site:quora' + '.com OR site:twitter' + '.com "{competitor}" "cancel" OR "leaving" OR "scam" OR "disappointed"',
+            'site:trustpilot' + '.com/review/ OR site:g2' + '.com/products/*/reviews "{competitor}" "worst" OR "bad" OR "useless" OR "billing"',
+            'site:reddit' + '.com OR site:quora' + '.com "{industry}" "looking for alternative to" OR "fed up with"',
         ],
     },
     3: {
@@ -124,35 +124,35 @@ SIGNAL_MODES: dict[int, dict] = {
         "templates": [
             '"{industry}" "hiring" "{icp_job_title}"',
             '"{company_type}" "Series A" OR "Series B" OR "raised" "{industry}"',
-            '"{industry}" "expanding" OR "new office" OR "growing team"',
+            '"{industry}" "expanding" OR "growing team" OR "new office"',
             '"{pain_keyword}" "scale" OR "growing pains" OR "outgrown"',
         ],
     },
     4: {
         "name": "review_signals",
         "templates": [
-            '"{pain_keyword}" review comparison "pros" "cons"',
-            '"{industry}" software "best" OR "top" 2024 OR 2025',
-            '"{competitor}" review "wish it had" OR "missing feature"',
-            '"{pain_keyword}" "G2" OR "Capterra" OR "Trustpilot" review',
+            'site:trustpilot' + '.com/review/ OR site:g2' + '.com/products/*/reviews "{pain_keyword}" "wish it had" OR "missing feature" OR "not satisfied"',
+            'site:trustpilot' + '.com/review/ OR site:g2' + '.com/products/*/reviews "{pain_keyword}" "worst experience" OR "terrible support" OR "regret"',
+            'site:mouthshut' + '.com OR site:consumercomplaints' + '.in "{pain_keyword}" "complaint" OR "scam" OR "waste of money"',
+            'site:g2' + '.com/products/*/reviews OR site:capterra' + '.com "{pain_keyword}" "alternatives" OR "compare" OR "wish"',
         ],
     },
     5: {
         "name": "trend_signals",
         "templates": [
-            '"{industry}" "digital transformation" OR "modernize" OR "automate"',
+            'site:reddit' + '.com OR site:quora' + '.com "{industry}" "digital transformation" OR "modernize" OR "automate"',
             '"{pain_keyword}" trend 2025 OR 2026',
+            'site:reddit' + '.com OR site:quora' + '.com "{industry}" "cost reduction" OR "efficiency" OR "ROI"',
             '"{industry}" "new regulation" OR "compliance" OR "mandate"',
-            '"{industry}" "cost reduction" OR "efficiency" OR "ROI"',
         ],
     },
     6: {
         "name": "community_signals",
         "templates": [
-            '"{pain_keyword}" forum OR community OR discussion "help"',
+            'site:reddit' + '.com/r/sales OR site:reddit' + '.com/r/marketing "{pain_keyword}" "how do you" OR "our stack"',
+            'site:reddit' + '.com/r/startups OR site:reddit' + '.com/r/SaaS "{pain_keyword}" "what tools" OR "recommendation"',
+            '"{pain_keyword}" inurl:forum OR inurl:community "help" OR "discussion"',
             '"{industry}" association OR conference OR "best practice" 2025',
-            '"{pain_keyword}" "case study" OR "how we solved"',
-            '"{industry}" "what tools" OR "how do you" OR "our stack"',
         ],
     },
 }
@@ -202,6 +202,8 @@ Classification rules (OSINT Focus):
 - EXPRESSING_PAIN (0.40-0.75): Venting about a raw operational problem, symptom, or inefficiency.
 - TREND           (0.10-0.45): General market discussion; no personal pain expressed.
 - NONE            (0.0 -0.29): Polished marketing copy, SEO articles, directories, or irrelevant noise.
+
+SELLER EXCLUSION RULE: If the content represents a competitor or vendor offering the same or similar services as described in the system solver description (e.g. they offer lead generation, email marketing, or outbound outreach agency services themselves), you MUST classify them as NONE with an intent_score of 0.0. Do not capture competitors.
 """
     try:
         import vertexai
@@ -277,9 +279,14 @@ class InboundSentimentService:
     # ------------------------------------------------------------------
 
     def _build_queries(self) -> list[str]:
-        """Build today's search queries using the daily rotation mode."""
+        """Build today's search queries using a blended daily rotation mode.
+        
+        Blends queries across multiple core intent modes (Active Intent, Competitor Churn,
+        Review Signals, and Community Signals) to prevent temporal lag while capping the
+        total number of queries to keep Serper credit costs constant and low.
+        """
         day_of_week = datetime.utcnow().weekday() if self.force_day_of_week is None else self.force_day_of_week
-        mode = SIGNAL_MODES[day_of_week]
+        primary_mode = SIGNAL_MODES[day_of_week]
 
         subs_base = {
             "industry":      self.industry,
@@ -288,15 +295,31 @@ class InboundSentimentService:
             "company_type":  self.company_type,
         }
 
+        # Select a blended mix of templates
+        selected_templates: list[str] = []
+        
+        # 1. First 2 templates from primary mode of the day
+        selected_templates.extend(primary_mode["templates"][:2])
+        
+        # 2. Blend with 1 template from 2 other core intent modes
+        # Core modes: 0 (active), 1 (pain), 2 (churn), 4 (reviews)
+        core_days = [0, 1, 2, 4]
+        if day_of_week in core_days:
+            core_days.remove(day_of_week)
+        # Take 1 template from the first two other core modes
+        for d in core_days[:2]:
+            other_mode = SIGNAL_MODES[d]
+            if other_mode["templates"]:
+                selected_templates.append(other_mode["templates"][0])
+
         queries: list[str] = []
-        for pain_kw in self.pain_kws:
+        for pain_kw in self.pain_kws[:3]:  # Cap pain keywords count to protect Serper budget
             subs = {**subs_base, "pain_keyword": pain_kw}
-            for template in mode["templates"]:
+            for template in selected_templates:
                 try:
                     q = template.format(**subs) + GLOBAL_NEGATIVE
                     queries.append(q)
                 except KeyError:
-                    # Template contains a variable not in subs — skip gracefully
                     pass
 
         # Unconstrained catch-all — surfaces long-tail sources Google knows about
@@ -305,8 +328,9 @@ class InboundSentimentService:
 
         log.info(
             "inbound_queries_built",
-            mode=mode["name"],
+            mode=primary_mode["name"],
             day=day_of_week,
+            blended_templates=len(selected_templates),
             count=len(queries),
         )
         return list(dict.fromkeys(queries))  # deduplicate, preserve order

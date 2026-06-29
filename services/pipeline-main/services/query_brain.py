@@ -57,7 +57,9 @@ _QUERY_BRAIN_SCHEMA = {
 
 _DEFAULT_BLACKLIST = (
     "-wiki -jobs -careers -investors -support -\"login\" "
-    "-www.zoominfo.com -www.ibm.com -www.amazon.com"
+    "-www.zoominfo.com -www.ibm.com -www.amazon.com "
+    "-site:upwork.com -site:fiverr.com -site:freelancer.com -site:behance.net "
+    "-\"our services\" -\"our portfolio\" -\"case studies\" -\"we offer\""
 )
 
 # ---------------------------------------------------------------------------
@@ -403,7 +405,7 @@ Generate exactly 3 natural-language queries that a frustrated INDIVIDUAL CONSUME
 
 Return ONLY the JSON object. No explanation, no markdown."""
         else:
-            # ── STANDARD PROMPT (V23.6 — Unified OSINT / Anti-SEO) ────────
+            # ── STANDARD PROMPT (V24.1.1 — B2B Buyer Friction Focus) ────────
             unified_prompt = f"""You are the Sideio Query Brain, operating as an elite OSINT investigator. Your goal is to find raw, hidden, unpolished web footprints of people or businesses experiencing specific pain points.
 
 # TASK 1 — RLHF HISTORICAL MINING
@@ -414,14 +416,15 @@ CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for his
 # TASK 2 — SYMPTOM DORKING (ANTI-SEO PROTOCOL)
 Target Pain Point / Bio: '{ctx.bio}'.
 Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW, unfiltered web footprints of prospects experiencing this problem.
-Rule: Focus purely on symptoms, complaints, and unpolished data (e.g., filetype:pdf, inurl:forum, intitle:"help with").
+Rule: Focus purely on symptoms, complaints, and unpolished data (e.g., filetype:pdf, inurl:forum, intitle:"help with", inurl:issue, inurl:bug).
 Rule: You MUST bypass SEO-optimized directories, aggregators, and marketing blogs.
 Rule: Every single query MUST include this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end of a query. Weave the geographic context organically into the search operators (e.g., intitle:"Oman" or site:.om). The Serper API handles geo-bounding separately.
+Rule: Focus on buyer pain symptoms and competitor friction (e.g. "alternative to", "pricing too high", "support issues", "bounce rates", "going to spam", "domain block"). Do NOT use generic category keywords like "lead generation services" or "outbound marketing agency" that match competitor websites.
 
 # TASK 3 — INTENT EXPANSION
 Audience: '{kw_str}'. Context: '{vector_label}'.
-Translate the pain point into exactly 3 natural-language conversational queries that a frustrated person or operator might ask on a niche forum, help board, or community group. Do not use generic commercial keywords.
+Translate the pain point into exactly 3 natural-language conversational queries that a frustrated operator or buyer might ask on a niche forum, help board, or community group. Think: user complaints, software comparisons, support requests. Do not use generic commercial vendor keywords.
 
 Return ONLY the JSON object. No explanation, no markdown."""
 
@@ -435,6 +438,11 @@ Return ONLY the JSON object. No explanation, no markdown."""
             "Use advanced Google operators (filetype:, inurl:forum, intitle:, site: for niche domains) "
             "and aggressive negative payloads (-site:yelp.com -site:g2.com -directory -listicle -\"top 10\"). "
             "Never produce queries that would return listicle pages, review aggregators, or paid directories.\n\n"
+            "BUYER INTENT VS SELLER OFFERINGS:\n"
+            "You are looking for buyer paint points and competitor complaints. "
+            "Do NOT generate search queries that match pages offering or advertising lead generation/outreach services. "
+            "For example, search for problems (e.g., 'emails going to spam', 'Apollo alternative') "
+            "rather than solutions (e.g., 'best lead generation tool', 'lead generation services').\n\n"
             "PERSONA ISOLATION:\n"
             "Process context strictly on a single persona vector. Do not mix or extract "
             "trend phrases across decoupled business domains.\n\n"

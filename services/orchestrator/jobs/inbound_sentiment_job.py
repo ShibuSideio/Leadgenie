@@ -175,8 +175,24 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
             continue  # Skip this tenant, don't crash the whole job
 
         try:
+            # 1. Run web and social inbound sentiment service
             svc     = InboundSentimentService(persona=persona, campaign=camp)
             signals = svc.run(max_queries=8, results_per_query=5)
+            
+            # 2. Run Google Maps competitor review intelligence service
+            try:
+                from services.inbound_maps_service import InboundMapsService
+                maps_svc = InboundMapsService(persona=persona, campaign=camp)
+                maps_signals = maps_svc.run(max_places=5)
+                signals.extend(maps_signals)
+            except Exception as maps_exc:
+                log.warning(
+                    "inbound_maps_svc_failed",
+                    uid=uid[:8],
+                    campaign_id=camp["campaign_id"],
+                    error=str(maps_exc),
+                )
+
             high    = [s for s in signals if s["intent_score"] >= MIN_INTENT_SCORE]
             all_signals.extend(high[:MAX_SIGNALS_PER_TENANT])
 
