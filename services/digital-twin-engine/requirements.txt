@@ -7,6 +7,7 @@ httpx==0.28.1
 google-cloud-secret-manager==2.29.0
 vertexai==1.71.1
 firebase-admin==6.5.0
-google-auth==2.55.0
+google-auth==2.55.1
 grpcio==1.81.1
 tenacity==8.2.3
+google-cloud-storage==2.19.0

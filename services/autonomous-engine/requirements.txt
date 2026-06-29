@@ -6,5 +6,6 @@ pydantic==2.13.4
 httpx==0.28.1
 tenacity==9.1.4
 feedparser==6.0.12
-google-auth==2.55.0
+google-auth==2.55.1
 grpcio==1.81.1
+google-cloud-storage==3.12.0

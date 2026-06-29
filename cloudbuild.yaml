@@ -1,6 +1,6 @@
 # =============================================================================
-# cloudbuild.yaml — Sideio Leads V24.1.8 Enterprise Build Pipeline
-# Deploy trigger: 2026-06-29 | Restored original deps + Dockerfile hardening
+# cloudbuild.yaml — Sideio Leads V24.1.10 Enterprise Build Pipeline
+# Deploy trigger: 2026-06-29 | Fix google-cloud-storage / vertexai conflict
 #
 # Changes from V23.5.2 (2026-04-30):
 #
