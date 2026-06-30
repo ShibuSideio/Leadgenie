@@ -2460,9 +2460,9 @@ The following features were **permanently removed** in commit `6f60251` on 2026-
 
 ---
 
-### 25.6 V24 Releases (V24.1.18 & V24.1.19) — Query Precision & Inbound Radar Geo Fixes
+### 25.6 V24 Releases (V24.1.18 - V24.1.20) — Query Precision & Inbound Radar Geo Fixes
 
-The following features and hotfixes were introduced in June 2026 under versions **V24.1.18** and **V24.1.19**:
+The following features and hotfixes were introduced in June 2026 under versions **V24.1.18**, **V24.1.19**, and **V24.1.20**:
 
 #### 25.6.1 OSINT Boolean Precedence & Spacing Optimizer (V24.1.18)
 * **Parenthetical OR Grouping Mandate**: Enforced strict parenthetical bounds on all `OR` clauses in both B2B and B2C prompts in `services/pipeline-main/services/query_brain.py` to prevent Google Search implicit `AND` precedence from diluting query results.
@@ -2475,6 +2475,12 @@ The following features and hotfixes were introduced in June 2026 under versions 
   - Expanded `GLOBAL_NEGATIVE` in the Inbound Sentiment queries to prune SEO directories, blogs, listicles, and general informational wiki posts.
   - Hardened the Gemini scoring prompt in `inbound_sentiment_service.py` with a strict general `SELLER EXCLUSION RULE` (excluding local competitors/agents across all industries) and an **Informational Filter** to classify generic guide pages as `NONE` with a score of `0.0`.
 
+#### 25.6.3 Universal Query Spacing Hardening (V24.1.20)
+* **Inbound Radar Query Cleansing**: Integrated the `_clean_query_syntax` spacing corrector into `InboundSentimentService._search_serper` to format and sanitize all radar queries before executing them on Serper, ensuring no database-polluted or template-generated queries leak spacing syntax bugs.
+* **Pipeline-Main Safety Net**: Applied `_clean_query_syntax` universally to the final output list of `generate_smart_query` in `query_brain.py` to clean all assembled B2B and B2C queries.
+* **Paid-Tier Spacing Safety**: Hardened `sanitize_query` in `serper_service.py` to run spacing corrections even when `SERPER_PAID_TIER=true` (which skips token reassembly), ensuring all queries remain syntactically clean on the search engine.
+
 ---
 
-*Architecture document: V24.1.19 release updated.*
+*Architecture document: V24.1.20 release updated.*
+
