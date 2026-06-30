@@ -51,6 +51,7 @@ class TestInboundRadarRemedies(unittest.TestCase):
         self.assertFalse(svc._is_noise_url("https://nicheforum.net/threads/123-issues-with-billing"))
         self.assertFalse(svc._is_noise_url("https://github.com/org/repo/issues/456"))
         self.assertFalse(svc._is_noise_url("https://reddit.com/r/sales/comments/xyz"))
+        self.assertFalse(svc._is_noise_url("https://www.facebook.com/groups/muscat/posts/123456"))
 
     @patch("gemini_service.call_gemini_2_5")
     def test_pre_filter_gemini_fallback(self, mock_call):

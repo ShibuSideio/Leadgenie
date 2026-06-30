@@ -415,7 +415,15 @@ class InboundSentimentService:
             if comp_clean and len(comp_clean) > 3 and comp_clean in url_lower:
                 return True
 
-        # 3. Path keywords indicating listicles, blogs, and other non-footprint pages
+        # 3. Social Media Bypass: Skip blog/listicle path patterns for major social hubs
+        social_domains = {
+            "facebook.com", "reddit.com", "twitter.com", "x.com", "quora.com",
+            "news.ycombinator.com"
+        }
+        if any(social in url_lower for social in social_domains):
+            return False
+
+        # 4. Path keywords indicating listicles, blogs, and other non-footprint pages
         noise_patterns = [
             r"/blog/", r"/article/", r"/post/", r"/best-", r"/top-", r"/vs/",
             r"/compare/", r"/pricing", r"/login", r"/signup", r"/careers", r"/jobs"
