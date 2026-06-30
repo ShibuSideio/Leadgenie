@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -12,6 +13,9 @@ if _PIPELINE_SERVICES not in sys.path:
     sys.path.insert(0, _PIPELINE_SERVICES)
 if _PIPELINE_ROOT not in sys.path:
     sys.path.insert(0, _PIPELINE_ROOT)
+
+# Mock services.telemetry in sys.modules to prevent path resolution failures when testing pipeline modules
+sys.modules["services.telemetry"] = MagicMock()
 
 from services.inbound_sentiment_service import InboundSentimentService
 from services.inbound_maps_service import InboundMapsService
@@ -95,6 +99,65 @@ class TestInboundRadarRemedies(unittest.TestCase):
         self.assertEqual(len(reviews), 2)
         self.assertEqual(reviews[0]["name"], "Alice")
         self.assertEqual(reviews[0]["rating"], 1)
+
+    @patch("services.inbound_sentiment_service.httpx.post")
+    @patch("services.inbound_sentiment_service._get_serper_key")
+    def test_inbound_sentiment_service_timeframe(self, mock_key, mock_post):
+        """Verify Serper payload contains appropriate tbs date filters."""
+        mock_key.return_value = "mock-key"
+        
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"organic": []}
+        mock_post.return_value = mock_resp
+        
+        # 1. Default timeframe should be qdr:y (past year)
+        svc = InboundSentimentService(persona={}, campaign={})
+        svc._search_serper("test query")
+        
+        args, kwargs = mock_post.call_args
+        payload = kwargs.get("json", {})
+        self.assertEqual(payload.get("tbs"), "qdr:y")
+        
+        # 2. Overridden timeframe should propagate
+        svc_custom = InboundSentimentService(persona={}, campaign={"inbound_timeframe": "qdr:m"})
+        svc_custom._search_serper("test query")
+        
+        args, kwargs = mock_post.call_args
+        payload = kwargs.get("json", {})
+        self.assertEqual(payload.get("tbs"), "qdr:m")
+
+        # 3. Timeframe "all" should omit tbs
+        svc_all = InboundSentimentService(persona={}, campaign={"inbound_timeframe": "all"})
+        svc_all._search_serper("test query")
+        
+        args, kwargs = mock_post.call_args
+        payload = kwargs.get("json", {})
+        self.assertNotIn("tbs", payload)
+
+    @patch("serper_service.httpx.post")
+    @patch("serper_service._get_serper_api_key")
+    def test_pipeline_serper_service_timeframe(self, mock_key, mock_post):
+        """Verify pipeline search_serper applies tbs date filters conditionally."""
+        mock_key.return_value = "mock-key"
+        
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"organic": []}
+        mock_post.return_value = mock_resp
+        
+        from serper_service import search_serper
+        
+        # 1. B2C campaign should have tbs="qdr:y"
+        search_serper("test query", sourcing_vector="B2C")
+        args, kwargs = mock_post.call_args
+        payload = json.loads(kwargs.get("data", "{}"))
+        self.assertEqual(payload.get("tbs"), "qdr:y")
+        
+        # 2. B2B campaign should not have tbs
+        search_serper("test query", sourcing_vector="B2B")
+        args, kwargs = mock_post.call_args
+        payload = json.loads(kwargs.get("data", "{}"))
+        self.assertNotIn("tbs", payload)
 
 
 if __name__ == "__main__":

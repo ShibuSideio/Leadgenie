@@ -456,6 +456,7 @@ def search_serper(
     *,
     campaign_id: str = "",
     tenant_id: str = "",
+    sourcing_vector: str = "",
 ) -> list:
     """Execute a Serper Google Search query with tenacity 429-retry.
 
@@ -466,11 +467,12 @@ def search_serper(
     row, and returns [].
 
     Args:
-        query:       Full search query string (may include site: operators).
-        location:    Serper ``location`` field (optional, e.g. ``"India"``).
-        gl:          Serper ``gl`` field / ISO country code (optional).
-        campaign_id: Campaign context for BQ audit telemetry (optional).
-        tenant_id:   Tenant context for BQ audit telemetry (optional).
+        query:           Full search query string (may include site: operators).
+        location:        Serper ``location`` field (optional, e.g. ``"India"``).
+        gl:              Serper ``gl`` field / ISO country code (optional).
+        campaign_id:     Campaign context for BQ audit telemetry (optional).
+        tenant_id:       Tenant context for BQ audit telemetry (optional).
+        sourcing_vector: Campaign sourcing vector label (optional).
 
     Returns:
         List of organic result dicts from Serper.  Empty on any failure.
@@ -496,6 +498,10 @@ def search_serper(
         payload_dict["location"] = location
     if gl:
         payload_dict["gl"] = gl
+
+    # V24.1.23: Restrict B2C/consumer sweeps to the past year to prevent cold/stale historical leads.
+    if sourcing_vector and _is_consumer_archetype(sourcing_vector):
+        payload_dict["tbs"] = "qdr:y"
 
     payload = json.dumps(payload_dict)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}

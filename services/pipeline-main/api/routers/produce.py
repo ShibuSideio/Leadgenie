@@ -367,6 +367,7 @@ def produce():
             gl=gl or None,
             campaign_id=campaign_id,
             tenant_id=tenant_id,
+            sourcing_vector=sourcing_vector,
         )
 
         update_circuit_telemetry("serper_call")

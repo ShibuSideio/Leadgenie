@@ -371,7 +371,14 @@ class InboundSentimentService:
         query = _clean_query_syntax(query)
         gl = self.campaign.get("gl") or "us"
         location = self.campaign.get("location")
+        
+        # V24.1.23: Restrict inbound sweeps to the past year to prevent cold/stale historical leads.
+        # Allow override via campaign.inbound_timeframe (defaults to "qdr:y").
+        timeframe = self.campaign.get("inbound_timeframe") or "qdr:y"
         payload = {"q": query, "num": num, "gl": gl, "hl": "en"}
+        if timeframe and timeframe != "all":
+            payload["tbs"] = timeframe
+
         if location:
             payload["location"] = location
 
