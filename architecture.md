@@ -2460,4 +2460,21 @@ The following features were **permanently removed** in commit `6f60251` on 2026-
 
 ---
 
-*Architecture document: V22 PROD-FROZEN. Next update expected at V23 feature milestone.*
+### 25.6 V24 Releases (V24.1.18 & V24.1.19) — Query Precision & Inbound Radar Geo Fixes
+
+The following features and hotfixes were introduced in June 2026 under versions **V24.1.18** and **V24.1.19**:
+
+#### 25.6.1 OSINT Boolean Precedence & Spacing Optimizer (V24.1.18)
+* **Parenthetical OR Grouping Mandate**: Enforced strict parenthetical bounds on all `OR` clauses in both B2B and B2C prompts in `services/pipeline-main/services/query_brain.py` to prevent Google Search implicit `AND` precedence from diluting query results.
+* **Regex Post-Sanitizer**: Added `_clean_query_syntax()` in `query_brain.py` to automatically correct missing spaces before opening parentheses (e.g., `"phrase"(Group)` -> `"phrase" (Group)` and `site:boards.net(...)`) and strip wildcard prefixes in `site:` operators (e.g. `site:*.org` -> `site:.org`).
+* **Serper Space Stripping Fix**: Updated `sanitize_query` in `services/pipeline-main/services/serper_service.py` to preserve space separation before opening parentheses `(` during query token reassembly.
+
+#### 25.6.2 Inbound Radar Geo Targeting & GMB Review Hotfixes (V24.1.19)
+* **Dynamic Geo-Targeting**: Updated `InboundSentimentService` (`services/orchestrator/services/inbound_sentiment_service.py`) and `InboundMapsService` (`services/orchestrator/services/inbound_maps_service.py`) to resolve a critical geo leak that hardcoded US indexing (`"gl": "us"`). The services now dynamically fetch the campaign's target country and location (`gl` and `location`).
+* **Noise and Competitor Filtering**:
+  - Expanded `GLOBAL_NEGATIVE` in the Inbound Sentiment queries to prune SEO directories, blogs, listicles, and general informational wiki posts.
+  - Hardened the Gemini scoring prompt in `inbound_sentiment_service.py` with a strict general `SELLER EXCLUSION RULE` (excluding local competitors/agents across all industries) and an **Informational Filter** to classify generic guide pages as `NONE` with a score of `0.0`.
+
+---
+
+*Architecture document: V24.1.19 release updated.*
