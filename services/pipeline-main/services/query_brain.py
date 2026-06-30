@@ -524,7 +524,13 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 "DO NOT use filetype: operators (filetype:pdf, filetype:pptx, filetype:doc) in symptom_dorks. "
                 "These are corporate research patterns that return whitepapers and slide decks, not consumer signals. "
                 "For consumer campaigns, use inurl:review, inurl:complaint, inurl:customer-review, inurl:feedback, "
-                "and site: operators targeting consumer review platforms instead.\n"
+                "and site: operators targeting consumer review platforms instead.\n\n"
+                "DIALOG-CUE DORKING MANDATE:\n"
+                "For consumer campaigns, you MUST weave conversational signals and dialog cues directly into the queries. "
+                "Append operators containing transactional or discussion reply signatures like "
+                "(\"pm me\" OR \"pm sent\" OR \"still available\" OR \"send details\" OR \"anyone know\"). "
+                "This forces Google to prioritize active discussion threads and forum posts rather than polished marketing landing pages. "
+                "Example dork: (inurl:forum OR inurl:community) Muscat \"villa\" (\"pm me\" OR \"still available\")\n"
             )
 
         try:

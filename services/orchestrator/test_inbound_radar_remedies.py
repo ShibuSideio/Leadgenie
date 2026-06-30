@@ -159,6 +159,49 @@ class TestInboundRadarRemedies(unittest.TestCase):
         payload = json.loads(kwargs.get("data", "{}"))
         self.assertNotIn("tbs", payload)
 
+    def test_inbound_sentiment_service_dialog_cue_dorking(self):
+        """Verify that _build_queries appends dialog cues only for B2C/consumer campaigns."""
+        # 1. B2C campaign
+        svc_b2c = InboundSentimentService(
+            persona={"pain_points": ["rent villa"]},
+            campaign={"sourcing_vector": "B2C"}
+        )
+        queries_b2c = svc_b2c._build_queries()
+        self.assertTrue(len(queries_b2c) > 0)
+        for q in queries_b2c:
+            self.assertIn('"pm me" OR "pm sent" OR "still available"', q)
+            
+        # 2. B2B campaign
+        svc_b2b = InboundSentimentService(
+            persona={"pain_points": ["rent villa"]},
+            campaign={"sourcing_vector": "B2B"}
+        )
+        queries_b2b = svc_b2b._build_queries()
+        self.assertTrue(len(queries_b2b) > 0)
+        for q in queries_b2b:
+            self.assertNotIn('"pm me" OR "pm sent" OR "still available"', q)
+
+    @patch("vertexai.generative_models.GenerativeModel")
+    @patch("core.clients.init_vertex")
+    def test_inbound_sentiment_service_context_aware_llm(self, mock_init, mock_model_cls):
+        """Verify that _score_with_gemini includes query context in prompt instructions."""
+        mock_model = MagicMock()
+        mock_model_cls.return_value = mock_model
+        mock_resp = MagicMock()
+        mock_resp.text = '{"intent_label": "ACTIVE_SEEKING", "intent_score": 0.9, "matched_pain_keywords": [], "company_name": null, "industry_hint": null, "reasoning": "Fits search query"}'
+        mock_model.generate_content.return_value = mock_resp
+        
+        from services.inbound_sentiment_service import _score_with_gemini
+        
+        res = _score_with_gemini("Test Title", "Test Snippet", "https://example.com", "Oman villa pm me", "ICP description")
+        
+        self.assertIsNotNone(res)
+        self.assertEqual(res["intent_label"], "ACTIVE_SEEKING")
+        args, kwargs = mock_model.generate_content.call_args
+        prompt = args[0]
+        self.assertIn("Triggering Google Query: Oman villa pm me", prompt)
+        self.assertIn("CONTEXT-AWARE CONVERSATIONAL INFERENCE", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

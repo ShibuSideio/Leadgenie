@@ -380,6 +380,7 @@ def produce():
                 snippet_db[link] = {
                     "title":   r.get("title", ""),
                     "snippet": r.get("snippet", ""),
+                    "query":   search_query,
                 }
 
     fetched_count = len(raw_urls)
@@ -408,7 +409,7 @@ def produce():
             dedup_key = s_domain
             
         cache_key = hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
-        combined  = f"{meta['title']}\n{meta['snippet']}".strip()
+        combined  = f"Query: {meta.get('query', '')}\nTitle: {meta['title']}\nSnippet: {meta['snippet']}".strip()
         if combined:
             try:
                 get_db().collection("scraped_cache").document(cache_key).set({

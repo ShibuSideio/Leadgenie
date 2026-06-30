@@ -146,6 +146,9 @@ SOCIAL PLATFORM RULE: Evaluate the SPECIFIC POST intent, not the platform's gene
 GEO RULE: Wrong region → Low.
 COMPETITOR RULE: If the snippet or URL belongs to a competitor offering the same or similar services as described in the USER BIO, classify it as Low Confidence.
 
+# STEP 3 — CONTEXT-AWARE INFERENCE (B2C/D2C)
+For B2C or D2C campaigns, the snippet field in the input JSON may contain text prepended with 'Query: <the triggering search query>'. Use the triggering query context to reverse-engineer the thread's conversational state. If the query contains dialog dorks (like "pm me" or "still available"), analyze whether the snippet contains replies or comments suggesting active consumer/buyer intent or a direct discussion relevant to the USER BIO. Do not automatically classify forum posts or social media snippets as Low Confidence if the query context indicates an active B2C/D2C discussion thread.
+
 Snippets: {json.dumps(snippets)}"""
 
     try:

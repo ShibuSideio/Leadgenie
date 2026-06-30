@@ -191,7 +191,7 @@ GLOBAL_NEGATIVE = (
 # Gemini scoring
 # ---------------------------------------------------------------------------
 
-def _score_with_gemini(title: str, snippet: str, url: str, icp_description: str) -> Optional[dict]:
+def _score_with_gemini(title: str, snippet: str, url: str, query: str, icp_description: str) -> Optional[dict]:
     """
     Call Gemini Flash to classify the intent of a single search result.
     Returns a scored dict or None if intent_score < 0.30.
@@ -208,6 +208,7 @@ def _score_with_gemini(title: str, snippet: str, url: str, icp_description: str)
     prompt = f"""You are an inbound OSINT intent classifier.
 Classify the raw buying intent or operational pain expressed in this public web content for a system solving: {icp_description}
 
+Triggering Google Query: {query}
 Title: {title}
 Snippet: {snippet}
 URL: {url}
@@ -228,6 +229,9 @@ Classification rules (OSINT Focus):
 - EXPRESSING_PAIN (0.40-0.75): Venting about a raw operational problem, symptom, or inefficiency.
 - TREND           (0.10-0.45): General market discussion; no personal pain expressed.
 - NONE            (0.0 -0.29): Polished marketing copy, SEO articles, directories, or irrelevant noise.
+
+CONTEXT-AWARE CONVERSATIONAL INFERENCE:
+Analyze the Google snippet in relation to the triggering query. If the query contains dialog dorks (like "pm me" or "still available"), use the snippet's metadata, title, and conversational phrases to reverse-engineer the thread's state. If a forum reply or social comment indicates buying intent, or the thread contextually addresses a direct need matching the USER BIO, classify it as ACTIVE_SEEKING or EXPRESSING_PAIN. Do not drop threads solely because they are forums/social posts.
 
 SELLER EXCLUSION RULE: If the content represents a provider, competitor, broker, agent, vendor, or seller offering the same or similar services as described in the system solver description (e.g., real estate agents/brokers in property campaigns, immigration agencies in visa/study campaigns, or lead generation agencies in outbound sales campaigns), you MUST classify them as NONE with an intent_score of 0.0. Do not capture competitors.
 
@@ -339,19 +343,23 @@ class InboundSentimentService:
             if other_mode["templates"]:
                 selected_templates.append(other_mode["templates"][0])
 
+        sourcing_vector = self.campaign.get("sourcing_vector", "")
+        is_consumer = (sourcing_vector or "").upper().strip() in {"B2C", "B2B2C", "D2C"}
+        dialog_suffix = ' ("pm me" OR "pm sent" OR "still available" OR "send details" OR "anyone know")' if is_consumer else ''
+
         queries: list[str] = []
         for pain_kw in self.pain_kws[:3]:  # Cap pain keywords count to protect Serper budget
             subs = {**subs_base, "pain_keyword": pain_kw}
             for template in selected_templates:
                 try:
-                    q = template.format(**subs) + GLOBAL_NEGATIVE
+                    q = template.format(**subs) + dialog_suffix + GLOBAL_NEGATIVE
                     queries.append(q)
                 except KeyError:
                     pass
 
         # Unconstrained catch-all — surfaces long-tail sources Google knows about
         for pain_kw in self.pain_kws[:2]:
-            queries.append(f'"{pain_kw}" "{self.industry}"' + GLOBAL_NEGATIVE)
+            queries.append(f'"{pain_kw}" "{self.industry}"' + dialog_suffix + GLOBAL_NEGATIVE)
 
         log.info(
             "inbound_queries_built",
@@ -467,7 +475,7 @@ class InboundSentimentService:
                 title   = result.get("title", "")
                 snippet = result.get("snippet", "")
 
-                scored = _score_with_gemini(title, snippet, url, self.icp_desc)
+                scored = _score_with_gemini(title, snippet, url, query, self.icp_desc)
                 if not scored:
                     continue
 
