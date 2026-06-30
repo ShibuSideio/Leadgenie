@@ -56,6 +56,12 @@ class InboundMapsService:
 
     def _search_maps(self, query: str) -> list[dict]:
         """Execute a Serper Maps query. Returns list of place dicts."""
+        gl = self.campaign.get("gl") or "us"
+        location = self.campaign.get("location")
+        payload = {"q": query, "gl": gl, "hl": "en"}
+        if location:
+            payload["location"] = location
+
         try:
             resp = httpx.post(
                 SERPER_MAPS_URL,
@@ -63,7 +69,7 @@ class InboundMapsService:
                     "X-API-KEY": _get_serper_key(),
                     "Content-Type": "application/json",
                 },
-                json={"q": query, "gl": "us", "hl": "en"},
+                json=payload,
                 timeout=15.0,
             )
             resp.raise_for_status()

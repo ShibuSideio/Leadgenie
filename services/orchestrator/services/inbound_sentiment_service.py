@@ -158,7 +158,10 @@ SIGNAL_MODES: dict[int, dict] = {
 }
 
 # Appended to EVERY query — strips known garbage before results hit Gemini
-GLOBAL_NEGATIVE = ' -"buy now" -"click here" -"sign up free" -"privacy policy"'
+GLOBAL_NEGATIVE = (
+    ' -directory -listicle -"top 10" -"best" -wiki -jobs -careers -support -"login" '
+    '-"buy now" -"click here" -"sign up free" -"privacy policy"'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +206,9 @@ Classification rules (OSINT Focus):
 - TREND           (0.10-0.45): General market discussion; no personal pain expressed.
 - NONE            (0.0 -0.29): Polished marketing copy, SEO articles, directories, or irrelevant noise.
 
-SELLER EXCLUSION RULE: If the content represents a competitor or vendor offering the same or similar services as described in the system solver description (e.g. they offer lead generation, email marketing, or outbound outreach agency services themselves), you MUST classify them as NONE with an intent_score of 0.0. Do not capture competitors.
-"""
+SELLER EXCLUSION RULE: If the content represents a provider, competitor, broker, agent, vendor, or seller offering the same or similar services as described in the system solver description (e.g., real estate agents/brokers in property campaigns, immigration agencies in visa/study campaigns, or lead generation agencies in outbound sales campaigns), you MUST classify them as NONE with an intent_score of 0.0. Do not capture competitors.
+
+INFORMATIONAL FILTER: General educational articles, blogs, listicles, directories, comparisons, news stories, and guides that do NOT contain a direct complaint, support ticket, or active buying query from a specific individual or company must be classified as NONE with an intent_score of 0.0."""
     try:
         import vertexai
         from vertexai.generative_models import GenerativeModel, GenerationConfig
@@ -341,6 +345,12 @@ class InboundSentimentService:
 
     def _search_serper(self, query: str, num: int = 5) -> list[dict]:
         """Execute a single Serper search. Returns list of organic result dicts."""
+        gl = self.campaign.get("gl") or "us"
+        location = self.campaign.get("location")
+        payload = {"q": query, "num": num, "gl": gl, "hl": "en"}
+        if location:
+            payload["location"] = location
+
         try:
             resp = httpx.post(
                 SERPER_URL,
@@ -348,7 +358,7 @@ class InboundSentimentService:
                     "X-API-KEY":    _get_serper_key(),
                     "Content-Type": "application/json",
                 },
-                json={"q": query, "num": num, "gl": "us", "hl": "en"},
+                json=payload,
                 timeout=15.0,
             )
             resp.raise_for_status()
