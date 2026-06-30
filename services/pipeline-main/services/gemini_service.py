@@ -153,18 +153,27 @@ Snippets: {json.dumps(snippets)}"""
         if not isinstance(tiered, list):
             raise ValueError("Expected list from tiering gate")
     except Exception as exc:
-        # SF-010 FIX: Fail-open — treat ALL URLs as High-tier.
-        # Previously returned {"High": [], "Medium": []} which caused the
-        # dispatch.py outer try/except to miss the failure (no raise) and
-        # silently drop the entire batch after the destructive queue pop.
+        # SF-010 FIX Hardening: Local heuristic fallback to prevent listicle/directory spills.
         log.warning(
-            "pre_filter_gemini_failed_fail_open",
+            "pre_filter_gemini_failed_local_fallback",
             error=str(exc),
             url_count=len(snippets),
-            action="Treating all URLs as High-tier to prevent silent batch drop.",
+            action="Running local heuristic fallback filter to drop obvious noise.",
         )
-        return {"High": [s.get("link", "") for s in snippets if s.get("link", "").startswith("http")],
-                "Medium": []}
+        fallback_high = []
+        noise_signatures = {
+            "yelp.com", "expertise.com", "g2.com", "capterra.com", "upwork.com",
+            "glassdoor.com", "indeed.com", "linkedin.com/jobs", "quora.com",
+            "wikipedia.org", "amazon.com", "zoominfo.com", "crunchbase.com",
+            "/blog/", "/article/", "/post/", "/best-", "/top-", "/vs/", "/compare/"
+        }
+        for s in snippets:
+            link = s.get("link", s.get("url", ""))
+            if link and link.startswith("http"):
+                link_lower = link.lower()
+                if not any(sig in link_lower for sig in noise_signatures):
+                    fallback_high.append(link)
+        return {"High": fallback_high, "Medium": []}
 
     output: dict[str, list] = {"High": [], "Medium": []}
     for item in tiered:

@@ -395,6 +395,36 @@ class InboundSentimentService:
     # Main pipeline
     # ------------------------------------------------------------------
 
+    def _is_noise_url(self, url: str) -> bool:
+        """Pre-screens a URL to check if it matches directory, listicle, or competitor signatures."""
+        url_lower = url.lower()
+
+        # 1. Directory and review aggregators blocklist
+        noise_domains = {
+            "yelp.com", "expertise.com", "g2.com", "capterra.com", "upwork.com",
+            "glassdoor.com", "indeed.com", "linkedin.com/jobs", "quora.com",
+            "wikipedia.org", "amazon.com", "zoominfo.com", "crunchbase.com",
+            "trustpilot.com/review"
+        }
+        if any(domain in url_lower for domain in noise_domains):
+            return True
+
+        # 2. Competitors URL check
+        for comp in self.competitors:
+            comp_clean = comp.lower().strip().replace(" ", "")
+            if comp_clean and len(comp_clean) > 3 and comp_clean in url_lower:
+                return True
+
+        # 3. Path keywords indicating listicles, blogs, and other non-footprint pages
+        noise_patterns = [
+            r"/blog/", r"/article/", r"/post/", r"/best-", r"/top-", r"/vs/",
+            r"/compare/", r"/pricing", r"/login", r"/signup", r"/careers", r"/jobs"
+        ]
+        if any(re.search(pat, url_lower) for pat in noise_patterns):
+            return True
+
+        return False
+
     def run(self, max_queries: int = 12, results_per_query: int = 5) -> list[dict]:
         """
         Full pipeline: build queries → search → Gemini score → return signals.
@@ -413,6 +443,11 @@ class InboundSentimentService:
                 if not url or url in seen_urls:
                     continue
                 seen_urls.add(url)
+
+                # Pre-screen URL to drop obvious lists, blogs, or competitors
+                if self._is_noise_url(url):
+                    log.info("inbound_url_pre_screen_filtered", url=url[:80])
+                    continue
 
                 title   = result.get("title", "")
                 snippet = result.get("snippet", "")

@@ -371,17 +371,36 @@ def list_inbound_signals(uid, tenant_id, user_role):
 
         signals = []
         try:
-            query = (
+            # Query directly utilizing the composite index (tenant_id + status + intent_score desc)
+            if not intent_label and not campaign_id:
+                query = (
+                    _db().collection("inbound_signals")
+                    .where(filter=FieldFilter("tenant_id", "==", t_id))
+                    .where(filter=FieldFilter("status", "==", status))
+                    .order_by("intent_score", direction=fs.Query.DESCENDING)
+                    .limit(limit)
+                )
+                signals = [_sanitize_signal_doc(d) for d in query.stream()]
+            else:
+                # If post-filters are active, read a larger slice to prevent premature slicing
+                query = (
+                    _db().collection("inbound_signals")
+                    .where(filter=FieldFilter("tenant_id", "==", t_id))
+                    .where(filter=FieldFilter("status", "==", status))
+                    .order_by("intent_score", direction=fs.Query.DESCENDING)
+                    .limit(300)
+                )
+                signals = [_sanitize_signal_doc(d) for d in query.stream()]
+        except Exception as exc:
+            log.warning("list_inbound_signals_index_query_failed_falling_back", error=str(exc))
+            # Safe local fallback to original full-table memory filtering
+            fallback_query = (
                 _db().collection("inbound_signals")
                 .where(filter=FieldFilter("tenant_id", "==", t_id))
             )
-            signals = [_sanitize_signal_doc(d) for d in query.stream()]
-        except Exception as exc:
-            log.warning("list_inbound_signals_query_failed_graceful_fallback", error=str(exc))
-            signals = []
+            signals = [_sanitize_signal_doc(d) for d in fallback_query.stream()]
 
-        # Execute Application-Level Filtering: Once the payload documents stream into the Python runtime stack,
-        # filter out records where status != "new" or intent_score < 0.55 in-memory.
+        # Execute Application-Level Filtering / Validation
         signals = [
             s for s in signals
             if s.get("status") == status

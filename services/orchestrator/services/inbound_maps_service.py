@@ -78,6 +78,26 @@ class InboundMapsService:
             log.warning("serper_maps_call_failed", query=query, error=str(exc))
             return []
 
+    def _fetch_place_reviews(self, cid: str) -> list[dict]:
+        """Fetch actual reviews for a place using its Google Customer ID (cid) via Serper."""
+        if not cid:
+            return []
+        try:
+            resp = httpx.post(
+                "https://google.serper.dev/reviews",
+                headers={
+                    "X-API-KEY": _get_serper_key(),
+                    "Content-Type": "application/json",
+                },
+                json={"cid": cid},
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            return resp.json().get("reviews", [])
+        except Exception as exc:
+            log.warning("serper_reviews_call_failed", cid=cid, error=str(exc))
+            return []
+
     def run(self, max_places: int = 5) -> list[dict]:
         """
         Scan maps for negative reviews and convert to inbound signals.
@@ -91,11 +111,13 @@ class InboundMapsService:
                 place_name = place.get("title", "")
                 address = place.get("address", "")
                 place_rating = place.get("rating")
+                cid = place.get("cid")
                 
-                # Check for direct negative reviews data returned by Serper
-                reviews = place.get("reviewsData", [])
+                # Fetch actual reviews using the GMB CID identifier
+                reviews = self._fetch_place_reviews(cid) if cid else []
+                
+                # Fallback to warning synthetic reviews only if no real reviews are found AND rating is low
                 if not reviews and place_rating is not None and float(place_rating) <= 2.5:
-                    # If average rating is low, generate a synthetic review prompt based on average rating
                     reviews = [{
                         "name": "Anonymous GMB User",
                         "rating": int(float(place_rating)),
