@@ -812,4 +812,5 @@ Return ONLY the JSON object. No explanation, no markdown."""
         _bl = _deconflict_blacklist(sd, blacklist)
         smart_queries.append(f"{sd} {_bl}")
 
-    return smart_queries
+    return [_clean_query_syntax(q) for q in smart_queries]
+

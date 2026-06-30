@@ -87,6 +87,29 @@ def _detect_platform(url: str) -> str:
     return "web"
 
 
+def _clean_query_syntax(raw: str) -> str:
+    """Optimize spacing and sanitize wildcard domain operators in queries.
+
+    Ensures proper space separation before opening parentheses and replaces
+    unsupported wildcard domains (site:*.org -> site:.org).
+    """
+    if not raw:
+        return ""
+    # 1. Strip wildcard domain prefix site:*. -> site:.
+    res = re.sub(r'(?<!\w)site:\*\.', 'site:.', raw)
+    
+    # 2. Insert missing space between quotes and opening parenthesis: "abc"(xyz) -> "abc" (xyz)
+    res = re.sub(r'(?<=\")\(', ' (', res)
+
+    # 3. Insert missing space between alphanumeric/dots/hyphens and opening parenthesis: net(xyz) -> net (xyz)
+    res = re.sub(r'([a-zA-Z0-9\.\-_])\(', r'\1 (', res)
+    
+    # 4. Insert missing space between closing and opening parenthesis: )( -> ) (
+    res = re.sub(r'\)(?=\()', ') ', res)
+    
+    return res
+
+
 # ---------------------------------------------------------------------------
 # 7-Mode signal rotation — one mode selected by day_of_week (0=Mon … 6=Sun)
 # All templates are platform-agnostic (no site: operators)
@@ -345,6 +368,7 @@ class InboundSentimentService:
 
     def _search_serper(self, query: str, num: int = 5) -> list[dict]:
         """Execute a single Serper search. Returns list of organic result dicts."""
+        query = _clean_query_syntax(query)
         gl = self.campaign.get("gl") or "us"
         location = self.campaign.get("location")
         payload = {"q": query, "num": num, "gl": gl, "hl": "en"}

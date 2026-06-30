@@ -179,9 +179,19 @@ def sanitize_query(query: str) -> str:
     # Sanitize wildcard domain operators (site:*.org -> site:.org)
     query = re.sub(r'(?<!\w)site:\*\.', 'site:.', query)
 
+    # Insert missing space between quotes and opening parenthesis: "abc"(xyz) -> "abc" (xyz)
+    query = re.sub(r'(?<=\")\(', ' (', query)
+
+    # Insert missing space between alphanumeric/dots/hyphens and opening parenthesis: net(xyz) -> net (xyz)
+    query = re.sub(r'([a-zA-Z0-9\.\-_])\(', r'\1 (', query)
+    
+    # Insert missing space between closing and opening parenthesis: )( -> ) (
+    query = re.sub(r'\)(?=\()', ') ', query)
+
     # V24.1.1: Skip sanitization entirely on paid tier
     if _SERPER_PAID_TIER:
         return query
+
 
     forbidden = ["linkedin", "facebook", "twitter", "instagram", "reddit", "quora", "youtube", "x.com"]
 
