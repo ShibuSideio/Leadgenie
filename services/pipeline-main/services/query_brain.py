@@ -130,6 +130,30 @@ class CampaignQueryContext:
         self.has_local_history: bool = False
 
 
+def _clean_query_syntax(raw: str) -> str:
+    """Optimize spacing and sanitize wildcard domain operators in queries.
+
+    Ensures proper space separation before opening parentheses and replaces
+    unsupported wildcard domains (site:*.org -> site:.org).
+    """
+    if not raw:
+        return ""
+    import re
+    # 1. Strip wildcard domain prefix site:*. -> site:.
+    res = re.sub(r'(?<!\w)site:\*\.', 'site:.', raw)
+    
+    # 2. Insert missing space between quotes and opening parenthesis: "abc"(xyz) -> "abc" (xyz)
+    res = re.sub(r'(?<=\")\(', ' (', res)
+
+    # 3. Insert missing space between alphanumeric/dots/hyphens and opening parenthesis: net(xyz) -> net (xyz)
+    res = re.sub(r'([a-zA-Z0-9\.\-_])\(', r'\1 (', res)
+    
+    # 4. Insert missing space between closing and opening parenthesis: )( -> ) (
+    res = re.sub(r'\)(?=\()', ') ', res)
+    
+    return res
+
+
 # ---------------------------------------------------------------------------
 # Main function
 # ---------------------------------------------------------------------------
@@ -398,6 +422,9 @@ Rule: DO NOT use B2B-style operators like filetype:pdf, filetype:pptx, inurl:whi
 Rule: You MUST bypass SEO-optimized directories and marketing blogs: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end. Weave geography into operators organically (e.g., intitle:"Kochi" or inurl:kerala).
 Rule: NEVER use B2B jargon: "lead generation", "pipeline", "go-to-market", "product-market fit", "enterprise sales", "SaaS", "B2B", "stakeholder alignment", "brand story", "unclear positioning".
+Rule: You MUST enclose all OR clauses in parentheses to enforce proper boolean precedence (e.g. `(inurl:review OR inurl:complaint) "difficulty"` instead of `inurl:review OR inurl:complaint "difficulty"`).
+Rule: Always separate operators, keywords, quotation marks, and parentheses with a space. Never output strings like `site:boards.net("difficulty")` (use `site:boards.net ("difficulty")` instead) or `"outbound sales"("IT services")` (use `"outbound sales" ("IT services")` instead).
+Rule: NEVER use wildcard characters in the `site:` operator (e.g. do not output site:*.org or site:*.com). Use site:.org or site:.com instead.
 
 # TASK 3 — CONSUMER INTENT EXPANSION
 Audience: '{kw_str}'. Context: '{vector_label}'.
@@ -421,6 +448,9 @@ Rule: You MUST bypass SEO-optimized directories, aggregators, and marketing blog
 Rule: Every single query MUST include this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end of a query. Weave the geographic context organically into the search operators (e.g., intitle:"Oman" or site:.om). The Serper API handles geo-bounding separately.
 Rule: Focus on buyer pain symptoms and competitor friction (e.g. "alternative to", "pricing too high", "support issues", "bounce rates", "going to spam", "domain block"). Do NOT use generic category keywords like "lead generation services" or "outbound marketing agency" that match competitor websites.
+Rule: You MUST enclose all OR clauses in parentheses to enforce proper boolean precedence (e.g. `(inurl:forum OR inurl:bug) "issue"` instead of `inurl:forum OR inurl:bug "issue"`).
+Rule: Always separate operators, keywords, quotation marks, and parentheses with a space. Never output strings like `site:boards.net("difficulty")` (use `site:boards.net ("difficulty")` instead) or `"outbound sales"("IT services")` (use `"outbound sales" ("IT services")` instead).
+Rule: NEVER use wildcard characters in the `site:` operator (e.g. do not output site:*.org or site:*.com). Use site:.org or site:.com instead.
 
 # TASK 3 — INTENT EXPANSION
 Audience: '{kw_str}'. Context: '{vector_label}'.
@@ -470,7 +500,18 @@ Return ONLY the JSON object. No explanation, no markdown."""
             "The Serper API receives geo-bounding parameters separately (gl, location). "
             "If you need to target a region, weave it into the search operators organically "
             "(e.g., intitle:\"Oman\" or site:.om or inurl:oman). "
-            "A trailing AND {place} destroys query precision.\n"
+            "A trailing AND {place} destroys query precision.\n\n"
+            "BOOLEAN PRECEDENCE & SPACING MANDATE:\n"
+            "1. You MUST enclose all OR clauses in parentheses to enforce proper operator precedence. "
+            "Google treats space as implicit AND which has higher precedence than OR. "
+            "Without parentheses, e.g., 'inurl:forum OR inurl:blog \"difficulty\"', Google parses it as "
+            "'(inurl:forum) OR (inurl:blog \"difficulty\")', leaking/diluting scope. "
+            "Always output: '(inurl:forum OR inurl:blog) \"difficulty\"'.\n"
+            "2. Never use wildcards in site: operators (e.g. NEVER output site:*.org or site:*.com). "
+            "Google does not support wildcard subdomains in site: searches. Use site:.org or site:.com instead.\n"
+            "3. Enforce strict spacing around quotes, operators, and parentheses. "
+            "For example, write 'site:boards.net (\"difficulty\")' instead of 'site:boards.net(\"difficulty\")', "
+            "and '\"outbound sales\" (\"IT services\")' instead of '\"outbound sales\"(\"IT services\")'.\n"
         )
         if _is_consumer_vector:
             _system_instruction += (
@@ -529,11 +570,11 @@ Return ONLY the JSON object. No explanation, no markdown."""
                         log.warning("symptom_dork_sanitized",
                                     original=_dork[:80], cleaned=_cleaned[:80])
                     if _cleaned:
-                        _sanitized_dorks.append(_cleaned)
+                        _sanitized_dorks.append(_clean_query_syntax(_cleaned))
                 ctx.symptom_dorks = _sanitized_dorks
 
                 ctx.intents = [
-                    q.strip() for q in result.get("translated_queries", [])
+                    _clean_query_syntax(q.strip()) for q in result.get("translated_queries", [])
                     if isinstance(q, str) and q.strip()
                 ][:3]
                 log.info("query_brain_gemini_ok",

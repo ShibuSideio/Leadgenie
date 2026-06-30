@@ -176,6 +176,9 @@ def sanitize_query(query: str) -> str:
     if not query:
         return ""
 
+    # Sanitize wildcard domain operators (site:*.org -> site:.org)
+    query = re.sub(r'(?<!\w)site:\*\.', 'site:.', query)
+
     # V24.1.1: Skip sanitization entirely on paid tier
     if _SERPER_PAID_TIER:
         return query
@@ -219,11 +222,16 @@ def sanitize_query(query: str) -> str:
     while final_tokens and final_tokens[-1] in ("AND", "OR", "NOT"):
         final_tokens.pop()
 
-    # Reassemble tokens
+    # Reassemble tokens - preserving proper spacing before opening parentheses
     result = ""
     for token in final_tokens:
-        if token in ("(", ")"):
-            result += token
+        if token == "(":
+            if result and not result.endswith("(") and not result.endswith(" "):
+                result += " ("
+            else:
+                result += "("
+        elif token == ")":
+            result += ")"
         else:
             if result and not result.endswith("("):
                 result += " " + token
