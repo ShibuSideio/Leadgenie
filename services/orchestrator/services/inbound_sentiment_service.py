@@ -242,7 +242,8 @@ INFORMATIONAL FILTER: General educational articles, blogs, listicles, directorie
         from core.clients import init_vertex  # type: ignore[import]
         init_vertex()
 
-        model = GenerativeModel("gemini-1.5-flash-001")
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        model = GenerativeModel(model_name)
         resp = model.generate_content(
             prompt,
             generation_config=GenerationConfig(temperature=0.05, max_output_tokens=512),
