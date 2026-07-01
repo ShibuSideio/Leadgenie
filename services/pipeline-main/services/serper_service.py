@@ -72,6 +72,34 @@ _ENRICHMENT_SOCIAL_BLACKLIST = [
     # Classifieds / directories / reviews — not B2B leads
     "yelp.com", "yellowpages.com", "bbb.org", "trustpilot.com",
     "glassdoor.com", "indeed.com", "monster.com",
+    # V24.5.1: B2B networking / SaaS platform root domains.
+    # These are search CONTAINERS — individual posts and profiles found
+    # within them are valid leads and flow through the snippet path
+    # (Tier 1 social short-circuit). But enriching the platform's OWN
+    # root domain (company profile, funding news, careers page for the
+    # platform itself) is meaningless and wastes 3-4 Serper credits.
+    # Example: alignable.com/business/acme-co → valid lead (snippet path).
+    #          alignable.com as a root domain → enrichment skipped here.
+    "alignable.com",
+    "constantcontact.com",
+    "mailchimp.com",
+    "hootsuite.com",
+    "sproutsocial.com",
+    "buffer.com",
+    "typeform.com",
+    "surveymonkey.com",
+    "zoho.com",
+    "freshworks.com",
+    "intercom.com",
+    "zendesk.com",
+    "sendgrid.com",
+    "klaviyo.com",
+    "activecampaign.com",
+    "pipedrive.com",
+    "monday.com",
+    "asana.com",
+    "notion.so",
+    "canva.com",
 ]
 
 # V24.1.1: Forum subdomain prefixes — if domain starts with any of these,

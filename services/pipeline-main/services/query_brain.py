@@ -478,7 +478,8 @@ CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for his
 # TASK 2 — SYMPTOM DORKING (ANTI-SEO PROTOCOL)
 Target Pain Point / Bio: '{ctx.bio}'.
 Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW, unfiltered web footprints of prospects experiencing this problem.
-Rule: Focus purely on symptoms, complaints, and unpolished data (e.g., filetype:pdf, inurl:forum, intitle:"help with", inurl:issue, inurl:bug).
+Rule: Focus purely on symptoms, complaints, and unpolished data. Allowed high-precision operators: filetype:pdf ONLY when combined with intitle: targeting a decision-maker role (e.g. filetype:pdf intitle:"CMO" "attribution challenge"), inurl:forum, inurl:complaint, inurl:discussion, intitle:"help with", site:reddit.com, site:community.<platform>.
+Rule: PROHIBITED OPERATORS — never use these in symptom_dorks for commercial B2B campaigns: site:.edu (returns academic papers and student projects, not buyers), site:.org (returns NGOs and trade bodies, not commercial buyers), inurl:issues (returns GitHub software issue trackers, not buyer pain), inurl:bug (returns developer bug reports, not business pain), filetype:pdf without a specific intitle: role anchor (returns generic research documents that no prospect will ever convert from).
 Rule: You MUST bypass SEO-optimized directories, aggregators, and marketing blogs.
 Rule: Every single query MUST include this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end of a query. Weave the geographic context organically into the search operators (e.g., intitle:"Oman" or site:.om). The Serper API handles geo-bounding separately.
@@ -547,6 +548,17 @@ Return ONLY the JSON object. No explanation, no markdown."""
             "3. Enforce strict spacing around quotes, operators, and parentheses. "
             "For example, write 'site:boards.net (\"difficulty\")' instead of 'site:boards.net(\"difficulty\")', "
             "and '\"outbound sales\" (\"IT services\")' instead of '\"outbound sales\"(\"IT services\")'.\n"
+            "\nPROHIBITED OPERATORS (B2B campaigns):\n"
+            "NEVER use any of the following in symptom_dorks. These operators return "
+            "academic content, open-source software trackers, or non-commercial entities "
+            "that CANNOT convert into B2B customers:\n"
+            "- site:.edu — university and educational institution pages\n"
+            "- site:.org — NGOs, foundations, and non-profit bodies\n"
+            "- inurl:issues — GitHub and GitLab software issue trackers\n"
+            "- inurl:bug — developer bug report threads\n"
+            "- filetype:pdf alone without intitle: role scoping — returns generic whitepapers\n"
+            "ALLOWED filetype:pdf usage: ONLY combined with intitle: targeting a named "
+            "decision-maker role. Example: filetype:pdf intitle:\"VP Marketing\" \"attribution problem\".\n"
         )
         if _is_consumer_vector:
             _system_instruction += (
