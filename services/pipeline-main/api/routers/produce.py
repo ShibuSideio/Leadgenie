@@ -512,6 +512,22 @@ def produce():
     # Write to unprocessed_queue (additive merge, cap at 200)
     # ------------------------------------------------------------------
     current_queue = campaign.get("unprocessed_queue", [])
+
+    # V24.4 (L3-4): Queue backpressure — if queue depth > 150 unconsumed URLs,
+    # skip producing new URLs. The consumer hasn't caught up yet. Producing more
+    # would cause [:200] trimming to silently discard fresh signals.
+    _queue_depth = len(current_queue) if current_queue else 0
+    if _queue_depth > 150:
+        log.info(
+            "produce_skipped_queue_full",
+            campaign_id=campaign_id,
+            queue_depth=_queue_depth,
+            threshold=150,
+            note="Queue saturated. Skipping produce run — consumer must drain queue first. "
+                 "Reduce drip_interval_minutes or increase dispatch frequency.",
+        )
+        return jsonify({"status": "skipped_queue_full", "queue_depth": _queue_depth}), 200
+
     combined_queue = list(dict.fromkeys(current_queue + fresh_urls))[:200]
 
     try:
@@ -519,7 +535,10 @@ def produce():
             "unprocessed_queue": combined_queue,
             "last_produced_at":  firestore.SERVER_TIMESTAMP,
         }
-        if not current_queue and combined_queue:
+        # V24.4 (L3-5): Always update next_drip_due when the queue is refreshed,
+        # not only on first fill. A stale next_drip_due causes immediate dispatch
+        # on every sweep instead of respecting the configured drip cadence.
+        if combined_queue:
             import datetime
             update_data["next_drip_due"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 

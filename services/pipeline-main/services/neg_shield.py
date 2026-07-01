@@ -35,12 +35,15 @@ log = get_logger(__name__)
 
 _CACHE_TTL_S: float = 600.0  # 10 minutes
 
+# V24.3 (L8-1): Cache key is now (tenant_id, sourcing_vector) to prevent
+# B2B rejection signals from polluting B2C/D2C search quality.
 _cache: dict[str, tuple[float, list[str], list[str]]] = {}
 
 
-def _cache_get(tenant_id: str) -> Optional[tuple[list[str], list[str]]]:
+def _cache_get(tenant_id: str, sourcing_vector: str = "B2B") -> Optional[tuple[list[str], list[str]]]:
     """Return cached (domains, entities) if TTL has not expired, else None."""
-    entry = _cache.get(tenant_id)
+    cache_key = f"{tenant_id}::{sourcing_vector}"
+    entry = _cache.get(cache_key)
     if entry is None:
         return None
     ts, domains, entities = entry
@@ -49,19 +52,21 @@ def _cache_get(tenant_id: str) -> Optional[tuple[list[str], list[str]]]:
     return domains, entities
 
 
-def _cache_get_stale(tenant_id: str) -> Optional[tuple[list[str], list[str]]]:
+def _cache_get_stale(tenant_id: str, sourcing_vector: str = "B2B") -> Optional[tuple[list[str], list[str]]]:
     """Return cached result even if expired (last-known-good fallback)."""
-    entry = _cache.get(tenant_id)
+    cache_key = f"{tenant_id}::{sourcing_vector}"
+    entry = _cache.get(cache_key)
     if entry is None:
         return None
     _, domains, entities = entry
     return domains, entities
 
 
-def _cache_put(tenant_id: str, domains: list[str], entities: list[str]) -> None:
+def _cache_put(tenant_id: str, sourcing_vector: str, domains: list[str], entities: list[str]) -> None:
     """Store result in cache with current timestamp."""
-    _cache[tenant_id] = (time.monotonic(), domains, entities)
-    # Evict oldest entries if cache grows beyond 200 tenants
+    cache_key = f"{tenant_id}::{sourcing_vector}"
+    _cache[cache_key] = (time.monotonic(), domains, entities)
+    # Evict oldest entries if cache grows beyond 200 keys
     if len(_cache) > 200:
         oldest_key = min(_cache, key=lambda k: _cache[k][0])
         _cache.pop(oldest_key, None)
@@ -77,14 +82,20 @@ def _cache_put(tenant_id: str, domains: list[str], entities: list[str]) -> None:
 _EFFECTIVE_TIMEOUT_S: float = max(NEG_SHIELD_BQ_TIMEOUT_S, 5.0)
 
 
-def fetch_neg_shield(tenant_id: str) -> tuple[list[str], list[str]]:
+def fetch_neg_shield(tenant_id: str, sourcing_vector: str = "B2B") -> tuple[list[str], list[str]]:
     """Fetch top 20 suppressed domains and entity names from BigQuery.
 
-    Uses an in-memory cache with 10-minute TTL. On BQ timeout or failure,
-    returns the last-known-good cached result instead of empty lists.
+    V24.3 (L8-1): Now accepts sourcing_vector to prevent B2B rejection signals
+    from polluting B2C/D2C search quality. The BQ query filters by vector,
+    so a B2B rejected domain (e.g. clutch.co) does not suppress B2C results.
+
+    Uses an in-memory cache keyed by (tenant_id, sourcing_vector) with 10-minute
+    TTL. On BQ timeout or failure, returns the last-known-good cached result.
 
     Args:
-        tenant_id: Tenant UID — scopes to this tenant + GLOBAL signals.
+        tenant_id:        Tenant UID — scopes to this tenant + GLOBAL signals.
+        sourcing_vector:  Campaign sourcing archetype (e.g. "B2B", "B2C", "D2C").
+                          Defaults to "B2B" for backward compatibility.
 
     Returns:
         Tuple of ``(blocked_domains, blocked_entities)``, each a deduplicated
@@ -92,19 +103,24 @@ def fetch_neg_shield(tenant_id: str) -> tuple[list[str], list[str]]:
         result exists and BQ also fails.
     """
     # Fast path: serve from cache if TTL has not expired
-    cached = _cache_get(tenant_id)
+    cached = _cache_get(tenant_id, sourcing_vector)
     if cached is not None:
-        log.debug("neg_shield_cache_hit", tenant=tenant_id[:8])
+        log.debug("neg_shield_cache_hit", tenant=tenant_id[:8], vector=sourcing_vector)
         return cached
 
     from google.cloud import bigquery as _bq_lib  # local to avoid cold-start overhead
 
     def _run() -> tuple[list[str], list[str]]:
         bq = _bq_lib.Client(project=PROJECT_ID)
+        # V24.3 (L8-1): Filter by sourcing_vector OR 'GLOBAL' so that B2B
+        # rejections (vector='B2B') don't appear in B2C queries (vector='B2C').
+        # GLOBAL signals are tenant-wide suppressions (e.g. competitor domains).
         query = """
             SELECT root_domain, entity_name
             FROM `{project}.swarm_analytics.Negative_Signals`
             WHERE (tenant_id = @tenant_id OR tenant_id = 'GLOBAL')
+              AND (sourcing_vector = @vector OR sourcing_vector = 'GLOBAL'
+                   OR sourcing_vector IS NULL)
               AND root_domain IS NOT NULL
             GROUP BY root_domain, entity_name
             ORDER BY COUNT(*) DESC
@@ -113,6 +129,7 @@ def fetch_neg_shield(tenant_id: str) -> tuple[list[str], list[str]]:
         job_config = _bq_lib.QueryJobConfig(
             query_parameters=[
                 _bq_lib.ScalarQueryParameter("tenant_id", "STRING", tenant_id),
+                _bq_lib.ScalarQueryParameter("vector",    "STRING", sourcing_vector),
             ]
         )
         job = bq.query(query, job_config=job_config)
@@ -125,12 +142,13 @@ def fetch_neg_shield(tenant_id: str) -> tuple[list[str], list[str]]:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             fut = pool.submit(_run)
             blocked_domains, blocked_entities = fut.result(timeout=_EFFECTIVE_TIMEOUT_S + 0.5)
-        _cache_put(tenant_id, blocked_domains, blocked_entities)
+        _cache_put(tenant_id, sourcing_vector, blocked_domains, blocked_entities)
         log.info(
             "neg_shield_loaded",
             blocked_domains=len(blocked_domains),
             blocked_entities=len(blocked_entities),
             tenant=tenant_id[:8],
+            vector=sourcing_vector,
         )
         return blocked_domains, blocked_entities
     except concurrent.futures.TimeoutError:
@@ -138,9 +156,10 @@ def fetch_neg_shield(tenant_id: str) -> tuple[list[str], list[str]]:
             "neg_shield_timeout",
             timeout_s=_EFFECTIVE_TIMEOUT_S,
             tenant=tenant_id[:8],
+            vector=sourcing_vector,
             action="Serving last-known-good cache if available.",
         )
-        stale = _cache_get_stale(tenant_id)
+        stale = _cache_get_stale(tenant_id, sourcing_vector)
         if stale is not None:
             log.info("neg_shield_stale_cache_served", tenant=tenant_id[:8],
                      domains=len(stale[0]), entities=len(stale[1]))
@@ -148,8 +167,9 @@ def fetch_neg_shield(tenant_id: str) -> tuple[list[str], list[str]]:
         return [], []
     except Exception as exc:
         log.warning("neg_shield_fetch_failed", error=str(exc), tenant=tenant_id[:8],
+                    vector=sourcing_vector,
                     action="Serving last-known-good cache if available.")
-        stale = _cache_get_stale(tenant_id)
+        stale = _cache_get_stale(tenant_id, sourcing_vector)
         if stale is not None:
             log.info("neg_shield_stale_cache_served", tenant=tenant_id[:8],
                      domains=len(stale[0]), entities=len(stale[1]))

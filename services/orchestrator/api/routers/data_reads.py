@@ -67,11 +67,17 @@ def get_leads(uid: str, tenant_id: str, user_role: str):
     """List leads for the authenticated tenant.
 
     Query params:
-        crm (str): ``"true"`` for CRM board only, ``"false"`` for dashboard feed.
+        crm      (str): ``"true"`` for CRM board only, ``"false"`` for dashboard feed.
+        sort_by  (str): Field to sort by — ``"score"`` or ``"createdAt"`` (default).
+        sort_dir (str): ``"asc"`` or ``"desc"`` (default).
+        min_score (int): Minimum normalized_score threshold (0–100); 0 means no filter.
 
     Returns:
         JSON with ``status`` and ``data`` (list of lead dicts).
     """
+    from google.cloud.firestore_v1.base_query import FieldFilter as _FF
+    from google.cloud.firestore_v1 import Query as _Query
+
     crm_param = request.args.get("crm")
     crm_filter = None
     if crm_param == "true":
@@ -79,8 +85,37 @@ def get_leads(uid: str, tenant_id: str, user_role: str):
     elif crm_param == "false":
         crm_filter = False
 
-    leads = list_leads(get_db(), tenant_id, crm_filter=crm_filter)
-    log.info("leads_listed", tenant=tenant_id[:8], count=len(leads), crm_filter=crm_filter)
+    # V24.4 (L5-5): Optional sort_by and min_score query parameters.
+    sort_by   = request.args.get("sort_by", "createdAt")  # default: chronological
+    min_score = request.args.get("min_score", type=int, default=0)
+    sort_dir  = request.args.get("sort_dir", "desc").lower()  # asc or desc
+
+    db = get_db()
+    q = db.collection("leads").where(filter=_FF("tenant_id", "==", tenant_id))
+    if crm_filter is not None:
+        q = q.where(filter=_FF("is_in_crm", "==", crm_filter))
+
+    if min_score > 0:
+        q = q.where(filter=_FF("normalized_score", ">=", min_score * 10))
+    # Sort field
+    if sort_by == "score":
+        _sort_direction = _Query.DESCENDING if sort_dir != "asc" else _Query.ASCENDING
+        q = q.order_by("normalized_score", direction=_sort_direction)
+    else:
+        q = q.order_by("createdAt", direction=_Query.DESCENDING)
+
+    docs = q.limit(200).stream()
+    leads = []
+    for doc in docs:
+        d = doc.to_dict() or {}
+        d["id"] = doc.id
+        for k, v in d.items():
+            if hasattr(v, "isoformat"):
+                d[k] = v.isoformat()
+        leads.append(d)
+
+    log.info("leads_listed", tenant=tenant_id[:8], count=len(leads),
+             crm_filter=crm_filter, sort_by=sort_by, min_score=min_score)
     return jsonify({"status": "success", "data": leads}), 200
 
 

@@ -40,8 +40,12 @@ def get_roi_analytics(uid: str, tenant_id: str, user_role: str):
     except (ValueError, TypeError):
         date_range_days = 30
 
-    result = compute_roi_metrics(get_db(), tenant_id, date_range_days)
-    log.info("roi_request_served", tenant=tenant_id[:8], days=date_range_days)
+    # V24.5 (L6-1): Optional sourcing_vector filter for per-vertical analytics isolation.
+    # Without this, B2B and B2C metrics aggregate in a way that makes both meaningless.
+    vertical = request.args.get("vertical")  # e.g. "B2B", "B2C", "D2C"
+
+    result = compute_roi_metrics(get_db(), tenant_id, date_range_days, vertical=vertical)
+    log.info("roi_request_served", tenant=tenant_id[:8], days=date_range_days, vertical=vertical)
     return jsonify({"status": "success", **result}), 200
 
 

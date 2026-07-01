@@ -15,7 +15,7 @@ This service owns: query execution and math.
 from __future__ import annotations
 
 import datetime
-from typing import Any
+from typing import Any, Optional
 
 from core.config import ROI_DEFAULTS
 from core.logging import get_logger
@@ -27,6 +27,7 @@ def compute_roi_metrics(
     db,
     tenant_id: str,
     date_range_days: int,
+    vertical: Optional[str] = None,
 ) -> dict[str, Any]:
     """Compute L1 ROI metrics for a tenant over a date window.
 
@@ -38,6 +39,9 @@ def compute_roi_metrics(
         db:              Firestore client (injected).
         tenant_id:       Tenant UID.
         date_range_days: Lookback window in days (1-365).
+        vertical:        Optional sourcing_vector value (e.g. "B2B", "B2C") to
+                         isolate per-vertical metrics. If None, all vectors
+                         are aggregated.
 
     Returns:
         Dict containing ``unit_economics``, ``metrics``,
@@ -63,26 +67,34 @@ def compute_roi_metrics(
     # ── 3. Lead counts ────────────────────────────────────────────────────
     n_approved = n_contacted = n_total_feed = 0
     try:
+        from google.cloud.firestore_v1.base_query import FieldFilter as _FF
+
+        def _base_query(status_field: str, status_val: str, date_field: str):
+            q = (
+                db.collection("leads")
+                .where(filter=_FF("tenant_id", "==", tenant_id))
+                .where(filter=_FF(status_field, "==", status_val))
+                .where(filter=_FF(date_field, ">=", cutoff))
+            )
+            if vertical:
+                # V24.5 (L6-1): Per-vertical isolation filter
+                q = q.where(filter=_FF("sourcing_vector", "==", vertical))
+            return q
+
         n_approved = sum(
-            1 for _ in db.collection("leads")
-            .where("tenant_id", "==", tenant_id)
-            .where("status", "==", "converted")
-            .where("updatedAt", ">=", cutoff)
-            .stream()
+            1 for _ in _base_query("status", "converted", "updatedAt").stream()
         )
         n_contacted = sum(
-            1 for _ in db.collection("leads")
-            .where("tenant_id", "==", tenant_id)
-            .where("status", "==", "contacted")
-            .where("updatedAt", ">=", cutoff)
-            .stream()
+            1 for _ in _base_query("status", "contacted", "updatedAt").stream()
         )
-        n_total_feed = sum(
-            1 for _ in db.collection("leads")
-            .where("tenant_id", "==", tenant_id)
-            .where("createdAt", ">=", cutoff)
-            .stream()
+        _total_q = (
+            db.collection("leads")
+            .where(filter=_FF("tenant_id", "==", tenant_id))
+            .where(filter=_FF("createdAt", ">=", cutoff))
         )
+        if vertical:
+            _total_q = _total_q.where(filter=_FF("sourcing_vector", "==", vertical))
+        n_total_feed = sum(1 for _ in _total_q.stream())
     except Exception as exc:
         log.error("roi_lead_count_failed", tenant=tenant_id[:8], error=str(exc))
 

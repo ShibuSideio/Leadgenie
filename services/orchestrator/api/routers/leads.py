@@ -28,7 +28,15 @@ def _db():
 bp = Blueprint("leads", __name__)
 log = get_logger("orchestrator.v23.leads")
 
-NEG_SIGNAL_REASONS = frozenset({"competitor", "author"})
+# V24.5 (L8-4): Sync with neg_signal.NEG_SIGNAL_REASONS — all five reasons now
+# trigger both the ontology penalty AND the BQ Negative_Signals insert.
+NEG_SIGNAL_REASONS = frozenset({
+    "competitor",
+    "author",
+    "wrong_industry",
+    "not_icp",
+    "low_quality",
+})
 
 _LEAD_UPDATE_ALLOWED = {"status", "is_in_crm", "crm_status", "rejection_reason", "deal_value", "follow_up_date", "notes", "crm_notes", "updatedAt"}
 
@@ -39,6 +47,8 @@ REJECTION_PENALTY_MAP: dict[str, float] = {
     "too_small":      -0.05,
     "competitor":      0.00,
     "author":          0.00,
+    "not_icp":        -0.10,  # V24.5 (L8-4)
+    "low_quality":    -0.10,  # V24.5 (L8-4)
 }
 
 
@@ -92,12 +102,17 @@ def update_lead(uid, tenant_id, user_role, doc_id):
         user_doc  = _db().collection("users").document(tenant_id).get()
         if user_doc.exists:
             wallet       = (user_doc.to_dict() or {}).get("wallet", {})
-            total_credits    = wallet.get("allocated_credits", 0)
-            reserved_credits = wallet.get("consumed_credits", 0)
-            if total_credits <= reserved_credits:
+            # V24.4 (L5-2): Read total_consumed (written by atomic settlement) rather than
+            # consumed_credits (legacy field). Using the wrong field allows quota-exhausted
+            # tenants to bypass the requeue gate if their credits were settled atomically.
+            _consumed = max(
+                wallet.get("total_consumed", 0),
+                wallet.get("consumed_credits", 0),  # legacy fallback
+            )
+            if wallet.get("allocated_credits", 0) <= _consumed:
                 log.warning("requeue_credit_gate_blocked",
                             doc_id=doc_id, tenant_id=tenant_id,
-                            total=total_credits, reserved=reserved_credits)
+                            total=wallet.get("allocated_credits", 0), reserved=_consumed)
                 return jsonify({"error": "Insufficient credits"}), 402
 
         # Apply clean requeue mutation — V23.9: use DELETE_FIELD to nuke
@@ -296,20 +311,68 @@ def update_lead(uid, tenant_id, user_role, doc_id):
 
     # ── Headless CRM egress webhook (converted) ───────────────────────────────
     if status == "converted":
-        try:
-            user_crm_doc    = _db().collection("users").document(tenant_id).get().to_dict() or {}
-            crm_webhook_url = user_crm_doc.get("crm_webhook_url")
-            if crm_webhook_url:
-                crm_payload = {
-                    "lead_id":           doc_id,
-                    "score":             lead_dict.get("score"),
-                    "dm":                lead_dict.get("dm"),
-                    "intent_signal":     lead_dict.get("intent_signal", ""),
-                    "contact_endpoints": lead_dict.get("contact_endpoints", []),
-                }
-                httpx.post(crm_webhook_url, json=crm_payload, timeout=5)
-        except Exception as crm_e:
-            log.warning("crm_egress_failed", error=str(crm_e))
+        user_crm_doc    = _db().collection("users").document(tenant_id).get().to_dict() or {}
+        crm_webhook_url = user_crm_doc.get("crm_webhook_url")
+        if crm_webhook_url:
+            # V24.4 (L5-3): CRM webhook delivery with Cloud Task retry.
+            # Previous: silent swallow on failure, no retry, HTTP 200 returned.
+            # New: on failure, enqueue a retry Cloud Task and record crm_delivery_status.
+            crm_delivery_status = "delivered"
+            try:
+                import httpx as _httpx
+                _crm_resp = _httpx.post(
+                    crm_webhook_url,
+                    json={
+                        "lead_id":         doc_id,
+                        "score":           lead_dict.get("score"),
+                        "dm":              lead_dict.get("dm"),
+                        "intent_signal":   lead_dict.get("intent_signal"),
+                        "contact_endpoints": lead_dict.get("contact_endpoints", []),
+                    },
+                    timeout=5,
+                )
+                _crm_resp.raise_for_status()
+            except Exception as crm_e:
+                log.warning("crm_egress_failed",
+                            error=str(crm_e),
+                            lead_id=doc_id,
+                            webhook_url=crm_webhook_url[:60])
+                crm_delivery_status = "pending_retry"
+                # Enqueue a single retry Cloud Task (3-hour delay)
+                try:
+                    from core.config import PROJECT_ID as _pid, LOCATION as _loc, QUEUE as _q, ORCHESTRATOR_URL as _orch  # type: ignore[import]
+                    from core.clients import get_tasks_client as _get_tc  # type: ignore[import]
+                    from google.protobuf import timestamp_pb2 as _ts_pb2  # type: ignore[import]
+                    import datetime as _dt, json as _json
+                    _tc = _get_tc()
+                    _queue_path = _tc.queue_path(_pid, _loc, _q)
+                    _when = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=3)
+                    _ts = _ts_pb2.Timestamp()
+                    _ts.FromDatetime(_when)
+                    _tc.create_task(request={
+                        "parent": _queue_path,
+                        "task": {
+                            "schedule_time": _ts,
+                            "http_request": {
+                                "http_method": "POST",
+                                "url": f"{_orch}/api/internal/crm-retry",
+                                "body": _json.dumps({"lead_id": doc_id, "tenant_id": uid}).encode(),
+                                "headers": {"Content-Type": "application/json"},
+                            },
+                        },
+                    })
+                    log.info("crm_retry_task_enqueued", lead_id=doc_id, delay_hours=3)
+                except Exception as _retry_err:
+                    log.warning("crm_retry_enqueue_failed",
+                                lead_id=doc_id, error=str(_retry_err))
+                    crm_delivery_status = "failed_permanent"
+            # Record delivery status on the lead document
+            try:
+                _db().collection("leads").document(doc_id).update(
+                    {"crm_delivery_status": crm_delivery_status}
+                )
+            except Exception:
+                pass
 
     return jsonify({"status": "success"}), 200
 
@@ -486,6 +549,7 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
             "summary":            sig.get("snippet", ""),
             "pain_point":         ", ".join(sig.get("pain_keywords", [])),
             "score":              round(sig.get("intent_score", 0.5) * 100),
+            "normalized_score":   round(sig.get("intent_score", 0.5) * 100),
             "source":             "inbound_radar",
             "status":             "new",
             "is_in_crm":          False,

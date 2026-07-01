@@ -75,7 +75,13 @@ _DEFAULT_BLACKLIST = (
 # the campaign's effective_bio and keywords — NOT inferred from the vector.
 # ---------------------------------------------------------------------------
 
-_CONSUMER_ARCHETYPES: frozenset = frozenset({"B2C", "B2B2C", "D2C"})
+# V24.3 (L2-2): Imported from core.constants — single source of truth.
+# Previously duplicated here and in serper_service.py with a "MUST stay in sync" warning.
+from core.constants import (  # type: ignore[import]
+    CONSUMER_ARCHETYPES as _CONSUMER_ARCHETYPES,
+    D2C_ARCHETYPES as _D2C_ARCHETYPES,
+    B2B2C_ARCHETYPES as _B2B2C_ARCHETYPES,
+)
 
 
 def _is_consumer_archetype(vector: str) -> bool:
@@ -227,7 +233,10 @@ def generate_smart_query(
                             vector=ctx.sourcing_vector,
                             note="No campaign_id — RLHF fetch is tenant-wide. "
                                  "Pain points may span multiple vectors.")
-            q = q.where(filter=_FF("status", "in", ["contacted", "converted"])).limit(20)
+            # V24.5 (L8-5): Include "reviewed" leads in RLHF pool. Operators typically
+            # review a lead before contacting it; excluding reviewed leads biases the
+            # RLHF signal toward fast-actioned leads only.
+            q = q.where(filter=_FF("status", "in", ["reviewed", "contacted", "converted"])).limit(20)
             docs = list(q.stream())
             ctx.pain_points = [
                 d.to_dict().get("pain_point", "")
@@ -290,7 +299,7 @@ def generate_smart_query(
                     campaign_id=ctx.campaign_id,
                 )
         except Exception as _neg_exc:
-            log.debug("query_brain_neg_rlhf_failed", error=str(_neg_exc))
+            log.warning("query_brain_neg_rlhf_failed", error=str(_neg_exc))
 
     _p_cat = (ctx.persona_category or "general").strip() or "general"
     if ctx.campaign_id:
@@ -301,8 +310,14 @@ def generate_smart_query(
     try:
         cfg = get_db().collection("system_config").document("router").get().to_dict() or {}
         _CONF_THRESHOLD = float(cfg.get("intent_confidence_threshold", 1000))
-    except Exception:
-        pass
+    except Exception as _conf_read_err:
+        # V24.3 (L1-4): Log threshold read failure — operator must know if
+        # STATISTICAL routing config is inaccessible.
+        log.warning("query_brain_conf_threshold_read_failed",
+                    error=str(_conf_read_err),
+                    fallback_threshold=_CONF_THRESHOLD,
+                    note="Firestore system_config/router unreadable; "
+                         "using default threshold. Check IAM permissions.")
 
     _confidence  = 0.0
     _router_mode = "GEMINI_FALLBACK"
@@ -379,9 +394,11 @@ def generate_smart_query(
                         f'"{ng}" AND ({kw_str})' if kw_str else f'"{ng}"'
                     )
                 if ctx.bio and top_ngrams:
-                    ctx.symptom_dorks = [
-                        f'"{top_ngrams[0]}"',
-                    ]
+                    # V24.3 (L1-2): STATISTICAL path now generates dorks for ALL top N-grams
+                    # (up to 3), matching the GEMINI_FALLBACK output count. Previously only
+                    # top_ngrams[0] generated a symptom_dork — the "confident" STATISTICAL
+                    # path paradoxically produced fewer queries than the fallback.
+                    ctx.symptom_dorks = [f'"{ng}"' for ng in top_ngrams[:3]]
                 log.info("query_brain_statistical_built",
                          query_count=len(ctx.intents), ngrams=top_ngrams)
             else:
@@ -404,6 +421,11 @@ def generate_smart_query(
         # "unclear positioning", etc.) which was being hallucinated by Gemini
         # because the old prompt hardcoded "B2B" in TASK 1.
         _is_consumer_vector = _is_consumer_archetype(vector_label)
+        # V24.3 (L2-1, L2-3): Vertical-specific prompt routing flags.
+        # D2C: competitor product comparison signals.
+        # B2B2C: dual-ICP — institutional buyer + individual end-user.
+        _is_d2c   = (ctx.sourcing_vector or "") in _D2C_ARCHETYPES
+        _is_b2b2c = (ctx.sourcing_vector or "") in _B2B2C_ARCHETYPES
 
         if _is_consumer_vector:
             # ── CONSUMER PROMPT (V24.1.1 — Differentiated from Standard) ───
@@ -532,6 +554,29 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 "This forces Google to prioritize active discussion threads and forum posts rather than polished marketing landing pages. "
                 "Example dork: (inurl:forum OR inurl:community) Muscat \"villa\" (\"pm me\" OR \"still available\")\n"
             )
+        # V24.3 (L2-1): D2C competitor-comparison system instruction override.
+        # D2C brands need consumer-vs-competitor signals, not local buyer pain.
+        if _is_d2c:
+            _system_instruction += (
+                "\nD2C PRODUCT COMPARISON MANDATE:\n"
+                "This is a Direct-to-Consumer brand campaign. Generate queries that find consumers "
+                "who are actively comparing products or switching from competitor brands. Prioritize: "
+                "'tried X alternative', 'switched from [brand]', 'honest review vs', "
+                "'is [product] worth it', 'looking for alternative to'. "
+                "Use site:reddit.com, site:trustpilot.com, inurl:review, inurl:compare. "
+                "Do NOT generate B2B SaaS or enterprise buyer signals.\n"
+            )
+        # V24.3 (L2-3): B2B2C dual-ICP system instruction.
+        # 50% institutional + 50% end-user signals.
+        if _is_b2b2c:
+            _system_instruction += (
+                "\nB2B2C DUAL-ICP MANDATE:\n"
+                "This business sells to institutions (B2B buyer) and serves individual end-users (B2C user). "
+                "Generate a MIXED query set: 50% institutional purchase signals "
+                "(procurement, budget approval, vendor selection) AND 50% end-user pain signals "
+                "(user complaints, review discussions, community posts). "
+                "Label each query type clearly in your output.\n"
+            )
 
         try:
             result = call_gemini_2_5(
@@ -646,9 +691,6 @@ Return ONLY the JSON object. No explanation, no markdown."""
             _filtered.append(tok)
         return " ".join(_filtered)
 
-    blacklist = _DEFAULT_BLACKLIST
-
-
     # ── Pre-emptive Persona exclusions: "NOT <phrase>" targeting signals (V23.5) ─
     _pre_exclusions: list[str] = []
     for _sig in (ctx.targeting_signals or []):
@@ -657,45 +699,57 @@ Return ONLY the JSON object. No explanation, no markdown."""
             _phrase = _sig_clean[4:].strip()
             if _phrase:
                 _pre_exclusions.append(f'-"{_phrase}"')
-
     if _pre_exclusions:
-        blacklist += " " + " ".join(_pre_exclusions)
         log.info(
             "persona_neg_signals_injected",
             count=len(_pre_exclusions),
             sample=_pre_exclusions[:3],
         )
 
-    # Negative Signal Shield injection
+    # V24.5 (L1-5): Blacklist priority rebuild — most specific (RLHF-learned) first,
+    # static defaults last. The 350-char cap trims from the tail, so trimming now
+    # removes static defaults before removing RLHF-learned campaign-specific signals.
+    _rlhf_blacklist = ""  # RLHF-learned exclusions (highest priority)
+    if ctx.neg_domains:
+        _rlhf_blacklist += " " + " ".join(f"-site:{d}" for d in ctx.neg_domains[:10] if d)
+        log.info("neg_rlhf_sites_injected", count=len(ctx.neg_domains[:10]))
+    if ctx.neg_title_frags:
+        _rlhf_blacklist += " " + " ".join(f'-intitle:"{t}"' for t in ctx.neg_title_frags[:5] if t)
+        log.info("neg_rlhf_titles_injected", count=len(ctx.neg_title_frags[:5]))
+
+    _shield_blacklist = ""  # Neg shield domains (tenant-level)
     try:
-        shield_domains, shield_entities = fetch_neg_shield(ctx.tenant_id)
+        # V24.3 (L8-1): Pass sourcing_vector so B2B rejections do not pollute B2C
+        # search quality. The neg shield BQ query now filters by vector.
+        shield_domains, shield_entities = fetch_neg_shield(
+            ctx.tenant_id,
+            sourcing_vector=ctx.sourcing_vector or "B2B",
+        )
         if shield_domains:
-            blacklist += " " + " ".join(f"-site:{d}" for d in shield_domains[:15] if d)
+            _shield_blacklist += " " + " ".join(f"-site:{d}" for d in shield_domains[:15] if d)
         if shield_entities:
-            blacklist += " " + " ".join(f'-intitle:"{e}"' for e in shield_entities[:10] if e)
+            _shield_blacklist += " " + " ".join(f'-intitle:"{e}"' for e in shield_entities[:10] if e)
         if shield_domains or shield_entities:
             log.info("neg_shield_injected",
                      domains=len(shield_domains), entities=len(shield_entities))
     except Exception as exc:
         log.warning("neg_shield_injection_failed", error=str(exc))
+        shield_domains, shield_entities = [], []
 
-    # Negative RLHF dorking
-    if ctx.neg_domains:
-        _excl_sites = " ".join(f"-site:{d}" for d in ctx.neg_domains[:10] if d)
-        blacklist += " " + _excl_sites
-        log.info("neg_rlhf_sites_injected", count=len(ctx.neg_domains[:10]))
-    if ctx.neg_title_frags:
-        _excl_titles = " ".join(f'-intitle:"{t}"' for t in ctx.neg_title_frags[:5] if t)
-        blacklist += " " + _excl_titles
-        log.info("neg_rlhf_titles_injected", count=len(ctx.neg_title_frags[:5]))
+    _persona_blacklist = ""  # Persona signals (campaign-level)
+    if _pre_exclusions:
+        _persona_blacklist = " " + " ".join(_pre_exclusions)
+
+    # Build: RLHF (most specific) → shield → persona → static (least specific)
+    blacklist = (_rlhf_blacklist + _shield_blacklist + _persona_blacklist + " " + _DEFAULT_BLACKLIST).strip()
 
     # V24.1.1: Cap blacklist length to prevent query explosion.
     # With all sources (base + persona signals + shield domains/entities + RLHF domains/titles),
     # the blacklist can exceed 500 chars, pushing total query length past 700+ chars.
     # This causes: (a) Serper response times >10s, (b) possible 0-result returns,
     # (c) wasted credits on queries that are too constrained to match anything.
-    # Cap at 350 chars — enough for base + ~15 exclusions. Trim from tail (RLHF additions
-    # are appended last and least critical).
+    # Cap at 350 chars — enough for base + ~15 exclusions. Trim from tail (static
+    # defaults are appended last and trimmed first under the new priority order).
     _MAX_BLACKLIST_LEN = 350
     if len(blacklist) > _MAX_BLACKLIST_LEN:
         _original_len = len(blacklist)
@@ -712,6 +766,7 @@ Return ONLY the JSON object. No explanation, no markdown."""
         log.info("blacklist_length_capped",
                  original=_original_len, capped=len(blacklist),
                  tokens_kept=len(_capped), tokens_total=len(_bl_tokens))
+
 
     if not ctx.has_local_history:
         ctx.pain_points = []
@@ -803,11 +858,27 @@ Return ONLY the JSON object. No explanation, no markdown."""
                  vector=ctx.sourcing_vector or "B2B",
                  is_consumer=_is_consumer)
     elif kw_str:
-        for kw in ctx.target_audience or []:
-            if not kw or not kw.strip():
-                continue
-            _bl = _deconflict_blacklist(f'("{kw}"){historical_str}', blacklist)
-            smart_queries.append(f'("{kw}"){historical_str} {_bl}')
+        if _is_consumer:
+            # V24.3 (L2-4): B2C/D2C keyword fallback — use intent-template queries
+            # instead of quoting raw bio words. Bio words like "private", "sale",
+            # "villa" produce SEO directory results, not buyer signals.
+            _geo_hint = ""
+            _consumer_fallback_templates = [
+                f'"looking for" OR "where can I find" OR "any recommendations" {blacklist}',
+                f'"anyone selling" OR "direct owner" OR "pm me" {blacklist}',
+                f'"advice needed" OR "help me find" OR "suggestion" {blacklist}',
+            ]
+            smart_queries.extend(_consumer_fallback_templates)
+            log.info("query_brain_b2c_fallback_templates_used",
+                     campaign_id=ctx.campaign_id,
+                     template_count=len(_consumer_fallback_templates),
+                     note="Consumer fallback: using intent templates instead of bio word split.")
+        else:
+            for kw in ctx.target_audience or []:
+                if not kw or not kw.strip():
+                    continue
+                _bl = _deconflict_blacklist(f'("{kw}"){historical_str}', blacklist)
+                smart_queries.append(f'("{kw}"){historical_str} {_bl}')
 
     for sd in ctx.symptom_dorks:
         if not sd or not sd.strip():

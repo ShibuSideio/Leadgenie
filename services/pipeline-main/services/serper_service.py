@@ -97,13 +97,9 @@ _NON_BUSINESS_SUFFIXES = (
 
 # FIX (2026-06-21): Replaced dead platform-specific B2C list with archetype-based
 # detection. The old list contained labels ("Reddit B2C", etc.) that could never
-# be produced by classify_sourcing_vector(). Now uses the canonical archetype set.
-# NOTE: Defined inline (not imported from query_brain) because the smoke test
-# harness loads serper_service.py via importlib in an isolated namespace where
-# cross-module imports are unavailable.
-# IMPORTANT (V24.1.1): This MUST stay in sync with query_brain._CONSUMER_ARCHETYPES.
-# If a new archetype is added to one, it must be added to both.
-_CONSUMER_ARCHETYPES: frozenset = frozenset({"B2C", "B2B2C", "D2C"})
+# V24.3 (L2-2): Imported from shared core.constants module.
+# Previously defined inline with a "MUST stay in sync with query_brain" warning.
+from core.constants import CONSUMER_ARCHETYPES as _CONSUMER_ARCHETYPES  # type: ignore[import]
 
 def _is_consumer_archetype(vector: str) -> bool:
     """Return True if *vector* is a consumer-facing business archetype."""
@@ -499,9 +495,13 @@ def search_serper(
     if gl:
         payload_dict["gl"] = gl
 
-    # V24.1.23: Restrict B2C/consumer sweeps to the past year to prevent cold/stale historical leads.
+    # V24.3 (L3-1): Use qdr:m (past month) instead of qdr:y (past year) for
+    # consumer campaigns. Dialog-cue dorks like "pm me" or "still available"
+    # target ACTIVE purchase discussions. A 1-year window retrieves stale
+    # conversations where the deal is long closed. The month window prevents
+    # Serper from returning abandoned Reddit threads and closed listings.
     if sourcing_vector and _is_consumer_archetype(sourcing_vector):
-        payload_dict["tbs"] = "qdr:y"
+        payload_dict["tbs"] = "qdr:m"
 
     payload = json.dumps(payload_dict)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}

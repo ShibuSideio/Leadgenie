@@ -82,7 +82,15 @@ def _is_generic_email(email: str) -> bool:
     if not email or "@" not in email:
         return False
     prefix = email.lower().strip().split("@")[0]
-    generics = {"support", "info", "admin", "sales", "billing", "jobs", "careers", "privacy", "help", "contact", "marketing", "office"}
+    # V24.4 (L5-4): Expanded generic email prefix filter. Previous set missed
+    # common team inbox prefixes that are not decision-maker contacts.
+    generics = {
+        "support", "info", "admin", "sales", "billing", "jobs", "careers",
+        "privacy", "help", "contact", "marketing", "office", "team", "hello",
+        "enquiries", "enquiry", "noreply", "no-reply", "do-not-reply",
+        "notifications", "alerts", "newsletter", "subscriptions", "listings",
+        "rentals", "general", "accounts", "feedback", "service", "services",
+    }
     return prefix in generics
 
 
@@ -425,9 +433,12 @@ def dispatch():
         with _cf.ThreadPoolExecutor(max_workers=1) as pool:
             fut    = pool.submit(pre_filter_gemini, synthetic_snippets, bio, location)
             tiered = fut.result(timeout=30)
-    except Exception as gate_err:
-        log.warning("dispatch_pre_filter_timeout", error=str(gate_err),
-                    note="Treating all URLs as High-tier.")
+    except Exception as _pf_err:
+        log.warning("pre_filter_timeout_all_urls_approved",
+                    error=str(_pf_err),
+                    url_count=len(batch_urls),
+                    note="V24.4 (L4-1): Pre-filter gate failed; ALL URLs treated as High-tier. "
+                         "Velocity gate bypassed for this batch. Monitor for quality degradation.")
         tiered = {"High": batch_urls, "Medium": [], "Low": []}
 
     high_urls   = tiered.get("High", [])
@@ -448,7 +459,12 @@ def dispatch():
             .where(filter=FieldFilter("createdAt", ">=", cutoff_24h))
             .count().get()[0][0].value
         )
-    except Exception:
+    except Exception as _vel_err:
+        # V24.4 (L4-2): Velocity gate disabled due to Firestore query failure.
+        # All Medium URLs will pass regardless of actual volume.
+        log.warning("velocity_gate_disabled_firestore_error",
+                    error=str(_vel_err),
+                    note="Medium URLs will pass without volume check. Monitor lead quality.")
         recent_count = 0
 
     allow_medium  = recent_count < velocity_threshold
@@ -590,8 +606,11 @@ def dispatch():
                 doc_ref.update({"status": "failed", "error": "Blocked by Cloudflare/WAF"})
                 try:
                     _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
+                except Exception as _lock_del_err:
+                    log.error("lead_lock_delete_failed",
+                              lock_entity=lock_entity,
+                              url=url[:80] if url else "unknown",
+                              error=str(_lock_del_err))
                 return {"url": url, "status": "blocked_waf"}
 
             # Stamp prism_mode on stub
@@ -616,8 +635,11 @@ def dispatch():
                 doc_ref.delete()
                 try:
                     _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
+                except Exception as _lock_del_err:
+                    log.error("lead_lock_delete_failed",
+                              lock_entity=lock_entity,
+                              url=url[:80] if url else "unknown",
+                              error=str(_lock_del_err))
                 return {"url": url, "status": "rlhf_drop"}
 
             # ── STEP 3: Score on FULL DOM text (P0 + P1 FIX) ─────────────────────
@@ -641,15 +663,21 @@ def dispatch():
                 doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
                 try:
                     _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
+                except Exception as _lock_del_err:
+                    log.error("lead_lock_delete_failed",
+                              lock_entity=lock_entity,
+                              url=url[:80] if url else "unknown",
+                              error=str(_lock_del_err))
                 return {"url": url, "status": "failed_vertex_timeout"}
             except Exception as eval_err:
                 doc_ref.update({"status": "failed", "error": f"Scoring failed: {eval_err}"})
                 try:
                     _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
+                except Exception as _lock_del_err:
+                    log.error("lead_lock_delete_failed",
+                              lock_entity=lock_entity,
+                              url=url[:80] if url else "unknown",
+                              error=str(_lock_del_err))
                 return {"url": url, "status": "failed_eval"}
 
             score = evaluation.get("score", 0)
@@ -675,11 +703,36 @@ def dispatch():
                 doc_ref.delete()
                 try:
                     _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception:
-                    pass
+                except Exception as _lock_del_err:
+                    log.error("lead_lock_delete_failed",
+                              lock_entity=lock_entity,
+                              url=url[:80] if url else "unknown",
+                              error=str(_lock_del_err))
+                # V24.4 (L4-7): Settle credit on score-drop to prevent reserved-but-
+                # never-settled accounting gaps. /finalize already does this; now
+                # the primary dispatch path matches that behaviour.
+                _settle_credit(tenant_id, "failure", lead_id=lead_id)
                 return {"url": url, "status": "score_drop"}
 
             # ── STEP 4: Consolidate lead details and save into root leads collection ──
+            # V24.4 (L4-5): Medium-tier URLs with snippet-only text (< 300 chars)
+            # are marked enrichment_pending rather than scored on insufficient data.
+            # Scoring a 2-sentence snippet populates all fields as 'Unknown' and
+            # destroys the lead's value to the operator.
+            _snippet_len = len(text.strip()) if text else 0
+            if url_to_tier.get(url) == "Medium" and _snippet_len < 300:
+                doc_ref.update({
+                    "status": "enrichment_pending",
+                    "enrichment_reason": "Medium-tier URL with snippet-only text; awaiting full scrape.",
+                    "confidence_tier": "Medium",
+                    "source_url": url,
+                    "tenant_id": tenant_id,
+                    "campaign_id": campaign_id,
+                })
+                log.info("dispatch_medium_enrichment_pending",
+                         url=url[:80], snippet_len=_snippet_len)
+                return {"url": url, "status": "enrichment_pending"}
+
             contact_endpoints = []
             for e in list(evaluation.get("contact_endpoints", [])):
                 if e.get("platform") == "email" and _is_generic_email(e.get("uri", "")):
@@ -703,6 +756,10 @@ def dispatch():
                 "tenant_id":                    tenant_id,
                 "origin_engine":                "cartographer",
                 "score":                        score,
+                # V24.2 (L5-1): normalized_score (0-100) unifies outbound (×10)
+                # and inbound (×100 from 0-1 intent_score) onto the same scale.
+                # The UI must read normalized_score for display.
+                "normalized_score":             min(score * 10, 100),
                 "matched_campaign_ids":         evaluation.get("matched_campaign_ids", []),
                 "matched_campaigns":            [campaign_id],
                 "campaign_id":                  campaign_id,
@@ -783,12 +840,17 @@ def dispatch():
                       error=str(loop_err), exc_info=True)
             try:
                 doc_ref.update({"status": "failed", "error": "Consumer pipeline crash"})
-            except Exception:
-                pass
+            except Exception as _stub_err:
+                log.warning("lead_stub_update_failed",
+                            lead_id=lead_id,
+                            error=str(_stub_err))
             try:
                 _db().collection("global_lead_locks").document(lock_entity).delete()
-            except Exception:
-                pass
+            except Exception as _lock_del_err:
+                log.error("lead_lock_delete_failed",
+                          lock_entity=lock_entity,
+                          url=url[:80] if url else "unknown",
+                          error=str(_lock_del_err))
             return {"url": url, "status": "crash"}
 
     # ── Dispatch all approved URLs in parallel (max 5 workers, 25s per URL) ─
@@ -878,8 +940,11 @@ def finalize():
         if lock_entity:
             try:
                 _db().collection("global_lead_locks").document(lock_entity).delete()
-            except Exception:
-                pass
+            except Exception as _lock_del_err:
+                log.error("lead_lock_delete_failed",
+                          lock_entity=lock_entity,
+                          url=url[:80] if url else "unknown",
+                          error=str(_lock_del_err))
         return jsonify({"status": "failed_scrape"}), 200
 
     context_payload, _ = deep_context_serper_dork(
@@ -897,8 +962,11 @@ def finalize():
         if lock_entity:
             try:
                 _db().collection("global_lead_locks").document(lock_entity).delete()
-            except Exception:
-                pass
+            except Exception as _lock_del_err:
+                log.error("lead_lock_delete_failed",
+                          lock_entity=lock_entity,
+                          url=url[:80] if url else "unknown",
+                          error=str(_lock_del_err))
         return jsonify({"error": str(eval_err)}), 500
 
     score = evaluation.get("score", 0)
@@ -957,8 +1025,11 @@ def finalize():
         if lock_entity:
             try:
                 _db().collection("global_lead_locks").document(lock_entity).delete()
-            except Exception:
-                pass
+            except Exception as _lock_del_err:
+                log.error("lead_lock_delete_failed",
+                          lock_entity=lock_entity,
+                          url=url[:80] if url else "unknown",
+                          error=str(_lock_del_err))
 
     return jsonify({"status": "ok", "score": score}), 200
 
@@ -1021,7 +1092,7 @@ def _shadow_track_bq(
                 log.debug("shadow_track_bq_ok", lead_id=lead_id[:16], score=score)
         except Exception as _bq_err:
             # Non-critical — never surface to scraping loop
-            log.debug("shadow_track_bq_failed", error=str(_bq_err)[:120])
+            log.warning("shadow_track_bq_failed", error=str(_bq_err)[:120])
 
     import threading as _th
     _th.Thread(target=_write, daemon=True).start()
@@ -1067,6 +1138,19 @@ def _maybe_notify_whatsapp(tenant_id: str, url: str, lead_id: str,
     """Fire WhatsApp Business API notification for score >= 8 leads."""
     try:
         import httpx as _httpx
+        # V24.2 (L4-8): WhatsApp feature flag guard.
+        # AGENTS.md: "WhatsApp features are disabled — do not re-enable without explicit approval."
+        # Gated behind Firestore feature flag so the data-presence guard below is not
+        # sufficient to re-enable the feature accidentally.
+        try:
+            _ff_doc = _db().collection("system_telemetry").document("feature_flags").get()
+            _ff_data = _ff_doc.to_dict() or {} if _ff_doc.exists else {}
+            if not _ff_data.get("whatsapp_enabled", False):
+                return  # Feature disabled by policy
+        except Exception as _ff_err:
+            log.warning("whatsapp_feature_flag_read_failed", error=str(_ff_err),
+                        fallback="Skipping WhatsApp notification (fail-safe).")
+            return  # Fail-safe: skip on flag read failure
         tenant_doc         = _db().collection("users").document(tenant_id).get().to_dict() or {}
         wa_token_encrypted = tenant_doc.get("wa_token")
         wa_phone_id        = tenant_doc.get("wa_phone_id")

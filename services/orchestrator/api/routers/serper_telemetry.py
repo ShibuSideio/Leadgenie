@@ -131,11 +131,15 @@ def get_serper_logs(uid, tenant_id, user_role):
 
     # ── Today's count sub-query ────────────────────────────────────────────────
     today_sql = f"""
+        -- V24.5 (L6-4): Use CAST(timestamp AS TIMESTAMP) instead of DATE(timestamp)
+        -- to match the fix applied to the main query in V23.4.2.
+        -- DATE(timestamp) fails on STRING-typed timestamp columns.
         SELECT COUNT(*) AS total_today
         FROM `{PROJECT_ID}.swarm_analytics.serper_audit_logs`
-        WHERE DATE(timestamp) = @today
+        WHERE CAST(timestamp AS TIMESTAMP) >= TIMESTAMP(CURRENT_DATE())
+        AND CAST(timestamp AS TIMESTAMP) < TIMESTAMP_ADD(TIMESTAMP(CURRENT_DATE()), INTERVAL 1 DAY)
     """
-    today_params = [_bq.ScalarQueryParameter("today", "DATE", today.isoformat())]
+    today_params = []
 
     try:
         # REGIONALITY FIX: explicit location prevents default US routing (Code 5)
@@ -172,7 +176,10 @@ def get_serper_logs(uid, tenant_id, user_role):
             round(sum(r["result_count"] or 0 for r in logs) / len(logs), 1)
             if logs else 0.0
         )
-        total_credits = sum(r["credit_cost"] or 1 for r in logs)
+        # V24.5 (L6-3): Default NULL credit_cost to 0 (not 1) to prevent inflating
+        # total credits when the field is missing. Previous: `or 1` caused up to 20%
+        # credit inflation on rows with NULL credit_cost.
+        total_credits = sum(r.get("credit_cost") or 0 for r in logs)
 
         log.info("serper_logs_fetched",
                  date_from=date_from.isoformat(),

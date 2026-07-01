@@ -42,6 +42,39 @@ _STOP_WORDS: frozenset[str] = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# V24.2 (L8-2): PII scrubbing — remove personal identifiers before BQ write
+# GDPR Article 5 (data minimisation) + Article 25 (privacy by design)
+# ---------------------------------------------------------------------------
+import re as _re
+_EMAIL_RE = _re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}')
+_PHONE_RE = _re.compile(r'\b(?:\+?\d[\d\s\-\.]{7,14}\d)\b')
+_NAME_RE  = _re.compile(
+    r'\b(?:Mr|Mrs|Ms|Dr|Prof)\s+[A-Z][a-z]+(\s+[A-Z][a-z]+)?\b'
+)
+
+def _scrub_pii(text: str) -> str:
+    """Remove personal identifiers from lead text before BigQuery ingestion.
+
+    Scrubs:
+    - Email addresses \u2192 [EMAIL]
+    - Phone numbers   \u2192 [PHONE]
+    - Salutation-prefixed names (Mr. John Smith) \u2192 [NAME]
+
+    Args:
+        text: Raw lead text (pain_point + dm).
+
+    Returns:
+        Text with PII patterns replaced by placeholder tokens.
+    """
+    if not text:
+        return text
+    text = _EMAIL_RE.sub('[EMAIL]', text)
+    text = _PHONE_RE.sub('[PHONE]', text)
+    text = _NAME_RE.sub('[NAME]', text)
+    return text
+
+
 def extract_ngrams(
     text: str,
     n_min: int = 2,
@@ -79,6 +112,7 @@ def _do_shadow_track(
     pain_point: str,
     tenant_id: str,
     project_id: str,
+    event_type: str = "occurrence",  # "occurrence" | "conversion" | "rejection"
 ) -> None:
     """Synchronous BQ MERGE upsert for Intent_Keywords.
 
@@ -93,7 +127,9 @@ def _do_shadow_track(
     """
     try:
         from google.cloud import bigquery as _bq_lib
-        ngrams = extract_ngrams(pain_point)
+        # V24.2 (L8-2): Scrub PII before N-gram extraction and BQ write.
+        scrubbed_text = _scrub_pii(pain_point)
+        ngrams = extract_ngrams(scrubbed_text)
         if not ngrams:
             log.info(
                 "shadow_tracker_no_ngrams",
@@ -124,15 +160,21 @@ def _do_shadow_track(
             WHEN MATCHED THEN
                 UPDATE SET
                     occurrence_count = T.occurrence_count + 1,
-                    yield_weight     = T.yield_weight + 1.0,
+                    -- V24.5 (L8-3): yield_weight differentiates by event quality:
+                    -- conversion = +2.0 (strong signal), occurrence = +1.0 (neutral),
+                    -- rejection = -0.5 (negative signal)
+                    yield_weight     = T.yield_weight + @yield_delta,
                     last_seen        = S.last_seen
             WHEN NOT MATCHED THEN
                 INSERT (tenant_id, persona_category, n_gram, occurrence_count, yield_weight, last_seen)
                 VALUES (S.tenant_id, S.persona_category, S.n_gram, S.occurrence_count, S.yield_weight, S.last_seen)
         """
+        yield_delta_map = {"conversion": 2.0, "rejection": -0.5, "occurrence": 1.0}
+        yield_delta = yield_delta_map.get(event_type, 1.0)
         params = [
             _bq_lib.ScalarQueryParameter("tenant_id", "STRING", tenant_id),
             _bq_lib.ScalarQueryParameter("cat", "STRING", persona_category),
+            _bq_lib.ScalarQueryParameter("yield_delta", "FLOAT64", yield_delta),
         ] + [
             _bq_lib.ScalarQueryParameter(f"ng_{i}", "STRING", ng)
             for i, ng in enumerate(ngrams)
@@ -159,6 +201,7 @@ def async_shadow_track(
     pain_point: str,
     tenant_id: str,
     project_id: str,
+    event_type: str = "occurrence",
 ) -> None:
     """Spawn a daemon thread to upsert N-grams to Intent_Keywords.
 
@@ -173,7 +216,7 @@ def async_shadow_track(
     try:
         t = threading.Thread(
             target=_do_shadow_track,
-            args=(persona_category, pain_point, tenant_id, project_id),
+            args=(persona_category, pain_point, tenant_id, project_id, event_type),
             daemon=True,
         )
         t.start()

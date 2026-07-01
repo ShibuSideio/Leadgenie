@@ -179,6 +179,17 @@ def run_agent_now(agent_id: str):
         return jsonify({"error": "Unauthorized"}), 403
     
     from services.agent_engine import run_agent
-    result = run_agent(agent_id, agent, db)
-    
-    return jsonify(result), 200
+    try:
+        result = run_agent(agent_id, agent, db)
+        return jsonify(result), 200
+    except Exception as agent_err:
+        from flask import current_app
+        log = current_app.logger
+        import logging
+        logging.getLogger("orchestrator.agents").error(
+            "agent_run_failed",
+            extra={"agent_id": agent_id, "error": str(agent_err)},
+            exc_info=True,
+        )
+        # V24.4 (L9-5): Return structured error without exposing traceback
+        return jsonify({"error": "Agent execution failed", "agent_id": agent_id}), 500

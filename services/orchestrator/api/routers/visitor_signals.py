@@ -68,6 +68,18 @@ def ingest_visitor_signal():
     if not _check_rate_limit(tenant_id):
         return jsonify({"error": "Rate limited"}), 429
 
+    # V24.5 (L7-1): Visitor signal IP→company enrichment provides zero value for
+    # B2C/D2C/B2B2C tenants — individual consumers resolve to their ISP, not a
+    # company. Check the tenant's active campaign types. If visitor_signals_enabled
+    # is explicitly set to False, skip the write and return 204.
+    try:
+        _user_doc = fs.Client().collection("users").document(tenant_id).get()
+        _user_data = _user_doc.to_dict() or {} if _user_doc.exists else {}
+        if _user_data.get("visitor_signals_enabled") is False:
+            return "", 204  # Opt-out
+    except Exception:
+        pass  # Fail-open: write the signal if flag check fails
+
     page_url = (body.get("page_url") or "")[:2048]
     referrer = (body.get("referrer") or "")[:2048]
     page_title = (body.get("page_title") or "")[:512]

@@ -22,7 +22,17 @@ from core.logging import get_logger
 log = get_logger(__name__)
 
 # Rejection reasons that trigger a Negative_Signals insert
-NEG_SIGNAL_REASONS: frozenset[str] = frozenset({"competitor", "author"})
+# V24.5 (L8-4): Expanded rejection reasons that trigger BQ domain suppression.
+# Previously only "competitor" and "author" recorded to swarm_analytics.Negative_Signals.
+# Domains rejected as wrong_industry or not_icp also re-appear in every produce cycle;
+# they must be suppressed in the neg shield to prevent repeated wasteful scoring.
+NEG_SIGNAL_REASONS: frozenset[str] = frozenset({
+    "competitor",    # Competing service offering
+    "author",        # Content author / influencer, not a buyer
+    "wrong_industry", # Domain clearly outside the target industry
+    "not_icp",       # Domain does not match ideal customer profile
+    "low_quality",   # Consistently low-score domain
+})
 
 
 def _do_neg_signal_insert(

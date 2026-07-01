@@ -77,15 +77,32 @@ log = get_logger("orchestrator.v23.internal")
 
 
 def _verify_oidc(request_obj) -> tuple[bool, str]:
-    """Return (is_valid, error_detail)."""
+    """Return (is_valid, error_detail).
+
+    V24.2: Validates OIDC token audience against ORCHESTRATOR_URL to prevent
+    cross-service token replay attacks (OWASP A2:2021).
+    """
+    import os as _os
     auth = request_obj.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return False, "Missing OIDC token"
     token = auth.split("Bearer ")[1]
+    # Audience must match this service's own URL to prevent cross-service replay.
+    # Fall back to None (no audience check) only if URL not configured — logged.
+    from core.config import ORCHESTRATOR_URL as _orch_url  # type: ignore[import]
+    expected_audience = _orch_url.strip() or None
+    if not expected_audience:
+        log.warning("oidc_audience_unconfigured",
+                    note="ORCHESTRATOR_URL not set; OIDC audience validation skipped. "
+                         "Set ORCHESTRATOR_URL to enable cross-service replay protection.")
     try:
         from google.oauth2 import id_token
         from google.auth.transport import requests as google_requests
-        id_token.verify_oauth2_token(token, google_requests.Request())
+        id_token.verify_oauth2_token(
+            token,
+            google_requests.Request(),
+            audience=expected_audience,
+        )
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -907,17 +924,26 @@ def cron_sweep():
                             if lr.get().exists:
                                 lr.delete()
                                 zombie_locks_released += 1
-                        except Exception:
-                            pass
+                        except Exception as _lock_del_err:
+                            log.error("zombie_lock_release_failed",
+                                      doc_id=zombie_doc.id,
+                                      lock_entity=lock_entity,
+                                      error=str(_lock_del_err))
                     zombie_tenant = zombie_data.get("tenant_id")
                     if zombie_tenant:
                         try:
                             _db().collection("users").document(zombie_tenant).update(
                                 {"wallet.reserved_credits": _fs.Increment(-1)}
                             )
-                        except Exception:
-                            pass
-            except Exception:
+                        except Exception as _credit_refund_err:
+                            log.error("zombie_credit_refund_failed",
+                                      doc_id=zombie_doc.id,
+                                      tenant_id=zombie_tenant,
+                                      error=str(_credit_refund_err))
+            except Exception as _zombie_doc_err:
+                log.warning("zombie_doc_recovery_failed",
+                            doc_id=zombie_doc.id if hasattr(zombie_doc, 'id') else 'unknown',
+                            error=str(_zombie_doc_err))
                 continue
     except Exception as zse:
         audit_trail.append(f"⚠️ Zombie sweep error: {zse}")
@@ -1144,12 +1170,25 @@ def trigger_inbound_sentiment():
     The job runs asynchronously — this endpoint always returns 202 within ~5 ms.
     """
     # Verify caller is Cloud Scheduler / internal (reuse existing OIDC check pattern)
-    internal_secret = __import__("os").environ.get("INTERNAL_CRON_SECRET", "")
+    import os as _os
+    internal_secret = _os.environ.get("INTERNAL_CRON_SECRET", "")
     provided_secret = request.headers.get("X-Internal-Secret", "")
     cloud_tasks_hdr = request.headers.get("X-CloudTasks-QueueName", "")
 
-    if internal_secret and provided_secret != internal_secret and not cloud_tasks_hdr:
-        log.warning("inbound_sentiment_trigger_unauthorized")
+    # V24.2 (L9-2): If INTERNAL_CRON_SECRET is not configured, ALL requests are
+    # rejected to prevent unauthenticated access. Require explicit opt-out by
+    # setting INTERNAL_CRON_SECRET to a non-empty value.
+    if not internal_secret:
+        log.error(
+            "inbound_sentiment_trigger_secret_not_configured",
+            note="INTERNAL_CRON_SECRET env var is not set. All requests rejected. "
+                 "Set this env var in Cloud Run to enable the inbound radar trigger.",
+        )
+        return jsonify({"error": "Service not configured — contact administrator"}), 503
+    if provided_secret != internal_secret and not cloud_tasks_hdr:
+        log.warning("inbound_sentiment_trigger_unauthorized",
+                    has_queue_header=bool(cloud_tasks_hdr),
+                    has_secret=bool(provided_secret))
         return jsonify({"error": "unauthorized"}), 401
 
     import threading
