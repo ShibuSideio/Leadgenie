@@ -415,23 +415,8 @@ class InboundSentimentService:
         """Pre-screens a URL to check if it matches directory, listicle, or competitor signatures."""
         url_lower = url.lower()
 
-        # 1. Directory and review aggregators blocklist
-        noise_domains = {
-            "yelp.com", "expertise.com", "g2.com", "capterra.com", "upwork.com",
-            "glassdoor.com", "indeed.com", "linkedin.com/jobs", "quora.com",
-            "wikipedia.org", "amazon.com", "zoominfo.com", "crunchbase.com",
-            "trustpilot.com/review"
-        }
-        if any(domain in url_lower for domain in noise_domains):
-            return True
-
-        # 2. Competitors URL check
-        for comp in self.competitors:
-            comp_clean = comp.lower().strip().replace(" ", "")
-            if comp_clean and len(comp_clean) > 3 and comp_clean in url_lower:
-                return True
-
-        # 3. Social Media Bypass: Skip blog/listicle path patterns for major social hubs
+        # 1. Social Media Bypass: Skip blog/listicle path patterns for major social hubs
+        # V24.1.25 — Moved to top to prevent Quora/Reddit being caught by general noise_domains
         social_domains = {
             "facebook.com", "reddit.com", "twitter.com", "x.com", "quora.com",
             "news.ycombinator.com"
@@ -439,13 +424,35 @@ class InboundSentimentService:
         if any(social in url_lower for social in social_domains):
             return False
 
+        # 2. Directory and review aggregators blocklist
+        noise_domains = {
+            "yelp.com", "expertise.com", "g2.com", "capterra.com", "upwork.com",
+            "glassdoor.com", "indeed.com", "linkedin.com/jobs", "quora.com",
+            "wikipedia.org", "amazon.com", "zoominfo.com", "crunchbase.com",
+            "trustpilot.com/review"
+        }
+        for domain in noise_domains:
+            if domain in url_lower:
+                log.info("inbound_url_filtered_domain", url=url[:80], reason=f"domain:{domain}")
+                return True
+
+        # 3. Competitors URL check
+        for comp in self.competitors:
+            comp_clean = comp.lower().strip().replace(" ", "")
+            if comp_clean and len(comp_clean) > 3 and comp_clean in url_lower:
+                log.info("inbound_url_filtered_competitor", url=url[:80], reason=f"competitor:{comp_clean}")
+                return True
+
         # 4. Path keywords indicating listicles, blogs, and other non-footprint pages
+        # V24.1.25 — Removed /post/ and /article/ as these often house legitimate forum threads
         noise_patterns = [
-            r"/blog/", r"/article/", r"/post/", r"/best-", r"/top-", r"/vs/",
+            r"/blog/", r"/best-", r"/top-", r"/vs/",
             r"/compare/", r"/pricing", r"/login", r"/signup", r"/careers", r"/jobs"
         ]
-        if any(re.search(pat, url_lower) for pat in noise_patterns):
-            return True
+        for pat in noise_patterns:
+            if re.search(pat, url_lower):
+                log.info("inbound_url_filtered_pattern", url=url[:80], reason=f"pattern:{pat}")
+                return True
 
         return False
 

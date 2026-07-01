@@ -40,7 +40,7 @@ log = get_logger("orchestrator.inbound_sentiment_job")
 BQ_DATASET  = os.environ.get("BQ_DATASET", "leads_intelligence")
 BQ_KW_TABLE = f"{PROJECT_ID}.{BQ_DATASET}.Intent_Keywords"
 
-MIN_INTENT_SCORE = 0.55   # Minimum score to write a signal to Firestore
+MIN_INTENT_SCORE = 0.45   # Minimum score to write a signal to Firestore (V24.1.25 — lowered from 0.55)
 MAX_SIGNALS_PER_TENANT = 25  # Serper quota guard per run
 RLHF_BOOST  = 0.12        # yield_weight increment for hot keywords
 RLHF_MIN    = 0.70        # Only boost keywords from signals above this score
