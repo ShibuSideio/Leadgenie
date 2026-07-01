@@ -858,6 +858,45 @@ Return ONLY the JSON object. No explanation, no markdown."""
                         note="Falling back to keyword-based queries.")
             ctx.intents = []
 
+    # ── Post-generation FAQ-opener sanitizer (V24.5.7) ─────────────────────
+    # For B2B vectors: drop translated_queries that start with FAQ-phrase openers.
+    # Despite the ANTI-FAQ MANDATE in TASK 3, Gemini occasionally generates
+    # "How do you...", "What are good alternatives...", "What is the best way to..."
+    # These match every SEO/marketing agency blog post and return zero buyers.
+    # The Gemini pre-filter then classifies the results as Low confidence, so
+    # these queries burn 1 credit for 0 leads. Drop them before Serper is called.
+    if not _is_consumer and ctx.intents:
+        _FAQ_OPENERS = (
+            "how do you ", "how do we ", "how do i ", "how to ",
+            "what are good ", "what are the best ", "what is the best ",
+            "what are common ", "what is the difference ", "what are some ",
+            "tips for ", "how can we ", "how can i ", "how can you ",
+            "why do ", "why does ", "why is ",
+            "best practices ", "guide to ", "introduction to ",
+        )
+        _b2b_clean_intents = []
+        for tq in ctx.intents:
+            tq_lower = tq.lower().lstrip('"\'')
+            if any(tq_lower.startswith(opener) for opener in _FAQ_OPENERS):
+                log.warning(
+                    "query_brain_faq_opener_scrubbed",
+                    intent=tq[:100],
+                    campaign_id=ctx.campaign_id,
+                    note="FAQ-opener detected post-generation. Dropping to avoid SEO-article Serper results.",
+                )
+            else:
+                _b2b_clean_intents.append(tq)
+        if _b2b_clean_intents:
+            ctx.intents = _b2b_clean_intents
+        elif ctx.intents:
+            # All intents were FAQ — keep the best one (least-FAQ) to avoid zero queries
+            log.warning(
+                "query_brain_all_b2b_intents_faq",
+                campaign_id=ctx.campaign_id,
+                note="ALL translated_queries were FAQ openers. Keeping 1 as last resort.",
+            )
+            ctx.intents = ctx.intents[:1]
+
     historical_str = ""
     if ctx.pain_points:
         phrases_esc  = [f'"{p}"' for p in ctx.pain_points[:3]]

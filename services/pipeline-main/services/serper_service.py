@@ -153,6 +153,16 @@ _ENTERPRISE_DOMAINS = [
 _NOISE_PATHS    = ["/legal", "/pricing", "/docs", "/author/", "/login"]
 _NOISE_SNIPPETS = ["sign in", "access denied", "forgot password", "please enable cookies"]
 
+# V24.5.7: CDN/static subdomain prefixes. These are asset-delivery servers, not
+# business websites. They return empty PRISM scrapes and waste 3-5 Serper credits.
+# The root domain may be a legitimate company (cdngetgo.com), but the 'assets.'
+# subdomain prefix unambiguously identifies a content delivery node, not a page.
+_CDN_SUBDOMAIN_PREFIXES = (
+    "assets.", "cdn.", "static.", "img.", "images.",
+    "media.", "s3.", "storage.", "files.", "dl.",
+    "download.", "content.",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -170,11 +180,12 @@ def extract_root_domain(url: str) -> str:
 
 
 def filter_serper_noise(serper_results: list) -> list:
-    """Remove enterprise, noise-path, and bot-page results from Serper output.
+    """Remove enterprise, noise-path, CDN, and bot-page results from Serper output.
 
     V24.1.1 FIX: Uses proper domain extraction and path-segment matching
     instead of substring. Prevents false positives like 'caribm.com' matching
     'ibm.com' or '/doctrine' matching '/docs'.
+    V24.5.7 FIX: Added CDN subdomain detection (_CDN_SUBDOMAIN_PREFIXES).
     """
     clean = []
     for r in serper_results:
@@ -183,6 +194,15 @@ def filter_serper_noise(serper_results: list) -> list:
         # V24.1.1: Use root domain extraction instead of substring match
         link_domain = extract_root_domain(link)
         if link_domain in _ENTERPRISE_DOMAINS:
+            continue
+        # V24.5.7: Block CDN/static subdomains — these are asset servers, not business pages.
+        # extract_root_domain strips 'www.' but keeps other subdomains.
+        # Check if the netloc (before root domain stripping) starts with a CDN prefix.
+        try:
+            raw_netloc = urlparse(link).netloc.lower()
+        except Exception:
+            raw_netloc = link_domain
+        if any(raw_netloc.startswith(pfx) for pfx in _CDN_SUBDOMAIN_PREFIXES):
             continue
         # V24.1.1: Path-segment matching — check that the path segment starts with noise prefix
         try:

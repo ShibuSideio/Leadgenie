@@ -496,6 +496,29 @@ def dispatch():
         if not target_domain:
             return {"url": url, "status": "skip_no_domain"}
 
+        # V24.5.7: Pre-PRISM TLD gate. Non-business TLD domains (academic, government,
+        # nonprofit, personal blog) were previously gated only inside deep_context_serper_dork()
+        # AFTER PRISM already ran (costing 3-5 credits per URL). This gate fires before PRISM
+        # so those credits are never spent.
+        # NOTE: .org is a broad block. Legitimate SaaS companies occasionally use .org
+        # (e.g. Wikipedia is .org, not a target). Accept the rare false negative \u2014
+        # the net credit saving is significant (3-8 credits per .org URL per cycle).
+        _NON_BUSINESS_TLD_GATE = (
+            ".edu", ".ac.in", ".ernet.in", ".gov", ".gov.in", ".mil",
+            ".org",   # nonprofits, trade associations, academic bodies
+            ".blog",  # personal/corporate blog hosting TLD
+            ".dev",   # personal developer portfolios
+            ".page",  # Google Sites personal pages
+        )
+        if any(target_domain.endswith(tld) for tld in _NON_BUSINESS_TLD_GATE):
+            log.info(
+                "dispatch_pre_prism_tld_gate",
+                url=url[:80],
+                domain=target_domain,
+                note="Non-business TLD blocked before PRISM. Saves 3-8 credits vs enrichment-stage gate.",
+            )
+            return {"url": url, "status": "skip_non_business_tld"}
+
         is_social = any(target_domain.endswith(s) for s in SOCIAL_SET)
         is_shared = any(target_domain.endswith(s) for s in SHARED_PLATFORMS)
         # P3 FIX: B2C/Real Estate campaigns use URL-path dedup (matches produce.py)
