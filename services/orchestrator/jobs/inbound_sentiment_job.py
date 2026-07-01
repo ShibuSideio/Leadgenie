@@ -162,17 +162,64 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
         persona = {}
 
         persona_id = camp.get("persona_id")
+        if persona_id:
+            persona_snap = (
+                db.collection("tenant_profiles")
+                .document(uid)
+                .collection("personas")
+                .document(persona_id)
+                .get()
+            )
+            if not persona_snap.exists:
+                # Persona was deleted after campaign creation — fall through to bio fallback
+                log.warning(
+                    "inbound_job_persona_missing",
+                    uid=uid[:8],
+                    persona_id=persona_id,
+                    note="Persona doc not found — falling back to campaign bio.",
+                )
+                persona_id = None
+            else:
+                persona = persona_snap.to_dict() or {}
+                if not (persona.get("uid") == uid or persona.get("tenant_id") == uid):
+                    log.warning(
+                        "invalid_persona_data",
+                        uid=uid[:8],
+                        persona_id=persona_id,
+                        reason="Persona multi-tenancy violation detected.",
+                    )
+                    continue  # Hard skip on ownership violation — security boundary
+
         if not persona_id:
-            continue
-
-        persona_snap = db.collection("tenant_profiles").document(uid).collection("personas").document(persona_id).get()
-        if not persona_snap.exists:
-            continue
-        persona = persona_snap.to_dict() or {}
-
-        if not (persona.get("uid") == uid or persona.get("tenant_id") == uid):
-            log.warning("invalid_persona_data", uid=uid[:8], persona_id=persona_id, reason="Persona multi-tenancy violation detected.")
-            continue  # Skip this tenant, don't crash the whole job
+            # V24.5.1: Fall back to campaign bio + keywords instead of silently skipping.
+            # Campaigns created before the Persona Vault feature have no persona_id.
+            # Skipping them meant the Inbound Radar produced zero signals for all pre-Vault tenants.
+            camp_bio = camp.get("persona_bio") or camp.get("bio") or ""
+            camp_kws = camp.get("persona_keywords") or camp.get("keywords") or ""
+            camp_name = camp.get("persona_name") or camp.get("name") or "Default"
+            if not camp_bio:
+                log.info(
+                    "inbound_job_no_bio_skip",
+                    uid=uid[:8],
+                    campaign_id=camp["campaign_id"],
+                    note="No bio or persona — skipping campaign.",
+                )
+                continue
+            # Synthetic persona from campaign fields
+            persona = {
+                "uid":      uid,
+                "tenant_id": uid,
+                "name":     camp_name,
+                "bio":      camp_bio,
+                "keywords": camp_kws,
+                "is_legacy": True,
+            }
+            log.info(
+                "inbound_job_persona_fallback",
+                uid=uid[:8],
+                campaign_id=camp["campaign_id"],
+                note="No persona_id — using campaign bio as synthetic persona.",
+            )
 
         try:
             # 1. Run web and social inbound sentiment service

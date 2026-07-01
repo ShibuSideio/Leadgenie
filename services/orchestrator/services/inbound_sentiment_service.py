@@ -235,6 +235,8 @@ Analyze the Google snippet in relation to the triggering query. If the query con
 
 SELLER EXCLUSION RULE: If the content represents a provider, competitor, broker, agent, vendor, or seller offering the same or similar services as described in the system solver description (e.g., real estate agents/brokers in property campaigns, immigration agencies in visa/study campaigns, or lead generation agencies in outbound sales campaigns), you MUST classify them as NONE with an intent_score of 0.0. Do not capture competitors.
 
+NON-COMMERCIAL ENTITY EXCLUSION: If the content originates from or describes any of the following, you MUST classify them as NONE with an intent_score of 0.0 — they are not commercial buyers and will never convert: government ministries, government departments (e.g., Dept of Commerce, Dept of Trade, Ministry of Finance), municipalities, public sector agencies, central banks, regulatory authorities, trade promotion bodies, embassies, consulates, non-profit organisations, charities, academic institutions, or intergovernmental organisations (UN, WTO, IMF, etc.). A government page promoting "market access" or "buyer-seller meets" is a policy initiative, not a buyer signal.
+
 INFORMATIONAL FILTER: General educational articles, blogs, listicles, directories, comparisons, news stories, and guides that do NOT contain a direct complaint, support ticket, or active buying query from a specific individual or company must be classified as NONE with an intent_score of 0.0."""
     try:
         import vertexai
