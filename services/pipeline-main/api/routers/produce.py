@@ -389,7 +389,18 @@ def produce():
     # ------------------------------------------------------------------
     # Snippet cache: persist snippets universally for two-stage funnel
     # ------------------------------------------------------------------
-    shared_platforms = {"linkedin.com", "medium.com", "substack.com", "wordpress.com", "github.io"}
+    # V24.5.4 FIX: Added buyer-forum platforms to shared_platforms.
+    # Without this, B2B campaigns deduplicate reddit.com to ONE slot — meaning
+    # 19 out of 20 Reddit buyer pain posts are silently dropped as domain-level
+    # duplicates. Each Reddit/Quora/HN thread is a UNIQUE lead, not a domain.
+    shared_platforms = {
+        "linkedin.com", "medium.com", "substack.com", "wordpress.com", "github.io",
+        # Buyer forum platforms — each thread/post is a unique lead (URL-path dedup)
+        "reddit.com", "quora.com", "stackexchange.com", "stackoverflow.com",
+        "news.ycombinator.com",   # Hacker News
+        "community.hubspot.com", "community.g2.com",  # vendor community boards
+        "forum.growthackers.com", "indiehackers.com",
+    }
     for surl, meta in snippet_db.items():
         s_domain    = extract_root_domain(surl)
         is_social   = any(s_domain.endswith(d) for d in _SOCIAL_DOMAINS_PRODUCER)
@@ -483,8 +494,8 @@ def produce():
             for s in _SOCIAL_DOMAINS_PRODUCER
         )
         f_is_shared = any(
-            f_domain.endswith(s)
-            for s in shared_platforms
+            f_domain.endswith(d)
+            for d in shared_platforms
         )
         # P3 FIX: B2C campaigns use URL-path dedup (matches snippet cache + existing leads)
         _is_b2c = _is_consumer_archetype(sourcing_vector)
