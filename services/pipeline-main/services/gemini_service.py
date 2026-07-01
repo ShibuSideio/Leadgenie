@@ -135,21 +135,37 @@ TARGET LOCATION: '{location_target}'
 # STEP 1 — OSINT SCORING MATRIX
 Evaluate the snippets purely on RAW INTENT and SYMPTOMS, ignoring corporate polish.
 
-High Confidence: Raw, unpolished footprints. This includes niche forum complaints, municipal PDFs, unoptimized local business pages, or direct expressions of pain/need that match the USER BIO. "Ugly" is good if the intent is strong.
+High Confidence: Raw, unpolished footprints. This includes niche forum complaints, municipal PDFs, unoptimized local business pages, or direct expressions of pain/need that match the USER BIO. "Ugly" is good if the intent is strong. Also includes community posts, Reddit threads, Slack/Discord exports, LinkedIn comments — where a PRACTITIONER is actively venting a problem they are experiencing RIGHT NOW.
 
-Medium Confidence: Ambiguous intent, but highly relevant industry or location.
+Medium Confidence: Ambiguous intent, but highly relevant industry or location. Includes: news articles about company challenges, job posts implying a capability gap, product reviews expressing frustration.
 
-Low Confidence: SEO-optimized listicles, directories (Yelp, G2, etc.), marketing blogs, generic news articles, or clear competitors/vendors offering matching lead generation, email outreach, or B2B data services themselves. High polish or competitor offerings mean Low Confidence.
+Low Confidence: SEO-optimised listicles, "Top 10" posts, how-to guides, directories (Yelp, G2, etc.), generic educational articles, or clear competitors/vendors SELLING the same service as in the USER BIO.
 
 # STEP 2 — UNIVERSAL RULES
 SOCIAL PLATFORM RULE: Evaluate the SPECIFIC POST intent, not the platform's general purpose.
 GEO RULE: Wrong region → Low.
-COMPETITOR RULE: If the snippet or URL belongs to a competitor offering the same or similar services as described in the USER BIO, classify it as Low Confidence.
+COMPETITOR RULE: If the snippet belongs to a vendor SELLING the same service as the USER BIO, classify it as Low.
 
-# STEP 3 — CONTEXT-AWARE INFERENCE (B2C/D2C)
-For B2C or D2C campaigns, the snippet field in the input JSON may contain text prepended with 'Query: <the triggering search query>'. Use the triggering query context to reverse-engineer the thread's conversational state. If the query contains dialog dorks (like "pm me" or "still available"), analyze whether the snippet contains replies or comments suggesting active consumer/buyer intent or a direct discussion relevant to the USER BIO. Do not automatically classify forum posts or social media snippets as Low Confidence if the query context indicates an active B2C/D2C discussion thread.
+# STEP 3 — CRITICAL: B2B BUYER FORUM EXCEPTION (V24.5.3)
+MARKETING BLOG vs BUYER FORUM: Do NOT classify as Low merely because a URL domain is marketing-related.
+A practitioner COMPLAINING about a marketing problem is a HIGH-CONFIDENCE BUYER, not a blog.
+These are HIGH regardless of domain:
+- "We've been through 3 brand agencies and still can't get consistent messaging" (Reddit/forum)
+- "Our attribution data has been completely wrong since the iOS update" (LinkedIn comment/community)
+- "Fed up with our marketing automation — the lead scoring is broken" (forum post)
+- "We tried HubSpot and Marketo and neither solved our ROI tracking problem" (community)
+These speakers are experiencing pain with budget to solve it.
+
+These are LOW (look similar but are NOT buyer signals):
+- "5 ways to improve your brand narrative in 2024" (listicle — no buyer present)
+- "How to fix attribution tracking" (how-to guide — educational, not a buyer complaint)
+- "Marketing automation compared: HubSpot vs Marketo" (vendor comparison article)
+
+# STEP 4 — CONTEXT-AWARE INFERENCE (B2C/D2C)
+For B2C or D2C campaigns, the snippet field may contain text prepended with 'Query: <the triggering search query>'. Use the triggering query context to reverse-engineer the thread state. If the query contains dialog dorks (like "pm me" or "still available"), analyze whether the snippet contains replies suggesting active consumer/buyer intent. Do not automatically classify forum posts or social media snippets as Low if the query context indicates an active B2C/D2C discussion thread.
 
 Snippets: {json.dumps(snippets)}"""
+
 
     try:
         tiered = call_gemini_2_5(prompt, expect_json=True, response_schema=_TIERING_SCHEMA)
