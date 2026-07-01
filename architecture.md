@@ -1,6 +1,6 @@
 # LeadGenie (Sideio) — Platform Architecture V24.5
 **Technical Specification Document**
-*Last Updated: 2026-07-01 | Version: V24.5.0 — Enterprise Remediation Complete*
+*Last Updated: 2026-07-01 | Version: V24.5.7 — Post-RCA Pipeline Hardening*
 
 ---
 
@@ -247,6 +247,10 @@ Core atomic lead document. Document ID is a deterministic SHA-256 hash.
 
 **Status Enum:** `processing` → `new` → `reviewed` → `contacted` → `converted` | `ignored` | `failed` | `enrichment_pending`
 
+> [!NOTE]
+> The GET /api/leads feed (V24.5.6) filters exclusively on `status == "new"`. Zombie stubs
+> (`processing`, `failed`, `enrichment_pending`) are NOT shown in the UI feed.
+
 **Key fields (V24.2+):**
 - `normalized_score` (0–100): unified scale across engines. Outbound = `score × 10`. Inbound = `intent_score × 100`
 - `origin_engine`: `"cartographer"` (Serper-driven) or `"autonomous"` (nightly engine) or `"inbound"` (Inbound Radar)
@@ -254,7 +258,11 @@ Core atomic lead document. Document ID is a deterministic SHA-256 hash.
 - `enrichment_pending`: set when Medium-tier URL has < 300 chars of text — awaiting full scrape (V24.4)
 
 **Score gate:** Only leads scoring `>= 7` are written as `"new"`. Leads below 7 delete the document.
-**Deduplication key:** `sha256(tenant_id + '_' + root_domain)` — same domain can never appear twice per tenant.
+
+**Deduplication key:**
+- **Social + shared-platform URLs** (`linkedin.com`, `reddit.com`, `quora.com`, `stackexchange.com`, `medium.com`, `substack.com`, `wordpress.com`, `github.io`, `news.ycombinator.com`, `indiehackers.com`, and vendor community boards): `sha256(tenant_id + '_' + netloc + path)` — each thread/post is a unique lead.
+- **B2B non-social domains** (all others for B2B campaigns): `sha256(tenant_id + '_' + root_domain)` — domain-level dedup prevents re-scraping the same company.
+- **Consumer archetypes (B2C/D2C/B2B2C)**: always URL-path dedup regardless of domain.
 
 ### 4.6 `global_lead_locks` Collection
 Cross-tenant exclusivity lock. Prevents two tenants from being served the same lead.
@@ -463,16 +471,25 @@ payload = {"q": f"{query} AND {location}", "num": 20, "location": location, "gl"
 response = httpx.post("https://google.serper.dev/search", headers={"X-API-KEY": key}, data=payload)
 ```
 
-Post-flight noise filter removes enterprise/aggregator domains, noise URL paths (`/legal`, `/pricing`, `/docs`, `/login`), and noise snippet patterns.
+Post-flight noise filter (`filter_serper_noise`) removes:
+1. **Enterprise/aggregator domains** (`ibm.com`, `amazon.com`, `g2.com`, `capterra.com`, `zoominfo.com`)
+2. **Noise URL paths** (`/legal`, `/pricing`, `/docs`, `/login`, `/author/`)
+3. **Bot/auth page snippets** (`"sign in"`, `"access denied"`, `"forgot password"`)
+4. **CDN/asset subdomains** (V24.5.7): `assets.*`, `cdn.*`, `static.*`, `img.*`, `images.*`, `media.*`, `s3.*`, `storage.*`, `files.*`, `dl.*`, `download.*`, `content.*` — these are asset delivery nodes, not business pages. Blocked before queue entry to save 3-5 credits per URL.
 
 **Queue backpressure (V24.4):** If `unprocessed_queue` depth > 150, produce skips Serper fetch entirely (`200 skipped_queue_full`). Prevents `[:200]` trimming from discarding fresh signals when the consumer hasn't caught up.
 
+**B2B Forum Dedup (V24.5.5):** Reddit, Quora, StackExchange, HN and other buyer forum platforms are in `shared_platforms` — each thread/post gets URL-path dedup, not domain-level collapse. Without this, all Reddit URLs for a B2B campaign would collapse to one slot.
+
 ### Step 7: Gemini Pre-Filter Gate
-All deduplicated Serper snippets pass through a Gemini LLM gate before scraping:
+All deduplicated Serper snippets pass through a Gemini `gemini-2.5-flash` LLM gate before scraping:
 - Rejects: SEO blogs, competitors, business directories, manufacturers
+- **B2B Buyer Forum Exception (V24.5.4):** Marketing-domain URLs with active practitioner complaint signals (frustrated tone, first-person pain, tool failure vocabulary) are classified as **High confidence** — not dropped as "marketing blog = Low". This was the root cause of zero leads in pre-V24.5.4 runs.
 - For consumer campaigns: evaluates the specific post intent, not the platform
 - Geo rule: if the site explicitly serves a different region → reject
-- Failure: pre-filter gate timeout is logged at `WARNING` with impact note (V24.4)
+- Failure: pre-filter gate timeout → all URLs approved as High-tier (fail-open, logged at `WARNING`)
+
+**B2B FAQ Sanitizer (V24.5.7):** After Gemini generates `translated_queries`, a post-generation filter drops any query starting with FAQ openers (`"how do you"`, `"what are good"`, `"what is the best"`, `"tips for"`, etc.) that match SEO agency blogs rather than buyer forums. If all queries are FAQ, one is kept as a last resort.
 
 ### Step 8: Global Exclusivity Lock + Deduplication
 ```python
@@ -481,11 +498,13 @@ if lock_doc.exists and lock_doc.to_dict().get("locked_until") > now_utc:
     continue  # Locked by another tenant for 14 days
 lock_ref.set({"locked_until": now_utc + timedelta(days=14)})
 
-lead_id = hashlib.sha256(f"{tenant_id}_{root_domain}".encode()).hexdigest()
+lead_id = hashlib.sha256(f"{tenant_id}_{root_domain_or_url_path}".encode()).hexdigest()
 doc_ref.create({"status": "processing", ...})  # Raises AlreadyExists if duplicate
 ```
 
 Lock-delete failures are logged at `ERROR` (V24.2 — was silent `except: pass`).
+
+**Pre-PRISM TLD gate (V24.5.7):** Before running any PRISM scraping, `_process_single_url()` checks the domain TLD against a non-business list (`.org`, `.edu`, `.gov`, `.blog`, `.dev`, `.page`). If matched, the URL returns `skip_non_business_tld` immediately — saving 3–8 Serper credits that would otherwise be spent on PRISM WalledGardenHook queries + enrichment. Previously, this check only fired inside `deep_context_serper_dork()` *after* PRISM had already run.
 
 ### Step 9: Three-Tier Scraping Strategy
 
@@ -630,8 +649,12 @@ On failure (V24.4):
 2. A 3-hour retry Cloud Task is enqueued to `/api/internal/crm-retry`
 3. If task enqueue also fails → `crm_delivery_status` set to `"failed_permanent"`
 
-### 10.2 GET /api/leads Filtering (V24.4)
+### 10.2 GET /api/leads (V24.5.6)
 Supports `?sort_by=score&min_score=N` query params for CRM-style pipeline views.
+
+**V24.5.6 fixes applied:**
+- `min_score` filter now compares against `normalized_score` (0–100) directly. Previously multiplied `min_score × 10` again, making the filter 10× too aggressive (e.g., `min_score=5` filtered `normalized_score >= 50` instead of `>= 5`).
+- Query now includes `.where(status == "new")` — previously returned all statuses including zombie `processing` stubs and `enrichment_pending` parking stubs.
 
 ---
 
@@ -788,6 +811,22 @@ log.warning("lead_lock_delete_failed",
 
 ---
 
+## 17. KNOWN OPEN ISSUES
+
+These are structural issues identified in the V24.5.x post-RCA audit. They do not block lead generation but represent technical debt or degraded capabilities.
+
+| # | Severity | Component | Issue | Impact |
+|---|---|---|---|---|
+| I-1 | 🟠 High | `neg_shield.py` | `swarm_analytics.Negative_Signals` BQ table missing or empty → `neg_shield_fetch_failed` every cycle | RLHF negative signal loop broken; no `-site:` exclusions applied to Serper queries |
+| I-2 | 🟠 High | `serper_service.py` | BQ audit telemetry schema mismatch → `serper_audit_broker_non_200` on every call | Credit tracking in BQ has zero rows; `swarm_analytics` audit table is dark |
+| I-3 | 🟡 Medium | `dispatch.py` | Velocity gate Firestore composite index missing → `velocity_gate_disabled_firestore_error` | All Medium-tier URLs auto-approved; no volume throttling |
+| I-4 | 🟡 Medium | `orchestrator` | `INTERNAL_CRON_SECRET` env var not set on Cloud Run → Inbound Radar returns 503 on every cron trigger | Inbound Radar cron non-functional; manual signal intake still works |
+| I-5 | 🟡 Medium | `dispatch.py` | `enrichment_pending` leads not counted in velocity gate | Velocity gate under-counts active leads when Medium-tier thin content is parked |
+
+**Resolution priority:** I-1 and I-2 share the same root cause (BQ dataset not initialised). Creating the `swarm_analytics.Negative_Signals` table and fixing the audit telemetry schema resolves both. I-4 requires setting `INTERNAL_CRON_SECRET` as a Cloud Run env var.
+
+---
+
 ## 17. VERSION HISTORY (RECENT)
 
 | Version | Date | Key Changes |
@@ -802,3 +841,8 @@ log.warning("lead_lock_delete_failed",
 | V24.1.22 | 2026-06-30 | Inbound Radar bypass for social media domain listicle path |
 | V24.1.21 | 2026-06-30 | GMB review scanning via CID, SEO noise pre-screening |
 | V24.1.20 | 2026-06-29 | Query spacing syntax hardening across all execution channels |
+| **V24.5.7** | **2026-07-01** | **CDN subdomain pre-queue filter; pre-PRISM TLD gate (.org/.edu/.gov/.blog/.dev); B2B FAQ-opener post-generation sanitizer in query_brain** |
+| **V24.5.6** | **2026-07-01** | **GET /api/leads double-multiply score bug fixed (min_score×10 removed); status='new' filter added to leads feed (zombie stubs no longer shown)** |
+| **V24.5.5** | **2026-07-01** | **B2B forum dedup collapse fixed — reddit.com, quora.com, stackexchange.com, stackoverflow.com, HN, vendor community boards added to shared_platforms for URL-path dedup** |
+| **V24.5.4** | **2026-07-01** | **Gemini pre-filter B2B Buyer Forum Exception — marketing-domain URLs with active practitioner complaint signals now classified High (was wrongly Low = zero leads)** |
+| **V24.5.3** | **2026-07-01** | **TASK 3 Anti-FAQ Mandate; .blog/.dev/.page/.app TLD blocking; query_brain specificity hardening** |
