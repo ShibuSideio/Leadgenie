@@ -75,13 +75,22 @@ _DEFAULT_BLACKLIST = (
 # the campaign's effective_bio and keywords — NOT inferred from the vector.
 # ---------------------------------------------------------------------------
 
-# V24.3 (L2-2): Imported from core.constants — single source of truth.
-# Previously duplicated here and in serper_service.py with a "MUST stay in sync" warning.
-from core.constants import (  # type: ignore[import]
-    CONSUMER_ARCHETYPES as _CONSUMER_ARCHETYPES,
-    D2C_ARCHETYPES as _D2C_ARCHETYPES,
-    B2B2C_ARCHETYPES as _B2B2C_ARCHETYPES,
-)
+# V24.3 (L2-2): Import from core.constants — single source of truth at runtime.
+# Falls back to inline definitions when core is not on sys.path (e.g. the
+# smoke-gate loads this file via importlib in an isolated namespace).
+try:
+    from core.constants import (  # type: ignore[import]
+        CONSUMER_ARCHETYPES as _CONSUMER_ARCHETYPES,
+        D2C_ARCHETYPES      as _D2C_ARCHETYPES,
+        B2B2C_ARCHETYPES    as _B2B2C_ARCHETYPES,
+    )
+except ImportError:
+    # Fallback — kept in sync with core/constants.py manually.
+    # The CI smoke gate verifies this file in isolation; the live container
+    # always has core/ on PYTHONPATH so the import above succeeds.
+    _CONSUMER_ARCHETYPES: frozenset = frozenset({"B2C", "B2B2C", "D2C"})
+    _D2C_ARCHETYPES:      frozenset = frozenset({"D2C"})
+    _B2B2C_ARCHETYPES:    frozenset = frozenset({"B2B2C"})
 
 
 def _is_consumer_archetype(vector: str) -> bool:
