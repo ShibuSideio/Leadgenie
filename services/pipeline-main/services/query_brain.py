@@ -490,7 +490,23 @@ Rule: NEVER use wildcard characters in the `site:` operator (e.g. do not output 
 
 # TASK 3 — INTENT EXPANSION
 Audience: '{kw_str}'. Context: '{vector_label}'.
-Translate the pain point into exactly 3 natural-language conversational queries that a frustrated operator or buyer might ask on a niche forum, help board, or community group. Think: user complaints, software comparisons, support requests. Do not use generic commercial vendor keywords.
+Translate the pain point into exactly 3 natural-language conversational queries that a SPECIFIC FRUSTRATED PRACTITIONER would type into a niche forum, Reddit, or community Slack — NOT a question that a marketing blog would answer.
+
+ANTI-FAQ MANDATE: NEVER generate generic question templates. The following openings are BANNED because they match SEO articles, not real buyer pain:
+- "How do B2B companies..." / "How do I..." / "What is the best way to..." / "What are the biggest challenges..."
+- "How can we..." / "What are common mistakes..." / "Tips for..."
+These are FAQ phrases. Every marketing agency blog ranks for them. They return zero buyers.
+
+INSTEAD, write queries that sound like a specific frustrated person venting in a forum thread:
+- "Anyone else fed up with [specific platform] attribution being completely wrong?"
+- "We've tried 3 marketing automation tools and they all [specific failure]"
+- "Our brand messaging feels like it belongs to our competitor — [specific situation]"
+- "Why does [specific pain] get worse after [specific trigger]?"
+
+The queries must feel TOO SPECIFIC to be answered by a generic blog post. Think Reddit r/marketing, GrowthHackers forums, Slack communities.
+
+Do not use generic commercial vendor keywords.
+
 
 Return ONLY the JSON object. No explanation, no markdown."""
 

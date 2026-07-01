@@ -118,9 +118,20 @@ _FORUM_DOMAIN_KEYWORDS = (
 
 # V24.0: Domain suffixes that indicate non-business entities.
 # V24.1.1: .org now skips ALL enrichment (not just Places).
+# V24.5.2: Added personal-publishing TLDs (.blog, .dev, .page, .app).
+#           - .blog  : WordPress/personal blogs — never a B2B lead
+#           - .dev   : Personal developer portfolios (not SaaS companies)
+#           - .page  : Google Sites personal pages
+#           - .app   : Usually app store redirect pages, not company sites
+#           NOTE: .io is intentionally NOT blocked — many legitimate B2B SaaS
+#           companies (Linear, Miro, Pitch) use .io as their primary domain.
 _NON_BUSINESS_SUFFIXES = (
     ".edu", ".ac.in", ".ernet.in", ".gov", ".gov.in", ".mil",
-    ".org",  # most .org are non-profits/foundations, not B2B leads
+    ".org",   # most .org are non-profits/foundations, not B2B leads
+    ".blog",  # personal/corporate blogs on blog-hosting TLD
+    ".dev",   # personal developer portfolios
+    ".page",  # Google Sites personal pages
+    ".app",   # app store redirect pages
 )
 
 # FIX (2026-06-21): Replaced dead platform-specific B2C list with archetype-based
