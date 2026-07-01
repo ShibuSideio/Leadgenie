@@ -21,7 +21,6 @@ from core.clients import get_db
 from core.logging import get_logger
 from repositories.firestore_repo import (
     list_campaigns,
-    list_leads,
 )
 
 log = get_logger(__name__)

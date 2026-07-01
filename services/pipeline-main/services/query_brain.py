@@ -394,11 +394,15 @@ def generate_smart_query(
                         f'"{ng}" AND ({kw_str})' if kw_str else f'"{ng}"'
                     )
                 if ctx.bio and top_ngrams:
-                    # V24.3 (L1-2): STATISTICAL path now generates dorks for ALL top N-grams
+                    # V24.4 (L1-2): STATISTICAL path now generates dorks for ALL top N-grams
                     # (up to 3), matching the GEMINI_FALLBACK output count. Previously only
                     # top_ngrams[0] generated a symptom_dork — the "confident" STATISTICAL
                     # path paradoxically produced fewer queries than the fallback.
-                    ctx.symptom_dorks = [f'"{ng}"' for ng in top_ngrams[:3]]
+                    _vertical_platform = "forum OR community OR reddit"
+                    ctx.symptom_dorks = [
+                        f'("{ng}") (site:{_vertical_platform} OR inurl:complaint OR inurl:review)'
+                        for ng in top_ngrams[:3]
+                    ][:3]
                 log.info("query_brain_statistical_built",
                          query_count=len(ctx.intents), ngrams=top_ngrams)
             else:
