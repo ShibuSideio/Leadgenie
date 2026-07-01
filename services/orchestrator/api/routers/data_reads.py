@@ -95,7 +95,15 @@ def get_leads(uid: str, tenant_id: str, user_role: str):
         q = q.where(filter=_FF("is_in_crm", "==", crm_filter))
 
     if min_score > 0:
-        q = q.where(filter=_FF("normalized_score", ">=", min_score * 10))
+        # V24.5.5 FIX: normalized_score is stored as 0-100 in Firestore (score × 10).
+        # Do NOT multiply by 10 again — that would treat min_score=5 as >=50, blocking
+        # all leads below 50/100 and making the score filter 10× too aggressive.
+        q = q.where(filter=_FF("normalized_score", ">=", min_score))
+    # V24.5.5 FIX: Only return completed, qualified leads (status='new').
+    # The feed previously returned ALL statuses including zombie 'processing' stubs,
+    # 'enrichment_pending' parking stubs, and 'failed' error stubs — cluttering the
+    # UI and making users think they had more/fewer leads than they actually do.
+    q = q.where(filter=_FF("status", "==", "new"))
     # Sort field
     if sort_by == "score":
         _sort_direction = _Query.DESCENDING if sort_dir != "asc" else _Query.ASCENDING
