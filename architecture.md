@@ -1,6 +1,6 @@
-# LeadGenie (Sideio) — Platform Architecture V24.5
+# LeadGenie (Sideio) — Platform Architecture V24.6
 **Technical Specification Document**
-*Last Updated: 2026-07-01 | Version: V24.5.7 — Post-RCA Pipeline Hardening*
+*Last Updated: 2026-07-02 | Version: V24.6.1 — Enterprise Hardening + Universal Context Builder*
 
 ---
 
@@ -43,6 +43,7 @@ LeadGenie is a fully automated, multi-tenant lead generation SaaS platform. It d
 │   │   ├── core/constants.py        # CONSUMER_ARCHETYPES, D2C_ARCHETYPES, B2B2C_ARCHETYPES
 │   │   ├── services/                # query_brain.py, serper_service.py, neg_shield.py,
 │   │   │                            # prism_pipeline.py, gemini_service.py, telemetry.py
+│   │   │                            # context_builder.py (V24.6.1 — enriched ICP context)
 │   │   └── requirements.txt
 │   ├── /scraper-heavy               # Cloud Run: Playwright headless browser
 │   ├── /digital-twin-engine         # Cloud Run: Website analyser + market trend cache
@@ -172,6 +173,8 @@ Distributed credit counters (bypass Firestore write contention).
   "tenant_id": "uid_from_firebase_auth",
   "name": "Q3 Commercial Cleaning Push",
   "bio": "We offer B2B janitorial services for offices.",
+  "effective_bio": "AI-enriched product description (richer than bio when populated)",
+  "campaign_focus": "Commercial cleaning for mid-market offices",
   "status": "active",
   "keywords": "facility management, office cleaning",
   "location": "Austin, TX",
@@ -181,6 +184,11 @@ Distributed credit counters (bypass Firestore write contention).
   "persona_bio": "Denormalised bio from linked Persona Vault entry.",
   "persona_keywords": "keyword1, keyword2",
   "persona_name": "Enterprise SaaS Decision Makers",
+  "persona_targeting_signals": ["looking for outsourced facility services", "NOT freelancer"],
+  "pain_point": "Buyer language observed from approved leads (accumulates over time)",
+  "target_angle_hook": "Message that resonates with buyer — informs query generation",
+  "target_angle_adv": "Advantage angle for outreach",
+  "unfair_advantage": "Seller differentiator — used by context_builder for ICP framing",
   "leads_generated": 105,
   "next_drip_due": "<TIMESTAMP>",
   "drip_interval_minutes": 60,
@@ -195,6 +203,12 @@ Distributed credit counters (bypass Firestore write contention).
 - `unprocessed_queue`: array of Serper result objects awaiting Gemini profiling; capped at 200 (backpressure at depth 150)
 - `next_drip_due`: updated on every produce run (V24.4 fix — was only set on first fill)
 - `keywords`: stored as comma-separated string, parsed to array in pipeline
+- `effective_bio`: AI-generated enriched product description. Priority Layer 1 in `context_builder.py`
+- `pain_point`: accumulates real buyer language from approved leads over time. Fed back into query generation by `context_builder.py` Layer 3 — the system compounds in intelligence with each approval
+- `target_angle_hook`, `unfair_advantage`, `persona_targeting_signals`: ALL consumed by `context_builder.py` (V24.6.1). Previously unused in pipeline.
+
+> [!IMPORTANT]
+> **V24.6.1 context pipeline:** `context_builder.build_enriched_context(campaign)` is the single source of truth for ICP context. It aggregates all 15+ campaign fields (including `effective_bio`, `pain_point`, `target_angle_hook`, `unfair_advantage`) into a structured context string used by both `produce.py` (query generation) and `dispatch.py` (pre-filter). Any new campaign field that should influence query generation must be added to `context_builder.py`, not to `dispatch.py` or `produce.py` individually.
 
 ### 4.4 `tenant_profiles/{tenant_id}/personas/{persona_id}` Sub-Collection
 Persona Vault: named AI agent configurations scoped to a tenant.
@@ -316,8 +330,12 @@ Firestore-controlled feature flags.
 | `tenant_id` | STRING | Tenant scope (or `"GLOBAL"` for platform-wide suppressions) |
 | `root_domain` | STRING | Domain to suppress in Serper queries |
 | `entity_name` | STRING | Entity label for neg shield |
+| `rejection_reason` | STRING | Rejection reason: `competitor`, `wrong_industry`, `not_icp`, `low_quality` |
 | `sourcing_vector` | STRING | Vector scope (`"B2B"`, `"B2C"`, etc., or `"GLOBAL"`) — V24.3 vector isolation |
-| `reason` | STRING | Rejection reason: `competitor`, `wrong_industry`, `not_icp`, `low_quality` (V24.5) |
+| `timestamp` | TIMESTAMP | When the signal was recorded |
+
+> [!NOTE]
+> `sourcing_vector` column was added 2026-07-02 via `bq update` to fix `neg_shield_fetch_failed`. The query in `neg_shield.py` references this column. Existing rows have `NULL` for this field and correctly match `OR sourcing_vector IS NULL` in the query.
 
 ---
 
@@ -442,12 +460,40 @@ Routing is gated by `sourcing_vector` (read from `core/constants.py — CONSUMER
 
 | Vector | Gemini Prompt Branch | Serper Temporal Window | Neg Shield Scope |
 |---|---|---|---|
-| B2B | Standard — enterprise buyer signals, filetype dorks | All-time | B2B-scoped |
+| B2B | Standard — enterprise buyer signals, filetype dorks | `tbs=qdr:y` (past year — V24.6.0) | B2B-scoped |
 | B2C | Consumer mandate — forum/review dorks, dialog-cue dorks (`"pm me"`, `"still available"`) | `tbs=qdr:m` (past month) | B2C-scoped |
 | D2C | D2C product comparison mandate — `site:reddit.com`, `site:trustpilot.com`, `inurl:compare` | `tbs=qdr:m` | D2C-scoped |
 | B2B2C | Dual-ICP mandate — 50% institutional + 50% end-user signals | `tbs=qdr:m` | B2B2C-scoped |
 
 **B2C keyword fallback (V24.3):** When `ctx.intents` is empty and only bio keywords are available, consumer campaigns use intent template queries (`"looking for"`, `"anyone selling"`, `"pm me"`) instead of quoting raw bio words. Raw bio words produce SEO directory results, not buyer signals.
+
+#### 5f. Universal Enriched Context Builder (V24.6.1)
+**Location:** `pipeline-main/services/context_builder.py`
+
+`build_enriched_context(campaign)` is the single source of truth for ICP context assembly, called by both `produce.py` and `dispatch.py`.
+
+**Problem it solves:** Not all users are elaborate. Before V24.6.1, a campaign created with only a name and location sent 5 words to Gemini for query generation (`"Product/Service: Brand Narrative Development"`). All other fields — `effective_bio`, `pain_point`, `target_angle_hook`, `unfair_advantage`, `persona_targeting_signals`, `geo_hierarchy` — were silently ignored.
+
+**Context assembly layers (in priority order):**
+
+| Layer | Fields Used | Notes |
+|---|---|---|
+| 1 — Product/Service | `effective_bio` > `persona_bio` > `bio` > `campaign_focus` | Richest non-junk wins |
+| 2 — Market Context | `keywords`, `persona_keywords` | Comma-separated, used as-is |
+| 3 — Buyer Pain | `pain_point` | Accumulates real buyer language from approved leads |
+| 4 — ICP Identity | `persona_name`, `persona_bio` | Skipped if already used in Layer 1 |
+| 5 — Messaging | `target_angle_hook`, `unfair_advantage` | Tells Gemini what buyer language resonates |
+| 6 — Targeting | `persona_targeting_signals` (positive only) | Negative signals (`NOT ...`) excluded here |
+| 7 — Geography | `location`, `geo_hierarchy.country`, `geo_hierarchy.region` | Skipped if "All" or "Global" |
+| 8 — Buyer Type | `sourcing_vector` | B2B / B2C / D2C / B2B2C |
+
+**Graceful degradation:**
+- Power user (all fields filled): 8 labeled sections, ~800 chars of context
+- Average user (bio + persona linked): 4 sections, ~300 chars
+- Lazy user (name + location only): 2 sections — name + geo
+- Fallback: always returns at least campaign name — never empty
+
+**Observability:** Logs `context_builder_assembled` with `sections` count and boolean flags per layer. Operators can diagnose thin-context campaigns by filtering for `sections < 3`.
 
 #### 5d. Blacklist Priority Rebuild (V24.5)
 Assembly order: RLHF-learned exclusions → neg shield domains → persona NOT signals → static defaults.
@@ -505,6 +551,18 @@ doc_ref.create({"status": "processing", ...})  # Raises AlreadyExists if duplica
 Lock-delete failures are logged at `ERROR` (V24.2 — was silent `except: pass`).
 
 **Pre-PRISM TLD gate (V24.5.7):** Before running any PRISM scraping, `_process_single_url()` checks the domain TLD against a non-business list (`.org`, `.edu`, `.gov`, `.blog`, `.dev`, `.page`). If matched, the URL returns `skip_non_business_tld` immediately — saving 3–8 Serper credits that would otherwise be spent on PRISM WalledGardenHook queries + enrichment. Previously, this check only fired inside `deep_context_serper_dork()` *after* PRISM had already run.
+
+**Page-type structural score cap (V24.6.0):** After Gemini scoring, before the score gate, a regex-based page-type classifier caps the Gemini score for structurally non-buyer page categories:
+
+| Page Type | URL Pattern | Score Cap |
+|---|---|---|
+| Conference / event | `/conference/`, `/summit/`, `/program/proposals` | 3 |
+| Government portal | `.gov`, `.mil`, `.govt.`, `/ministry/`, `/department/` | 2 |
+| Academic repo | `/sol3/`, `/ssrn/`, `/arxiv/`, `/research/paper/` | 2–3 |
+| Press release | `/press-release/`, `/newsroom/` | 4 |
+| Job board | `/jobs/`, `/careers/`, `/vacancies/` | 4 |
+
+Even if Gemini gives a conference page 10/10 (keyword match), the cap reduces it to 3, which is below the score gate threshold of 6–7. Prevents `postgresconf.org/conferences/SV2022/...` from scoring 10/10 (confirmed production bug, fixed V24.6.0).
 
 ### Step 9: Three-Tier Scraping Strategy
 
@@ -813,17 +871,21 @@ log.warning("lead_lock_delete_failed",
 
 ## 17. KNOWN OPEN ISSUES
 
-These are structural issues identified in the V24.5.x post-RCA audit. They do not block lead generation but represent technical debt or degraded capabilities.
+These are structural issues identified in the V24.5.x and V24.6.x post-RCA audit.
 
-| # | Severity | Component | Issue | Impact |
+| # | Severity | Component | Issue | Status |
 |---|---|---|---|---|
-| I-1 | 🟠 High | `neg_shield.py` | `swarm_analytics.Negative_Signals` BQ table missing or empty → `neg_shield_fetch_failed` every cycle | RLHF negative signal loop broken; no `-site:` exclusions applied to Serper queries |
-| I-2 | 🟠 High | `serper_service.py` | BQ audit telemetry schema mismatch → `serper_audit_broker_non_200` on every call | Credit tracking in BQ has zero rows; `swarm_analytics` audit table is dark |
-| I-3 | 🟡 Medium | `dispatch.py` | Velocity gate Firestore composite index missing → `velocity_gate_disabled_firestore_error` | All Medium-tier URLs auto-approved; no volume throttling |
-| I-4 | 🟡 Medium | `orchestrator` | `INTERNAL_CRON_SECRET` env var not set on Cloud Run → Inbound Radar returns 503 on every cron trigger | Inbound Radar cron non-functional; manual signal intake still works |
-| I-5 | 🟡 Medium | `dispatch.py` | `enrichment_pending` leads not counted in velocity gate | Velocity gate under-counts active leads when Medium-tier thin content is parked |
+| I-1 | ✅ Resolved | `neg_shield.py` | `Negative_Signals` BQ table missing `sourcing_vector` column → `neg_shield_fetch_failed` every cycle | Fixed 2026-07-02: `bq update` added column; query now resolves |
+| I-2 | 🟠 High | `serper_service.py` | BQ audit telemetry schema mismatch → `serper_audit_broker_non_200` on every call | Open — audit table schema needs investigation |
+| I-3 | 🟡 Medium | `dispatch.py` | Velocity gate Firestore composite index missing → `velocity_gate_disabled_firestore_error` | Open — all Medium-tier URLs auto-approved |
+| I-4 | ✅ Resolved | `orchestrator` | `INTERNAL_CRON_SECRET` env var not set → Inbound Radar returns 503 | Fixed 2026-07-02: env var set on revision `orchestrator-00403-jey`, traffic migrated |
+| I-5 | 🟡 Medium | `dispatch.py` | `enrichment_pending` leads not counted in velocity gate | Open |
+| I-6 | 🟡 Medium | All campaigns | Pre-filter context starvation — campaigns without persona sent 5-word bio to Gemini | Fixed V24.6.1: `context_builder.py` aggregates all 15+ fields |
+| I-7 | 🟡 Medium | `serper_service.py` | B2B had no temporal filter (all-time) — 2022 conference pages competed with 2026 buyer posts | Fixed V24.6.0: B2B now uses `tbs=qdr:y` (past year) |
+| I-8 | 🟡 Medium | `dispatch.py` | No page-type score cap — conference/govt pages scored 9-10/10 | Fixed V24.6.0: structural regex cap applied before score gate |
 
-**Resolution priority:** I-1 and I-2 share the same root cause (BQ dataset not initialised). Creating the `swarm_analytics.Negative_Signals` table and fixing the audit telemetry schema resolves both. I-4 requires setting `INTERNAL_CRON_SECRET` as a Cloud Run env var.
+**Diagnostic shortcut for operators:** Filter Cloud Run logs for `context_builder_assembled sections=<N>`. Any campaign with `sections < 3` is a thin-context campaign that may produce poor leads — prompt customer to fill in bio, pain_point, or link a persona.
+
 
 ---
 
@@ -831,18 +893,15 @@ These are structural issues identified in the V24.5.x post-RCA audit. They do no
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V24.6.1** | **2026-07-02** | **Universal context builder (`context_builder.py`): all 15+ campaign fields (effective_bio, pain_point, target_angle_hook, unfair_advantage, persona_targeting_signals, geo_hierarchy) now feed query generation and pre-filter. Handles all user types from lazy (name+location only) to power user (all fields filled). Single source of truth used by both produce.py and dispatch.py.** |
+| **V24.6.0** | **2026-07-02** | **B2B temporal filter: `tbs=qdr:y` added (was all-time — 2022 conference pages competed with 2026 buyer posts). Page-type structural score cap: conference≤3, govt≤2, academic≤3 — prevents Gemini 10/10 on non-buyer pages. Env fix: INTERNAL_CRON_SECRET set on orchestrator revision 00403-jey, Inbound Radar now live. BQ fix: Negative_Signals `sourcing_vector` column added, neg_shield_fetch_failed resolved.** |
 | V24.5.0 | 2026-07-01 | RLHF yield-weight quality signal, expanded rejection vocabulary, visitor signal opt-out, analytics vertical filter, serper telemetry fixes |
 | V24.4.0 | 2026-07-01 | Queue backpressure, enrichment_pending stub, credit settlement on score-drop, CRM webhook Cloud Task retry, lead sort/filter |
 | V24.3.0 | 2026-07-01 | D2C/B2B2C prompt branches, `tbs=qdr:m` consumer freshness, vector-isolated neg shield, B2C intent template fallback, core/constants.py shared module |
 | V24.2.0 | 2026-07-01 | OIDC audience validation, mandatory INTERNAL_CRON_SECRET, PII scrubbing, WhatsApp feature flag, normalized_score, all except:pass replaced |
 | V24.1.25 | 2026-06-30 | Gemini model swap to gemini-2.5-flash |
-| V24.1.24 | 2026-06-30 | Dialog-Cue Dorking, Context-Aware LLM Inference |
-| V24.1.23 | 2026-06-30 | Consumer search freshness (qdr:y, superseded by qdr:m in V24.3) |
-| V24.1.22 | 2026-06-30 | Inbound Radar bypass for social media domain listicle path |
-| V24.1.21 | 2026-06-30 | GMB review scanning via CID, SEO noise pre-screening |
-| V24.1.20 | 2026-06-29 | Query spacing syntax hardening across all execution channels |
-| **V24.5.7** | **2026-07-01** | **CDN subdomain pre-queue filter; pre-PRISM TLD gate (.org/.edu/.gov/.blog/.dev); B2B FAQ-opener post-generation sanitizer in query_brain** |
-| **V24.5.6** | **2026-07-01** | **GET /api/leads double-multiply score bug fixed (min_score×10 removed); status='new' filter added to leads feed (zombie stubs no longer shown)** |
-| **V24.5.5** | **2026-07-01** | **B2B forum dedup collapse fixed — reddit.com, quora.com, stackexchange.com, stackoverflow.com, HN, vendor community boards added to shared_platforms for URL-path dedup** |
-| **V24.5.4** | **2026-07-01** | **Gemini pre-filter B2B Buyer Forum Exception — marketing-domain URLs with active practitioner complaint signals now classified High (was wrongly Low = zero leads)** |
-| **V24.5.3** | **2026-07-01** | **TASK 3 Anti-FAQ Mandate; .blog/.dev/.page/.app TLD blocking; query_brain specificity hardening** |
+| V24.5.7 | 2026-07-01 | CDN subdomain pre-queue filter; pre-PRISM TLD gate (.org/.edu/.gov/.blog/.dev); B2B FAQ-opener post-generation sanitizer in query_brain |
+| V24.5.6 | 2026-07-01 | GET /api/leads double-multiply score bug fixed (min_score×10 removed); status='new' filter added to leads feed (zombie stubs no longer shown) |
+| V24.5.5 | 2026-07-01 | B2B forum dedup collapse fixed — reddit.com, quora.com, stackexchange.com, stackoverflow.com, HN, vendor community boards added to shared_platforms for URL-path dedup |
+| V24.5.4 | 2026-07-01 | Gemini pre-filter B2B Buyer Forum Exception — marketing-domain URLs with active practitioner complaint signals now classified High (was wrongly Low = zero leads) |
+| V24.5.3 | 2026-07-01 | TASK 3 Anti-FAQ Mandate; .blog/.dev/.page/.app TLD blocking; query_brain specificity hardening |
