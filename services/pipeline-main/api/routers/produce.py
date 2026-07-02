@@ -160,6 +160,25 @@ def produce():
         )
         log.info("child_campaign_override_resolved", bio_preview=bio[:80])
 
+    # V24.6.1: Replace thin bio assembly with build_enriched_context().
+    # Previously: picked ONE field (persona_bio OR bio) and ignored all others.
+    # Now: aggregates ALL 15+ campaign fields (effective_bio, pain_point,
+    # target_angle_hook, unfair_advantage, persona_name, geo_hierarchy, etc.)
+    # into a structured ICP context. Handles sparse campaigns (user filled only
+    # campaign name + location) and rich campaigns (all fields filled) equally.
+    # Overrides the above `bio` variable entirely.
+    try:
+        from services.context_builder import build_enriched_context  # type: ignore[import]
+        bio = build_enriched_context(campaign)
+    except Exception as _ctx_err:
+        log.warning(
+            "context_builder_failed",
+            campaign_id=campaign_id,
+            error=str(_ctx_err),
+            note="Falling back to raw bio field. Check context_builder.py.",
+        )
+        # bio stays as-is from the persona vault logic above
+
     # ------------------------------------------------------------------
     # FIX (2026-06-21): Bio field sanitizer.
     # Scrub the bio if it contains system error strings or sentinels
@@ -369,6 +388,30 @@ def produce():
             tenant_id=tenant_id,
             sourcing_vector=sourcing_vector,
         )
+
+        # V24.5.9: Zero-result geo fallback for consumer campaigns.
+        # Small national Google indexes (gl=om, gl=bh, gl=kw) rarely have forum/
+        # community content. When a geo-restricted call returns 0 results for a B2C
+        # campaign, retry globally so buyer signals on Reddit, expat forums, and
+        # regional platforms (which are globally indexed) are not missed.
+        # Only fires when: (a) gl is set, (b) result is empty, (c) consumer archetype.
+        _is_consumer_vector = _is_consumer_archetype(sourcing_vector)
+        if not raw_results and gl and _is_consumer_vector:
+            log.info(
+                "produce_geo_fallback",
+                query=search_query[:80],
+                original_gl=gl,
+                note="Geo-restricted call returned 0 results. Retrying globally for consumer campaign.",
+                campaign_id=campaign_id,
+            )
+            raw_results = search_serper(
+                search_query,
+                location=None,     # no location restriction
+                gl=None,           # no country restriction — search global index
+                campaign_id=campaign_id,
+                tenant_id=tenant_id,
+                sourcing_vector=sourcing_vector,
+            )
 
         update_circuit_telemetry("serper_call")
 

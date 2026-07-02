@@ -251,36 +251,36 @@ def dispatch():
     sourcing_vector = campaign.get("sourcing_vector", "B2B")
     location        = campaign.get("location", "").strip()
 
-    # ── PERSONA VAULT: inject persona bio (V23 precedence) ──────────────────
-    persona_id = campaign.get("persona_id", "")
-    if persona_id:
-        persona_bio = campaign.get("persona_bio", "").strip()
-        if persona_bio:
-            bio = persona_bio
-            log.info("dispatch_persona_injected",
-                     persona_name=campaign.get("persona_name", persona_id),
-                     campaign_id=campaign_id)
-
-    # V24.6.0: Keywords-as-bio fallback for campaigns without a linked persona.
-    # Root cause of pre-filter context starvation (confirmed 2026-07-02):
-    # Campaigns without a persona send only bio (e.g. "Product/Service: Brand
-    # Narrative Development" — 5 words) to the Gemini pre-filter. With no ICP
-    # context Gemini cannot distinguish a buyer post from a vendor blog, so it
-    # classifies 9/10 URLs as Low (pre_filter_complete high=1, medium=0).
-    # The keywords field authored at campaign creation contains rich ICP context
-    # (market pain, target audience, differentiation) — use it as the bio when
-    # no persona is linked and keywords is richer than the current bio.
-    if not persona_id:
-        kw = campaign.get("keywords", "").strip()
-        if kw and len(kw) > len(bio):
-            bio = kw
-            log.info(
-                "dispatch_keywords_bio_fallback",
-                bio_chars=len(bio),
-                kw_chars=len(kw),
-                note="No persona linked — using keywords field as pre-filter ICP context.",
-                campaign_id=campaign_id,
-            )
+    # V24.6.1: Replace all bio assembly logic (persona vault + V24.6.0 keywords
+    # fallback) with build_enriched_context(). The context builder aggregates
+    # ALL 15+ campaign and persona fields into a structured ICP context.
+    # This fixes pre-filter context starvation for ALL user types:
+    #   - Power user (all fields filled): gets 8 rich context sections
+    #   - Average user (bio + persona linked): gets persona + market context
+    #   - Lazy user (name + location only): gets geo-targeted name context
+    # The V24.6.0 keywords-as-bio fallback is preserved inside Layer 2 of the
+    # builder, so there is no regression for campaigns without a persona.
+    try:
+        from services.context_builder import build_enriched_context  # type: ignore[import]
+        bio = build_enriched_context(campaign)
+        log.info(
+            "dispatch_enriched_context_assembled",
+            bio_chars=len(bio),
+            campaign_id=campaign_id,
+        )
+    except Exception as _ctx_err:
+        log.warning(
+            "dispatch_context_builder_failed",
+            campaign_id=campaign_id,
+            error=str(_ctx_err),
+            note="Falling back to raw bio field. Check context_builder.py.",
+        )
+        # Fallback: persona vault precedence (V23 behaviour)
+        persona_id = campaign.get("persona_id", "")
+        if persona_id:
+            persona_bio = campaign.get("persona_bio", "").strip()
+            if persona_bio:
+                bio = persona_bio
 
     log.info("TRACE-3: Campaign loaded.",
              campaign_id=campaign_id,
