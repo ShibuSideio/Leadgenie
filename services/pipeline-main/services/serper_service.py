@@ -576,6 +576,17 @@ def search_serper(
     # Serper from returning abandoned Reddit threads and closed listings.
     if sourcing_vector and _is_consumer_archetype(sourcing_vector):
         payload_dict["tbs"] = "qdr:m"
+    else:
+        # V24.6.0: B2B temporal freshness gate.
+        # Previously B2B had NO tbs filter (all-time), allowing a 2022 conference
+        # page to compete equally with a 2026 buyer forum post in scoring.
+        # Evidence: postgresconf.org/conferences/SV2022/... scored 10/10 on the
+        # Medica AI Data campaign (confirmed 2026-07-02).
+        # qdr:y (past year) is calibrated for the B2B buying cycle:
+        #   - Enterprise buying cycles span months → need > qdr:m window
+        #   - Archived conference pages / 2-year-old blog posts are never buyers
+        #   - 12-month window excludes stale content without narrowing too aggressively
+        payload_dict["tbs"] = "qdr:y"
 
     payload = json.dumps(payload_dict)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}

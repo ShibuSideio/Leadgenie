@@ -261,6 +261,27 @@ def dispatch():
                      persona_name=campaign.get("persona_name", persona_id),
                      campaign_id=campaign_id)
 
+    # V24.6.0: Keywords-as-bio fallback for campaigns without a linked persona.
+    # Root cause of pre-filter context starvation (confirmed 2026-07-02):
+    # Campaigns without a persona send only bio (e.g. "Product/Service: Brand
+    # Narrative Development" — 5 words) to the Gemini pre-filter. With no ICP
+    # context Gemini cannot distinguish a buyer post from a vendor blog, so it
+    # classifies 9/10 URLs as Low (pre_filter_complete high=1, medium=0).
+    # The keywords field authored at campaign creation contains rich ICP context
+    # (market pain, target audience, differentiation) — use it as the bio when
+    # no persona is linked and keywords is richer than the current bio.
+    if not persona_id:
+        kw = campaign.get("keywords", "").strip()
+        if kw and len(kw) > len(bio):
+            bio = kw
+            log.info(
+                "dispatch_keywords_bio_fallback",
+                bio_chars=len(bio),
+                kw_chars=len(kw),
+                note="No persona linked — using keywords field as pre-filter ICP context.",
+                campaign_id=campaign_id,
+            )
+
     log.info("TRACE-3: Campaign loaded.",
              campaign_id=campaign_id,
              sourcing_vector=sourcing_vector,
@@ -704,6 +725,50 @@ def dispatch():
                 return {"url": url, "status": "failed_eval"}
 
             score = evaluation.get("score", 0)
+
+            # V24.6.0: Page-type score cap — structural URL signals that
+            # unambiguously identify non-buyer page categories regardless of
+            # what Gemini scores. Prevents conference pages, government portals,
+            # and academic repositories from scoring 9-10 and reaching the feed.
+            # Applied BEFORE the thin-payload threshold so the cap takes
+            # precedence over everything.
+            #
+            # Evidence: postgresconf.org/conferences/SV2022/.../sql-engine → 10/10
+            #           DeptofCommerceIndia → 9/10
+            # Both are correct Gemini keyword matches but structurally wrong page types.
+            import re as _re_pt
+            _PAGE_TYPE_CAP: int | None = None
+            _url_lower = url.lower()
+            _PAGE_TYPE_RULES: list[tuple[str, int, str]] = [
+                # (pattern, score_cap, label)
+                # Conference / event pages
+                (r"/(conference|conf|summit|symposium|webinar|event)s?/",           3, "conference_page"),
+                (r"/(program|schedule|agenda|speakers?|sessions?)/proposals?",       3, "conference_program"),
+                # Government / regulatory portals
+                (r"\.(gov|mil|govt)\.?",                                            2, "government_portal"),
+                (r"/(ministry|department|dept)[-_/]",                               2, "government_dept"),
+                # Academic repositories and research
+                (r"/(research|paper|abstract|thesis|dissertation|preprint)/",       3, "academic_content"),
+                (r"/(sol3|ssrn|arxiv|researchgate|pubmed)/",                        2, "academic_repo"),
+                # Press release / news wire
+                (r"/(press[-_]release|press[-_]room|newsroom|media[-_]centre)/",    4, "press_release"),
+                # Job boards (hiring page ≠ buyer page)
+                (r"/(jobs|careers|vacancies|join[-_]us)/",                          4, "job_board"),
+            ]
+            for _pattern, _cap, _label in _PAGE_TYPE_RULES:
+                if _re_pt.search(_pattern, _url_lower):
+                    _PAGE_TYPE_CAP = _cap
+                    log.info(
+                        "dispatch_page_type_cap",
+                        url=url[:80],
+                        original_score=score,
+                        cap=_cap,
+                        label=_label,
+                        note="Structural page type cap applied before score gate.",
+                    )
+                    break
+            if _PAGE_TYPE_CAP is not None and score > _PAGE_TYPE_CAP:
+                score = _PAGE_TYPE_CAP
 
             # ── STEP 3b: Dynamic score threshold (P1 FIX — 2026-06-20) ───────────
             # Restored from legacy main.py L2820-2828.
