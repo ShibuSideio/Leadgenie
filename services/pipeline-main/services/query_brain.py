@@ -661,6 +661,32 @@ Return ONLY the JSON object. No explanation, no markdown."""
                     if _cleaned != _dork:
                         log.warning("symptom_dork_sanitized",
                                     original=_dork[:80], cleaned=_cleaned[:80])
+                    # V24.5.8: Prohibited-operator gate (code-level belt-and-suspenders).
+                    # Despite the prompt instruction, Gemini still generates site:.org and
+                    # site:.edu as POSITIVE target operators, returning academic/nonprofit
+                    # pages instead of buyers (e.g. (site:.org OR site:.edu) "brand narrative").
+                    # Strip the prohibited site: clause from the dork. If nothing remains,
+                    # drop the dork entirely.
+                    _PROHIBITED_POSITIVE_SITE = _re.compile(
+                        r'site:\.(?:org|edu|ac\.\w+|gov|mil)\b',
+                        _re.IGNORECASE
+                    )
+                    if _PROHIBITED_POSITIVE_SITE.search(_cleaned):
+                        _before = _cleaned
+                        # Strip the offending site: clauses + any surrounding OR/AND
+                        _cleaned = _PROHIBITED_POSITIVE_SITE.sub('', _cleaned)
+                        # Clean up orphaned boolean operators and empty parens
+                        _cleaned = _re.sub(r'\(\s*(?:OR\s*)+\)', '', _cleaned)
+                        _cleaned = _re.sub(r'\bOR\s+OR\b', 'OR', _cleaned)
+                        _cleaned = _re.sub(r'^\s*(?:OR|AND)\s+', '', _cleaned)
+                        _cleaned = _re.sub(r'\s+(?:OR|AND)\s*$', '', _cleaned)
+                        _cleaned = _cleaned.strip()
+                        log.warning(
+                            "symptom_dork_prohibited_site_stripped",
+                            original=_before[:120],
+                            cleaned=_cleaned[:120],
+                            note="site:.org / site:.edu as positive operator stripped — returns academic pages, not buyers",
+                        )
                     if _cleaned:
                         _sanitized_dorks.append(_clean_query_syntax(_cleaned))
                 ctx.symptom_dorks = _sanitized_dorks

@@ -148,6 +148,13 @@ def _is_consumer_archetype(vector: str) -> bool:
 _ENTERPRISE_DOMAINS = [
     "ibm.com", "amazon.com", "microsoft.com",
     "g2.com", "capterra.com", "zoominfo.com",
+    # V24.5.8: Academic preprint and research repositories — never a business lead.
+    # Gemini pre-filter can misclassify these as buyers when campaign domain overlaps
+    # with the paper's subject (e.g., MediMorph AI campaign → medical AI papers).
+    "ssrn.com",        # Social Science Research Network
+    "researchgate.net", # Academic social network (researchers, not buyers)
+    "semanticscholar.org",
+    "pubmed.ncbi.nlm.nih.gov",
 ]
 
 _NOISE_PATHS    = ["/legal", "/pricing", "/docs", "/author/", "/login"]
@@ -157,10 +164,18 @@ _NOISE_SNIPPETS = ["sign in", "access denied", "forgot password", "please enable
 # business websites. They return empty PRISM scrapes and waste 3-5 Serper credits.
 # The root domain may be a legitimate company (cdngetgo.com), but the 'assets.'
 # subdomain prefix unambiguously identifies a content delivery node, not a page.
+# V24.5.8: Extended with academic repository subdomain prefixes. Repos like
+# lirias.kuleuven.be (KU Leuven), papers.ssrn.com, eprints.university.edu
+# are never buyers even if their content overlaps with the campaign's domain.
 _CDN_SUBDOMAIN_PREFIXES = (
+    # CDN / asset delivery
     "assets.", "cdn.", "static.", "img.", "images.",
     "media.", "s3.", "storage.", "files.", "dl.",
     "download.", "content.",
+    # Academic repository subdomains
+    "papers.", "repository.", "eprints.", "dspace.",
+    "lirias.", "preprint.", "preprints.", "scholar.",
+    "research.", "publications.", "pub.",
 )
 
 
