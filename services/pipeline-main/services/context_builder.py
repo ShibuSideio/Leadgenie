@@ -1,4 +1,4 @@
-﻿"""
+"""
 context_builder.py — V24.6.1
 ==============================
 Single source of truth for enriched campaign context assembly.
@@ -20,9 +20,9 @@ USED BY:
 """
 
 from __future__ import annotations
-import logging
+import structlog
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 
 def build_enriched_context(campaign: dict) -> str:
