@@ -966,6 +966,156 @@ def cron_sweep():
 
 
 # =============================================================================
+# POST /api/internal/cron/harvest-sweep  (V25.2.0)
+# Called by Cloud Scheduler every 4 hours (offset by 2h from /cron/sweep).
+# Fans out one /harvest Cloud Task per active campaign — no Serper, no QueryBrain.
+# =============================================================================
+@bp.route("/api/internal/cron/harvest-sweep", methods=["POST"])
+def cron_harvest_sweep():
+    """V25.2.0 — Signal harvest fan-out sweep (4-hour cadence).
+
+    Identical fan-out pattern to cron_sweep(), but targets /harvest
+    instead of /produce. Does NOT run Serper or QueryBrain — signal
+    harvest sources (Reddit, classified, forum, Google Reviews, YouTube)
+    only. Allows fresh signals between 6-hour Serper sweeps.
+
+    Guards applied:
+      - OIDC verification (same as all cron routes)
+      - Kill switch gate (shared Firestore state with cron_sweep)
+      - ORCHESTRATOR_SA_EMAIL + PIPELINE_URL pre-flight
+      - Credit gate per tenant (skip if remaining_credits <= 0)
+
+    Jitter: 0–60s per task (distinct from /produce 0–120s jitter).
+    """
+    from google.cloud import tasks_v2 as tv2
+    import random as _random
+
+    ok, err = _verify_oidc(request)
+    if not ok:
+        return jsonify({"error": err}), 401 if "Missing" in err else 403
+
+    # Kill switch gate (shared with cron_sweep)
+    try:
+        _ks_doc  = _db().collection("system_telemetry").document("kill_switch").get()
+        _ks_data = _ks_doc.to_dict() or {} if _ks_doc.exists else {}
+        if _ks_data.get("active") is True:
+            log.info(
+                "harvest_sweep_kill_switch_active",
+                activated_by=_ks_data.get("activated_by", "unknown"),
+                message="Harvest sweep aborted — kill switch is engaged.",
+            )
+            return jsonify({
+                "message": "Kill switch active — harvest sweep skipped.",
+                "kill_switch_active": True,
+            }), 200
+    except Exception as _ks_err:
+        log.warning("harvest_sweep_kill_switch_read_failed", error=str(_ks_err),
+                    fallback="Proceeding with harvest sweep despite kill-switch read failure.")
+
+    # Pre-flight: ORCHESTRATOR_SA_EMAIL
+    if not ORCHESTRATOR_SA_EMAIL:
+        log.critical("harvest_sweep_sa_email_missing",
+                     action="Set ORCHESTRATOR_SA_EMAIL env var in Cloud Run.")
+        return jsonify({"error": "Precondition Failed", "code": "ORCHESTRATOR_SA_EMAIL_MISSING"}), 412
+
+    base_url = PIPELINE_URL.split("/dispatch")[0].strip()
+    if not base_url:
+        log.critical("harvest_sweep_pipeline_url_missing",
+                     action="Set PIPELINE_URL env var in Cloud Run.")
+        return jsonify({"error": "Precondition Failed", "code": "PIPELINE_URL_MISSING"}), 412
+
+    harvest_url = f"{base_url}/harvest"
+    sa_email    = ORCHESTRATOR_SA_EMAIL
+    now_utc     = datetime.datetime.now(datetime.timezone.utc)
+
+    # Fetch all active campaigns
+    campaigns = list(
+        _db().collection("campaigns")
+          .where(filter=FieldFilter("status", "==", "active"))
+          .limit(500)
+          .stream()
+    )
+    log.info("harvest_sweep_query_executed", campaign_count=len(campaigns))
+
+    from core.clients import get_tasks_client as _get_tasks_client
+    from google.protobuf import timestamp_pb2 as _ts_pb2
+    tasks_client = _get_tasks_client()
+    queue_path   = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
+
+    dispatched = skipped = 0
+
+    for camp_doc in campaigns:
+        campaign_data = camp_doc.to_dict() or {}
+        campaign_id   = camp_doc.id
+        tenant_id     = campaign_data.get("tenant_id")
+
+        if not tenant_id:
+            log.warning("harvest_sweep_no_tenant_id", campaign_id=campaign_id)
+            skipped += 1
+            continue
+
+        # Credit gate — skip campaigns with no remaining credits
+        try:
+            user_data = _db().collection("users").document(tenant_id).get().to_dict() or {}
+            wallet    = user_data.get("wallet", {}) or {}
+            remaining = int(wallet.get("remaining_credits", 0) or 0)
+            if remaining <= 0:
+                log.info("harvest_sweep_credit_gate_skip",
+                         tenant_id=tenant_id, campaign_id=campaign_id,
+                         remaining_credits=remaining)
+                skipped += 1
+                continue
+        except Exception as _cg_err:
+            log.warning("harvest_sweep_credit_gate_failed",
+                        tenant_id=tenant_id, error=str(_cg_err),
+                        fallback="Proceeding with harvest task dispatch.")
+
+        # Dispatch /harvest Cloud Task with jitter 0–60s
+        jitter = _random.randint(0, 60)
+        try:
+            _when = now_utc + datetime.timedelta(seconds=jitter)
+            _ts   = _ts_pb2.Timestamp()
+            _ts.FromDatetime(_when)
+
+            tasks_client.create_task(request={
+                "parent": queue_path,
+                "task": {
+                    "schedule_time": _ts,
+                    "http_request": {
+                        "http_method": tv2.HttpMethod.POST,
+                        "url":         harvest_url,
+                        "headers":     {"Content-Type": "application/json"},
+                        "body":        json.dumps({
+                            "tenant_id":   tenant_id,
+                            "campaign_id": campaign_id,
+                        }).encode(),
+                        "oidc_token": {
+                            "service_account_email": sa_email,
+                            "audience":              base_url,
+                        },
+                    },
+                },
+            })
+            dispatched += 1
+            log.info("harvest_task_dispatched",
+                     campaign_id=campaign_id, tenant_id=tenant_id, jitter_s=jitter)
+        except Exception as task_err:
+            log.error("harvest_task_dispatch_failed",
+                      campaign_id=campaign_id, tenant_id=tenant_id,
+                      error=str(task_err), exc_info=True)
+            skipped += 1
+
+    log.info("harvest_sweep_complete", dispatched=dispatched, skipped=skipped,
+             campaigns=len(campaigns))
+    return jsonify({
+        "message":    f"V25.2.0 Harvest Sweep: {dispatched} tasks dispatched, {skipped} skipped.",
+        "dispatched": dispatched,
+        "skipped":    skipped,
+        "campaigns":  len(campaigns),
+    }), 200
+
+
+# =============================================================================
 # POST /api/telemetry/conversion_feedback  (X-API-Key auth)
 # =============================================================================
 @bp.route("/api/telemetry/conversion_feedback", methods=["POST"])

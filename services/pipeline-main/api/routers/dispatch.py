@@ -876,6 +876,20 @@ def dispatch():
                 "prism_fallback":               fallback_used,
                 "status":                       "new",
                 "is_in_crm":                    False,
+                # V25.2.0: Social signal provenance (populated for social-snippet leads)
+                "signal_source_type":           "full_text",
+                "signal_platform":              "",
+                "social_snippet":               "",
+                # V25.2.0: Cluster metadata (cluster leads are written by signal_cluster_analyst.py)
+                "is_cluster_lead":              False,
+                "cluster_id":                   "",
+                "convergence_score":            0.0,
+                "cluster_signals":              [],
+                "cluster_snippets":             [],
+                "cluster_platforms":            [],
+                "cluster_summary":              "",
+                "source_diversity":             0,
+                "cluster_label":                "",
             }
             doc_ref.set(lead_payload, merge=True)
             _settle_credit(tenant_id, "success", lead_id=lead_id)
