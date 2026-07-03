@@ -741,7 +741,20 @@ def dispatch():
                 fit_score += preferences_weights.get(f"tech_{tech}", 0)
             if fit_score <= -3:
                 log.info("dispatch_rlhf_drop", domain=target_domain, fit_score=fit_score)
-                doc_ref.delete()
+                # SCORE-04 FIX: Preserve the lead with rlhf_filtered status instead
+                # of deleting it. This provides visibility into RLHF-dropped leads
+                # for operator review and model debugging.
+                doc_ref.update({
+                    "status": "rlhf_filtered",
+                    "rlhf_fit_score": fit_score,
+                    "rlhf_filter_reason": (
+                        f"RLHF fit_score {fit_score} <= -3 threshold. "
+                        f"Domain: {target_domain}. "
+                        f"Hiring intent: {native_hiring_intent}. "
+                        f"Tech stack: {tech_stack[:5]}."
+                    ),
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                })
                 try:
                     _db().collection("global_lead_locks").document(lock_entity).delete()
                 except Exception as _lock_del_err:
@@ -749,6 +762,12 @@ def dispatch():
                               lock_entity=lock_entity,
                               url=url[:80] if url else "unknown",
                               error=str(_lock_del_err))
+                # FIN-03: Settle credit on RLHF drop path
+                try:
+                    _settle_credit(tenant_id, "failure", lead_id=lead_id)
+                except Exception as _settle_err:
+                    log.warning("settle_credit_on_rlhf_drop_failed",
+                                lead_id=lead_id, error=str(_settle_err))
                 return {"url": url, "status": "rlhf_drop"}
 
             # ── STEP 3: Score on FULL DOM text (P0 + P1 FIX) ─────────────────────
@@ -777,6 +796,12 @@ def dispatch():
                               lock_entity=lock_entity,
                               url=url[:80] if url else "unknown",
                               error=str(_lock_del_err))
+                # FIN-03: Settle credit on Vertex AI timeout
+                try:
+                    _settle_credit(tenant_id, "failure", lead_id=lead_id)
+                except Exception as _settle_err:
+                    log.warning("settle_credit_on_timeout_failed",
+                                lead_id=lead_id, error=str(_settle_err))
                 return {"url": url, "status": "failed_vertex_timeout"}
             except Exception as eval_err:
                 doc_ref.update({"status": "failed", "error": f"Scoring failed: {eval_err}"})
@@ -787,6 +812,12 @@ def dispatch():
                               lock_entity=lock_entity,
                               url=url[:80] if url else "unknown",
                               error=str(_lock_del_err))
+                # FIN-03: Settle credit on eval failure
+                try:
+                    _settle_credit(tenant_id, "failure", lead_id=lead_id)
+                except Exception as _settle_err:
+                    log.warning("settle_credit_on_eval_failed",
+                                lead_id=lead_id, error=str(_settle_err))
                 return {"url": url, "status": "failed_eval"}
 
             score = evaluation.get("score", 0)
@@ -908,16 +939,61 @@ def dispatch():
             for e in list(evaluation.get("contact_endpoints", [])):
                 if e.get("platform") == "email" and _is_generic_email(e.get("uri", "")):
                     continue
+                # SCORE-01 FIX: Validate email contacts against scraped DOM text.
+                # Mark each contact with a 'validated' boolean indicating whether
+                # the email address actually appears in the scraped page content.
+                # Unvalidated contacts are kept but flagged for operator awareness.
+                if e.get("platform") == "email" and e.get("uri"):
+                    e["validated"] = bool(text and e["uri"].lower() in text.lower())
+                else:
+                    e["validated"] = True  # Non-email contacts default to validated
                 contact_endpoints.append(e)
             existing_uris     = {e["uri"] for e in contact_endpoints}
             for em in (emails or [])[:3]:
                 if em and em not in existing_uris and not _is_generic_email(em):
-                    contact_endpoints.append({"platform": "email", "uri": em})
+                    _em_validated = bool(text and em.lower() in text.lower())
+                    contact_endpoints.append({"platform": "email", "uri": em, "validated": _em_validated})
                     existing_uris.add(em)
             for ph in (phones or [])[:2]:
                 if ph and ph not in existing_uris:
-                    contact_endpoints.append({"platform": "other", "uri": ph})
+                    contact_endpoints.append({"platform": "other", "uri": ph, "validated": True})
                     existing_uris.add(ph)
+
+            # SCORE-02 FIX: All-unknown quality gate.
+            # If score passes threshold but all key fields are unknown/empty,
+            # the lead is too thin for the operator. Set enrichment_pending
+            # so it can be re-processed with richer data.
+            _company_unknown = (
+                not evaluation.get("company_name")
+                or str(evaluation.get("company_name", "")).strip().lower() in ("", "unknown", "none", "n/a")
+            )
+            _pain_unknown = (
+                not evaluation.get("pain_point")
+                or str(evaluation.get("pain_point", "")).strip().lower() in ("", "unknown", "none", "n/a")
+            )
+            _contacts_empty = len(contact_endpoints) == 0
+
+            if _company_unknown and _pain_unknown and _contacts_empty:
+                log.info(
+                    "dispatch_all_unknown_quality_gate",
+                    url=url[:80],
+                    score=score,
+                    company=evaluation.get("company_name"),
+                    pain=evaluation.get("pain_point"),
+                    contacts=len(contact_endpoints),
+                    note="Score passes threshold but all key fields are unknown/empty. "
+                         "Setting enrichment_pending.",
+                )
+                doc_ref.update({
+                    "status": "enrichment_pending",
+                    "enrichment_reason": (
+                        "All-unknown quality gate: company_name, pain_point, and "
+                        "contact_endpoints are all empty/unknown despite passing score gate."
+                    ),
+                    "score": score,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                })
+                return {"url": url, "status": "enrichment_pending_all_unknown"}
 
             log.info("TRACE-10: Writing qualified lead to Firestore.",
                      url=url[:80], score=score, campaign_id=campaign_id)
@@ -1036,6 +1112,12 @@ def dispatch():
                           lock_entity=lock_entity,
                           url=url[:80] if url else "unknown",
                           error=str(_lock_del_err))
+            # FIN-03: Settle credit on pipeline crash path
+            try:
+                _settle_credit(tenant_id, "failure", lead_id=lead_id)
+            except Exception as _settle_err:
+                log.warning("settle_credit_on_crash_failed",
+                            lead_id=lead_id, error=str(_settle_err))
             return {"url": url, "status": "crash"}
 
     # ── Dispatch all approved URLs in parallel (max 5 workers, 25s per URL) ─
@@ -1087,6 +1169,12 @@ def dispatch():
                 except Exception as _cleanup_err:
                     log.warning("dispatch_timeout_cleanup_failed", url=url[:80],
                                 error=str(_cleanup_err))
+                # FIN-03: Settle credit on per-URL timeout
+                try:
+                    _settle_credit(tenant_id, "failure", lead_id=_lid)
+                except Exception as _settle_err:
+                    log.warning("settle_credit_on_url_timeout_failed",
+                                url=url[:80], error=str(_settle_err))
                 scrape_failed += 1
             except Exception as fut_err:
                 log.error("dispatch_future_crash", url=url[:80], error=str(fut_err),
@@ -1113,6 +1201,12 @@ def dispatch():
                 log.warning("dispatch_batch_timeout_cleanup_failed",
                             url=_remaining_url[:80],
                             error=str(_batch_cleanup_err))
+            # FIN-03: Settle credit on batch timeout remaining URLs
+            try:
+                _settle_credit(tenant_id, "failure", lead_id=_rlid)
+            except Exception as _settle_err:
+                log.warning("settle_credit_on_batch_timeout_failed",
+                            url=_remaining_url[:80], error=str(_settle_err))
 
     log.info("dispatch_batch_complete", campaign_id=campaign_id,
              processed=len(all_results), scrape_success=scrape_success,

@@ -176,13 +176,50 @@ class GoogleReviewSource(BaseSignalSource):
             )
             return []
 
-        names = [n for n in result.get("competitor_names", []) if isinstance(n, str) and n.strip()]
+        raw_names = [n.strip() for n in result.get("competitor_names", []) if isinstance(n, str) and n.strip()]
+
+        # INT-08: Validate competitor names to catch Gemini hallucinations.
+        # Generic descriptions, too-short tokens, or URL-shaped strings waste
+        # 2 Serper credits each (Maps + Reviews) with zero useful reviews.
+        validated: list[str] = []
+        _GENERIC_PHRASES = (
+            "any company", "local business", "competitor", "example",
+            "business name", "your competitor", "similar company",
+            "a company", "the company", "generic", "placeholder",
+        )
+        for name in raw_names:
+            name_lower = name.lower()
+            # Too short to be a real business name
+            if len(name) < 3:
+                log.debug("competitor_name_rejected_too_short", name=name)
+                continue
+            # Too long — likely a description, not a name
+            if len(name) > 80:
+                log.debug("competitor_name_rejected_too_long", name=name[:80])
+                continue
+            # Looks like a URL, not a business name
+            if name_lower.startswith(("http://", "https://", "www.")):
+                log.debug("competitor_name_rejected_url", name=name[:80])
+                continue
+            # Generic description instead of a specific business
+            if any(phrase in name_lower for phrase in _GENERIC_PHRASES):
+                log.debug("competitor_name_rejected_generic", name=name[:80])
+                continue
+            validated.append(name)
+
+        if len(validated) < len(raw_names):
+            log.info(
+                "competitor_names_validation_filtered",
+                raw_count=len(raw_names),
+                validated_count=len(validated),
+                rejected_names=[n for n in raw_names if n not in validated][:5],
+            )
         log.info(
             "google_reviews_competitors_derived",
-            count=len(names),
+            count=len(validated),
             geo=self._geo,
         )
-        return names
+        return validated
 
     @retry(
         wait=wait_exponential(multiplier=1, min=2, max=8),

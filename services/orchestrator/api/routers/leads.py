@@ -21,6 +21,7 @@ from core.helpers import (  # type: ignore[import]
     _async_shadow_track,
     _enqueue_bq_telemetry_task,
 )
+from api.routers.settings import _is_internal_url  # SEC-01: SSRF validation
 
 def _db():
     return get_db()
@@ -320,18 +321,26 @@ def update_lead(uid, tenant_id, user_role, doc_id):
             crm_delivery_status = "delivered"
             try:
                 import httpx as _httpx
-                _crm_resp = _httpx.post(
-                    crm_webhook_url,
-                    json={
-                        "lead_id":         doc_id,
-                        "score":           lead_dict.get("score"),
-                        "dm":              lead_dict.get("dm"),
-                        "intent_signal":   lead_dict.get("intent_signal"),
-                        "contact_endpoints": lead_dict.get("contact_endpoints", []),
-                    },
-                    timeout=5,
-                )
-                _crm_resp.raise_for_status()
+                # SEC-01: Validate CRM webhook URL is not an internal/private address
+                if _is_internal_url(crm_webhook_url):
+                    log.warning("crm_egress_ssrf_blocked",
+                                lead_id=doc_id,
+                                webhook_url=crm_webhook_url[:60],
+                                reason="URL resolves to internal/private address")
+                    crm_delivery_status = "blocked_ssrf"
+                else:
+                    _crm_resp = _httpx.post(
+                        crm_webhook_url,
+                        json={
+                            "lead_id":         doc_id,
+                            "score":           lead_dict.get("score"),
+                            "dm":              lead_dict.get("dm"),
+                            "intent_signal":   lead_dict.get("intent_signal"),
+                            "contact_endpoints": lead_dict.get("contact_endpoints", []),
+                        },
+                        timeout=5,
+                    )
+                    _crm_resp.raise_for_status()
             except Exception as crm_e:
                 log.warning("crm_egress_failed",
                             error=str(crm_e),
@@ -539,6 +548,34 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
     lead_id = None
 
     if new_status == "converted_to_lead":
+        # FIN-02: Check wallet and consume a credit BEFORE creating the lead.
+        # Previously credit_settled was set to True without any actual debit.
+        try:
+            _user_doc = _db().collection("users").document(tenant_id).get()
+            _user_data = _user_doc.to_dict() or {} if _user_doc.exists else {}
+            _wallet = _user_data.get("wallet", {})
+            _allocated = int(_wallet.get("allocated_credits", 0) or 0)
+            _consumed = max(
+                int(_wallet.get("total_consumed", 0) or 0),
+                int(_wallet.get("consumed_credits", 0) or 0),
+            )
+            _reserved = int(_wallet.get("reserved_credits", 0) or 0)
+            _available = _allocated - _consumed - _reserved
+            if _available <= 0:
+                log.warning("inbound_signal_conversion_insufficient_credits",
+                            signal_id=signal_doc_id, tenant_id=tenant_id,
+                            allocated=_allocated, consumed=_consumed, reserved=_reserved)
+                return jsonify({"error": "Insufficient credits to convert signal to lead"}), 402
+            # Consume 1 credit atomically
+            _db().collection("users").document(tenant_id).update(
+                {"wallet.total_consumed": fs.Increment(1)}
+            )
+        except Exception as _credit_err:
+            if "Insufficient credits" in str(_credit_err):
+                raise
+            log.warning("inbound_signal_credit_check_failed", error=str(_credit_err),
+                        note="Proceeding with conversion — credit check non-fatal.")
+
         # Promote signal to a full lead document
         lead_ref = _db().collection("leads").document()
         company  = sig.get("company_name") or "Unknown Company"
@@ -555,7 +592,7 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
             "source":             "inbound_radar",
             "status":             "new",
             "is_in_crm":          False,
-            "credit_settled":     True,
+            "credit_settled":     True,  # FIN-02: Now set AFTER actual credit consumption above
             "fit_score":          sig.get("intent_score", 0.5),
             "intent_label":       sig.get("intent_label", "EXPRESSING_PAIN"),
             "inbound_signal_id":  sig.get("signal_id", ""),

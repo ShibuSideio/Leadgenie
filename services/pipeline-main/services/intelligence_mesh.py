@@ -70,9 +70,13 @@ class ReviewSignalProvider(IntelligenceProvider):
 
     def fetch_signals(self, company_name, domain, serper_fn, **kwargs):
         signals = []
-        if not company_name:
+        # SCORE-05/06: Fall back to domain when company_name is missing.
+        # Leads from social/forum sources often have no company_name; skipping
+        # all enrichment for these leads silently suppresses their scores.
+        search_term = company_name or domain
+        if not search_term:
             return signals
-        query = f'(site:g2.com OR site:capterra.com) "{company_name}"'
+        query = f'(site:g2.com OR site:capterra.com) "{search_term}"'
         try:
             results = serper_fn(query)
             for r in (results or [])[:2]:
@@ -94,9 +98,11 @@ class FundingSignalProvider(IntelligenceProvider):
 
     def fetch_signals(self, company_name, domain, serper_fn, **kwargs):
         signals = []
-        if not company_name:
+        # SCORE-05/06: Fall back to domain when company_name is missing.
+        search_term = company_name or domain
+        if not search_term:
             return signals
-        query = f'"{company_name}" ("raised" OR "funding" OR "Series A" OR "Series B" OR "seed round")'
+        query = f'"{search_term}" ("raised" OR "funding" OR "Series A" OR "Series B" OR "seed round")'
         try:
             results = serper_fn(query)
             for r in (results or [])[:2]:
@@ -119,9 +125,11 @@ class NewsSignalProvider(IntelligenceProvider):
 
     def fetch_signals(self, company_name, domain, serper_fn, **kwargs):
         signals = []
-        if not company_name:
+        # SCORE-05/06: Fall back to domain when company_name is missing.
+        search_term = company_name or domain
+        if not search_term:
             return signals
-        query = f'"{company_name}" ("launch" OR "expansion" OR "partnership" OR "acquisition")'
+        query = f'"{search_term}" ("launch" OR "expansion" OR "partnership" OR "acquisition")'
         try:
             results = serper_fn(query)
             for r in (results or [])[:2]:

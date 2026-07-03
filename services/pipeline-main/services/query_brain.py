@@ -315,10 +315,10 @@ def generate_smart_query(
         _p_cat = f"{ctx.campaign_id}_{_p_cat}"
 
     # ── Step 2: Confidence threshold router ───────────────────────────────────
-    _CONF_THRESHOLD = 1000.0
+    _CONF_THRESHOLD = 100.0
     try:
         cfg = get_db().collection("system_config").document("router").get().to_dict() or {}
-        _CONF_THRESHOLD = float(cfg.get("intent_confidence_threshold", 1000))
+        _CONF_THRESHOLD = float(cfg.get("intent_confidence_threshold", 100))
     except Exception as _conf_read_err:
         # V24.3 (L1-4): Log threshold read failure — operator must know if
         # STATISTICAL routing config is inaccessible.
@@ -407,9 +407,12 @@ def generate_smart_query(
                     # (up to 3), matching the GEMINI_FALLBACK output count. Previously only
                     # top_ngrams[0] generated a symptom_dork — the "confident" STATISTICAL
                     # path paradoxically produced fewer queries than the fallback.
-                    _vertical_platform = "forum OR community OR reddit"
+                    # QRY-01 FIX: Use proper site: operators for community
+                    # domains instead of unsupported bare keywords. Remove
+                    # inurl: which Google deprioritizes (0-result returns).
+                    _vertical_sites = "site:reddit.com OR site:quora.com OR site:community.hubspot.com"
                     ctx.symptom_dorks = [
-                        f'("{ng}") (site:{_vertical_platform} OR inurl:complaint OR inurl:review)'
+                        f'("{ng}") ({_vertical_sites}) "complaint" OR "review"'
                         for ng in top_ngrams[:3]
                     ][:3]
                 log.info("query_brain_statistical_built",
@@ -806,7 +809,7 @@ Return ONLY the JSON object. No explanation, no markdown."""
     # Also reduced cap from 350→250 chars. Evidence (2026-07-03): 350-char
     # blacklists combined with tbs=qdr:2y and gl=in produce 0 Google results
     # for every Brand Narrative and Kerala Education campaign query.
-    _MAX_BLACKLIST_LEN = 250
+    _MAX_BLACKLIST_LEN = 450
     if len(blacklist) > _MAX_BLACKLIST_LEN:
         import re as _bl_re
         _original_len = len(blacklist)

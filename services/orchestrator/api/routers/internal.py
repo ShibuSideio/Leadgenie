@@ -114,8 +114,13 @@ def _verify_oidc(request_obj) -> tuple[bool, str]:
 # =============================================================================
 @bp.route("/api/internal/telemetry/bq-push", methods=["POST"])
 def bq_push():
-    if not request.headers.get("X-CloudTasks-QueueName"):
-        return jsonify({"error": "Forbidden — direct access not allowed"}), 403
+    # SEC-02: OIDC as primary auth; Cloud Tasks header as secondary fallback.
+    # X-CloudTasks-QueueName is spoofable — OIDC is the authoritative signal.
+    has_cloud_tasks = bool(request.headers.get("X-CloudTasks-QueueName"))
+    if not has_cloud_tasks:
+        ok, err = _verify_oidc(request)
+        if not ok:
+            return jsonify({"error": "Forbidden — OIDC verification failed", "detail": err}), 403
     payload = request.json or {}
     if not payload.get("event_id") or not payload.get("tenant_id"):
         return jsonify({"error": "Invalid payload"}), 400
@@ -273,8 +278,12 @@ def serper_audit():
 # =============================================================================
 @bp.route("/api/internal/credits/settle", methods=["POST"])
 def settle_credits():
-    if not request.headers.get("X-CloudTasks-QueueName"):
-        return jsonify({"error": "Forbidden"}), 403
+    # SEC-02: OIDC as primary auth; Cloud Tasks header as secondary fallback.
+    has_cloud_tasks = bool(request.headers.get("X-CloudTasks-QueueName"))
+    if not has_cloud_tasks:
+        ok, err = _verify_oidc(request)
+        if not ok:
+            return jsonify({"error": "Forbidden — OIDC verification failed", "detail": err}), 403
     payload   = request.json or {}
     tenant_id = payload.get("tenant_id")
     outcome   = payload.get("outcome")
@@ -321,6 +330,40 @@ def cron_sweep():
     if not ok:
         return jsonify({"error": err}), 401 if "Missing" in err else 403
 
+    # RACE-03: Firestore distributed lock — prevent sweep double-fire.
+    # If another sweep instance is already running, return 200 (no retry).
+    from google.cloud import firestore
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    _lock_ref = _db().collection("system_config").document("sweep_lock")
+    try:
+        @firestore.transactional
+        def _acquire_lock(txn):
+            snap = _lock_ref.get(transaction=txn)
+            lock_data = snap.to_dict() or {} if snap.exists else {}
+            locked_until = lock_data.get("locked_until")
+            if locked_until:
+                if hasattr(locked_until, "tzinfo") and locked_until.tzinfo is None:
+                    locked_until = locked_until.replace(tzinfo=datetime.timezone.utc)
+                if locked_until > now_utc:
+                    return False  # lock held
+            # Acquire lock for 10 minutes
+            txn.set(_lock_ref, {
+                "locked_until": now_utc + datetime.timedelta(minutes=10),
+                "locked_by": "cron_sweep",
+                "locked_at": now_utc,
+            })
+            return True
+
+        txn = _db().transaction()
+        acquired = _acquire_lock(txn)
+        if not acquired:
+            log.info("sweep_lock_already_held",
+                     note="Another sweep instance is running — skipping.")
+            return jsonify({"message": "Sweep already running", "skipped": True}), 200
+    except Exception as _lock_err:
+        log.warning("sweep_lock_acquire_failed", error=str(_lock_err),
+                    fallback="Proceeding with sweep despite lock failure (fail-open).")
+
     # ── Kill Switch Gate (V24.1) ──────────────────────────────────────────────
     # If the admin has activated the global kill switch via POST /api/l0/kill-switch,
     # skip ALL campaign processing and return 200 (so Cloud Scheduler doesn't retry).
@@ -334,6 +377,11 @@ def cron_sweep():
                 activated_at=str(_ks_data.get("activated_at", "")),
                 message="Sweep aborted — kill switch is engaged.",
             )
+            # RACE-03: Release lock before returning
+            try:
+                _lock_ref.delete()
+            except Exception:
+                pass
             return jsonify({
                 "message": "Kill switch active — sweep skipped.",
                 "kill_switch_active": True,
@@ -344,7 +392,7 @@ def cron_sweep():
         log.warning("kill_switch_read_failed", error=str(_ks_err),
                     fallback="Proceeding with sweep despite kill-switch read failure.")
 
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
+
 
     # ── Task 1: OIDC config pre-flight ────────────────────────────────────────
     # Fail fast with HTTP 412 (Precondition Failed) — NOT 503.
@@ -855,14 +903,35 @@ def cron_sweep():
             current_retry = zombie_data.get("retry_count", 0)
             try:
                 if current_retry < MAX_RETRIES:
-                    # ── AUTO-RETRY: re-queue with incremented counter ──
-                    zombie_doc.reference.update({
-                        "status":       "queued",
-                        "lock_entity":  None,
-                        "error":        None,
-                        "retry_count":  current_retry + 1,
-                        "recovered_at": _fs.SERVER_TIMESTAMP,
-                    })
+                    # RACE-09: Use Firestore transaction to verify lead status is
+                    # STILL 'processing' before marking as queued/failed.
+                    # Without this, a lead that completed processing between the
+                    # query and this update could be incorrectly re-queued.
+                    @_fs.transactional
+                    def _zombie_retry_txn(txn, doc_ref):
+                        snap = doc_ref.get(transaction=txn)
+                        if not snap.exists:
+                            return False
+                        current_data = snap.to_dict() or {}
+                        if current_data.get("status") != "processing":
+                            return False  # Status changed — skip
+                        txn.update(doc_ref, {
+                            "status":       "queued",
+                            "lock_entity":  None,
+                            "error":        None,
+                            "retry_count":  current_retry + 1,
+                            "recovered_at": _fs.SERVER_TIMESTAMP,
+                        })
+                        return True
+
+                    _z_txn = _db().transaction()
+                    _zombie_updated = _zombie_retry_txn(_z_txn, zombie_doc.reference)
+                    if not _zombie_updated:
+                        log.info("zombie_status_changed_skip",
+                                 doc_id=zombie_doc.id,
+                                 note="Lead status is no longer 'processing' — skipped.")
+                        continue
+                    # \u2500\u2500 AUTO-RETRY: re-queue with incremented counter \u2500\u2500
                     zombie_recovered += 1
                     log.info("zombie_auto_retry",
                              doc_id=zombie_doc.id,
@@ -894,14 +963,32 @@ def cron_sweep():
                         log.warning("zombie_retry_task_dispatch_failed",
                                     doc_id=zombie_doc.id, error=str(zt_err))
                 else:
-                    # ── TERMINAL: max retries exhausted → DLQ ──
-                    zombie_doc.reference.update({
-                        "status":       "failed",
-                        "lock_entity":  None,
-                        "error":        f"Zombie recovery failed after {MAX_RETRIES} retries "
-                                        f"(>{ZOMBIE_MINS}min execution limit).",
-                        "recovered_at": _fs.SERVER_TIMESTAMP,
-                    })
+                    # RACE-09: Use transaction for terminal failure path too
+                    @_fs.transactional
+                    def _zombie_dlq_txn(txn, doc_ref):
+                        snap = doc_ref.get(transaction=txn)
+                        if not snap.exists:
+                            return False
+                        current_data = snap.to_dict() or {}
+                        if current_data.get("status") != "processing":
+                            return False  # Status changed — skip
+                        txn.update(doc_ref, {
+                            "status":       "failed",
+                            "lock_entity":  None,
+                            "error":        f"Zombie recovery failed after {MAX_RETRIES} retries "
+                                            f"(>{ZOMBIE_MINS}min execution limit).",
+                            "recovered_at": _fs.SERVER_TIMESTAMP,
+                        })
+                        return True
+
+                    _z_dlq_txn = _db().transaction()
+                    _zombie_dlq_updated = _zombie_dlq_txn(_z_dlq_txn, zombie_doc.reference)
+                    if not _zombie_dlq_updated:
+                        log.info("zombie_dlq_status_changed_skip",
+                                 doc_id=zombie_doc.id,
+                                 note="Lead status is no longer 'processing' — skipped DLQ.")
+                        continue
+                    # \u2500\u2500 TERMINAL: max retries exhausted \u2192 DLQ \u2500\u2500
                     zombie_dlq += 1
                     log.warning("zombie_terminal_failure_dlq",
                                 doc_id=zombie_doc.id,
@@ -953,6 +1040,12 @@ def cron_sweep():
              producers=produce_dispatched, consumers=consume_dispatched,
              zombies=zombie_recovered, zombie_dlq=zombie_dlq,
              circuit_breaker_blocked_vectors=sorted(blocked_vectors) if blocked_vectors else [])
+
+    # RACE-03: Release sweep lock
+    try:
+        _lock_ref.delete()
+    except Exception as _lock_release_err:
+        log.warning("sweep_lock_release_failed", error=str(_lock_release_err))
     return jsonify({
         "message": f"V23 Sweep: {produce_dispatched} producers + {consume_dispatched} consumers.",
         "produce_dispatched":    produce_dispatched,

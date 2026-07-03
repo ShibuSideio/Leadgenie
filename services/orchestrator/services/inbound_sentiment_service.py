@@ -304,7 +304,10 @@ class InboundSentimentService:
         self.campaign      = campaign
         self.force_day_of_week = force_day_of_week
         self.pain_kws      = [str(p) for p in (persona.get("pain_points") or [])[:5]]
-        self.industry      = str(persona.get("industry") or "B2B software")
+        # INT-11: Use campaign keywords or 'general business' instead of hardcoded 'B2B software'
+        _campaign_kws = (campaign.get("keywords") or "").strip()
+        _industry_fallback = _campaign_kws.split(",")[0].strip() if _campaign_kws else "general business"
+        self.industry      = str(persona.get("industry") or _industry_fallback)
         self.competitors   = [str(c) for c in (persona.get("competitors") or [])[:3]]
         self.icp_desc      = str(
             persona.get("icp_description")
@@ -313,6 +316,23 @@ class InboundSentimentService:
         )
         self.icp_job_title = str(persona.get("icp_job_title") or "operations manager")
         self.company_type  = str(persona.get("company_type") or "company")
+
+        # INT-05: Guard against empty pain_kws — extract keywords from icp_desc or industry
+        if not self.pain_kws:
+            _fallback_text = self.icp_desc if self.icp_desc and self.icp_desc != self.industry else self.industry
+            # Extract multi-word keywords (4+ chars) from fallback text
+            import re as _re
+            _extracted = list(dict.fromkeys(
+                w for w in _re.findall(r"\b\w{4,}\b", _fallback_text.lower())
+                if w not in {"that", "this", "with", "from", "they", "their", "have", "been", "will", "about", "what", "when", "which"}
+            ))[:5]
+            if _extracted:
+                self.pain_kws = _extracted
+                log.info("pain_kws_fallback_applied", source="icp_desc" if self.icp_desc != self.industry else "industry", keywords=_extracted)
+            else:
+                # Last resort: use industry as a single keyword
+                self.pain_kws = [self.industry]
+                log.warning("pain_kws_last_resort_fallback", keyword=self.industry)
 
     # ------------------------------------------------------------------
     # Query building

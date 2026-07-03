@@ -29,6 +29,14 @@ function _escapeHTML(str) {
         .replace(/'/g, '&#39;');
 }
 
+// ── P0-XSS: Safe href helper — blocks javascript:/data:/vbscript: scheme injection ──
+function _safeHref(url) {
+    if (!url || typeof url !== 'string') return '#';
+    var trimmed = url.trim().toLowerCase();
+    if (trimmed.startsWith('javascript:') || trimmed.startsWith('data:') || trimmed.startsWith('vbscript:')) return '#';
+    return _escapeHTML(url);
+}
+
 
 
 // DOM Elements
@@ -1295,20 +1303,32 @@ window.viewLeadTimeline = function(eventsJson) {
 // CORE API MUTATION HELPER — used by pushToCRM, updateLeadStatus, etc.
 // =============================================================================
 
+// FE-12: Double-click / concurrent-call protection guard
+let _apiMutationInFlight = false;
+
 async function performApiMutation(url, method, payload) {
+    if (_apiMutationInFlight) {
+        console.warn('[performApiMutation] Blocked concurrent call to', url);
+        return false;
+    }
     const user = auth.currentUser;
     if (!user) return false;
-    // iOS Safari fix: force=true guarantees a fresh token even when the
-    // Safari background throttling has invalidated the in-memory cached token.
-    const token = await user.getIdToken(true);
-    const response = await fetch(`${API_BASE}${url}`, {
-        method: method,
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    });
-    if (response.status === 401 || response.status === 403) { handleAuthRejection(); return false; }
-    if (!response.ok) throw new Error('API Execution Failed');
-    return true;
+    _apiMutationInFlight = true;
+    try {
+        // iOS Safari fix: force=true guarantees a fresh token even when the
+        // Safari background throttling has invalidated the in-memory cached token.
+        const token = await user.getIdToken(true);
+        const response = await fetch(`${API_BASE}${url}`, {
+            method: method,
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (response.status === 401 || response.status === 403) { handleAuthRejection(); return false; }
+        if (!response.ok) throw new Error('API Execution Failed');
+        return true;
+    } finally {
+        _apiMutationInFlight = false;
+    }
 }
 
 // =============================================================================
@@ -1713,6 +1733,13 @@ window.saveCampaignAction = async function(payload) {
         if (!createResp.ok) throw new Error('Campaign creation failed');
         const createData = await createResp.json();
         const campaignId = createData.id;
+
+        // FE-05: Surface backend warnings (e.g., geo validation, quota) as toasts
+        if (Array.isArray(createData.warnings) && createData.warnings.length > 0) {
+            createData.warnings.forEach(function(w) {
+                showToast(_escapeHTML(String(w)), 'warning');
+            });
+        }
 
         // ── V23 IGNITION: fire Day-1 producer immediately ────────────────────
         // J-13 FIX: create_campaign already enqueues a zero-wait producer task.
@@ -3519,7 +3546,7 @@ function _prismDossierHTML(lead) {
             var h = new URL(lead.url || lead.source_url || '').hostname.replace('www.','');
             platform = h.split('.')[0].charAt(0).toUpperCase() + h.split('.')[0].slice(1);
         } catch(e) {}
-        var snippet = lead.intent_signal || lead.pain_point || '';
+        var snippet = _escapeHTML(lead.intent_signal || lead.pain_point || '');
         var handleEntry = null;
         var eps = lead.contact_endpoints || [];
         for (var ei = 0; ei < eps.length; ei++) {
@@ -3531,16 +3558,16 @@ function _prismDossierHTML(lead) {
         var handle = handleEntry ? handleEntry.uri : '';
         return '<div class="lc-section lc-dossier lc-dossier--social">' +
             '<div class="lc-section-label">Social Intelligence</div>' +
-            '<div class="lc-dossier-row"><span class="lc-dossier-key">Intent Detected On</span><span class="lc-dossier-val">' + platform + '</span></div>' +
+            '<div class="lc-dossier-row"><span class="lc-dossier-key">Intent Detected On</span><span class="lc-dossier-val">' + _escapeHTML(platform) + '</span></div>' +
             (snippet ? '<div class="lc-dossier-row"><span class="lc-dossier-key">Snippet Context</span><span class="lc-dossier-val lc-dossier-snippet">' + snippet + '</span></div>' : '') +
-            (handle ? '<div class="lc-dossier-row"><span class="lc-dossier-key">Profile</span><span class="lc-dossier-val"><a href="' + handle + '" target="_blank" rel="noopener" style="color:var(--primary);text-decoration:none;">View &#x2197;</a></span></div>' : '') +
+            (handle ? '<div class="lc-dossier-row"><span class="lc-dossier-key">Profile</span><span class="lc-dossier-val"><a href="' + _safeHref(handle) + '" target="_blank" rel="noopener" style="color:var(--primary);text-decoration:none;">View &#x2197;</a></span></div>' : '') +
             '</div>';
     }
 
     if (mode === 'b2b2c') {
-        var demand = lead.intent_signal || lead.pain_point || 'Consumer demand signal captured.';
-        var obj    = lead.primary_objection_hypothesis || lead.objection || '';
-        var tech   = (lead.tech_stack_found || []).slice(0,4).join(', ') || '-';
+        var demand = _escapeHTML(lead.intent_signal || lead.pain_point || 'Consumer demand signal captured.');
+        var obj    = _escapeHTML(lead.primary_objection_hypothesis || lead.objection || '');
+        var tech   = _escapeHTML((lead.tech_stack_found || []).slice(0,4).join(', ') || '-');
         return '<div class="lc-section lc-dossier lc-dossier--b2b2c">' +
             '<div class="lc-section-label">Consumer Demand Context</div>' +
             '<div class="lc-dossier-row"><span class="lc-dossier-key">Demand Signal</span><span class="lc-dossier-val">' + demand + '</span></div>' +
@@ -3551,12 +3578,12 @@ function _prismDossierHTML(lead) {
             '</div>';
     }
 
-    var csz   = lead.company_size_tier || '-';
-    var tech2 = (lead.tech_stack_found || []).slice(0,4).join(', ') || '-';
-    var obj2  = lead.primary_objection_hypothesis || lead.objection || '';
+    var csz   = _escapeHTML(lead.company_size_tier || '-');
+    var tech2 = _escapeHTML((lead.tech_stack_found || []).slice(0,4).join(', ') || '-');
+    var obj2  = _escapeHTML(lead.primary_objection_hypothesis || lead.objection || '');
     var dmN   = lead.decision_maker_name  || '';
     var dmT   = lead.decision_maker_title || '';
-    var dmStr = [dmN, dmT].filter(Boolean).join(' / ') || '-';
+    var dmStr = _escapeHTML([dmN, dmT].filter(Boolean).join(' / ') || '-');
     return '<div class="lc-section lc-dossier lc-dossier--b2b">' +
         '<div class="lc-section-label">Company Dossier</div>' +
         '<div class="lc-dossier-row"><span class="lc-dossier-key">Company Size</span><span class="lc-dossier-val">' + csz + '</span></div>' +
@@ -3713,7 +3740,7 @@ window.createLeadCardV2 = function(docId, lead) {
         card.innerHTML =
             '<div class="lc-header" style="margin-bottom: 12px;">' +
                 '<div class="lc-left">' +
-                    '<div class="lc-company-name"><a href="'+(lead.url||lead.source_url||'#')+'" target="_blank" rel="noopener noreferrer">'+titlePrefix+displayName+titleSuffix+'</a></div>' +
+                    '<div class="lc-company-name"><a href="'+_safeHref(lead.url||lead.source_url||'#')+'" target="_blank" rel="noopener noreferrer">'+titlePrefix+displayName+titleSuffix+'</a></div>' +
                     '<div class="lc-meta"><span>'+srcLbl+'</span>'+(timeAgo?' &middot; '+timeAgo:'')+'</div>' +
                 '</div>' +
                 '<div class="lc-score-wrap" style="align-items: center;">' +
@@ -3835,8 +3862,8 @@ window.createLeadCardV2 = function(docId, lead) {
     if (lead.email || lead.phone) {
         cInfo = '<div class="lc-section" style="font-size:0.85rem;">' +
             '<div class="lc-section-label">Contact Info</div>' +
-            (lead.email ? '<a href="mailto:'+lead.email+'" style="color:#2563eb;text-decoration:none;">'+lead.email+'</a>&nbsp;' : '') +
-            (lead.phone ? '<a href="tel:'+lead.phone+'" style="color:#2563eb;text-decoration:none;">'+lead.phone+'</a>' : '') +
+            (lead.email ? '<a href="mailto:'+_escapeHTML(lead.email)+'" style="color:#2563eb;text-decoration:none;">'+_escapeHTML(lead.email)+'</a>&nbsp;' : '') +
+            (lead.phone ? '<a href="tel:'+_escapeHTML(lead.phone)+'" style="color:#2563eb;text-decoration:none;">'+_escapeHTML(lead.phone)+'</a>' : '') +
             '</div>';
     }
 
@@ -3847,7 +3874,7 @@ window.createLeadCardV2 = function(docId, lead) {
     card.innerHTML =
         '<div class="lc-header">' +
             '<div class="lc-left">' +
-                '<div class="lc-company-name"><a href="'+(lead.url||lead.source_url||'#')+'" target="_blank" rel="noopener noreferrer">'+titlePrefix+displayName+titleSuffix+'</a></div>' +
+                '<div class="lc-company-name"><a href="'+_safeHref(lead.url||lead.source_url||'#')+'" target="_blank" rel="noopener noreferrer">'+titlePrefix+displayName+titleSuffix+'</a></div>' +
                 '<div class="lc-meta"><span>'+srcLbl+'</span>'+(timeAgo?' &middot; '+timeAgo:'')+' </div>' +
             '</div>' +
             '<div class="lc-score-wrap">' +
@@ -3865,7 +3892,7 @@ window.createLeadCardV2 = function(docId, lead) {
         '</button>' +
         '<div class="lc-expanded" id="'+expandId+'">' +
             (dm ? '<div class="lc-section"><div class="lc-section-label">Your Opening Message</div><div class="lc-icebreaker">'+dm+'</div></div>' : '') +
-            (lead.pain_point && lead.pain_point !== signal ? '<div class="lc-section"><div class="lc-section-label">Why This Lead</div><div class="lc-why">'+lead.pain_point+'</div></div>' : '') +
+            (lead.pain_point && lead.pain_point !== signal ? '<div class="lc-section"><div class="lc-section-label">Why This Lead</div><div class="lc-why">'+_escapeHTML(lead.pain_point)+'</div></div>' : '') +
             '<button class="expand-btn" data-action="toggle-dossier" data-lead-id="'+docId+'">' +
                 '<span class="dossier-chevron">&#x25BC;</span> View Full Dossier &amp; Tags' +
             '</button>' +
@@ -5817,7 +5844,7 @@ async function loadInboundSignals(statusFilter = 'new') {
             const ic = INTENT_COLORS[sig.intent_label] || INTENT_COLORS.TREND;
             const score = Math.round((sig.intent_score || 0) * 100);
             const kws = (sig.pain_keywords || []).slice(0, 4).map(k =>
-                `<span style="background:#f1f5f9; border-radius:12px; padding:2px 8px; font-size:0.7rem; color:#475569;">${k}</span>`
+                `<span style="background:#f1f5f9; border-radius:12px; padding:2px 8px; font-size:0.7rem; color:#475569;">${_escapeHTML(k)}</span>`
             ).join(' ');
 
             return `
@@ -5825,16 +5852,16 @@ async function loadInboundSignals(statusFilter = 'new') {
                 <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">
                     <div style="flex:1; min-width:0;">
                         <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap;">
-                            <span style="background:${ic.badge}; color:#fff; border-radius:20px; padding:3px 10px; font-size:0.7rem; font-weight:700;">${ic.label}</span>
+                            <span style="background:${ic.badge}; color:#fff; border-radius:20px; padding:3px 10px; font-size:0.7rem; font-weight:700;">${_escapeHTML(ic.label)}</span>
                             <span style="background:#fff; border:1px solid #e5e7eb; border-radius:20px; padding:2px 10px; font-size:0.7rem; font-weight:600; color:#374151;">
-                                ${sig.source_platform || 'web'}
+                                ${_escapeHTML(sig.source_platform || 'web')}
                             </span>
-                            ${sig.company_name ? `<span style="font-size:0.78rem; font-weight:600; color:#1e293b;">🏢 ${sig.company_name}</span>` : ''}
+                            ${sig.company_name ? `<span style="font-size:0.78rem; font-weight:600; color:#1e293b;">🏢 ${_escapeHTML(sig.company_name)}</span>` : ''}
                         </div>
-                        <div style="font-weight:600; font-size:0.92rem; margin-bottom:6px; color:#0f172a; line-height:1.4;">${sig.headline || '(no title)'}</div>
-                        <div style="font-size:0.82rem; color:#475569; margin-bottom:8px; line-height:1.5;">${(sig.snippet || '').substring(0,220)}…</div>
+                        <div style="font-weight:600; font-size:0.92rem; margin-bottom:6px; color:#0f172a; line-height:1.4;">${_escapeHTML(sig.headline || '(no title)')}</div>
+                        <div style="font-size:0.82rem; color:#475569; margin-bottom:8px; line-height:1.5;">${_escapeHTML((sig.snippet || '').substring(0,220))}…</div>
                         <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">${kws}</div>
-                        <a href="${sig.source_url}" target="_blank" rel="noopener noreferrer" style="font-size:0.75rem; color:var(--primary); text-decoration:none;">
+                        <a href="${_safeHref(sig.source_url)}" target="_blank" rel="noopener noreferrer" style="font-size:0.75rem; color:var(--primary); text-decoration:none;">
                             🔗 View Source ↗
                         </a>
                     </div>

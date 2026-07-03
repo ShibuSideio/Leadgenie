@@ -115,6 +115,9 @@ def fetch_neg_shield(tenant_id: str, sourcing_vector: str = "B2B") -> tuple[list
         # V24.3 (L8-1): Filter by sourcing_vector OR 'GLOBAL' so that B2B
         # rejections (vector='B2B') don't appear in B2C queries (vector='B2C').
         # GLOBAL signals are tenant-wide suppressions (e.g. competitor domains).
+        # INT-02: 90-day TTL — exclude expired neg signals so domains
+        # don't stay suppressed forever. Respects explicit expires_at if
+        # set, otherwise falls back to 90-day window from timestamp.
         query = """
             SELECT root_domain, entity_name
             FROM `{project}.swarm_analytics.Negative_Signals`
@@ -122,6 +125,9 @@ def fetch_neg_shield(tenant_id: str, sourcing_vector: str = "B2B") -> tuple[list
               AND (sourcing_vector = @vector OR sourcing_vector = 'GLOBAL'
                    OR sourcing_vector IS NULL)
               AND root_domain IS NOT NULL
+              AND timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+              AND (expires_at IS NULL
+                   OR expires_at > CURRENT_TIMESTAMP())
             GROUP BY root_domain, entity_name
             ORDER BY COUNT(*) DESC
             LIMIT 20

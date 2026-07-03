@@ -227,7 +227,7 @@ def analyze_website(uid, tenant_id, user_role):
             r = httpx.get(
                 url,
                 timeout=httpx.Timeout(connect=4.0, read=7.0, write=4.0, pool=1.0),
-                follow_redirects=True,
+                follow_redirects=False,
                 headers={
                     "User-Agent": "Mozilla/5.0 (compatible; Sideio/1.0; +https://sideio.com)",
                     "Accept-Language": "en-US,en;q=0.9",

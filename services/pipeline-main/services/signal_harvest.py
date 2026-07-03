@@ -661,6 +661,54 @@ def _write_to_firestore(
                 f"{tenant_id}_{_dedup_key}".encode()
             ).hexdigest()
 
+            # INT-04 FIX: Set dm from reviewer author (signal.author) and
+            # company_name from the reviewer's business context, not the
+            # competitor being reviewed.
+            _reviewer_name = (signal.author or "").strip()
+            _reviewer_snippet = (score.get("pain_summary", "") or "")[:200]
+            _dm_value = _reviewer_name if _reviewer_name else "Google Maps Reviewer"
+            # company_name should reflect the reviewer's company/context, not
+            # the competitor place. Use reviewer metadata if available, else
+            # derive from the review pain context.
+            _company_from_reviewer = (
+                signal.metadata.get("reviewer_company", "")
+                or signal.metadata.get("reviewer_context", "")
+                or ""
+            ).strip()
+            _company_name_value = _company_from_reviewer if _company_from_reviewer else f"Reviewer of {signal.metadata.get('place_name', 'Unknown')}"
+
+            # FIN-01 FIX: Check/reserve credits before creating direct lead.
+            # Mirror dispatch.py's credit settlement pattern.
+            _credits_available = True
+            try:
+                _user_snap = db.collection("users").document(tenant_id).get()
+                _user_data = _user_snap.to_dict() or {} if _user_snap.exists else {}
+                _credit_limit = _user_data.get("credit_limit", 0)
+                _credits_used = _user_data.get("credits_used", 0)
+                if _credit_limit > 0 and _credits_used >= _credit_limit:
+                    _credits_available = False
+                    log.info(
+                        "signal_harvest_direct_lead_insufficient_credits",
+                        campaign_id=campaign_id,
+                        tenant_id=tenant_id,
+                        credits_used=_credits_used,
+                        credit_limit=_credit_limit,
+                        note="Insufficient credits for direct lead. Queuing URL normally.",
+                    )
+            except Exception as _cred_check_err:
+                log.warning(
+                    "signal_harvest_credit_check_failed",
+                    campaign_id=campaign_id,
+                    error=str(_cred_check_err),
+                    note="Credit check failed. Proceeding with lead creation (fail-open).",
+                )
+
+            if not _credits_available:
+                # Insufficient credits — queue the URL through normal dispatch instead
+                harvest_urls.append(signal.url)
+                queued += 1
+                continue
+
             lead_doc = {
                 "url":              signal.url,
                 "status":           "new",
@@ -668,15 +716,15 @@ def _write_to_firestore(
                 "normalized_score": 80,
                 "pain_point":       score.get("pain_summary", ""),
                 "intent_signal":    score.get("buyer_language_quote", ""),
-                "decision_maker":   {"name": signal.author},
-                "company_name":     signal.metadata.get("place_name", ""),
+                "decision_maker":   {"name": _reviewer_name},
+                "company_name":     _company_name_value,
                 "source":           "signal_harvest_review",
                 "is_cluster_lead":  False,
                 "tenant_id":        tenant_id,
                 "campaign_id":      campaign_id,
                 "matched_campaigns": [{"campaign_id": campaign_id, "raw_score": 8}],
                 "contact_endpoints": [{"platform": "google_maps", "uri": signal.url}],
-                "dm":               "",
+                "dm":               _dm_value,
                 "icebreaker_angle": score.get("pain_summary", ""),
                 "score_reasoning":  (
                     f"HIGH-tier Google Review on competitor "
@@ -697,6 +745,23 @@ def _write_to_firestore(
                 lead_ref = db.collection("leads").document(lead_id)
                 lead_ref.create(lead_doc)
                 direct_leads_count += 1
+
+                # FIN-01 FIX: Settle credit after successful direct lead creation
+                try:
+                    import random as _rnd
+                    _shard = _rnd.randint(0, 9)
+                    db.collection("users").document(tenant_id) \
+                        .collection("wallet_shards").document(str(_shard)) \
+                        .set({"consumed_credits": firestore.Increment(1)}, merge=True)
+                except Exception as _settle_err:
+                    log.warning(
+                        "signal_harvest_credit_settle_failed",
+                        campaign_id=campaign_id,
+                        lead_id=lead_id,
+                        error=str(_settle_err),
+                        note="Credit settlement failed after direct lead creation.",
+                    )
+
                 log.info(
                     "signal_harvest_direct_lead_created",
                     campaign_id=campaign_id,
@@ -705,6 +770,18 @@ def _write_to_firestore(
                     reviewer=signal.author[:60],
                 )
             except AlreadyExists:
+                # RACE-06 FIX: Release lock on AlreadyExists path.
+                # The dedup key was already claimed — release any lock we may
+                # hold to prevent lock leak.
+                try:
+                    _lock_key = hashlib.sha256(_dedup_key.encode()).hexdigest()
+                    db.collection("global_lead_locks").document(_lock_key).delete()
+                except Exception as _lock_release_err:
+                    log.warning(
+                        "signal_harvest_lock_release_failed_on_dup",
+                        lead_id=lead_id,
+                        error=str(_lock_release_err),
+                    )
                 log.info(
                     "signal_harvest_direct_lead_exists",
                     campaign_id=campaign_id,

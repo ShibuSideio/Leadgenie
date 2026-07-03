@@ -367,14 +367,39 @@ def sanitize_query(query: str) -> str:
     return result
 
 
+# EXT-04: 5-minute TTL on the Serper key cache.
+# core.clients caches indefinitely (container-lifetime). This wrapper adds a
+# 5-minute TTL so that a key rotation in Secret Manager takes effect within
+# 5 minutes without redeploying. The (key, timestamp) tuple is stored module-
+# level; on expiry the cached value in core.clients is cleared and re-fetched.
+_serper_key_cache_local: tuple[str, float] | None = None
+_SERPER_KEY_TTL_S: float = 300.0  # 5 minutes
+
+
 def _get_serper_api_key() -> str:
-    """Fetch Serper API key — uses process-lifetime cache from core.clients.
+    """Fetch Serper API key with a 5-minute TTL cache layer.
 
     SF-004 fix: previously called Secret Manager on every invocation.
-    get_serper_key() caches the result for the lifetime of the container,
-    eliminating 40+ Secret Manager RPCs per dispatch task batch.
+    get_serper_key() caches the result for the lifetime of the container.
+    EXT-04: This wrapper adds a 5-min TTL so key rotations take effect
+    without container restarts.
     """
-    return get_serper_key(SERPER_API_KEY_NAME)
+    import time as _time
+    import core.clients as _cc  # type: ignore[import]
+
+    global _serper_key_cache_local
+    now = _time.monotonic()
+    if _serper_key_cache_local is not None:
+        cached_key, cached_ts = _serper_key_cache_local
+        if now - cached_ts < _SERPER_KEY_TTL_S:
+            return cached_key
+        # TTL expired — clear the upstream process-lifetime cache so
+        # get_serper_key() re-fetches from Secret Manager.
+        _cc._serper_key_cache = None
+
+    key = get_serper_key(SERPER_API_KEY_NAME)
+    _serper_key_cache_local = (key, now)
+    return key
 
 
 # ---------------------------------------------------------------------------
@@ -620,23 +645,36 @@ def search_serper(
     payload = json.dumps(payload_dict)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
 
-    def _is_rate_limited(exc: BaseException) -> bool:
-        return (
-            isinstance(exc, httpx.HTTPStatusError)
-            and exc.response.status_code == 429
-        )
+    # EXT-03: Retry on transient network errors (timeout, connection reset)
+    # AND transient server errors (500/502/503/504) in addition to 429.
+    _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+    def _is_retryable(exc: BaseException) -> bool:
+        if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in _RETRYABLE_STATUS_CODES
+        return False
 
     @retry(
         wait=wait_exponential(multiplier=2, min=4, max=32),
         stop=stop_after_attempt(4),
-        retry=retry_if_exception(_is_rate_limited),
+        retry=retry_if_exception(_is_retryable),
         reraise=True,  # V24.1.1 FIX: reraise=False returned None on exhaustion → TypeError on len()
     )
     def _do_post():
         r = httpx.post(url, headers=headers, data=payload, timeout=30)
-        if r.status_code == 429:
+        if r.status_code in _RETRYABLE_STATUS_CODES:
             r.raise_for_status()
         if r.status_code == 200:
+            # EXT-02: Log remaining Serper credits if header is present.
+            _credits_remaining = r.headers.get("X-Credits-Remaining")
+            if _credits_remaining is not None:
+                log.info(
+                    "serper_credits_remaining",
+                    credits=_credits_remaining,
+                    query=query[:60],
+                )
             return r.json().get("organic", [])
         log.warning("serper_non_retryable", status=r.status_code, body=r.text[:200])
         return []

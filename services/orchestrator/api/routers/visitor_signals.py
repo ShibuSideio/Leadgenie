@@ -29,6 +29,11 @@ _rate_cache: dict[str, tuple[int, float]] = {}
 _RATE_LIMIT = 100  # requests per window
 _RATE_WINDOW = 60  # seconds
 
+# SEC-05: Tenant existence cache — {tenant_id: expiry_timestamp}
+# Avoids Firestore reads on every beacon while ensuring only valid tenants write data.
+_TENANT_CACHE: dict[str, float] = {}
+_TENANT_CACHE_TTL = 300  # 5 minutes
+
 
 def _check_rate_limit(tenant_id: str) -> bool:
     """Return True if request is allowed, False if rate-limited."""
@@ -64,7 +69,26 @@ def ingest_visitor_signal():
     
     if not tenant_id or len(tenant_id) > 128:
         return jsonify({"error": "Invalid tenant_id"}), 400
-    
+
+    # SEC-05: Verify tenant exists in users collection (cached 5 min)
+    now_ts = time.time()
+    cached_expiry = _TENANT_CACHE.get(tenant_id)
+    if cached_expiry is not None and now_ts < cached_expiry:
+        tenant_valid = True
+    else:
+        try:
+            _tenant_doc = fs.Client().collection("users").document(tenant_id).get()
+            tenant_valid = _tenant_doc.exists
+        except Exception:
+            tenant_valid = False
+        if tenant_valid:
+            _TENANT_CACHE[tenant_id] = now_ts + _TENANT_CACHE_TTL
+        else:
+            # Negative cache for 60s to avoid repeated lookups for bad IDs
+            _TENANT_CACHE[tenant_id] = now_ts + 60
+    if not tenant_valid:
+        return jsonify({"error": "Unknown tenant"}), 404
+
     if not _check_rate_limit(tenant_id):
         return jsonify({"error": "Rate limited"}), 429
 

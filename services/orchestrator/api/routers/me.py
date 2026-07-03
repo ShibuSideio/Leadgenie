@@ -14,6 +14,7 @@ from api.middleware import require_auth
 from core.clients import get_db
 from core.logging import get_logger
 from repositories.firestore_repo import get_wallet_shards_total
+from api.routers.settings import _is_internal_url  # SEC-01: SSRF validation
 
 log = get_logger(__name__)
 
@@ -47,6 +48,9 @@ def me_endpoint(uid: str, tenant_id: str, user_role: str):
             crm_url = payload["crm_webhook_url"]
             if crm_url and not crm_url.startswith(("http://", "https://")):
                 return jsonify({"error": "Webhook URL must start with http:// or https://"}), 400
+            # SEC-01: Block CRM webhooks targeting internal/private infrastructure
+            if crm_url and _is_internal_url(crm_url):
+                return jsonify({"error": "Webhook URL must not point to internal or private addresses"}), 400
             updates["crm_webhook_url"] = crm_url
         # V23.5: inbound radar toggle
         if "inbound_radar_enabled" in payload:

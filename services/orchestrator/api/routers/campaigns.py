@@ -54,7 +54,7 @@ log = get_logger("orchestrator.v23.campaigns")
 
 MAX_CHILD_CAMPAIGNS = int(os.environ.get("MAX_CHILD_CAMPAIGNS", 5))
 
-_CAMPAIGN_UPDATE_ALLOWED = {"name", "bio", "keywords", "status", "gl", "location", "persona_id", "drip_interval_minutes", "geo_hierarchy", "updatedAt", "sourcing_vector"}
+_CAMPAIGN_UPDATE_ALLOWED = {"name", "bio", "keywords", "status", "gl", "location", "persona_id", "drip_interval_minutes", "geo_hierarchy", "updatedAt", "sourcing_vector", "next_produce_due"}
 
 # ---------------------------------------------------------------------------
 # FIX (2026-06-21): Campaign field sanitizer — server-side write boundary.
@@ -105,7 +105,7 @@ def _sanitize_campaign_fields(data: dict) -> dict:
         parts = [k.strip() for k in kw.split(",") if k.strip()]
         clean = [
             k for k in parts
-            if len(k) > 2
+            if len(k) >= 2
             and not any(junk in k.lower() for junk in _FIELD_JUNK_PATTERNS)
         ]
         if len(clean) < len(parts):
@@ -361,6 +361,24 @@ def create_campaign(uid, tenant_id, user_role):
         task["schedule_time"] = sched_ts
         tasks_client.create_task(request={"parent": queue_path, "task": task})
         log.info("zero_wait_enqueued", campaign_id=doc_ref.id, jitter=jitter)
+
+        # UX-01: Also enqueue a consumer/dispatcher Cloud Task with 180s delay
+        # so newly created campaigns don't wait for the next sweep cycle.
+        try:
+            consumer_delay = 180
+            consumer_ts = timestamp_pb2.Timestamp()
+            consumer_ts.FromDatetime(now_utc + datetime.timedelta(seconds=consumer_delay))
+            consumer_task = _oidc_task(
+                f"{base_url}/dispatch",
+                {"tenant_id": tenant_id, "campaign_id": doc_ref.id},
+                sa_email, base_url,
+            )
+            consumer_task["schedule_time"] = consumer_ts
+            tasks_client.create_task(request={"parent": queue_path, "task": consumer_task})
+            log.info("zero_wait_consumer_enqueued", campaign_id=doc_ref.id, delay_s=consumer_delay)
+        except Exception as consumer_err:
+            log.warning("zero_wait_consumer_enqueue_failed", error=str(consumer_err))
+
     except Exception as enq_err:
         enqueue_error = str(enq_err)
         log.warning("zero_wait_enqueue_failed", error=enqueue_error)
@@ -423,6 +441,11 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
     data.pop("tenant_id", None)
     data["updatedAt"] = firestore.SERVER_TIMESTAMP
 
+    # UX-03: If keywords or bio changed, set next_produce_due to now for re-produce
+    existing_data = doc_data.to_dict() or {}
+    _keywords_changed = "keywords" in data and data.get("keywords") != existing_data.get("keywords")
+    _bio_changed = "bio" in data and data.get("bio") != existing_data.get("bio")
+
     if "bio" in data and data["bio"]:
         weights = get_vector_weights()
         data["sourcing_vector"] = classify_sourcing_vector(data["bio"], weights)
@@ -438,8 +461,54 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
     _sanitize_campaign_fields(data)
 
     data = {k: v for k, v in data.items() if k in _CAMPAIGN_UPDATE_ALLOWED}
+
+    # UX-02: Resume from paused → active: re-ignite by setting next_produce_due to now
+    #        and dispatching a fresh /produce Cloud Task.
+    old_status = existing_data.get("status")
+    new_status = data.get("status")
+    if old_status == "paused" and new_status == "active":
+        _now_utc = datetime.datetime.now(datetime.timezone.utc)
+        data["next_produce_due"] = _now_utc.isoformat()
+        try:
+            from core.config import PIPELINE_URL as _pl_url  # type: ignore[import]
+            from core.helpers import get_service_account_email as _get_sa  # type: ignore[import]
+            from core.clients import get_tasks_client as _get_tc  # type: ignore[import]
+            from core.config import PROJECT_ID as _pid, LOCATION as _loc, QUEUE as _q  # type: ignore[import]
+            from google.cloud import tasks_v2 as _tv2
+            from google.protobuf import timestamp_pb2 as _ts_pb2
+            import json as _json
+            _base = _pl_url.split("/dispatch")[0]
+            _sa = _get_sa().strip()
+            _tc = _get_tc()
+            _qp = _tc.queue_path(_pid, _loc, _q)
+            _ts = _ts_pb2.Timestamp()
+            _ts.FromDatetime(_now_utc + datetime.timedelta(seconds=random.randint(1, 5)))
+            _task = {
+                "schedule_time": _ts,
+                "http_request": {
+                    "http_method": _tv2.HttpMethod.POST,
+                    "url": f"{_base}/produce",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": _json.dumps({"tenant_id": tenant_id, "campaign_id": doc_id}).encode(),
+                    "oidc_token": {"service_account_email": _sa, "audience": _base},
+                },
+            }
+            _tc.create_task(request={"parent": _qp, "task": _task})
+            log.info("campaign_resume_reignite", campaign_id=doc_id)
+        except Exception as _re_err:
+            log.warning("campaign_resume_reignite_failed", campaign_id=doc_id, error=str(_re_err))
+
+    # UX-03: If keywords or bio changed, force re-produce
+    if _keywords_changed or _bio_changed:
+        _now_utc_ux03 = datetime.datetime.now(datetime.timezone.utc)
+        data["next_produce_due"] = _now_utc_ux03.isoformat()
+        log.info("campaign_reproduce_scheduled",
+                 campaign_id=doc_id,
+                 keywords_changed=_keywords_changed,
+                 bio_changed=_bio_changed)
+
     doc_ref.update(data)
-    _enqueue_bq_telemetry_task(tenant_id, doc_data.to_dict(), data.get("status") or "updated")
+    _enqueue_bq_telemetry_task(tenant_id, existing_data, data.get("status") or "updated")
     return jsonify({"status": "success"}), 200
 
 

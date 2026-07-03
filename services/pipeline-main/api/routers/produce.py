@@ -590,13 +590,15 @@ def produce():
     )
 
     # ------------------------------------------------------------------
-    # Write to unprocessed_queue (additive merge, cap at 200)
+    # Write to unprocessed_queue (atomic ArrayUnion, cap at 200)
+    # RACE-01/02 FIX: Use firestore.ArrayUnion for atomic, race-safe
+    # append instead of destructive overwrite that loses concurrent writes.
     # ------------------------------------------------------------------
     current_queue = campaign.get("unprocessed_queue", [])
 
     # V24.4 (L3-4): Queue backpressure — if queue depth > 150 unconsumed URLs,
     # skip producing new URLs. The consumer hasn't caught up yet. Producing more
-    # would cause [:200] trimming to silently discard fresh signals.
+    # would cause the 200-URL cap to silently discard fresh signals.
     _queue_depth = len(current_queue) if current_queue else 0
     if _queue_depth > 150:
         log.info(
@@ -609,21 +611,58 @@ def produce():
         )
         return jsonify({"status": "skipped_queue_full", "queue_depth": _queue_depth}), 200
 
-    combined_queue = list(dict.fromkeys(current_queue + fresh_urls))[:200]
+    # Cap fresh_urls to stay within the 200-URL queue limit.
+    # Estimate remaining capacity from the snapshot (best-effort — concurrent
+    # producers may have appended since the read, but ArrayUnion is idempotent
+    # so duplicates are harmless).
+    _remaining_capacity = max(200 - _queue_depth, 0)
+    _capped_fresh = fresh_urls[:_remaining_capacity] if fresh_urls else []
+
+    if not _capped_fresh:
+        log.info(
+            "produce_no_fresh_after_cap",
+            campaign_id=campaign_id,
+            queue_depth=_queue_depth,
+            fresh_count=len(fresh_urls),
+            note="No fresh URLs fit within 200-URL cap.",
+        )
+    else:
+        queued_count = len(_capped_fresh)  # Update queued_count to reflect actual appended
 
     try:
+        import datetime
         update_data = {
-            "unprocessed_queue": combined_queue,
+            "unprocessed_queue": firestore.ArrayUnion(_capped_fresh),
             "last_produced_at":  firestore.SERVER_TIMESTAMP,
         }
         # V24.4 (L3-5): Always update next_drip_due when the queue is refreshed,
         # not only on first fill. A stale next_drip_due causes immediate dispatch
         # on every sweep instead of respecting the configured drip cadence.
-        if combined_queue:
-            import datetime
+        if _capped_fresh:
             update_data["next_drip_due"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         campaign_ref.update(update_data)
+
+        # Post-write cap enforcement: re-read queue length and trim if another
+        # concurrent producer pushed it past 200 (defense-in-depth).
+        try:
+            _refreshed = campaign_ref.get().to_dict() or {}
+            _post_queue = _refreshed.get("unprocessed_queue", [])
+            if len(_post_queue) > 200:
+                log.warning(
+                    "produce_queue_over_cap_trimming",
+                    campaign_id=campaign_id,
+                    queue_len=len(_post_queue),
+                    note="Concurrent append pushed queue past 200. Trimming to 200.",
+                )
+                campaign_ref.update({"unprocessed_queue": _post_queue[:200]})
+        except Exception as _cap_check_err:
+            log.warning(
+                "produce_queue_cap_check_failed",
+                campaign_id=campaign_id,
+                error=str(_cap_check_err),
+                note="Non-fatal — queue may temporarily exceed 200 URLs.",
+            )
     except Exception as exc:
         log.critical(
             "produce_queue_write_failed",
@@ -632,6 +671,8 @@ def produce():
             exc_info=True,
         )
         return jsonify({"error": "Queue write failed", "details": str(exc)}), 500
+
+    combined_queue = current_queue + _capped_fresh  # For response metrics only
 
     # ------------------------------------------------------------------
     # V25.1.0: Signal Harvest — multi-source intent discovery pathway.
@@ -705,13 +746,13 @@ def produce():
             )
 
     log.info("TRACE-DONE: produce() complete.",
-             campaign_id=campaign_id, queue_depth=len(combined_queue))
+             campaign_id=campaign_id, queue_depth=len(_capped_fresh))
 
     return jsonify({
         "status":        "produced",
         "fetched":       fetched_count,
         "deduplicated":  duped_count,
-        "queued":        queued_count,
+        "queued":        len(_capped_fresh),
         "queue_depth":   len(combined_queue),
         # V25.1.0: Signal harvest pathway metrics
         "harvest": harvest_metrics,

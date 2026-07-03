@@ -59,7 +59,11 @@ def call_gemini_2_5(
     init_vertex()
 
     from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
-    from google.api_core.exceptions import ResourceExhausted  # type: ignore[import]
+    from google.api_core.exceptions import (  # type: ignore[import]
+        ResourceExhausted,
+        ServiceUnavailable,
+        DeadlineExceeded,
+    )
 
     model = GenerativeModel(
         _GEMINI_MODEL,  # SF-014: configurable via GEMINI_MODEL env var
@@ -77,7 +81,9 @@ def call_gemini_2_5(
     @retry(
         wait=wait_exponential(multiplier=1, min=2, max=10),
         stop=stop_after_attempt(5),
-        retry=retry_if_exception_type(ResourceExhausted),
+        retry=retry_if_exception_type(
+            (ResourceExhausted, ServiceUnavailable, DeadlineExceeded, ConnectionError)
+        ),
     )
     def _invoke():
         return model.generate_content(prompt, generation_config=config)

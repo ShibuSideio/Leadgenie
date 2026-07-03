@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v24.1.17'; // V24.1.17: Admin feature fixes and scrolling responsive tabs
+const CACHE_NAME = 'sideio-v25.4.0'; // V25.4.0: Frontend security hardening — XSS fixes, double-click guard
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=24.1.17',
-     '/styles.css?v=24.1.17',
+     '/app.js?v=25.4.0',
+     '/styles.css?v=25.4.0',
      '/manifest.json'
  ];
 
