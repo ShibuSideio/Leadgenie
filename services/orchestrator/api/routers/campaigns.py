@@ -365,12 +365,42 @@ def create_campaign(uid, tenant_id, user_role):
         enqueue_error = str(enq_err)
         log.warning("zero_wait_enqueue_failed", error=enqueue_error)
 
-    return jsonify({
+    # V25.3.1: Bio quality warning — lazy users get feedback instead of
+    # silently producing 0 leads for weeks.
+    _warnings = []
+    _bio_len = len((data.get("bio") or "").strip())
+    if _bio_len == 0:
+        _warnings.append({
+            "code": "BIO_EMPTY",
+            "message": "Campaign has no bio. Lead quality will be very low. "
+                       "Add a 2-3 sentence description of your product/service and target audience.",
+            "severity": "high",
+        })
+    elif _bio_len < 50:
+        _warnings.append({
+            "code": "BIO_TOO_SHORT",
+            "message": "Campaign bio is very short. Lead matching works best with "
+                       "50+ characters describing your product and target pain points.",
+            "severity": "medium",
+        })
+
+    if not (data.get("keywords") or "").strip():
+        _warnings.append({
+            "code": "NO_KEYWORDS",
+            "message": "No keywords provided. The system will auto-generate search terms "
+                       "from your bio, which may be less precise.",
+            "severity": "low",
+        })
+
+    response_data = {
         "status": "success",
         "id": doc_ref.id,
         "zero_wait_enqueued": enqueue_error is None,
         "enqueue_error": enqueue_error,
-    }), 201
+    }
+    if _warnings:
+        response_data["warnings"] = _warnings
+    return jsonify(response_data), 201
 
 
 # =============================================================================

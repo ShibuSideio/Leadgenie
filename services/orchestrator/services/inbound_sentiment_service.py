@@ -13,6 +13,7 @@ Query strategy:
   - Gemini drops results with intent_score < 0.30 (Layer 2 garbage filter)
 
 V23.5 — added 2026-06-08
+V25.3.1 — fix NameError: is_consumer, dialog_suffix undefined in _build_queries()
 """
 from __future__ import annotations
 
@@ -327,6 +328,10 @@ class InboundSentimentService:
         day_of_week = datetime.utcnow().weekday() if self.force_day_of_week is None else self.force_day_of_week
         primary_mode = SIGNAL_MODES[day_of_week]
 
+        # V25.3.1: Fix NameError — is_consumer was never defined.
+        _consumer_vectors = frozenset({"B2C", "B2B2C", "D2C"})
+        is_consumer = (self.campaign.get("sourcing_vector") or "") in _consumer_vectors
+
         subs_base = {
             "industry":      self.industry,
             "competitor":    self.competitors[0] if self.competitors else "legacy tool",
@@ -357,6 +362,14 @@ class InboundSentimentService:
             other_mode = SIGNAL_MODES[d]
             if other_mode["templates"]:
                 selected_templates.append(other_mode["templates"][0])
+
+        # V25.3.1: Fix NameError — dialog_suffix was never defined.
+        # Consumer campaigns get dialog-cue operators to find active purchase threads.
+        # B2B campaigns get empty suffix (pain keywords are sufficient).
+        if is_consumer:
+            dialog_suffix = ' ("pm me" OR "still available" OR "send details" OR "anyone know")'
+        else:
+            dialog_suffix = ""
 
         queries: list[str] = []
         for pain_kw in self.pain_kws[:3]:  # Cap pain keywords count to protect Serper budget

@@ -250,6 +250,14 @@ def dispatch():
     sourcing_vector = campaign.get("sourcing_vector", "B2B")
     location        = campaign.get("location", "").strip()
 
+    # V25.3.1: Adaptive threshold — campaigns with thin bios (< 50 chars)
+    # get a lower bar because Gemini can't produce high-confidence scores
+    # without rich ICP context. This prevents vague bios from killing
+    # 100% of leads. The user gets a bio_quality_warning at campaign
+    # creation to encourage better input.
+    _raw_bio = (campaign.get("bio") or campaign.get("effective_bio") or "").strip()
+    _is_thin_bio = len(_raw_bio) < 50
+
     # V24.6.1: Replace all bio assembly logic (persona vault + V24.6.0 keywords
     # fallback) with build_enriched_context(). The context builder aggregates
     # ALL 15+ campaign and persona fields into a structured ICP context.
@@ -567,6 +575,8 @@ def dispatch():
         """
         target_domain = extract_root_domain(url)
         if not target_domain:
+            log.info("dispatch_skip_no_domain", url=url[:80],
+                     note="Could not extract root domain from URL.")
             return {"url": url, "status": "skip_no_domain"}
 
         # V24.5.7: Pre-PRISM TLD gate. Non-business TLD domains (academic, government,
@@ -701,16 +711,16 @@ def dispatch():
                             "Enable JavaScript and cookies to continue",
                             "Checking if the site connection is secure",
                             "Access Denied", "403 Forbidden"]
-            if any(kw.lower() in text.lower() for kw in bot_keywords):
-                doc_ref.update({"status": "failed", "error": "Blocked by Cloudflare/WAF"})
-                try:
-                    _db().collection("global_lead_locks").document(lock_entity).delete()
-                except Exception as _lock_del_err:
-                    log.error("lead_lock_delete_failed",
-                              lock_entity=lock_entity,
-                              url=url[:80] if url else "unknown",
-                              error=str(_lock_del_err))
-                return {"url": url, "status": "blocked_waf"}
+            _is_waf_text = any(kw.lower() in text.lower() for kw in bot_keywords)
+            # V25.3.1: WAF-blocked pages should defer to scraper-heavy (headless
+            # browser) instead of hard-failing. PRISM's GeneralDomainHook may have
+            # hit WAF but scraper-heavy has Playwright/headless Chrome.
+            if _is_waf_text:
+                log.info("dispatch_waf_deferred", url=url[:80],
+                         note="WAF detected in DOM text. Deferring to scraper-heavy.")
+                _defer_to_scraper_heavy(url, lead_id, tenant_id, campaign_id,
+                                        bio, target_domain, preferences_weights)
+                return {"url": url, "status": "deferred_waf"}
 
             # Stamp prism_mode on stub
             try:
@@ -845,6 +855,8 @@ def dispatch():
             )
             if is_harvest_lead:
                 accept_threshold = 5   # Pre-qualified by inline scoring
+            elif _is_thin_bio:
+                accept_threshold = 4   # V25.3.1: Vague bio — Gemini can't score > 5
             elif is_thin_payload:
                 accept_threshold = 6
             else:
@@ -1034,15 +1046,17 @@ def dispatch():
     with _cf.ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
         futures = {executor.submit(_process_single_url, u): u for u in approved_urls}
         _batch_start = time.monotonic()
+        _processed_urls: set[str] = set()  # V25.3.1: Track processed for batch-timeout cleanup
         for fut in _cf.as_completed(futures, timeout=(_URL_TIMEOUT_S * len(approved_urls))):
             if time.monotonic() - _batch_start > _OUTER_TIMEOUT_S:
                 log.error("dispatch_batch_timeout_ceiling",
                           timeout_s=_OUTER_TIMEOUT_S,
                           processed=len(all_results),
-                          remaining=len(futures) - len(all_results),
+                          remaining=len(futures) - len(_processed_urls),
                           note="Hard 180s ceiling hit. Remaining URLs abandoned.")
                 break
             url = futures[fut]
+            _processed_urls.add(url)
             try:
                 result = fut.result(timeout=_URL_TIMEOUT_S)
                 status = result.get("status", "unknown")
@@ -1056,11 +1070,49 @@ def dispatch():
                 log.error("dispatch_url_timeout", url=url[:80],
                           timeout_s=_URL_TIMEOUT_S,
                           note="URL processing exceeded wall-clock ceiling.")
+                # V25.3.1: Clean up orphaned resources on timeout
+                try:
+                    _p = urlparse(url)
+                    _frag_t = f"#{_p.fragment}" if _p.fragment else ""
+                    if any(_p.netloc.endswith(s) for s in SOCIAL_SET) or any(_p.netloc.endswith(s) for s in SHARED_PLATFORMS) or _is_consumer_archetype(sourcing_vector):
+                        _ep = f"{_p.netloc}{_p.path}{_frag_t}".lower().replace("www.", "")
+                    else:
+                        _ep = extract_root_domain(url)
+                    _lid = hashlib.sha256(f"{tenant_id}_{_ep}".encode()).hexdigest()
+                    _db().collection("leads").document(_lid).update(
+                        {"status": "failed", "error": "Dispatch per-URL timeout (25s)"}
+                    )
+                    _lock_ent = hashlib.sha256(_ep.encode()).hexdigest() if _ep != extract_root_domain(url) else extract_root_domain(url)
+                    _db().collection("global_lead_locks").document(_lock_ent).delete()
+                except Exception as _cleanup_err:
+                    log.warning("dispatch_timeout_cleanup_failed", url=url[:80],
+                                error=str(_cleanup_err))
                 scrape_failed += 1
             except Exception as fut_err:
                 log.error("dispatch_future_crash", url=url[:80], error=str(fut_err),
                           exc_info=True)
                 scrape_failed += 1
+
+        # V25.3.1: Mark remaining unprocessed URLs' stubs as failed after batch timeout
+        _remaining_urls = [u for u in approved_urls if u not in _processed_urls]
+        for _remaining_url in _remaining_urls:
+            try:
+                _rp = urlparse(_remaining_url)
+                _rfrag = f"#{_rp.fragment}" if _rp.fragment else ""
+                if any(_rp.netloc.endswith(s) for s in SOCIAL_SET) or any(_rp.netloc.endswith(s) for s in SHARED_PLATFORMS) or _is_consumer_archetype(sourcing_vector):
+                    _rep = f"{_rp.netloc}{_rp.path}{_rfrag}".lower().replace("www.", "")
+                else:
+                    _rep = extract_root_domain(_remaining_url)
+                _rlid = hashlib.sha256(f"{tenant_id}_{_rep}".encode()).hexdigest()
+                _db().collection("leads").document(_rlid).update(
+                    {"status": "failed", "error": "Batch timeout — URL not processed"}
+                )
+                _rlock = hashlib.sha256(_rep.encode()).hexdigest() if _rep != extract_root_domain(_remaining_url) else extract_root_domain(_remaining_url)
+                _db().collection("global_lead_locks").document(_rlock).delete()
+            except Exception as _batch_cleanup_err:
+                log.warning("dispatch_batch_timeout_cleanup_failed",
+                            url=_remaining_url[:80],
+                            error=str(_batch_cleanup_err))
 
     log.info("dispatch_batch_complete", campaign_id=campaign_id,
              processed=len(all_results), scrape_success=scrape_success,

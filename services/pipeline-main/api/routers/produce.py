@@ -160,6 +160,12 @@ def produce():
         )
         log.info("child_campaign_override_resolved", bio_preview=bio[:80])
 
+    # V25.3.1: Preserve raw bio BEFORE enrichment for keyword synthesis.
+    # build_enriched_context() adds structural labels ("PRODUCT/SERVICE:",
+    # "BUYER TYPE:") that must NOT leak into Serper search queries.
+    _raw_bio = (campaign.get("bio") or campaign.get("effective_bio") or
+                campaign.get("persona_bio") or campaign.get("name") or "").strip()
+
     # V24.6.1: Replace thin bio assembly with build_enriched_context().
     # Previously: picked ONE field (persona_bio OR bio) and ignored all others.
     # Now: aggregates ALL 15+ campaign fields (effective_bio, pain_point,
@@ -210,10 +216,13 @@ def produce():
 
     # Synthesise keywords from bio if empty
     if not keywords:
-        if bio:
-            keywords = [w.strip() for w in bio.split() if len(w.strip()) > 3][:5]
+        if _raw_bio:
+            # V25.3.1: Use raw bio, not enriched context, to prevent
+            # structural labels from becoming Serper search terms.
+            keywords = [w.strip() for w in _raw_bio.split() if len(w.strip()) > 3][:5]
             log.info("keywords_synthesised_from_bio",
-                     count=len(keywords), campaign_id=campaign_id)
+                     count=len(keywords), campaign_id=campaign_id,
+                     source="raw_bio")
 
     # ------------------------------------------------------------------
     # FIX (2026-06-21): Keyword ingestion sanitizer.
