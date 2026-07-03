@@ -1,5 +1,5 @@
 """
-LeadGenie Signal Sources Package — V25.1.0
+LeadGenie Signal Sources Package — V25.1.1
 
 Provides archetype-aware, multi-source signal discovery without hardcoded
 campaign values. Each source implements BaseSignalSource and returns
@@ -12,12 +12,26 @@ Design principles:
   - Every source handles failures gracefully and returns partial results
 
 Available sources:
-  RedditSource         — Reddit JSON API (no auth)
-  HackerNewsSource     — HN Algolia API (no auth)
-  StackOverflowSource  — Stack Exchange API (free tier)
-  RssFeedSource        — Generic RSS/Atom parser
-  SerperDiscoverySource— Serper as URL discovery only (thin content)
-  JobPostSource        — Job board signals via RSS
+  === B2B ===
+  RedditSource             — Reddit RSS (public) + OAuth JSON API (upgrade path)
+  HackerNewsSource         — HN Algolia API (no auth, full text)
+  RssFeedSource            — Generic RSS/Atom parser (any feed URL)
+  SerperDiscoverySource    — Serper as URL discovery only → PRISM scrapes full content
+  JobPostSource            — Job board signals: capability gap = buying trigger
+
+  === B2C / D2C ===
+  ClassifiedListingSource  — Expat forums, property portals, classified ads
+                             (expatriates.com, dubizzle.com, propertyfinder.ae, OLX)
+                             Highest-quality B2C signal: "Looking for 3BR villa Muscat"
+  ConsumerForumSource      — Consumer review and product comparison platforms
+                             (r/BuyItForLife, r/frugal, Quora, ProductHunt, IndieHackers)
+                             D2C founder signal: Show HN, IndieHackers, Shopify community
+
+  === Base ===
+  BaseSignalSource         — Abstract base class for all sources
+  SignalItem               — Standardized signal container with full content
+
+Archetype routing: see services.source_router.SourceRouter
 """
 from __future__ import annotations
 

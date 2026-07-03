@@ -1,27 +1,37 @@
 """
-Source Router — V25.1.0
+Source Router — V25.1.1
 =======================
 Dynamically maps a campaign's ICP context and archetype to the correct
 set of signal sources. Zero hardcoding of subreddits, keywords, or URLs.
 
 DESIGN:
   1. Gemini analyzes the campaign's ICP context string (from context_builder)
-     and returns a structured routing configuration.
+     and returns a structured routing configuration — with separate instruction
+     tracks per archetype (B2B, B2C, D2C, B2B2C).
   2. The router instantiates the appropriate BaseSignalSource objects.
   3. A deterministic fallback activates when Gemini times out or fails.
 
 ARCHETYPE ROUTING:
-  B2B    — Reddit (professional communities), HN (tech/startup), Stack Overflow,
+  B2B    — Reddit (professional communities), HN (tech/startup),
             RSS (industry blogs), Job Posts (capability gap), Serper discovery
-  B2C    — Reddit (consumer communities, expat forums), RSS (forums, portals),
-            Google News RSS, Serper discovery (targeted forums)
-  D2C    — Reddit (founder + consumer communities), HN (show_hn),
-            RSS (product + entrepreneurship communities)
-  B2B2C  — Job Posts (channel partner roles), RSS (trade publications),
-            Serper discovery (partner/distributor forums)
 
-All routing parameters (subreddits, search terms, feed URLs) are derived
-from the campaign ICP — never preset per campaign_id or campaign_name.
+  B2C    — ClassifiedListings (expat forums, property portals, want ads),
+            ConsumerForum (review platforms, product comparisons),
+            Reddit (consumer intent subreddits),
+            RSS (portal feeds, Google News consumer events),
+            Serper discovery (site: operators on consumer platforms)
+
+  D2C    — ConsumerForum (product discovery + D2C founder spaces),
+            Reddit (r/ecommerce, r/Entrepreneur, r/smallbusiness),
+            HN Show HN (product launches and D2C founder problems),
+            RSS (IndieHackers, ProductHunt),
+            Serper discovery (competitor + switching intent)
+
+  B2B2C  — Job Posts (channel partner roles), RSS (trade publications),
+            Serper discovery (partner/distributor forums),
+            Reddit (industry + end-consumer communities)
+
+All routing parameters are derived from the campaign ICP — never hardcoded.
 """
 from __future__ import annotations
 
@@ -32,11 +42,13 @@ from typing import Optional
 from core.logging import get_logger                                           # type: ignore[import]
 from services.gemini_service import call_gemini_2_5                           # type: ignore[import]
 from services.signal_sources.base import BaseSignalSource                     # type: ignore[import]
-from services.signal_sources.reddit import RedditSource                       # type: ignore[import]
-from services.signal_sources.hackernews import HackerNewsSource               # type: ignore[import]
-from services.signal_sources.rss_feed import RssFeedSource                    # type: ignore[import]
-from services.signal_sources.serper_discovery import SerperDiscoverySource    # type: ignore[import]
-from services.signal_sources.job_posts import JobPostSource                   # type: ignore[import]
+from services.signal_sources.reddit import RedditSource                           # type: ignore[import]
+from services.signal_sources.hackernews import HackerNewsSource                   # type: ignore[import]
+from services.signal_sources.rss_feed import RssFeedSource                        # type: ignore[import]
+from services.signal_sources.serper_discovery import SerperDiscoverySource        # type: ignore[import]
+from services.signal_sources.job_posts import JobPostSource                       # type: ignore[import]
+from services.signal_sources.classified_listings import ClassifiedListingSource   # type: ignore[import]
+from services.signal_sources.consumer_forum import ConsumerForumSource            # type: ignore[import]
 
 log = get_logger("pipeline.source_router")
 
@@ -62,16 +74,16 @@ _ROUTING_SCHEMA = {
         },
         "hackernews_queries": {
             "type": "ARRAY",
-            "description": "Hacker News search queries. Use for tech, SaaS, and startup ICPs.",
+            "description": "Hacker News search queries. Use ONLY for tech, SaaS, startup, or D2C founder ICPs. Leave empty for B2C consumer ICPs.",
             "items": {"type": "STRING"},
         },
         "rss_feed_urls": {
             "type": "ARRAY",
-            "description": "Full URLs of RSS/Atom feeds relevant to this ICP. Must be publicly accessible.",
+            "description": "Full URLs of RSS/Atom feeds relevant to this ICP. Must be publicly accessible. For B2C: include consumer portals, expat forums, classified feeds. For B2B: include industry blogs and trade publications.",
             "items": {
                 "type": "OBJECT",
                 "properties": {
-                    "url":      {"type": "STRING", "description": "Full RSS feed URL"},
+                    "url":       {"type": "STRING", "description": "Full RSS feed URL"},
                     "rationale": {"type": "STRING", "description": "Why this feed is relevant"},
                 },
                 "required": ["url", "rationale"],
@@ -79,12 +91,12 @@ _ROUTING_SCHEMA = {
         },
         "job_post_keywords": {
             "type": "ARRAY",
-            "description": "Job role titles/keywords that signal a buying trigger (capability gap). E.g. 'Head of Brand', 'VP Marketing'.",
+            "description": "Job role titles that signal a buying trigger. Use ONLY for B2B/B2B2C archetypes. Leave empty for B2C/D2C pure consumer ICPs.",
             "items": {"type": "STRING"},
         },
         "serper_discovery_queries": {
             "type": "ARRAY",
-            "description": "Google Search operator queries for Serper URL discovery. Use site: operators to target specific forums/communities. Full content retrieved by PRISM.",
+            "description": "Google Search operator queries for Serper URL discovery. For B2C/D2C: use site: operators to target consumer platforms (expatriates.com, dubizzle.com, reddit.com, quora.com, tripadvisor.com). For B2B: target professional forums and industry sites. Full content retrieved by PRISM.",
             "items": {"type": "STRING"},
         },
         "geo_filter_terms": {
@@ -94,7 +106,40 @@ _ROUTING_SCHEMA = {
         },
         "buyer_language_context": {
             "type": "STRING",
-            "description": "Short summary of what language and signals to look for in this ICP context. Used as context for inline scoring.",
+            "description": "Short summary of what language and signals to look for in this ICP context. What EXACT WORDS would a high-intent buyer use?",
+        },
+        # B2C/D2C specific fields
+        "classified_listing_config": {
+            "type": "OBJECT",
+            "description": "Configuration for classified ad / consumer portal discovery. Relevant for B2C and D2C archetypes. Leave empty for B2B.",
+            "properties": {
+                "categories": {
+                    "type": "ARRAY",
+                    "description": "Product/service category terms that buyers search on classified sites (e.g. ['villa', 'apartment', 'office space'])",
+                    "items": {"type": "STRING"},
+                },
+                "platform_types": {
+                    "type": "ARRAY",
+                    "description": "Platform types to search. Options: 'property', 'expat', 'classified', 'news'. Select those relevant to the ICP.",
+                    "items": {"type": "STRING"},
+                },
+            },
+            "required": [],
+        },
+        "consumer_forum_config": {
+            "type": "OBJECT",
+            "description": "Configuration for consumer review and product forum discovery. Relevant for B2C and D2C archetypes.",
+            "properties": {
+                "product_category": {
+                    "type": "STRING",
+                    "description": "Primary product or service category for consumer forum search (e.g. 'interior design', 'running shoes', 'meal delivery')",
+                },
+                "include_d2c_founders": {
+                    "type": "BOOLEAN",
+                    "description": "True for D2C archetype — also monitors founder communities (IndieHackers, Show HN, ProductHunt)",
+                },
+            },
+            "required": [],
         },
     },
     "required": [
@@ -105,6 +150,8 @@ _ROUTING_SCHEMA = {
         "serper_discovery_queries",
         "geo_filter_terms",
         "buyer_language_context",
+        "classified_listing_config",
+        "consumer_forum_config",
     ],
 }
 
@@ -205,12 +252,14 @@ class SourceRouter:
         """Ask Gemini to analyze the ICP and output source configuration."""
         geo_note = f"Target geography: {geo}" if geo else "Geography: Global / not restricted."
 
-        prompt = f"""You are an OSINT signal source router for a B2B/B2C/D2C intent lead generation platform.
+        # Build archetype-specific instruction block
+        archetype_instructions = _build_archetype_instructions(archetype)
+
+        prompt = f"""You are an OSINT signal source router for a B2B/B2C/D2C/B2B2C intent lead generation platform.
 
 TASK:
-Given the following campaign ICP (Ideal Customer Profile), determine the best open-web signal
-sources to monitor for ACTIVE BUYING INTENT. The goal is to find people or companies who are
-RIGHT NOW expressing a need, pain, or active search that matches this ICP.
+Given the following campaign ICP, determine the BEST OPEN-WEB SIGNAL SOURCES for ACTIVE BUYING INTENT.
+The goal: find people or organizations RIGHT NOW expressing a need that matches this ICP.
 
 CAMPAIGN ARCHETYPE: {archetype}
 {geo_note}
@@ -218,41 +267,60 @@ CAMPAIGN ARCHETYPE: {archetype}
 ICP CONTEXT:
 {icp_context}
 
-REQUIREMENTS:
-1. Reddit subreddits: Select 3-6 subreddits where this ICP is likely to post about their pain.
-   Include a search_query per subreddit that will surface pain/intent posts.
-   Do NOT suggest subreddits that are clearly irrelevant.
+--- ARCHETYPE-SPECIFIC INSTRUCTIONS ---
+{archetype_instructions}
 
-2. Hacker News queries: Suggest 1-3 queries IF the ICP is a tech founder, engineer, SaaS buyer,
-   or startup. Leave empty for pure consumer (B2C) or non-tech ICPs.
+--- UNIVERSAL REQUIREMENTS ---
+A. Reddit: Select 3-6 subreddits where this ICP posts about their pain.
+   Match subreddits to BUYER type — not seller type.
+   For B2C: consumer communities (r/expats, r/india, r/LifeAdvice, r/moving, r/FirstTimeHomeBuyer)
+   For D2C: founder + buyer communities (r/ecommerce, r/Entrepreneur, r/BuyItForLife, r/frugal)
+   For B2B: professional communities (r/marketing, r/SaaS, r/startups, r/sales)
+   Each subreddit needs a search_query that surfaces INTENT POSTS (not generic discussion).
 
-3. RSS feed URLs: Suggest 2-5 REAL, publicly accessible RSS feed URLs:
-   - Google News RSS for news-triggered events (e.g. company announcements)
-   - Industry forum RSS feeds
-   - Niche community feeds
-   Format: https://news.google.com/rss/search?q={'{search terms}'}&hl=en
+B. RSS feeds: 3-6 publicly accessible RSS feed URLs.
+   For B2C: consumer portals, expat community feeds, classified site feeds, Google News consumer queries.
+   For D2C: ProductHunt RSS, IndieHackers RSS, Google News for product category.
+   For B2B: industry blogs, trade publications, Google News for company announcements.
+   Format for Google News: https://news.google.com/rss/search?q=ENCODED_QUERY&hl=en
 
-4. Job post keywords: For B2B archetypes, suggest 2-4 job role titles that signal a BUYING
-   TRIGGER (the company needs to hire because they lack this capability = they need a vendor).
-   Leave empty for B2C archetypes.
+C. Serper discovery queries: 2-4 Google Search operator queries.
+   For B2C: target WHERE consumers post wants (site:expatriates.com, site:dubizzle.com, site:reddit.com, site:quora.com)
+     Examples: "site:expatriates.com Oman villa rent looking for"
+               "site:reddit.com r/expats looking for apartment Muscat"
+               "site:quora.com best interior designer Dubai recommend"
+   For D2C: target product review and comparison sites.
+     Examples: "site:reddit.com best alternatives to [product]"
+               "site:quora.com recommend [product category]"
+   For B2B: target professional forums and discussion boards.
+     Examples: "site:community.hubspot.com marketing automation pain"
 
-5. Serper discovery queries: Suggest 2-4 Google Search operator queries to find relevant
-   forum threads and community discussions that aren't on Reddit.
-   Use site: operators: e.g. "site:expatriates.com Oman property rent"
+D. Geo filter terms: Geographic keywords to filter signals. Be specific (city names, not just country).
 
-6. Geo filter terms: If geography matters, list the geographic terms to filter signals.
-   These are used to ensure signals are relevant to the target location.
-   Leave empty if the ICP is global or geography-independent.
+E. Buyer language context: 2-3 sentences on EXACT WORDS a high-intent buyer for this ICP uses.
+   This is critical — it trains the inline scorer on what HIGH vs LOW looks like.
 
-7. Buyer language context: Describe in 2-3 sentences what language patterns indicate a
-   HIGH-INTENT buyer for this ICP. What EXACT WORDS would they use?
+F. classified_listing_config (B2C/D2C ONLY):
+   categories: What product/service terms appear in classified ads for this ICP
+     (e.g. "villa", "apartment", "interior design", "moving service")
+   platform_types: Which platform types apply — "property", "expat", "classified", "news"
+   Leave EMPTY for B2B archetypes.
+
+G. consumer_forum_config (B2C/D2C ONLY):
+   product_category: Primary category for consumer forum search
+   include_d2c_founders: true only for D2C (monitors IndieHackers, ProductHunt, Show HN)
+   Leave EMPTY for B2B archetypes.
+
+H. job_post_keywords (B2B/B2B2C ONLY): Role titles signaling a capability gap.
+   Leave EMPTY for B2C/D2C archetypes.
 
 IMPORTANT:
-- ALL suggestions must be based on the ICP above — nothing generic
-- Subreddit names must be real subreddits that exist
+- Suggestions must match the specific ICP above — nothing generic
+- Subreddit names must be REAL subreddits that exist
 - RSS URLs must be properly formatted and publicly accessible
-- Do not suggest subreddits/sources that are clearly off-topic
-- For geo-specific ICPs (e.g. Oman real estate), focus sources on that geography"""
+- For geo-specific ICPs: all sources must be geo-focused
+- For B2C/D2C: fill classified_listing_config and consumer_forum_config
+- For B2B: fill job_post_keywords and leave classified/consumer fields empty"""
 
         result = call_gemini_2_5(
             prompt,
@@ -261,14 +329,65 @@ IMPORTANT:
         )
         if not isinstance(result, dict):
             raise ValueError(f"Routing schema returned unexpected type: {type(result)}")
+        # Inject archetype into config for _instantiate_sources
+        result["_archetype"] = archetype
         return result
 
     def _instantiate_sources(self, config: dict, geo: str) -> list[BaseSignalSource]:
-        """Convert Gemini routing config into BaseSignalSource instances."""
+        """Convert Gemini routing config into BaseSignalSource instances.
+
+        Source instantiation order reflects priority:
+        B2C/D2C: ClassifiedListings + ConsumerForum first (highest-intent consumer signals)
+        B2B:     Reddit + HN + Job Posts first (professional community signals)
+        All:     RSS + Serper discovery always last (broadest coverage, lowest specificity)
+        """
         sources: list[BaseSignalSource] = []
         geo_filter_terms = config.get("geo_filter_terms", [])
+        archetype = config.get("_archetype", "B2B").upper()
+        is_consumer = "B2C" in archetype or "D2C" in archetype
 
-        # 1. Reddit sources
+        # === B2C / D2C primary sources ===================================
+
+        # 1. Classified Listing Source (B2C/D2C first — highest-intent consumer signal)
+        #    A consumer posting "Looking for 3BR villa Muscat" is an active buyer.
+        classified_cfg = config.get("classified_listing_config", {})
+        if classified_cfg and is_consumer:
+            categories = [c for c in classified_cfg.get("categories", []) if c]
+            platform_types = classified_cfg.get("platform_types", [])
+            if categories:
+                sources.append(ClassifiedListingSource(
+                    categories     = categories,
+                    geo            = geo,
+                    platform_types = platform_types if platform_types else None,
+                    max_age_days   = 14,
+                ))
+                log.info(
+                    "source_router_classified_configured",
+                    categories=categories,
+                    geo=geo or "global",
+                )
+
+        # 2. Consumer Forum Source (B2C/D2C — product review + comparison signals)
+        consumer_cfg = config.get("consumer_forum_config", {})
+        if consumer_cfg and is_consumer:
+            product_category = consumer_cfg.get("product_category", "").strip()
+            include_founders = consumer_cfg.get("include_d2c_founders", False)
+            if product_category:
+                sources.append(ConsumerForumSource(
+                    product_category     = product_category,
+                    geo                  = geo,
+                    include_d2c_founders = include_founders,
+                    max_age_days         = 21,
+                ))
+                log.info(
+                    "source_router_consumer_forum_configured",
+                    product_category=product_category,
+                    include_d2c_founders=include_founders,
+                )
+
+        # === Universal sources (all archetypes) ==========================
+
+        # 3. Reddit (community discovery — archetype-adaptive)
         reddit_configs = config.get("reddit_sources", [])
         if reddit_configs:
             subreddits   = [r.get("subreddit", "") for r in reddit_configs if r.get("subreddit")]
@@ -286,7 +405,7 @@ IMPORTANT:
                     search_terms=search_terms[:3],
                 )
 
-        # 2. Hacker News
+        # 4. Hacker News (B2B, SaaS, startup, D2C founder only)
         hn_queries = [q for q in config.get("hackernews_queries", []) if q]
         if hn_queries:
             sources.append(HackerNewsSource(
@@ -297,7 +416,7 @@ IMPORTANT:
                 min_comments    = 2,
             ))
 
-        # 3. RSS feeds
+        # 5. RSS feeds
         rss_configs = config.get("rss_feed_urls", [])
         rss_urls    = [r.get("url", "") for r in rss_configs if r.get("url")]
         if rss_urls:
@@ -309,25 +428,25 @@ IMPORTANT:
                 max_age_days    = 14,
             ))
 
-        # 4. Job posts (B2B signal only)
+        # 6. Job posts (B2B/B2B2C only — capability gap signal)
         job_keywords = [k for k in config.get("job_post_keywords", []) if k]
-        if job_keywords:
+        if job_keywords and not is_consumer:
             sources.append(JobPostSource(
                 role_keywords = job_keywords,
                 geo           = geo,
                 max_age_days  = 30,
             ))
 
-        # 5. Serper discovery (URLs only → PRISM scrapes for full content)
+        # 7. Serper discovery (URLs → PRISM scrapes for full content)
+        #    For B2C/D2C: queries target consumer platforms (expatriates.com, dubizzle.com)
+        #    For B2B: queries target professional forums and industry sites
         discovery_queries = [q for q in config.get("serper_discovery_queries", []) if q]
         if discovery_queries and self._serper_key:
-            # Derive geo code from geo string (e.g. "Oman" → "om", "India" → "in")
-            # Do NOT map — pass empty geo_code; queries already contain geo-specificity
             sources.append(SerperDiscoverySource(
                 discovery_queries = discovery_queries,
                 serper_api_key    = self._serper_key,
                 num_results       = 10,
-                geo_code          = "",  # No geo restriction — queries are already targeted
+                geo_code          = "",  # Queries already contain geo-specificity
             ))
 
         return sources
@@ -376,11 +495,13 @@ IMPORTANT:
         sources: list[BaseSignalSource] = []
         norm_arch = archetype.upper()
 
+        is_consumer = "B2C" in norm_arch or "D2C" in norm_arch
+
         # Archetype → generic subreddit fallback set
         if "B2C" in norm_arch:
-            subreddits = ["expats", "personalfinance", "travel", "askreddit"]
+            subreddits = ["expats", "personalfinance", "travel", "LifeAdvice", "moving"]
         elif "D2C" in norm_arch:
-            subreddits = ["Entrepreneur", "ecommerce", "smallbusiness", "startups"]
+            subreddits = ["Entrepreneur", "ecommerce", "smallbusiness", "BuyItForLife", "frugal"]
         elif "B2B2C" in norm_arch:
             subreddits = ["startups", "Entrepreneur", "sales", "smallbusiness"]
         else:  # B2B default
@@ -394,6 +515,21 @@ IMPORTANT:
                 max_age_days = 14,
             ))
 
+        # B2C fallback: ClassifiedListingSource with category terms from keywords
+        if is_consumer and search_terms:
+            sources.append(ClassifiedListingSource(
+                categories     = search_terms[:3],
+                geo            = geo,
+                platform_types = ["expat", "news", "classified"],
+                max_age_days   = 14,
+            ))
+            sources.append(ConsumerForumSource(
+                product_category     = " ".join(search_terms[:2]),
+                geo                  = geo,
+                include_d2c_founders = "D2C" in norm_arch,
+                max_age_days         = 21,
+            ))
+
         # Always add Google News RSS as a fallback discovery source
         if search_terms:
             from urllib.parse import quote_plus
@@ -405,13 +541,13 @@ IMPORTANT:
             ))
 
         # B2B fallback: HN
-        if "B2B" in norm_arch or "SAAS" in norm_arch:
+        if not is_consumer and ("B2B" in norm_arch or "SAAS" in norm_arch):
             sources.append(HackerNewsSource(
-                search_queries = search_terms[:2] if search_terms else ["startup problems"],
-                max_age_days   = 30,
-                include_ask    = True,
-                include_stories= False,
-                min_comments   = 3,
+                search_queries  = search_terms[:2] if search_terms else ["startup problems"],
+                max_age_days    = 30,
+                include_ask     = True,
+                include_stories = False,
+                min_comments    = 3,
             ))
 
         return RoutingConfig(
@@ -421,3 +557,105 @@ IMPORTANT:
             archetype              = archetype,
             derived_by             = "fallback",
         )
+
+
+# ---------------------------------------------------------------------------
+# Module-level archetype instruction builder
+# ---------------------------------------------------------------------------
+
+def _build_archetype_instructions(archetype: str) -> str:
+    """Return archetype-specific discovery instructions for the Gemini routing prompt.
+
+    Each archetype has fundamentally different buyer behavior and therefore
+    different optimal signal sources. These instructions ensure Gemini selects
+    the right platform types, not just generic best practices.
+    """
+    arch = archetype.upper()
+
+    if "B2B2C" in arch:
+        return """ARCHETYPE: B2B2C (Business sells to Business that sells to Consumer)
+Your ICP is a BUSINESS that needs to reach end consumers. Target:
+- Companies looking for distribution partners, reseller networks, retail placement
+- Retailers/wholesalers seeking new product lines to stock
+- Franchise seekers or channel partner applicants
+
+Signal sources priority:
+1. Job posts: "Franchise Development Manager", "Channel Partner Manager", "Business Development" roles
+2. Industry trade publication RSS feeds
+3. Reddit: r/Entrepreneur, r/smallbusiness, r/FranchiseBusiness
+4. Serper: site: queries on trade show sites, chamber of commerce forums
+5. classified_listing_config: LEAVE EMPTY (this is B2B, not consumer)
+6. consumer_forum_config: LEAVE EMPTY"""
+
+    if "D2C" in arch:
+        return """ARCHETYPE: D2C (Direct-to-Consumer)
+Your ICP is EITHER a D2C founder needing services (supplier, logistics, creative, fintech)
+OR a consumer buying directly from a brand. Determine from ICP context which it is.
+
+IF targeting D2C FOUNDERS (buying services):
+1. HN queries: Focus on Show HN, startup challenges, ecommerce pain points
+2. Reddit: r/ecommerce, r/Entrepreneur, r/startups, r/smallbusiness
+3. RSS: IndieHackers, ProductHunt, Shopify community
+4. job_post_keywords: Roles like "Head of Growth", "Ecommerce Manager"
+5. classified_listing_config: LEAVE EMPTY
+6. consumer_forum_config: include_d2c_founders = true, product_category = the ICP's product space
+
+IF targeting END CONSUMERS (buying D2C products):
+1. Reddit: consumer intent subreddits (r/BuyItForLife, r/frugal, product-specific subs)
+2. RSS: ProductHunt new launches, review blogs, Google News product comparisons
+3. Serper: site:reddit.com "best [product]", site:quora.com "recommend [product]"
+4. classified_listing_config: categories = product category terms
+5. consumer_forum_config: product_category, include_d2c_founders = false
+6. job_post_keywords: LEAVE EMPTY
+7. HN queries: LEAVE EMPTY (consumers don't use HN)"""
+
+    if "B2C" in arch:
+        return """ARCHETYPE: B2C (Business sells to individual Consumer)
+Your ICP is an INDIVIDUAL CONSUMER with a personal need. They do NOT post on LinkedIn
+or Hacker News. They post on consumer communities, classified sites, expat forums, and
+review platforms.
+
+KEY INSIGHT: For B2C, Serper + PRISM is CRITICAL because consumers post on sites
+without RSS (classified sites, expat forums). Serper finds the URL, PRISM reads the
+full "Looking for..." post. This is the highest-quality B2C signal.
+
+Signal sources priority:
+1. classified_listing_config: ALWAYS fill this for B2C
+   - categories: What the buyer would search for (not what you sell)
+   - platform_types: "expat" if expat/international audience, "property" if real estate,
+     "classified" for general goods/services, "news" always
+2. Serper discovery: site: operators on WHERE CONSUMERS POST
+   - site:expatriates.com for Middle East expat consumers
+   - site:reddit.com r/{local community} for local intent
+   - site:quora.com for service recommendations
+   - site:dubizzle.com for UAE/Oman classified intent
+3. Reddit: consumer communities (NOT professional ones)
+   - r/expats for international relocation intent
+   - r/{country specific} for local consumer intent
+   - r/personalfinance, r/travel for context
+4. RSS: Consumer portal feeds, local news, Google News with consumer queries
+5. HN queries: LEAVE EMPTY (consumers don't use HN)
+6. job_post_keywords: LEAVE EMPTY (irrelevant for B2C)
+7. consumer_forum_config: Always fill this
+   - product_category: Main category the consumer is buying
+   - include_d2c_founders: false"""
+
+    # Default: B2B
+    return """ARCHETYPE: B2B (Business sells to Business)
+Your ICP is a PROFESSIONAL DECISION MAKER or BUSINESS. They post on LinkedIn,
+professional Reddit communities, Hacker News (if tech), and industry forums.
+
+Signal sources priority:
+1. Reddit: Professional communities (r/marketing, r/SaaS, r/startups, r/sales, etc.)
+   - Search queries must surface PAIN POSTS not generic discussion
+   - Examples: "we tried X and it failed", "looking for alternative to", "anyone dealt with"
+2. Hacker News: Use for tech/SaaS B2B ICPs
+   - Ask HN posts are highest quality: "Ask HN: How do you handle X?"
+3. Job Posts: ALWAYS include for B2B — capability gaps = vendor opportunities
+   - Think: what role does the buyer hire when they DON'T have your solution?
+4. RSS: Industry trade publications, company blog RSS, Google News for company triggers
+   - Company triggers: funding rounds, new executive hires, rebrands, expansions
+5. Serper: Professional forums, community boards, Slack community sites
+   - site:community.hubspot.com, site:indiehackers.com, site:reddit.com
+6. classified_listing_config: LEAVE EMPTY (B2B buyers don't post on classified sites)
+7. consumer_forum_config: LEAVE EMPTY"""
