@@ -1,7 +1,8 @@
-# Whatsapp-webhook -- Exact-pinned (V24.1.9 2026-06-29) | python:3.10-slim
+# Whatsapp-webhook -- Exact-pinned (V25.2.2 2026-07-03) | python:3.10-slim
 google-cloud-firestore==2.27.0
 google-cloud-secret-manager==2.29.0
 grpcio==1.81.1
-Flask==3.0.0
-gunicorn==21.2.0
+Flask==3.0.3
+gunicorn==22.0.0
 httpx==0.28.1
+google-auth==2.55.1

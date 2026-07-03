@@ -1,6 +1,9 @@
-# Scraper-heavy -- Exact-pinned (V24.1.9 2026-06-29) | playwright:v1.42.0-jammy
+# Scraper-heavy -- Exact-pinned (V25.2.2 2026-07-03) | playwright:v1.42.0-jammy
 playwright==1.42.0
-Flask==3.0.0
-gunicorn==21.2.0
+Flask==3.0.3
+gunicorn==22.0.0
 google-cloud-tasks==2.23.0
 google-cloud-secret-manager==2.29.0
+grpcio==1.81.1
+google-auth==2.55.1
+httpx==0.28.1
