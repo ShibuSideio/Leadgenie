@@ -10,7 +10,8 @@ exposed to the public internet — they require either:
 Routes:
   POST /api/internal/telemetry/bq-push
   POST /api/internal/credits/settle
-  POST /api/internal/cron/sweep
+  POST /api/internal/cron/sweep            (Serper produce fan-out, every 24h)
+  POST /api/internal/cron/harvest-sweep   (Signal harvest fan-out, every 4h — V25.2.0)
   POST /api/internal/cron/reflection
   POST /api/internal/cron/ontology-decay
   POST /api/telemetry/conversion_feedback

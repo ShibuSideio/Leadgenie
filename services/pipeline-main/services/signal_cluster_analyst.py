@@ -38,6 +38,10 @@ from typing import Any, Optional
 from core.logging import get_logger                 # type: ignore[import]
 from services.gemini_service import call_gemini_2_5  # type: ignore[import]
 
+# Lazy imports to avoid circular dependency — dispatch._settle_credit is in api/routers layer
+# and signal_cluster_analyst is in services layer. Import inside function body.
+# Same pattern used by harvest.py for cluster analyst calls.
+
 log = get_logger("pipeline.signal_cluster_analyst")
 
 _PROJECT_ID             = os.environ.get("GCP_PROJECT", os.environ.get("GOOGLE_CLOUD_PROJECT", ""))
@@ -349,6 +353,12 @@ def _create_cluster_lead(
     """Write a cluster lead record to Firestore campaigns/{id}/leads.
 
     Returns the lead_id string, or None on failure.
+
+    V25.2.1 fixes:
+      - Added 18 standard UI fields with defaults (dm, company_name, etc.)
+        so lead cards render without blank sections.
+      - Calls _settle_credit() after successful write for billing accuracy.
+      - Mints a social passthrough JWT token for social-URL leads.
     """
     try:
         lead_id = str(uuid.uuid4())
@@ -365,32 +375,65 @@ def _create_cluster_lead(
         now_utc = datetime.datetime.now(datetime.timezone.utc)
 
         lead_payload = {
-            "id":                    lead_id,
-            "source_url":            source_url,
-            "tenant_id":             tenant_id,
-            "campaign_id":           campaign_id,
-            "origin_engine":         "cluster_analyst",
-            "is_cluster_lead":       True,
-            "cluster_id":            cluster.get("cluster_id", ""),
-            "cluster_label":         cluster.get("cluster_label", ""),
-            "cluster_summary":       cluster.get("intent_summary", ""),
-            "buyer_profile":         cluster.get("buyer_profile", ""),
-            "convergence_score":     cluster.get("convergence_score", 0.0),
-            "source_diversity":      len({s.get("source_type") for s in contributing if s.get("source_type")}),
-            "cluster_signals":       signal_urls,
-            "cluster_snippets":      signal_snippets,
-            "cluster_platforms":     signal_platforms,
-            "pain_point":            cluster.get("intent_summary", ""),
-            "intent_signal":         cluster.get("cluster_label", ""),
-            "score":                 int(cluster.get("convergence_score", 0) / 10),
-            "normalized_score":      min(int(cluster.get("convergence_score", 0)), 100),
-            "sourcing_vector":       archetype,
-            "status":                "new",
-            "is_in_crm":             False,
-            "created_at":            now_utc,
-            # Social token fields (populated per signal in D1)
-            "signal_platform":       signal_platforms[0] if signal_platforms else "",
-            "signal_source_type":    "cluster",
+            # Core identifiers
+            "id":                          lead_id,
+            "source_url":                  source_url,
+            "tenant_id":                   tenant_id,
+            "campaign_id":                 campaign_id,
+            "origin_engine":               "cluster_analyst",
+            "status":                      "new",
+            "is_in_crm":                   False,
+            "created_at":                  now_utc,
+            "sourcing_vector":             archetype,
+
+            # Cluster intelligence
+            "is_cluster_lead":             True,
+            "cluster_id":                  cluster.get("cluster_id", ""),
+            "cluster_label":               cluster.get("cluster_label", ""),
+            "cluster_summary":             cluster.get("intent_summary", ""),
+            "buyer_profile":               cluster.get("buyer_profile", ""),
+            "convergence_score":           cluster.get("convergence_score", 0.0),
+            "source_diversity":            len({s.get("source_type") for s in contributing if s.get("source_type")}),
+            "cluster_signals":             signal_urls,
+            "cluster_snippets":            signal_snippets,
+            "cluster_platforms":           signal_platforms,
+
+            # Scores
+            "score":                       int(cluster.get("convergence_score", 0) / 10),
+            "normalized_score":            min(int(cluster.get("convergence_score", 0)), 100),
+
+            # Intent
+            "pain_point":                  cluster.get("intent_summary", ""),
+            "intent_signal":               cluster.get("cluster_label", ""),
+
+            # Social provenance
+            "signal_source_type":          "cluster",
+            "signal_platform":             signal_platforms[0] if signal_platforms else "",
+            "social_snippet":              signal_snippets[0] if signal_snippets else "",
+
+            # Standard UI fields — defaults so lead cards render correctly
+            # V25.2.1: added missing fields that dispatch.py always writes.
+            "dm":                          False,
+            "hiring_intent_found":         False,
+            "tech_stack_found":            False,
+            "icebreaker_angle":            "",
+            "contact_endpoints":           {},
+            "decision_maker_name":         "",
+            "decision_maker_title":        "",
+            "company_name":                cluster.get("buyer_profile", "")[:80],
+            "company_size_tier":           "",
+            "primary_objection_hypothesis": "",
+            "score_reasoning":             cluster.get("intent_summary", ""),
+            "confidence_level":            "medium",
+            "evidence_chain":              signal_snippets[:3],
+            "prism_mode":                  "cluster",
+            "prism_fallback":              False,
+            "confidence_tier":             "MEDIUM",
+            "matched_campaign_ids":        [campaign_id],
+            "matched_campaigns":           [campaign_id],
+            "dossier_text":                "",
+            "trend_mapped":                False,
+            "highest_campaign_id":         campaign_id,
         }
 
         db.collection("campaigns").document(campaign_id) \
@@ -405,7 +448,46 @@ def _create_cluster_lead(
             convergence_score=cluster.get("convergence_score", 0),
             signals=len(contributing),
         )
+
+        # V25.2.1: Deduct credit for cluster leads (same as dispatch-path leads)
+        try:
+            from api.routers.dispatch import _settle_credit  # type: ignore[import]
+            _settle_credit(tenant_id, "success", lead_id=lead_id)
+        except Exception as _cr_err:
+            log.warning(
+                "cluster_lead_credit_settle_failed",
+                lead_id=lead_id,
+                tenant_id=tenant_id,
+                error=str(_cr_err),
+                note="Non-blocking — lead written but credit not settled.",
+            )
+
+        # V25.2.1: Mint social passthrough token for social-URL leads
+        # Non-blocking — failure does not block lead creation
+        if source_url:
+            try:
+                from api.routers.social_redirect import mint_social_token  # type: ignore[import]
+                _token = mint_social_token(
+                    lead_id=lead_id,
+                    tenant_id=tenant_id,
+                    url=source_url,
+                    db=db,
+                )
+                if _token:
+                    # Attach token to lead doc so the frontend can build /go/<token> URLs
+                    db.collection("campaigns").document(campaign_id) \
+                      .collection("leads").document(lead_id) \
+                      .update({"social_token": _token})
+            except Exception as _tok_err:
+                log.warning(
+                    "cluster_lead_token_mint_failed",
+                    lead_id=lead_id,
+                    error=str(_tok_err),
+                    note="Non-blocking.",
+                )
+
         return lead_id
+
     except Exception as exc:
         log.error(
             "cluster_lead_write_failed",

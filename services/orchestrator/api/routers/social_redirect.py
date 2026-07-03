@@ -40,9 +40,10 @@ from core.clients import get_db, get_sm_client  # type: ignore[import]
 bp  = Blueprint("social_redirect", __name__)
 log = get_logger("orchestrator.social_redirect")
 
-_SOCIAL_TOKEN_SECRET_NAME = os.environ.get(
-    "SOCIAL_TOKEN_SECRET_NAME", "social-token-secret"
-)
+# SOCIAL_TOKEN_SECRET_NAME must be a full Secret Manager resource path:
+#   projects/{project_id}/secrets/{secret_name}/versions/latest
+# Set this env var in Cloud Run — do NOT rely on the default.
+_SOCIAL_TOKEN_SECRET_NAME = os.environ.get("SOCIAL_TOKEN_SECRET_NAME", "")
 _ALLOWED_REDIRECT_DOMAINS = frozenset({
     "linkedin.com", "x.com", "twitter.com", "facebook.com",
     "instagram.com", "threads.net", "reddit.com",
@@ -54,7 +55,26 @@ _PROJECT_ID = os.environ.get("GCP_PROJECT", os.environ.get("GOOGLE_CLOUD_PROJECT
 
 
 def _get_token_secret() -> str:
-    """Read SOCIAL_TOKEN_SECRET from Secret Manager."""
+    """Read SOCIAL_TOKEN_SECRET from Secret Manager.
+
+    Raises:
+        RuntimeError: When SOCIAL_TOKEN_SECRET_NAME env var is not set or is not
+            a valid Secret Manager resource path (projects/.../secrets/.../versions/...).
+        google.api_core.exceptions.NotFound: When the secret does not exist.
+    """
+    if not _SOCIAL_TOKEN_SECRET_NAME:
+        raise RuntimeError(
+            "SOCIAL_TOKEN_SECRET_NAME env var is not set. "
+            "Set it to a full Secret Manager resource path: "
+            "projects/{project}/secrets/social-token-secret/versions/latest"
+        )
+    # Validate it looks like a proper resource path (not a bare secret name)
+    if not _SOCIAL_TOKEN_SECRET_NAME.startswith("projects/"):
+        raise RuntimeError(
+            f"SOCIAL_TOKEN_SECRET_NAME='{_SOCIAL_TOKEN_SECRET_NAME}' is not a valid "
+            "Secret Manager resource path. Expected format: "
+            "projects/{project}/secrets/{name}/versions/{version}"
+        )
     client   = get_sm_client()
     response = client.access_secret_version(
         request={"name": _SOCIAL_TOKEN_SECRET_NAME}
@@ -73,6 +93,95 @@ def _is_allowed_domain(url: str) -> bool:
         )
     except Exception:
         return False
+
+
+def mint_social_token(
+    lead_id: str,
+    tenant_id: str,
+    url: str,
+    db,
+) -> str | None:
+    """Mint a signed JWT social passthrough token and store it in Firestore.
+
+    Call this from signal_cluster_analyst._create_cluster_lead() and from
+    signal_harvest Stage 7 when writing social-URL leads (LinkedIn, X, etc.).
+
+    The token encodes: typ, lead_id, tenant_id, url, iat (issued-at).
+    It has NO exp claim — lifetime is session-based, revoked via Firestore.
+
+    The token hash is stored in the top-level Firestore collection
+    ``social_tokens/{sha256_hash[0:32]}``. On user logout, the logout handler
+    sets ``revoked=True`` on all tokens for that tenant.
+
+    Args:
+        lead_id:   Firestore lead document ID.
+        tenant_id: Tenant isolation key.
+        url:       The original social platform URL to protect.
+        db:        Firestore client (google.cloud.firestore.Client).
+
+    Returns:
+        The signed JWT string, or None if minting fails (non-blocking).
+    """
+    import hashlib
+
+    # Only mint tokens for social domains \u2014 no-op for others
+    if not _is_allowed_domain(url):
+        return None
+
+    try:
+        import jwt as pyjwt  # type: ignore[import]
+    except ImportError:
+        log.warning("mint_social_token_jwt_missing",
+                    note="PyJWT not installed \u2014 social tokens cannot be minted.")
+        return None
+
+    try:
+        secret = _get_token_secret()
+    except Exception as _sec_err:
+        log.warning("mint_social_token_secret_failed",
+                    lead_id=lead_id, error=str(_sec_err),
+                    note="Non-blocking \u2014 lead created without social token.")
+        return None
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    payload = {
+        "typ":       "social_passthrough",
+        "lead_id":   lead_id,
+        "tenant_id": tenant_id,
+        "url":       url,
+        "iat":       int(now_utc.timestamp()),
+    }
+
+    try:
+        token = pyjwt.encode(payload, secret, algorithm="HS256")
+        token_hash = hashlib.sha256(token.encode()).hexdigest()[:32]
+
+        # Store in top-level social_tokens collection (same path the redirect checks)
+        db.collection("social_tokens").document(token_hash).set({
+            "token_hash": token_hash,
+            "lead_id":    lead_id,
+            "tenant_id":  tenant_id,
+            "url":        url[:500],
+            "created_at": now_utc,
+            "revoked":    False,
+        })
+
+        log.info(
+            "social_token_minted",
+            lead_id=lead_id,
+            tenant_id=tenant_id,
+            token_hash=token_hash,
+        )
+        return token
+    except Exception as mint_err:
+        log.error(
+            "social_token_mint_failed",
+            lead_id=lead_id,
+            error=str(mint_err),
+            note="Non-blocking \u2014 lead created without social token.",
+        )
+        return None
+
 
 
 def _log_click_to_bq(lead_id: str, tenant_id: str, url: str) -> None:

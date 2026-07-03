@@ -1,4 +1,4 @@
-# Orchestrator -- Exact-pinned (V24.1.9 2026-06-29) | python:3.11-slim
+# Orchestrator -- Exact-pinned (V25.2.1 2026-07-03) | python:3.11-slim
 # Pin ALL direct deps to ==exact to eliminate pip resolver backtracking.
 Flask==3.0.3
 flask-cors==4.0.1
@@ -19,3 +19,6 @@ pydantic==2.13.4
 PyPDF2==3.0.1
 cachetools==7.1.4
 google-auth==2.55.1
+# V25.2.1 additions
+PyJWT==2.10.1          # social_redirect.py — JWT HS256 token verification for /go/<token>
+tenacity==9.1.4        # retry logic parity with pipeline-main

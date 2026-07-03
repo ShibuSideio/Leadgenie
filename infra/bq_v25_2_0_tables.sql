@@ -1,10 +1,21 @@
--- LeadGenie V25.2.0 — BigQuery Table DDL
--- Run once: bq query --use_legacy_sql=false < infra/bq_v25_2_0_tables.sql
+-- LeadGenie V25.2.1 — BigQuery Table DDL
+-- V25.2.1 fix: replaced hardcoded project ID with shell variable substitution.
+--
+-- Usage (run via setup_v25_2_0.sh which injects $PROJECT_ID):
+--   PROJECT_ID=$(gcloud config get-value project)
+--   sed "s/\${PROJECT_ID}/${PROJECT_ID}/g" infra/bq_v25_2_0_tables.sql \
+--       | bq query --use_legacy_sql=false
+--
+-- Or run directly in the GCP Console BigQuery editor (substitute PROJECT_ID first).
+
+-- Ensure dataset exists (idempotent — safe to re-run)
+CREATE SCHEMA IF NOT EXISTS `${PROJECT_ID}.swarm_analytics`
+OPTIONS(description='LeadGenie OSINT analytics — raw signals, clusters, click events');
 
 -- Table 1: raw_signals
 -- Every scored signal from signal_harvest, all tiers (HIGH/MEDIUM/LOW).
 -- Partitioned by date for cost efficiency.
-CREATE TABLE IF NOT EXISTS `lead-sniper-prod.swarm_analytics.raw_signals` (
+CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.swarm_analytics.raw_signals` (
   signal_id      STRING    NOT NULL  OPTIONS(description='UUID for deduplication'),
   campaign_id    STRING    NOT NULL  OPTIONS(description='Campaign that harvested this signal'),
   tenant_id      STRING    NOT NULL  OPTIONS(description='Tenant isolation key'),
@@ -26,7 +37,7 @@ OPTIONS(description='V25.2.0: Raw intent signals from all harvest sources. Input
 
 -- Table 2: intent_clusters
 -- Gemini-derived intent clusters from correlated signals.
-CREATE TABLE IF NOT EXISTS `lead-sniper-prod.swarm_analytics.intent_clusters` (
+CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.swarm_analytics.intent_clusters` (
   cluster_id        STRING    NOT NULL  OPTIONS(description='UUID'),
   campaign_id       STRING    NOT NULL,
   tenant_id         STRING    NOT NULL,
@@ -50,7 +61,7 @@ OPTIONS(description='V25.2.0: Gemini intent clusters. Source for cluster-type le
 
 -- Table 3: click_events
 -- Tracks when users click personal token (social passthrough) links.
-CREATE TABLE IF NOT EXISTS `lead-sniper-prod.swarm_analytics.click_events` (
+CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.swarm_analytics.click_events` (
   click_id    STRING    NOT NULL  OPTIONS(description='UUID'),
   lead_id     STRING              OPTIONS(description='Lead that generated the token'),
   tenant_id   STRING    NOT NULL  OPTIONS(description='Tenant isolation'),
