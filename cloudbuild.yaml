@@ -374,7 +374,7 @@ steps:
       --timeout=300 \
       --allow-unauthenticated \
       --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com \
-      --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,ORCHESTRATOR_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,SCHEDULER_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,INTERNAL_CRON_SECRET=$INTERNAL_CRON_SECRET \
+      --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,ORCHESTRATOR_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,SCHEDULER_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,INTERNAL_CRON_SECRET=$$INTERNAL_CRON_SECRET \
       --quiet
   secretEnv: ['INTERNAL_CRON_SECRET']
 
