@@ -125,8 +125,8 @@ class RssFeedSource(BaseSignalSource):
     # ------------------------------------------------------------------
 
     @retry(
-        wait=wait_exponential(multiplier=1, min=2, max=8),
-        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=3),
+        stop=stop_after_attempt(1),
         retry=retry_if_exception_type(requests.exceptions.RequestException),
     )
     def _fetch_feed(self, feed_url: str) -> bytes:
