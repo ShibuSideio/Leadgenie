@@ -136,7 +136,7 @@ class InboundMapsService:
                         title = f"Negative Google Map Review for {place_name}"
                         snippet = f"[{rev_rating}/5 Star Rating] Reviewer: {rev.get('name', 'Anonymous')}. Review: {rev_text}"
 
-                        scored = _score_with_gemini(title, snippet, url, self.icp_desc)
+                        scored = _score_with_gemini(title, snippet, url, f"Maps API: {query}", self.icp_desc)
                         if not scored:
                             continue
 

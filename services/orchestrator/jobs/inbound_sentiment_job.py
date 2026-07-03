@@ -45,6 +45,15 @@ MAX_SIGNALS_PER_TENANT = 25  # Serper quota guard per run
 RLHF_BOOST  = 0.12        # yield_weight increment for hot keywords
 RLHF_MIN    = 0.70        # Only boost keywords from signals above this score
 
+# V25.2.2: Raised from 5 → 20 (4× raw URL pool, same Serper credit cost per call)
+# and from 8 → 14 queries (freed capacity from cross-run dedup cache)
+_RESULTS_PER_QUERY = int(os.environ.get("INBOUND_RESULTS_PER_QUERY", "20"))
+_MAX_QUERIES       = int(os.environ.get("INBOUND_MAX_QUERIES", "14"))
+
+# V25.2.2: Cross-run URL dedup — 7-day window prevents re-scoring same URLs every 6h.
+_DEDUP_TTL_DAYS = 7
+_DEDUP_COLL     = "inbound_dedup"
+
 
 # ---------------------------------------------------------------------------
 # Main entry point
@@ -224,7 +233,13 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
         try:
             # 1. Run web and social inbound sentiment service
             svc     = InboundSentimentService(persona=persona, campaign=camp)
-            signals = svc.run(max_queries=8, results_per_query=5)
+            # V25.2.2: Load cross-run seen hashes to skip already-scored URLs
+            seen_hashes = _load_dedup_hashes(db, uid)
+            signals = svc.run(
+                max_queries=_MAX_QUERIES,
+                results_per_query=_RESULTS_PER_QUERY,
+                seen_url_hashes=seen_hashes,
+            )
             
             # 2. Run Google Maps competitor review intelligence service
             try:
@@ -272,6 +287,9 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
     # Write to Firestore (idempotent via signal_id — set with merge=True)
     _write_signals(db, uid, deduped)
 
+    # V25.2.2: Save processed URL hashes to Firestore dedup cache for next run
+    _save_dedup_hashes(db, uid, [s.get("source_url", "") for s in deduped])
+
     # RLHF: boost keywords from ACTIVE_SEEKING / COMPETITOR_CHURN signals
     _boost_rlhf(bq, uid, deduped)
 
@@ -286,6 +304,13 @@ def _write_signals(db, uid: str, signals: list[dict]) -> None:
     """Batch-upsert signals into inbound_signals collection."""
     if not signals:
         return
+
+    import datetime
+
+    # V25.2.2: Signals expire after 30 days (Firestore TTL field)
+    _signal_expire = (
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30)
+    )
 
     # Firestore batch limit is 500 — chunk if needed
     CHUNK = 400
@@ -316,6 +341,7 @@ def _write_signals(db, uid: str, signals: list[dict]) -> None:
                     "week":                sig.get("week", ""),
                     "status":              sig.get("status", "new"),
                     "synced_at":           firestore.SERVER_TIMESTAMP,
+                    "expire_at":           _signal_expire,  # V25.2.2: TTL field
                 },
                 merge=True,
             )
@@ -385,6 +411,78 @@ def _top_keywords(signals: list[dict]) -> list[str]:
     for sig in signals:
         kws.extend(sig.get("pain_keywords") or [])
     return [kw for kw, _ in Counter(kws).most_common(5)]
+
+
+# ---------------------------------------------------------------------------
+# Cross-run URL dedup helpers (V25.2.2)
+# ---------------------------------------------------------------------------
+
+def _url_hash(url: str) -> str:
+    """Stable 16-char SHA-256 hash of a URL for dedup comparison."""
+    import hashlib
+    return hashlib.sha256(url.encode()).hexdigest()[:16]
+
+
+def _load_dedup_hashes(db, uid: str) -> set[str]:
+    """Load the set of URL hashes seen in the last 7 days for this tenant.
+
+    Reads from inbound_dedup/{uid} which stores a map of hash -> expires_at.
+    Returns a frozenset of hash strings. Non-blocking: returns empty set on error.
+    """
+    import datetime
+    try:
+        doc = db.collection(_DEDUP_COLL).document(uid).get()
+        if not doc.exists:
+            return set()
+        data = doc.to_dict() or {}
+        now = datetime.datetime.now(datetime.timezone.utc)
+        # Expire entries older than TTL and collect valid hashes
+        valid = set()
+        for h, exp in data.items():
+            if h.startswith("_"):  # skip metadata fields
+                continue
+            try:
+                if hasattr(exp, "tzinfo"):
+                    exp_ts = exp if exp.tzinfo else exp.replace(tzinfo=datetime.timezone.utc)
+                else:
+                    exp_ts = datetime.datetime.fromisoformat(str(exp)).replace(
+                        tzinfo=datetime.timezone.utc
+                    )
+                if exp_ts > now:
+                    valid.add(h)
+            except Exception:
+                pass
+        log.info("inbound_dedup_loaded", uid=uid[:8], cached_hashes=len(valid))
+        return valid
+    except Exception as exc:
+        log.warning("inbound_dedup_load_failed", uid=uid[:8], error=str(exc),
+                    note="Non-blocking — will re-score all URLs this run.")
+        return set()
+
+
+def _save_dedup_hashes(db, uid: str, urls: list[str]) -> None:
+    """Persist URL hashes to inbound_dedup/{uid} with 7-day expiry.
+
+    Uses Firestore merge=True to accumulate hashes across runs.
+    Each field is hash_string -> expires_at ISO timestamp.
+    Non-blocking: failures only log.
+    """
+    import datetime
+    if not urls:
+        return
+    try:
+        expires = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(days=_DEDUP_TTL_DAYS)
+        ).isoformat()
+        payload = {_url_hash(u): expires for u in urls if u}
+        if not payload:
+            return
+        db.collection(_DEDUP_COLL).document(uid).set(payload, merge=True)
+        log.info("inbound_dedup_saved", uid=uid[:8], new_hashes=len(payload))
+    except Exception as exc:
+        log.warning("inbound_dedup_save_failed", uid=uid[:8], error=str(exc),
+                    note="Non-blocking — next run may re-score some URLs.")
 
 
 # ---------------------------------------------------------------------------

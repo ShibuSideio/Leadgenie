@@ -1317,18 +1317,27 @@ def trigger_inbound_sentiment():
     """
     Trigger the Inbound Sentiment Radar job.
 
-    Security: Protected by X-CloudTasks-QueueName or X-Internal-Secret header.
+    Security: Accepts callers via any of three paths:
+      1. X-Internal-Secret header matching INTERNAL_CRON_SECRET (manual/test calls)
+      2. X-CloudTasks-QueueName header (Cloud Tasks dispatched calls)
+      3. Authorization: Bearer <OIDC token> from Cloud Scheduler, where the
+         token's email claim matches SCHEDULER_SA_EMAIL env var.
+
+    V25.2.2 FIX: Cloud Scheduler sends OIDC tokens, NOT X-CloudTasks-QueueName.
+    The original code only checked for the queue header, causing all cron calls
+    to fail with 401 — the inbound radar had never auto-run via cron.
+
     The job runs asynchronously — this endpoint always returns 202 within ~5 ms.
     """
-    # Verify caller is Cloud Scheduler / internal (reuse existing OIDC check pattern)
     import os as _os
-    internal_secret = _os.environ.get("INTERNAL_CRON_SECRET", "")
-    provided_secret = request.headers.get("X-Internal-Secret", "")
-    cloud_tasks_hdr = request.headers.get("X-CloudTasks-QueueName", "")
+    internal_secret    = _os.environ.get("INTERNAL_CRON_SECRET", "")
+    scheduler_sa_email = _os.environ.get("SCHEDULER_SA_EMAIL", "")
+    provided_secret    = request.headers.get("X-Internal-Secret", "")
+    cloud_tasks_hdr    = request.headers.get("X-CloudTasks-QueueName", "")
+    auth_header        = request.headers.get("Authorization", "")
 
     # V24.2 (L9-2): If INTERNAL_CRON_SECRET is not configured, ALL requests are
-    # rejected to prevent unauthenticated access. Require explicit opt-out by
-    # setting INTERNAL_CRON_SECRET to a non-empty value.
+    # rejected to prevent unauthenticated access.
     if not internal_secret:
         log.error(
             "inbound_sentiment_trigger_secret_not_configured",
@@ -1336,10 +1345,48 @@ def trigger_inbound_sentiment():
                  "Set this env var in Cloud Run to enable the inbound radar trigger.",
         )
         return jsonify({"error": "Service not configured — contact administrator"}), 503
-    if provided_secret != internal_secret and not cloud_tasks_hdr:
-        log.warning("inbound_sentiment_trigger_unauthorized",
-                    has_queue_header=bool(cloud_tasks_hdr),
-                    has_secret=bool(provided_secret))
+
+    # Path 1: Explicit secret header (manual / test calls)
+    if provided_secret == internal_secret:
+        pass  # authorized
+
+    # Path 2: Cloud Tasks queue header (Cloud Tasks dispatched calls)
+    elif cloud_tasks_hdr:
+        pass  # authorized — Cloud Run IAM already verified the OIDC token
+
+    # Path 3: Cloud Scheduler OIDC token — verify email claim
+    # Cloud Run validates the signature before this handler is reached.
+    # We only need to check the email matches the configured service account.
+    elif auth_header.startswith("Bearer ") and scheduler_sa_email:
+        try:
+            import jwt as _jwt  # PyJWT — already in requirements.txt
+            token = auth_header.split(" ", 1)[1]
+            # decode without verification — Cloud Run has already verified the sig
+            claims = _jwt.decode(token, options={"verify_signature": False})
+            token_email = claims.get("email", "")
+            if token_email != scheduler_sa_email:
+                log.warning(
+                    "inbound_sentiment_trigger_scheduler_email_mismatch",
+                    expected=scheduler_sa_email,
+                    got=token_email[:30],
+                )
+                return jsonify({"error": "unauthorized"}), 401
+            # authorized — email matches configured scheduler service account
+        except Exception as _jwt_err:
+            log.warning(
+                "inbound_sentiment_trigger_jwt_decode_failed",
+                error=str(_jwt_err),
+                note="Non-blocking — treating as unauthorized.",
+            )
+            return jsonify({"error": "unauthorized"}), 401
+
+    else:
+        log.warning(
+            "inbound_sentiment_trigger_unauthorized",
+            has_queue_header=bool(cloud_tasks_hdr),
+            has_secret=bool(provided_secret),
+            has_bearer=auth_header.startswith("Bearer "),
+        )
         return jsonify({"error": "unauthorized"}), 401
 
     import threading

@@ -464,10 +464,12 @@ def list_inbound_signals(uid, tenant_id, user_role):
             signals = [_sanitize_signal_doc(d) for d in fallback_query.stream()]
 
         # Execute Application-Level Filtering / Validation
+        # V25.2.2: Aligned floor to 0.45 (matches MIN_INTENT_SCORE in inbound_sentiment_job.py).
+        # Previously hardcoded 0.55 silently dropped signals the job had written at 0.45–0.54.
         signals = [
             s for s in signals
             if s.get("status") == status
-            and float(s.get("intent_score", 0.0)) >= 0.55
+            and float(s.get("intent_score", 0.0)) >= 0.45
         ]
 
         # Optional label filter — applied after Firestore fetch (no composite index needed)

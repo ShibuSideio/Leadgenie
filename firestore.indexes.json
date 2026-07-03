@@ -145,6 +145,13 @@
       "fieldPath": "expire_at",
       "ttl": true,
       "indexes": []
+    },
+    {
+      "collectionGroup": "inbound_signals",
+      "fieldPath": "expire_at",
+      "ttl": true,
+      "indexes": [],
+      "_comment": "V25.2.2: Auto-expire old inbound signals. Job should write expire_at = now + 30 days."
     }
   ]
 }
