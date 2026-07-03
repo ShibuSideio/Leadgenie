@@ -612,18 +612,16 @@ def search_serper(
     if sourcing_vector and _is_consumer_archetype(sourcing_vector):
         payload_dict["tbs"] = "qdr:m"
     else:
-        # V24.6.0: B2B temporal freshness gate.
-        # Previously B2B had NO tbs filter (all-time), allowing a 2022 conference
-        # page to compete equally with a 2026 buyer forum post in scoring.
-        # Evidence: postgresconf.org/conferences/SV2022/... scored 10/10 on the
-        # Medica AI Data campaign (confirmed 2026-07-02).
-        # V24.6.4: Widened from qdr:y (1 year) to qdr:2y (2 years).
-        # Evidence (2026-07-03): Brand Narrative campaign with gl=in + tbs=qdr:y
-        # returned fetched=0 across every produce run — global index has no indexed
-        # forum content matching exact buyer-language phrases within 12 months.
-        # 2-year window still excludes 2022 conference pages (the original problem)
-        # while capturing 2024 forum discussions where buyers discuss brand strategy.
-        payload_dict["tbs"] = "qdr:2y"
+        # V25.2.3: B2B temporal filter REMOVED.
+        # Evidence (2026-07-03): tbs=qdr:2y combined with gl=in and niche
+        # buyer-language forum queries produced fetched=0 across every produce
+        # run for Brand Narrative, Kerala Education, and Oman Realty campaigns.
+        # Google has zero indexed content matching exact phrases like
+        # "struggle to differentiate our brand" within 2 years in the India index.
+        # The Gemini pre-filter and score gate downstream handle freshness —
+        # stale 2022 results are scored low and naturally filtered out.
+        # Removing tbs entirely to restore Serper recall.
+        pass  # no tbs filter for B2B
 
     payload = json.dumps(payload_dict)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}

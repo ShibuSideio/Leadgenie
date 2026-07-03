@@ -810,18 +810,22 @@ Return ONLY the JSON object. No explanation, no markdown."""
     # Build: RLHF (most specific) → shield → persona → static (least specific)
     blacklist = (_rlhf_blacklist + _shield_blacklist + _persona_blacklist + " " + _DEFAULT_BLACKLIST).strip()
 
-    # V24.1.1: Cap blacklist length to prevent query explosion.
-    # With all sources (base + persona signals + shield domains/entities + RLHF domains/titles),
-    # the blacklist can exceed 500 chars, pushing total query length past 700+ chars.
-    # This causes: (a) Serper response times >10s, (b) possible 0-result returns,
-    # (c) wasted credits on queries that are too constrained to match anything.
-    # Cap at 350 chars — enough for base + ~15 exclusions. Trim from tail (static
-    # defaults are appended last and trimmed first under the new priority order).
-    _MAX_BLACKLIST_LEN = 350
+    # V25.2.3: Cap blacklist length to prevent query explosion.
+    # BUG FIX: Previous cap used whitespace `.split()` which broke multi-word
+    # -intitle:"..." exclusions into individual words. Each word passed the cap
+    # check individually, so a single 80-char -intitle: phrase was never trimmed.
+    # FIX: Use regex to split on exclusion operator boundaries so multi-word
+    # phrases are treated as atomic units.
+    # Also reduced cap from 350→250 chars. Evidence (2026-07-03): 350-char
+    # blacklists combined with tbs=qdr:2y and gl=in produce 0 Google results
+    # for every Brand Narrative and Kerala Education campaign query.
+    _MAX_BLACKLIST_LEN = 250
     if len(blacklist) > _MAX_BLACKLIST_LEN:
+        import re as _bl_re
         _original_len = len(blacklist)
-        # Split into tokens, rebuild from front, stop when budget exhausted
-        _bl_tokens = blacklist.split()
+        # Split on operator boundaries: each token is a complete exclusion unit
+        # e.g. -site:foo.com | -intitle:"long phrase here" | -"exact match" | -word
+        _bl_tokens = _bl_re.findall(r'-(?:site:\S+|intitle:"[^"]*"|"[^"]*"|\S+)', blacklist)
         _capped = []
         _running = 0
         for _t in _bl_tokens:
