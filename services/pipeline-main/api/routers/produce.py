@@ -389,19 +389,23 @@ def produce():
             sourcing_vector=sourcing_vector,
         )
 
-        # V24.5.9: Zero-result geo fallback for consumer campaigns.
-        # Small national Google indexes (gl=om, gl=bh, gl=kw) rarely have forum/
-        # community content. When a geo-restricted call returns 0 results for a B2C
-        # campaign, retry globally so buyer signals on Reddit, expat forums, and
-        # regional platforms (which are globally indexed) are not missed.
-        # Only fires when: (a) gl is set, (b) result is empty, (c) consumer archetype.
+        # V24.6.3: Zero-result geo fallback — extended to ALL campaign types.
+        # Previously only fired for consumer archetypes (_is_consumer_vector).
+        # Evidence (2026-07-03): B2B Brand Narrative campaign (gl=in, tbs=qdr:y)
+        # returned fetched=0 across 6 consecutive produce runs because niche
+        # buyer-language forum queries have zero indexed content in the India
+        # national Google index. Removing the consumer-only guard ensures B2B
+        # campaigns also retry on the global index when geo-restricted call
+        # returns empty. The Gemini pre-filter downstream handles geographic
+        # relevance scoring — we do not need to gatekeep at the Serper level.
         _is_consumer_vector = _is_consumer_archetype(sourcing_vector)
-        if not raw_results and gl and _is_consumer_vector:
+        if not raw_results and gl:
             log.info(
                 "produce_geo_fallback",
                 query=search_query[:80],
                 original_gl=gl,
-                note="Geo-restricted call returned 0 results. Retrying globally for consumer campaign.",
+                sourcing_vector=sourcing_vector,
+                note="Geo-restricted call returned 0 results. Retrying on global index.",
                 campaign_id=campaign_id,
             )
             raw_results = search_serper(

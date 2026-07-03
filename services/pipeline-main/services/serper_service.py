@@ -155,6 +155,12 @@ _ENTERPRISE_DOMAINS = [
     "researchgate.net", # Academic social network (researchers, not buyers)
     "semanticscholar.org",
     "pubmed.ncbi.nlm.nih.gov",
+    # V24.6.3: Login-walled social platforms — organic Serper results from these
+    # domains always produce snippets with "sign in" / "log in" / "create account".
+    # They are never scrapeable leads. Block at domain level to fail-fast and
+    # avoid wasting the snippet noise-check cycle on known-bad results.
+    "linkedin.com",    # B2B posts require login to view
+    "quora.com",       # Answers paywalled; snippet shows "Continue Reading"
 ]
 
 _NOISE_PATHS    = ["/legal", "/pricing", "/docs", "/author/", "/login"]
@@ -201,14 +207,23 @@ def filter_serper_noise(serper_results: list) -> list:
     instead of substring. Prevents false positives like 'caribm.com' matching
     'ibm.com' or '/doctrine' matching '/docs'.
     V24.5.7 FIX: Added CDN subdomain detection (_CDN_SUBDOMAIN_PREFIXES).
+    V24.6.3 FIX: Added per-reason telemetry counter (noise_filter_summary)
+    so operators can diagnose which filter is killing results without
+    expanding individual log entries.
     """
     clean = []
+    # V24.6.3: per-reason counters for observability
+    _rejected_enterprise = 0
+    _rejected_cdn        = 0
+    _rejected_path       = 0
+    _rejected_snippet    = 0
     for r in serper_results:
         link    = r.get("link", "").lower()
         snippet = r.get("snippet", "").lower()
         # V24.1.1: Use root domain extraction instead of substring match
         link_domain = extract_root_domain(link)
         if link_domain in _ENTERPRISE_DOMAINS:
+            _rejected_enterprise += 1
             continue
         # V24.5.7: Block CDN/static subdomains — these are asset servers, not business pages.
         # extract_root_domain strips 'www.' but keeps other subdomains.
@@ -218,6 +233,7 @@ def filter_serper_noise(serper_results: list) -> list:
         except Exception:
             raw_netloc = link_domain
         if any(raw_netloc.startswith(pfx) for pfx in _CDN_SUBDOMAIN_PREFIXES):
+            _rejected_cdn += 1
             continue
         # V24.1.1: Path-segment matching — check that the path segment starts with noise prefix
         try:
@@ -225,10 +241,26 @@ def filter_serper_noise(serper_results: list) -> list:
         except Exception:
             link_path = ""
         if any(link_path.startswith(p) or f"{p}/" in link_path for p in _NOISE_PATHS):
+            _rejected_path += 1
             continue
         if any(s in snippet for s in _NOISE_SNIPPETS):
+            _rejected_snippet += 1
             continue
         clean.append(r)
+    # V24.6.3: emit summary only when results were rejected — avoids log spam on clean batches
+    total_in = len(serper_results)
+    total_rejected = _rejected_enterprise + _rejected_cdn + _rejected_path + _rejected_snippet
+    if total_rejected > 0:
+        log.info(
+            "noise_filter_summary",
+            total_in=total_in,
+            total_passed=len(clean),
+            total_rejected=total_rejected,
+            rejected_enterprise=_rejected_enterprise,
+            rejected_cdn=_rejected_cdn,
+            rejected_path=_rejected_path,
+            rejected_snippet=_rejected_snippet,
+        )
     return clean
 
 # V24.1.1: Check env var for Serper paid tier (skips social domain stripping)
