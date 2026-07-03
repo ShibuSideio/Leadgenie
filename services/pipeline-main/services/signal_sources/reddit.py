@@ -1,62 +1,76 @@
 """
-Reddit Signal Source — V25.1.0
+Reddit Signal Source — V25.1.1
+================================
+Discovers intent signals from Reddit using two access paths:
 
-Discovers intent signals from Reddit using the official public JSON API.
-No authentication required for reading public subreddits.
+PRIMARY (always works, no auth):
+  Reddit publishes RSS 2.0 feeds for every subreddit and search result.
+  These are publicly accessible at:
+    Subreddit new:  https://www.reddit.com/r/{subreddit}/new.rss
+    Subreddit search: https://www.reddit.com/r/{subreddit}/search.rss?q={query}&sort=new
 
-API reference:
-  Subreddit new:  GET https://www.reddit.com/r/{subreddit}/new.json
-  Subreddit search: GET https://www.reddit.com/r/{subreddit}/search.json
-  Global search:  GET https://www.reddit.com/search.json
+UPGRADE (when OAuth credentials available):
+  The OAuth Client Credentials grant provides access to the JSON API,
+  which returns full ``selftext`` (complete post body). RSS descriptions
+  are limited to ~100-300 chars. To enable: set environment variables
+    REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET
+  These are obtained by registering a free script app at:
+    https://www.reddit.com/prefs/apps
 
-Reddit returns full post text in the ``selftext`` field — no PRISM scrape
-needed for text posts. Link posts have empty selftext; their URL is returned
-for optional PRISM enrichment.
+NOTE (V25.1.1): Reddit's JSON API now returns 403 Forbidden for unauthenticated
+requests. The RSS-first strategy is the correct publicly-available approach.
+RSS descriptions are sufficient for Gemini intent classification. Full content
+available via PRISM scraping the post URL (which opens the thread).
 
-Rate limits: 60 requests/minute without OAuth. We enforce a 1.1s inter-request
-sleep to stay safely under the limit.
+Rate limits:
+  RSS: generous, no documented limit
+  OAuth API: 100 requests/minute
 """
 from __future__ import annotations
 
+import os
 import time
 import datetime
+import threading
 from typing import Optional
+from urllib.parse import quote_plus
 
 import requests
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
-from core.logging import get_logger                          # type: ignore[import]
+from core.logging import get_logger                                    # type: ignore[import]
 from services.signal_sources.base import BaseSignalSource, SignalItem  # type: ignore[import]
+from services.signal_sources.rss_feed import RssFeedSource             # type: ignore[import]
 
 log = get_logger("pipeline.signal_sources.reddit")
 
-_USER_AGENT = "LeadGenie/25.1.0 (intent signal collector; contact@sideio.com)"
-_BASE_URL   = "https://www.reddit.com"
-_CONNECT_TIMEOUT = 10  # seconds
-_READ_TIMEOUT    = 20  # seconds
-_INTER_REQUEST_SLEEP = 1.1  # seconds — stays under 60 req/min
-_DELETED_SENTINEL = frozenset({"[deleted]", "[removed]", ""})
+_USER_AGENT         = "LeadGenie/25.1.0 (intent signal collector; contact@sideio.com)"
+_BASE_URL           = "https://www.reddit.com"
+_OAUTH_BASE_URL     = "https://oauth.reddit.com"
+_TOKEN_URL          = "https://www.reddit.com/api/v1/access_token"
+_CONNECT_TIMEOUT    = 10
+_READ_TIMEOUT       = 20
+_INTER_REQUEST_SLEEP = 0.5  # RSS is generous; short sleep for courtesy
+
+# Thread-safe token cache
+_token_cache: dict[str, str | float] = {}
+_token_lock = threading.Lock()
 
 
 class RedditSource(BaseSignalSource):
-    """Intent signal discovery via Reddit's public JSON API.
+    """Intent signal discovery from Reddit subreddits.
 
-    Fetches new posts from specified subreddits and optionally searches within
-    them using caller-supplied search terms. All configuration is injected
-    at construction time — no hardcoding inside this class.
+    Uses RSS feeds (always available, no auth) as the primary access path.
+    Upgrades to OAuth JSON API automatically when REDDIT_CLIENT_ID and
+    REDDIT_CLIENT_SECRET environment variables are set — providing full
+    post text instead of RSS excerpts.
 
     Args:
-        subreddits:    List of subreddit names to monitor (without the r/ prefix).
-                       e.g. ["marketing", "indianstartups"]
-        search_terms:  List of queries to run as subreddit searches. Each term
-                       is searched in every subreddit. May be empty — in that
-                       case only new-post browsing is performed.
-        geo_terms:     Optional list of geographic keywords (e.g. ["Oman", "Muscat"]).
-                       When provided, posts are filtered to those containing at
-                       least one geo term in title or selftext (case-insensitive).
-                       When None or empty, no geo filtering is applied.
-        max_age_days:  Discard posts older than this many days. Default 14.
-        max_per_source: Max signals to return from this source per discover() call.
+        subreddits:     List of subreddit names (without r/ prefix).
+        search_terms:   Search queries to run within each subreddit.
+        geo_terms:      Optional geographic filter keywords.
+        max_age_days:   Discard posts older than this many days.
+        max_per_source: Maximum signals returned per discover() call.
     """
 
     source_type = "reddit"
@@ -69,195 +83,242 @@ class RedditSource(BaseSignalSource):
         max_age_days: int = 14,
         max_per_source: int = 50,
     ) -> None:
-        self._subreddits    = [s.lstrip("r/") for s in subreddits]
-        self._search_terms  = search_terms or []
-        self._geo_terms     = [g.lower() for g in (geo_terms or [])]
-        self._max_age_days  = max_age_days
+        self._subreddits     = [s.lstrip("r/") for s in subreddits]
+        self._search_terms   = search_terms or []
+        self._geo_terms      = [g.lower() for g in (geo_terms or [])]
+        self._max_age_days   = max_age_days
         self._max_per_source = max_per_source
-        self._cutoff_ts     = (
-            datetime.datetime.utcnow()
-            - datetime.timedelta(days=max_age_days)
-        ).timestamp()
+
+        # Detect OAuth credentials for JSON API upgrade
+        self._client_id     = os.environ.get("REDDIT_CLIENT_ID", "")
+        self._client_secret = os.environ.get("REDDIT_CLIENT_SECRET", "")
+        self._use_oauth     = bool(self._client_id and self._client_secret)
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
     def discover(self) -> list[SignalItem]:
-        """Fetch intent signals from all configured subreddits."""
+        """Fetch intent signals from Reddit via RSS (or JSON API if OAuth configured)."""
+        if self._use_oauth:
+            log.info("reddit_using_oauth_path")
+            return self._discover_via_json_api()
+        else:
+            log.info("reddit_using_rss_path")
+            return self._discover_via_rss()
+
+    # ------------------------------------------------------------------
+    # RSS path (primary — no auth required)
+    # ------------------------------------------------------------------
+
+    def _discover_via_rss(self) -> list[SignalItem]:
+        """Fetch posts via Reddit RSS feeds — always publicly accessible."""
+        seen_urls: set[str] = set()
+        signals:   list[SignalItem] = []
+
+        rss_urls: list[str] = []
+
+        for subreddit in self._subreddits:
+            # New posts feed (no search — organic browsing)
+            rss_urls.append(f"{_BASE_URL}/r/{subreddit}/new.rss?limit=25")
+
+            # Search results for each term within this subreddit
+            for term in self._search_terms:
+                encoded = quote_plus(term)
+                rss_urls.append(
+                    f"{_BASE_URL}/r/{subreddit}/search.rss"
+                    f"?q={encoded}&sort=new&t=month&restrict_sr=1"
+                )
+
+        if rss_urls:
+            rss = RssFeedSource(
+                feed_urls    = rss_urls,
+                geo_terms    = self._geo_terms if self._geo_terms else None,
+                max_age_days = self._max_age_days,
+                max_per_source = self._max_per_source,
+            )
+            raw_signals = rss.discover()
+
+            for sig in raw_signals:
+                if sig.url and sig.url not in seen_urls:
+                    seen_urls.add(sig.url)
+                    # Tag source_type as reddit (RSS parser returns rss_feed)
+                    signals.append(SignalItem(
+                        url         = sig.url,
+                        text        = sig.text,
+                        title       = sig.title,
+                        author      = sig.author,
+                        source_type = self.source_type,
+                        fetched_at  = sig.fetched_at or self._now_iso(),
+                        metadata    = {
+                            **sig.metadata,
+                            "access_path":     "rss",
+                            # RSS descriptions are ~100-300 chars — thin for PRISM upgrade
+                            "is_thin_content": len(sig.text) < 200,
+                        },
+                    ))
+
+        log.info(
+            "reddit_rss_discover_complete",
+            subreddits=len(self._subreddits),
+            signals_found=len(signals),
+        )
+        return signals[: self._max_per_source]
+
+    # ------------------------------------------------------------------
+    # JSON API path (OAuth upgrade — full selftext available)
+    # ------------------------------------------------------------------
+
+    def _discover_via_json_api(self) -> list[SignalItem]:
+        """Fetch posts via Reddit OAuth JSON API — full post text available."""
+        token = self._get_oauth_token()
+        if not token:
+            log.warning("reddit_oauth_token_failed", note="Falling back to RSS path.")
+            return self._discover_via_rss()
+
         seen_ids: set[str] = set()
         signals:  list[SignalItem] = []
+        cutoff_ts = (
+            datetime.datetime.utcnow() - datetime.timedelta(days=self._max_age_days)
+        ).timestamp()
 
         for subreddit in self._subreddits:
             if len(signals) >= self._max_per_source:
                 break
-
-            # 1. Organic new posts (no query)
             try:
-                items = self._fetch_new(subreddit)
+                items = self._json_fetch_new(subreddit, token, cutoff_ts)
                 for item in items:
                     if item.url not in seen_ids:
                         seen_ids.add(item.url)
                         signals.append(item)
             except Exception as exc:
-                log.warning(
-                    "reddit_fetch_new_failed",
-                    subreddit=subreddit,
-                    error=str(exc),
-                )
+                log.warning("reddit_json_fetch_failed", subreddit=subreddit, error=str(exc))
             time.sleep(_INTER_REQUEST_SLEEP)
 
-            # 2. Targeted search per term
             for term in self._search_terms:
                 if len(signals) >= self._max_per_source:
                     break
                 try:
-                    items = self._fetch_search(subreddit, term)
+                    items = self._json_search(subreddit, term, token, cutoff_ts)
                     for item in items:
                         if item.url not in seen_ids:
                             seen_ids.add(item.url)
                             signals.append(item)
                 except Exception as exc:
                     log.warning(
-                        "reddit_search_failed",
+                        "reddit_json_search_failed",
                         subreddit=subreddit,
-                        query=term[:80],
+                        query=term[:60],
                         error=str(exc),
                     )
                 time.sleep(_INTER_REQUEST_SLEEP)
 
-        # Apply geo filter if terms provided
         if self._geo_terms:
-            signals = self._apply_geo_filter(signals)
+            signals = [
+                s for s in signals
+                if any(g in (s.title + " " + s.text).lower() for g in self._geo_terms)
+            ]
 
-        log.info(
-            "reddit_discover_complete",
-            subreddits=len(self._subreddits),
-            search_terms=len(self._search_terms),
-            signals_found=len(signals),
-        )
+        log.info("reddit_json_discover_complete", signals_found=len(signals))
         return signals[: self._max_per_source]
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
 
     @retry(
         wait=wait_exponential(multiplier=1, min=2, max=8),
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(2),
         retry=retry_if_exception_type(requests.exceptions.RequestException),
     )
-    def _get_json(self, url: str, params: dict) -> dict:
-        """HTTP GET with standard Reddit headers. Raises on non-200."""
+    def _json_fetch_new(
+        self, subreddit: str, token: str, cutoff_ts: float
+    ) -> list[SignalItem]:
         resp = requests.get(
-            url,
-            params=params,
-            headers={"User-Agent": _USER_AGENT},
+            f"{_OAUTH_BASE_URL}/r/{subreddit}/new.json",
+            params={"limit": 25, "raw_json": 1},
+            headers={
+                "User-Agent":    _USER_AGENT,
+                "Authorization": f"Bearer {token}",
+            },
             timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
         )
-        if resp.status_code == 429:
-            log.warning("reddit_rate_limited", url=url)
-            time.sleep(30)
-            resp = requests.get(
-                url,
-                params=params,
-                headers={"User-Agent": _USER_AGENT},
-                timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
-            )
         resp.raise_for_status()
-        return resp.json()
+        return self._parse_json_listing(resp.json(), cutoff_ts)
 
-    def _fetch_new(self, subreddit: str) -> list[SignalItem]:
-        """Fetch the newest posts from a subreddit."""
-        data = self._get_json(
-            f"{_BASE_URL}/r/{subreddit}/new.json",
-            {"limit": 25, "raw_json": 1},
-        )
-        return self._parse_listing(data, subreddit=subreddit)
-
-    def _fetch_search(self, subreddit: str, query: str) -> list[SignalItem]:
-        """Search within a subreddit for a specific query."""
-        data = self._get_json(
-            f"{_BASE_URL}/r/{subreddit}/search.json",
-            {
-                "q":           query,
-                "sort":        "new",
-                "t":           "month",
-                "restrict_sr": 1,
-                "limit":       25,
-                "raw_json":    1,
-            },
-        )
-        return self._parse_listing(data, subreddit=subreddit, query=query)
-
-    def _parse_listing(
-        self,
-        data: dict,
-        subreddit: str,
-        query: str = "",
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=8),
+        stop=stop_after_attempt(2),
+        retry=retry_if_exception_type(requests.exceptions.RequestException),
+    )
+    def _json_search(
+        self, subreddit: str, query: str, token: str, cutoff_ts: float
     ) -> list[SignalItem]:
-        """Parse Reddit listing JSON into SignalItems."""
-        signals: list[SignalItem] = []
-        children = (
-            data.get("data", {}).get("children", [])
-            if isinstance(data, dict)
-            else []
+        resp = requests.get(
+            f"{_OAUTH_BASE_URL}/r/{subreddit}/search.json",
+            params={"q": query, "sort": "new", "t": "month", "restrict_sr": 1, "limit": 25, "raw_json": 1},
+            headers={
+                "User-Agent":    _USER_AGENT,
+                "Authorization": f"Bearer {token}",
+            },
+            timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
         )
+        resp.raise_for_status()
+        return self._parse_json_listing(resp.json(), cutoff_ts, query=query)
 
-        for child in children:
+    def _parse_json_listing(
+        self, data: dict, cutoff_ts: float, query: str = ""
+    ) -> list[SignalItem]:
+        _DELETED = frozenset({"[deleted]", "[removed]", ""})
+        signals: list[SignalItem] = []
+        for child in data.get("data", {}).get("children", []):
             post = child.get("data", {})
-            if not isinstance(post, dict):
+            if float(post.get("created_utc", 0)) < cutoff_ts:
                 continue
-
-            # Age filter
-            created_utc = float(post.get("created_utc", 0))
-            if created_utc and created_utc < self._cutoff_ts:
-                continue
-
-            selftext = post.get("selftext", "") or ""
-            if selftext in _DELETED_SENTINEL:
+            selftext  = (post.get("selftext") or "").strip()
+            if selftext in _DELETED:
                 selftext = ""
-
             title     = post.get("title", "") or ""
             permalink = post.get("permalink", "")
-            canonical = (
-                f"{_BASE_URL}{permalink}"
-                if permalink.startswith("/")
-                else (post.get("url", "") or "")
-            )
+            canonical = f"https://www.reddit.com{permalink}" if permalink.startswith("/") else (post.get("url") or "")
             if not canonical:
                 continue
-
-            # Combine title + selftext for scoring
-            combined = f"{title}\n\n{selftext}".strip()
-
-            # Mark as thin if selftext is empty (link post — needs PRISM)
-            is_thin = not bool(selftext.strip())
-
             signals.append(SignalItem(
                 url         = canonical,
-                text        = combined,
+                text        = f"{title}\n\n{selftext}".strip(),
                 title       = title,
                 author      = post.get("author", "") or "",
                 source_type = self.source_type,
                 fetched_at  = self._now_iso(),
                 metadata    = {
-                    "subreddit":       post.get("subreddit", subreddit),
+                    "subreddit":       post.get("subreddit", ""),
                     "score":           post.get("score", 0),
                     "num_comments":    post.get("num_comments", 0),
-                    "is_thin_content": is_thin,
+                    "access_path":     "oauth_json",
+                    "is_thin_content": not bool(selftext.strip()),
                     "search_query":    query,
-                    "post_id":         post.get("id", ""),
                 },
             ))
-
         return signals
 
-    def _apply_geo_filter(self, signals: list[SignalItem]) -> list[SignalItem]:
-        """Keep only signals that mention at least one geo term."""
-        filtered = []
-        for sig in signals:
-            haystack = (sig.title + " " + sig.text).lower()
-            if any(term in haystack for term in self._geo_terms):
-                filtered.append(sig)
-        return filtered
+    def _get_oauth_token(self) -> str:
+        """Get or refresh Reddit OAuth access token (client credentials grant)."""
+        global _token_cache
+        with _token_lock:
+            if (
+                _token_cache.get("token")
+                and float(_token_cache.get("expires_at", 0)) > time.time() + 60
+            ):
+                return str(_token_cache["token"])
+            try:
+                resp = requests.post(
+                    _TOKEN_URL,
+                    auth=(self._client_id, self._client_secret),
+                    data={"grant_type": "client_credentials"},
+                    headers={"User-Agent": _USER_AGENT},
+                    timeout=(8, 15),
+                )
+                resp.raise_for_status()
+                token_data = resp.json()
+                _token_cache["token"]      = token_data["access_token"]
+                _token_cache["expires_at"] = time.time() + int(token_data.get("expires_in", 3600))
+                return str(_token_cache["token"])
+            except Exception as exc:
+                log.warning("reddit_oauth_token_error", error=str(exc))
+                return ""
