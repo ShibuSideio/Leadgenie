@@ -348,13 +348,22 @@ HIGH tier: The signal contains explicit buyer intent — someone asking for a ve
   recommendation, expressing frustration with a current solution, announcing a budget
   or project that matches the ICP, or describing a pain that is directly addressable.
   The person/company is identifiable and reachable.
+  ALSO HIGH: A Google Maps review where the REVIEWER describes their own use case,
+  pain, or project in a way that matches the ICP — the reviewer IS a proven buyer
+  in this category (they already spent money on a competitor).
 
 MEDIUM tier: The signal shows strong contextual relevance to the ICP but lacks explicit
   buying intent. Could be a decision influencer, a company going through a relevant
   change, or a topic discussion from the ICP audience.
+  ALSO MEDIUM: A positive review on a competitor where the reviewer mentions their
+  business type, use case, or project context that matches the ICP, even without
+  explicit dissatisfaction.
 
-LOW tier: The signal is a generic article, listicle, review of a past experience,
-  corporate announcement unrelated to buying, or clearly irrelevant to the ICP.
+LOW tier: The signal is a generic article, listicle, corporate announcement unrelated
+  to buying, spam, or clearly irrelevant to the ICP.
+  A review is LOW only if: (a) it contains no useful buyer context (e.g. just "Great
+  service" with no detail), (b) the reviewer is clearly outside the ICP geo/category,
+  or (c) the review is from a competitor/seller, not a buyer.
 
 GEO RULE: If a geo_target is set and the signal is clearly from/about a different
   geography, set geo_match=false and tier=LOW.
