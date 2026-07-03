@@ -102,7 +102,7 @@ def _acquire_lead_lock(transaction, lock_ref, now_utc):
     """
     Atomically acquires a global exclusivity lock.
     Returns True  → lock acquired (new or expired).
-    Returns False → domain within 14-day exclusivity window; caller skips.
+    Returns False → domain within 3-day exclusivity window; caller skips.
     Raises        → Firestore contention; caller skips.
     """
     snap = lock_ref.get(transaction=transaction)
@@ -116,9 +116,8 @@ def _acquire_lead_lock(transaction, lock_ref, now_utc):
     # Postmortem Fix #2: write expire_at alongside locked_until so the Firestore
     # TTL policy (once enabled in GCP Console on global_lead_locks.expire_at)
     # automatically cleans up stale lock documents.
-    # Without a TTL index: ~547k stale docs accumulate over 12 months, growing
-    # indefinitely and incorrectly blacklisting domains for 14 days on false-positive WAFs.
-    _locked_until = now_utc + datetime.timedelta(days=14)
+    # V25.2.2: Reduced from 14 days → 3 days for faster lead re-discovery.
+    _locked_until = now_utc + datetime.timedelta(days=3)
     transaction.set(lock_ref, {
         "locked_until": _locked_until,
         "expire_at":    _locked_until,   # TTL field — Firestore TTL policy key
@@ -561,7 +560,7 @@ def dispatch():
             acquired = _acquire_lead_lock(lock_txn, lock_ref, now_utc)
             if not acquired:
                 log.info("dispatch_exclusivity_skip", url=url[:80],
-                         lock_entity=lock_entity, note="14-day window active.")
+                         lock_entity=lock_entity, note="3-day window active.")
                 return {"url": url, "status": "skip_exclusivity"}
         except Exception as lock_err:
             log.warning("dispatch_lock_failed", url=url[:80], error=str(lock_err))
