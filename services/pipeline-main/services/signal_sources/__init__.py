@@ -1,5 +1,5 @@
 """
-LeadGenie Signal Sources Package — V25.1.1
+LeadGenie Signal Sources Package — V25.2.0
 
 Provides archetype-aware, multi-source signal discovery without hardcoded
 campaign values. Each source implements BaseSignalSource and returns
@@ -26,6 +26,12 @@ Available sources:
   ConsumerForumSource      — Consumer review and product comparison platforms
                              (r/BuyItForLife, r/frugal, Quora, ProductHunt, IndieHackers)
                              D2C founder signal: Show HN, IndieHackers, Shopify community
+  GoogleReviewSource       — Google Maps reviews of competitor businesses.
+                             Gemini derives competitor names from ICP; Serper Maps + Reviews
+                             API fetches buyer-language reviews. All archetypes.
+  YouTubeSource            — YouTube video discovery via YouTube Data API v3.
+                             Video title + description as buyer-intent signal text.
+                             B2C and D2C archetypes only.
 
   === Base ===
   BaseSignalSource         — Abstract base class for all sources
@@ -36,3 +42,5 @@ Archetype routing: see services.source_router.SourceRouter
 from __future__ import annotations
 
 from services.signal_sources.base import SignalItem, BaseSignalSource  # noqa: F401
+from services.signal_sources.google_reviews import GoogleReviewSource   # noqa: F401
+from services.signal_sources.youtube import YouTubeSource               # noqa: F401

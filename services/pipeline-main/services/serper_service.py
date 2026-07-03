@@ -614,11 +614,13 @@ def search_serper(
         # page to compete equally with a 2026 buyer forum post in scoring.
         # Evidence: postgresconf.org/conferences/SV2022/... scored 10/10 on the
         # Medica AI Data campaign (confirmed 2026-07-02).
-        # qdr:y (past year) is calibrated for the B2B buying cycle:
-        #   - Enterprise buying cycles span months → need > qdr:m window
-        #   - Archived conference pages / 2-year-old blog posts are never buyers
-        #   - 12-month window excludes stale content without narrowing too aggressively
-        payload_dict["tbs"] = "qdr:y"
+        # V24.6.4: Widened from qdr:y (1 year) to qdr:2y (2 years).
+        # Evidence (2026-07-03): Brand Narrative campaign with gl=in + tbs=qdr:y
+        # returned fetched=0 across every produce run — global index has no indexed
+        # forum content matching exact buyer-language phrases within 12 months.
+        # 2-year window still excludes 2022 conference pages (the original problem)
+        # while capturing 2024 forum discussions where buyers discuss brand strategy.
+        payload_dict["tbs"] = "qdr:2y"
 
     payload = json.dumps(payload_dict)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}

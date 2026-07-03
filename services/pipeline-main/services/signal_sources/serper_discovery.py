@@ -1,15 +1,23 @@
 """
-Serper Discovery Source — V25.1.0
+Serper Discovery Source — V25.2.0
 
 Uses Serper (Google Search API) strictly as a URL DISCOVERY TOOL.
 This source returns candidate URLs with thin content — the full content
 is obtained by PRISM scraping in the dispatch layer.
 
 CRITICAL DESIGN PRINCIPLE:
-  Serper snippets (140 chars) are NOT used as signal content.
+  Serper snippets (140 chars) are NOT used as signal content by default.
   They are stored as a thin discovery hint only.
   The ``is_thin_content`` metadata flag tells signal_harvest.py to
   route these signals through PRISM scraping before Gemini scoring.
+
+  EXCEPTION — Social snippet bypass (V25.2.0):
+  For social-domain URLs (LinkedIn, X, Facebook, Instagram, Threads)
+  that PRISM cannot access without authentication, signal_harvest.py
+  Stage 4.5 reads ``metadata["serper_snippet"]`` (the raw Google
+  snippet, ≤140 chars) as the signal text. This is the buyer's own
+  words as indexed by Google and is used verbatim for Gemini scoring.
+  ``metadata["serper_title"]`` carries the raw Google title.
 
 Why this source still exists:
   Serper/Google is the best tool for finding specific forum threads,
@@ -170,6 +178,8 @@ class SerperDiscoverySource(BaseSignalSource):
                     "geo_code":        self._geo_code,
                     "is_thin_content": True,
                     "position":        result.get("position", 0),
+                    "serper_snippet":  snippet,   # raw Google snippet (buyer's words for social URLs)
+                    "serper_title":    title,     # raw Google title
                 },
             ))
 

@@ -1,5 +1,5 @@
 """
-Signal Harvest — V25.1.0
+Signal Harvest — V25.2.0
 =========================
 Enterprise multi-source intent signal collection pipeline.
 
@@ -59,6 +59,11 @@ _PRISM_CONNECT_TIMEOUT   = 8    # seconds
 _PRISM_READ_TIMEOUT      = 20   # seconds
 _SCRAPED_CACHE_COLL      = "scraped_cache"
 _UNPROCESSED_QUEUE_COLL  = "unprocessed_queue"
+
+_SOCIAL_SNIPPET_DOMAINS = frozenset({
+    "linkedin.com", "x.com", "twitter.com",
+    "facebook.com", "instagram.com", "threads.net",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +210,13 @@ def harvest_signals(
     fresh_signals = fresh_signals[:_MAX_SIGNALS_PER_RUN]
 
     # ------------------------------------------------------------------ #
+    # Stage 4.5 — Social snippet injection (V25.2.0)                      #
+    # For social-domain URLs found via Serper, use the cached Google       #
+    # snippet as signal text. PRISM cannot access these without auth.      #
+    # ------------------------------------------------------------------ #
+    fresh_signals = _inject_social_snippets(fresh_signals)
+
+    # ------------------------------------------------------------------ #
     # Stage 5 — PRISM enrichment for thin signals                         #
     # ------------------------------------------------------------------ #
     thin_signals  = [s for s in fresh_signals if s.is_thin][:_MAX_PRISM_SCRAPES]
@@ -265,6 +277,21 @@ def harvest_signals(
     )
     metrics["queued"] = queued
 
+    # ------------------------------------------------------------------ #
+    # Stage 8 — Write ALL scored signals to BQ raw_signals (V25.2.0)     #
+    # Non-blocking daemon thread — zero latency impact.                   #
+    # BQ accumulates full signal history for cluster analyst.             #
+    # ------------------------------------------------------------------ #
+    try:
+        from services.signal_bq_writer import write_signals_to_bq  # type: ignore[import]
+        write_signals_to_bq(scored_results=scored_results, campaign=campaign)
+    except Exception as _bq_err:
+        log.warning(
+            "signal_harvest_bq_write_skipped",
+            error=str(_bq_err),
+            note="Non-critical — harvest results still written to Firestore.",
+        )
+
     log.info(
         "signal_harvest_complete",
         campaign_id=campaign_id,
@@ -318,6 +345,104 @@ def _dedup_against_cache(
             note="Returning all signals unfiltered.",
         )
         return signals
+
+
+# ---------------------------------------------------------------------------
+# Social snippet injection (Stage 4.5)
+# ---------------------------------------------------------------------------
+
+def _inject_social_snippets(signals: list[SignalItem]) -> list[SignalItem]:
+    """Promote Serper snippets to full signal text for social-domain URLs.
+
+    PRISM cannot scrape LinkedIn, X, Facebook, Instagram, or Threads without
+    authentication. For these URLs discovered via Serper, the raw Google snippet
+    stored in ``metadata["serper_snippet"]`` is the buyer's own words as indexed
+    by Google. When the snippet is substantive (≥30 chars) it is promoted to the
+    signal's text field so Gemini inline scoring can operate on real content.
+
+    Args:
+        signals: List of SignalItems from all discovery sources.
+
+    Returns:
+        New list with social-domain thin signals replaced by snippet-enriched
+        versions where possible. All other signals are returned unchanged.
+    """
+    from urllib.parse import urlparse
+
+    result: list[SignalItem] = []
+    injected = 0
+
+    for signal in signals:
+        if not signal.is_thin:
+            result.append(signal)
+            continue
+
+        host = urlparse(signal.url).netloc.lower().replace("www.", "")
+        # Check if any known social domain is a suffix of the host
+        is_social = any(host == d or host.endswith("." + d) for d in _SOCIAL_SNIPPET_DOMAINS)
+
+        if not is_social:
+            result.append(signal)
+            continue
+
+        snippet = signal.metadata.get("serper_snippet", "") or ""
+        if len(snippet) < 30:
+            result.append(signal)
+            continue
+
+        platform = _detect_social_platform(host)
+        enriched = SignalItem(
+            url         = signal.url,
+            text        = snippet,
+            title       = signal.title,
+            author      = signal.author,
+            source_type = signal.source_type,
+            fetched_at  = signal.fetched_at,
+            metadata    = {
+                **signal.metadata,
+                "is_thin_content": False,
+                "content_source":  "serper_snippet",
+                "social_platform": platform,
+            },
+        )
+        log.debug(
+            "social_snippet_injected",
+            url=signal.url[:80],
+            platform=platform,
+            snippet_len=len(snippet),
+        )
+        result.append(enriched)
+        injected += 1
+
+    log.info(
+        "social_snippet_injection_complete",
+        total=len(signals),
+        injected=injected,
+    )
+    return result
+
+
+def _detect_social_platform(host: str) -> str:
+    """Map a social-domain hostname to a canonical platform identifier.
+
+    Args:
+        host: Hostname with ``www.`` already stripped (e.g. ``linkedin.com``).
+
+    Returns:
+        Platform string: ``"linkedin"``, ``"x"``, ``"facebook"``,
+        ``"instagram"``, ``"threads"``, or ``"social"`` as fallback.
+    """
+    if "linkedin.com" in host:
+        return "linkedin"
+    if "x.com" in host or "twitter.com" in host:
+        return "x"
+    if "facebook.com" in host:
+        return "facebook"
+    if "instagram.com" in host:
+        return "instagram"
+    if "threads.net" in host:
+        return "threads"
+    return "social"
 
 
 # ---------------------------------------------------------------------------

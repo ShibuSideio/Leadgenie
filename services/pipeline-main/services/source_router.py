@@ -1,5 +1,5 @@
 """
-Source Router — V25.1.1
+Source Router — V25.2.0
 =======================
 Dynamically maps a campaign's ICP context and archetype to the correct
 set of signal sources. Zero hardcoding of subreddits, keywords, or URLs.
@@ -49,6 +49,8 @@ from services.signal_sources.serper_discovery import SerperDiscoverySource      
 from services.signal_sources.job_posts import JobPostSource                       # type: ignore[import]
 from services.signal_sources.classified_listings import ClassifiedListingSource   # type: ignore[import]
 from services.signal_sources.consumer_forum import ConsumerForumSource            # type: ignore[import]
+from services.signal_sources.google_reviews import GoogleReviewSource             # type: ignore[import]
+from services.signal_sources.youtube import YouTubeSource                         # type: ignore[import]
 
 log = get_logger("pipeline.source_router")
 
@@ -329,8 +331,9 @@ IMPORTANT:
         )
         if not isinstance(result, dict):
             raise ValueError(f"Routing schema returned unexpected type: {type(result)}")
-        # Inject archetype into config for _instantiate_sources
-        result["_archetype"] = archetype
+        # Inject private routing hints for _instantiate_sources
+        result["_archetype"]    = archetype
+        result["_icp_context"]  = icp_context
         return result
 
     def _instantiate_sources(self, config: dict, geo: str) -> list[BaseSignalSource]:
@@ -448,6 +451,41 @@ IMPORTANT:
                 num_results       = 10,
                 geo_code          = "",  # Queries already contain geo-specificity
             ))
+
+        # 8. Google Reviews (all archetypes — competitor review mining)
+        #    Gemini derives competitor names from ICP; Serper Maps + Reviews
+        #    fetch buyer-language reviews. Works for B2B service firms too.
+        if self._serper_key:
+            icp_context = config.get("_icp_context", "")
+            raw_arch    = config.get("_archetype", "B2B")
+            sources.append(GoogleReviewSource(
+                icp_context    = icp_context,
+                geo            = geo,
+                archetype      = raw_arch,
+                serper_api_key = self._serper_key,
+                max_age_days   = 60,
+            ))
+
+        # 9. YouTube (B2C and D2C only — video discovery for consumer ICPs)
+        #    B2C/D2C buyers research purchases on YouTube before converting.
+        #    Uses search_queries from the routing config (same Gemini output).
+        if is_consumer:
+            yt_queries = [
+                r.get("search_query", "")
+                for r in config.get("reddit_sources", [])
+                if r.get("search_query")
+            ][:6]  # Derive from Reddit queries — they capture the same buyer intent
+            if yt_queries:
+                sources.append(YouTubeSource(
+                    search_queries = yt_queries,
+                    max_results    = 10,
+                    max_age_days   = 30,
+                ))
+                log.info(
+                    "source_router_youtube_configured",
+                    archetype=raw_arch,
+                    queries=len(yt_queries),
+                )
 
         return sources
 
