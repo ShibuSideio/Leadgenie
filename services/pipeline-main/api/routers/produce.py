@@ -380,38 +380,52 @@ def produce():
         clean_location = location if location and location.lower() != "all" else ""
         search_query   = kw
 
-        raw_results = search_serper(
-            search_query,
-            location=clean_location or None,
-            gl=gl or None,
-            campaign_id=campaign_id,
-            tenant_id=tenant_id,
-            sourcing_vector=sourcing_vector,
-        )
-
-        # V24.6.3: Zero-result geo fallback — extended to ALL campaign types.
-        # Previously only fired for consumer archetypes (_is_consumer_vector).
-        # Evidence (2026-07-03): B2B Brand Narrative campaign (gl=in, tbs=qdr:y)
-        # returned fetched=0 across 6 consecutive produce runs because niche
-        # buyer-language forum queries have zero indexed content in the India
-        # national Google index. Removing the consumer-only guard ensures B2B
-        # campaigns also retry on the global index when geo-restricted call
-        # returns empty. The Gemini pre-filter downstream handles geographic
-        # relevance scoring — we do not need to gatekeep at the Serper level.
+        # V25.3.0: Split Serper strategy by sourcing vector.
+        # B2B niche queries (boolean dorks with buyer-language phrases) return
+        # 0 results on geo-restricted Google indexes (gl=in, gl=ae, etc.).
+        # The old dual-query pattern sent the geo call first then retried
+        # globally — doubling Serper credit spend with zero benefit for B2B.
+        # Consumer archetypes (B2C, D2C, B2B2C) still benefit from geo-
+        # restricted indexes because local business discovery depends on
+        # Google's locale-specific ranking.
         _is_consumer_vector = _is_consumer_archetype(sourcing_vector)
-        if not raw_results and gl:
-            log.info(
-                "produce_geo_fallback",
-                query=search_query[:80],
-                original_gl=gl,
-                sourcing_vector=sourcing_vector,
-                note="Geo-restricted call returned 0 results. Retrying on global index.",
-                campaign_id=campaign_id,
-            )
+
+        if _is_consumer_vector:
+            # Consumer: geo-restricted first, then global fallback
             raw_results = search_serper(
                 search_query,
-                location=None,     # no location restriction
-                gl=None,           # no country restriction — search global index
+                location=clean_location or None,
+                gl=gl or None,
+                campaign_id=campaign_id,
+                tenant_id=tenant_id,
+                sourcing_vector=sourcing_vector,
+            )
+            if not raw_results and gl:
+                log.info(
+                    "produce_geo_fallback",
+                    query=search_query[:80],
+                    original_gl=gl,
+                    sourcing_vector=sourcing_vector,
+                    note="Consumer geo-restricted call returned 0 results. "
+                         "Retrying on global index.",
+                    campaign_id=campaign_id,
+                )
+                raw_results = search_serper(
+                    search_query,
+                    location=None,
+                    gl=None,
+                    campaign_id=campaign_id,
+                    tenant_id=tenant_id,
+                    sourcing_vector=sourcing_vector,
+                )
+        else:
+            # B2B: global-only (geo terms already in query text from query_brain).
+            # V25.3.0: B2B niche queries return 0 results on geo-restricted
+            # indexes. Geo relevance handled by Gemini scoring downstream.
+            raw_results = search_serper(
+                search_query,
+                location=None,
+                gl=None,
                 campaign_id=campaign_id,
                 tenant_id=tenant_id,
                 sourcing_vector=sourcing_vector,
@@ -662,7 +676,10 @@ def produce():
 
         harvest_thread = _threading.Thread(target=_run_harvest, daemon=True)
         harvest_thread.start()
-        harvest_thread.join(timeout=180)  # 3-minute hard wall-clock budget
+        # 5-minute wall-clock budget: Google Reviews (5 competitors × 10 reviews
+        # each) + PRISM enrichment + Gemini inline scoring can exceed 3 minutes.
+        # 300s accommodates worst-case Serper + Gemini latency chains.
+        harvest_thread.join(timeout=300)
 
         if harvest_result_holder:
             harvest_metrics = harvest_result_holder[0]
@@ -675,7 +692,7 @@ def produce():
             log.warning(
                 "signal_harvest_thread_timeout",
                 campaign_id=campaign_id,
-                note="Harvest thread exceeded 180s budget. Results discarded.",
+                note="Harvest thread exceeded 300s budget. Results discarded.",
             )
 
     log.info("TRACE-DONE: produce() complete.",

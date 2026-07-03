@@ -1,5 +1,5 @@
 """
-Signal Harvest — V25.2.0
+Signal Harvest — V25.3.0
 =========================
 Enterprise multi-source intent signal collection pipeline.
 
@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime
+import hashlib
 import os
 from typing import Optional, Any
 
@@ -107,7 +108,7 @@ def harvest_signals(
         geo=geo or "global",
     )
 
-    metrics = {"discovered": 0, "scored": 0, "queued": 0, "prism_enriched": 0, "errors": 0}
+    metrics = {"discovered": 0, "scored": 0, "queued": 0, "direct_leads": 0, "prism_enriched": 0, "errors": 0}
 
     # ------------------------------------------------------------------ #
     # Stage 1 — Build ICP context                                         #
@@ -305,6 +306,7 @@ def harvest_signals(
         campaign       = campaign,
         icp_context    = icp_context,
         db             = db,
+        metrics        = metrics,
     )
     metrics["queued"] = queued
 
@@ -578,26 +580,32 @@ def _write_to_firestore(
     campaign: dict,
     icp_context: str,
     db: Any,
+    metrics: dict | None = None,
 ) -> int:
-    """Write HIGH/MEDIUM signals to scraped_cache and campaign unprocessed_queue.
+    """Write scored signals to Firestore.
 
-    V25.2.4 FIX: Previously wrote to a top-level ``unprocessed_queue`` collection.
-    Dispatch reads URLs from the *campaign document's* ``unprocessed_queue`` array
-    field, so signals written to the collection were never dispatched — a complete
-    architectural disconnect.
+    HIGH-tier google_review signals are promoted to direct leads, bypassing
+    dispatch entirely. These signals already contain full buyer language,
+    reviewer identity, pain summary, and geo-confirmed competitor context
+    — dispatch’s 19 drop points would add latency without new enrichment.
 
-    Now appends URLs to the campaign document's array field via Firestore
-    ``arrayUnion``, matching produce.py's write path exactly.
+    All other HIGH/MEDIUM signals are written to scraped_cache and appended
+    to the campaign document’s ``unprocessed_queue`` array via Firestore
+    ``arrayUnion``, matching produce.py’s write path exactly.
 
     Returns:
-        Count of signals successfully written to unprocessed_queue.
+        Count of signals written to unprocessed_queue (excludes direct leads).
     """
     campaign_id = campaign.get("id", campaign.get("campaign_id", "unknown"))
     tenant_id   = campaign.get("tenant_id", "")
     queued      = 0
+    direct_leads_count = 0
     batch       = db.batch()
     batch_count = 0
     harvest_urls: list[str] = []
+
+    from urllib.parse import urlparse as _urlparse
+    from google.api_core.exceptions import AlreadyExists  # type: ignore[import]
 
     for signal, score in scored_results:
         tier = score.get("tier", "LOW")
@@ -610,11 +618,12 @@ def _write_to_firestore(
         # Dispatch reads text from scraped_cache.text to run pre_filter_gemini.
         # By writing full signal content here, the pre_filter runs on real content
         # instead of 140-char Serper snippets.
-        import hashlib
-        from urllib.parse import urlparse as _urlparse
-
         _parsed = _urlparse(signal.url)
-        _dedup_key = f"{_parsed.netloc}{_parsed.path}".lower().replace("www.", "")
+        # Include fragment (#review-0, #review-1) in dedup key — urlparse
+        # strips fragments from .path, so reviews sharing a base URL would
+        # collide without this.
+        _frag_suffix = f"#{_parsed.fragment}" if _parsed.fragment else ""
+        _dedup_key = f"{_parsed.netloc}{_parsed.path}{_frag_suffix}".lower().replace("www.", "")
         _cache_key = hashlib.sha256(f"{tenant_id}_{_dedup_key}".encode()).hexdigest()
 
         cache_ref = db.collection(_SCRAPED_CACHE_COLL).document(_cache_key)
@@ -627,7 +636,7 @@ def _write_to_firestore(
             "campaign_id":  campaign_id,
             "tenant_id":    tenant_id,
             "created_at":   now_ts,
-            # Inline score metadata — enriches dispatch's final_score_and_dm context
+            # Inline score metadata — enriches dispatch’s final_score_and_dm context
             "harvest_tier":              tier,
             "harvest_pain_summary":      score.get("pain_summary", ""),
             "harvest_contact_point":     score.get("contact_point", ""),
@@ -639,6 +648,80 @@ def _write_to_firestore(
         batch.set(cache_ref, cache_doc, merge=True)
         batch_count += 1
 
+        # ------------------------------------------------------------------ #
+        # V25.3.0 — Direct lead creation for HIGH-tier google_review signals  #
+        #                                                                      #
+        # These signals contain full buyer language (verbatim review text),     #
+        # reviewer name, pain summary from inline scoring, geo confirmation,   #
+        # and competitor context. Dispatch’s 19 drop points add latency with   #
+        # no incremental enrichment for this signal class.                     #
+        # ------------------------------------------------------------------ #
+        if tier == "HIGH" and signal.source_type == "google_review":
+            lead_id = hashlib.sha256(
+                f"{tenant_id}_{_dedup_key}".encode()
+            ).hexdigest()
+
+            lead_doc = {
+                "url":              signal.url,
+                "status":           "new",
+                "score":            8,
+                "normalized_score": 80,
+                "pain_point":       score.get("pain_summary", ""),
+                "intent_signal":    score.get("buyer_language_quote", ""),
+                "decision_maker":   {"name": signal.author},
+                "company_name":     signal.metadata.get("place_name", ""),
+                "source":           "signal_harvest_review",
+                "is_cluster_lead":  False,
+                "tenant_id":        tenant_id,
+                "campaign_id":      campaign_id,
+                "matched_campaigns": [{"campaign_id": campaign_id, "raw_score": 8}],
+                "contact_endpoints": [{"platform": "google_maps", "uri": signal.url}],
+                "dm":               "",
+                "icebreaker_angle": score.get("pain_summary", ""),
+                "score_reasoning":  (
+                    f"HIGH-tier Google Review on competitor "
+                    f"'{signal.metadata.get('place_name', '')}'. "
+                    f"Reviewer is a proven buyer in this category."
+                ),
+                "evidence_chain":   [{
+                    "signal_type": "REVIEW_SIGNAL",
+                    "evidence":    score.get("buyer_language_quote", ""),
+                    "confidence":  0.85,
+                }],
+                "confidence_level": "HIGH",
+                "createdAt":        firestore.SERVER_TIMESTAMP,
+                "updatedAt":        firestore.SERVER_TIMESTAMP,
+            }
+
+            try:
+                lead_ref = db.collection("leads").document(lead_id)
+                lead_ref.create(lead_doc)
+                direct_leads_count += 1
+                log.info(
+                    "signal_harvest_direct_lead_created",
+                    campaign_id=campaign_id,
+                    lead_id=lead_id,
+                    place_name=signal.metadata.get("place_name", "")[:80],
+                    reviewer=signal.author[:60],
+                )
+            except AlreadyExists:
+                log.info(
+                    "signal_harvest_direct_lead_exists",
+                    campaign_id=campaign_id,
+                    lead_id=lead_id,
+                    note="Dedup: lead already exists, skipping.",
+                )
+            except Exception as exc:
+                log.error(
+                    "signal_harvest_direct_lead_failed",
+                    campaign_id=campaign_id,
+                    lead_id=lead_id,
+                    error=str(exc),
+                )
+            # HIGH-tier reviews bypass the queue — do NOT append to harvest_urls
+            continue
+
+        # MEDIUM-tier (and non-review HIGH) signals go through dispatch queue
         harvest_urls.append(signal.url)
         queued += 1
 
@@ -655,6 +738,10 @@ def _write_to_firestore(
             batch       = db.batch()
             batch_count = 0
 
+    # Track direct lead count in caller’s metrics dict
+    if metrics is not None:
+        metrics["direct_leads"] = direct_leads_count
+
     # Final scraped_cache commit
     if batch_count > 0:
         try:
@@ -666,14 +753,14 @@ def _write_to_firestore(
                 error=str(exc),
             )
 
-    # ---- Append URLs to campaign document's unprocessed_queue array ----
+    # ---- Append URLs to campaign document’s unprocessed_queue array ----
     # V25.2.4: This is the critical fix. Dispatch reads from the campaign
-    # document's unprocessed_queue array field, NOT from a top-level collection.
+    # document’s unprocessed_queue array field, NOT from a top-level collection.
     # Use arrayUnion for atomic, dedup-safe append.
     if harvest_urls:
         try:
             campaign_ref = db.collection("campaigns").document(campaign_id)
-            # Cap at 200 to match produce.py's queue limit
+            # Cap at 200 to match produce.py’s queue limit
             campaign_ref.update({
                 "unprocessed_queue": firestore.ArrayUnion(harvest_urls[:200]),
             })
@@ -695,6 +782,7 @@ def _write_to_firestore(
         "signal_harvest_firestore_written",
         campaign_id=campaign_id,
         queued=queued,
+        direct_leads=direct_leads_count,
     )
     return queued
 

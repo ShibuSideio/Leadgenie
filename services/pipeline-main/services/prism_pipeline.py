@@ -241,21 +241,33 @@ class WalledGardenHook:
         cache_key = url.replace("/", "_")
         cache_ref = self._db.collection("scraped_cache").document(cache_key)
 
-        # Cache read
+        # Cache read — V25.3.0 Credit Guard
+        # Only skip Serper queries when cached text is substantial (>= 500 chars).
+        # signal_harvest may have written full content to a sha256-keyed doc that
+        # doesn't match the PRISM-native cache_key. If PRISM's own cache has thin
+        # text from a prior WalledGarden run, fall through to Serper for a richer
+        # triangulation rather than returning a low-quality snippet.
         try:
             cached = cache_ref.get()
             if cached.exists:
                 c = cached.to_dict()
-                if c.get("text"):
-                    log.info("walled_garden_cache_hit", url=url[:80], chars=len(c["text"]))
+                cached_text = c.get("text", "")
+                if cached_text and len(cached_text) >= 500:
+                    log.info("prism_walled_garden_cache_hit",
+                             url=url[:80], chars=len(cached_text),
+                             source=c.get("source", "unknown"))
                     return {
-                        "text":         c["text"],
+                        "text":         cached_text,
                         "tech_stack":   c.get("tech_stack", ["Social Platform Snippet"]),
                         "emails":       c.get("emails", []),
                         "phones":       c.get("phones", []),
                         "mode":         "WalledGarden",
                         "fallback_used": False,
                     }
+                elif cached_text:
+                    log.info("walled_garden_cache_thin_skip",
+                             url=url[:80], chars=len(cached_text),
+                             note="Cached text below 500-char threshold; proceeding to Serper.")
         except Exception as ce:
             log.warning("walled_garden_cache_read_error", url=url[:80], error=str(ce))
 

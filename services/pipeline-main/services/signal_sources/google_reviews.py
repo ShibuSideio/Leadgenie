@@ -1,5 +1,5 @@
 """
-Google Reviews Signal Source — V25.2.0
+Google Reviews Signal Source — V25.3.0
 
 Strategy: competitor reviews as buyer-intent signals.
 
@@ -264,6 +264,23 @@ class GoogleReviewSource(BaseSignalSource):
             )
             return []
 
+        # V25.3.0: Extract business website from Maps API result.
+        # Used as the base review URL for dedup — each business has a unique
+        # website domain, so dispatch won't collapse reviews across competitors.
+        business_website = (place.get("website") or "").strip()
+
+        # Base URL strategy for dedup uniqueness:
+        #   1. Prefer business website (unique domain per competitor).
+        #   2. Fallback: CID-style URL with place_id IN THE PATH (not query
+        #      param), so each competitor gets a unique {netloc}{path} dedup key.
+        #
+        # Previously all reviews shared `google.com/maps/place/?q=...` which
+        # collapsed to one dedup key since dispatch strips query params.
+        if business_website:
+            base_url = business_website.rstrip("/")
+        else:
+            base_url = f"https://www.google.com/maps/place/data=!4m2!3m1!1s{quote_plus(place_id)}"
+
         try:
             reviews = self._maps_reviews(place_id)
         except Exception as exc:
@@ -276,6 +293,7 @@ class GoogleReviewSource(BaseSignalSource):
             return []
 
         signals: list[SignalItem] = []
+        review_index = 0
         for review in reviews:
             rating      = review.get("rating", 0)
             review_text = (review.get("snippet") or review.get("text") or "").strip()
@@ -286,7 +304,12 @@ class GoogleReviewSource(BaseSignalSource):
             if rating <= 3 or len(review_text) < 40:
                 continue
 
-            url   = f"https://www.google.com/maps/place/?q={quote_plus(place_id)}"
+            # V25.3.0: Each review gets a unique URL via fragment.
+            # This prevents dispatch dedup from collapsing multiple reviews
+            # on the same business into a single lead.
+            url   = f"{base_url}#review-{review_index}"
+            review_index += 1
+
             text  = f"{rating}star review on '{place_name}': {review_text}"
             title = f"{place_name} \u2014 {rating}\u2605 review"
 
@@ -306,6 +329,7 @@ class GoogleReviewSource(BaseSignalSource):
                     "rating":          rating,
                     "review_date":     review_date,
                     "serper_snippet":  review_text,
+                    "business_website": business_website,
                 },
             ))
 

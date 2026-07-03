@@ -449,21 +449,23 @@ Extract up to 3 short trend phrases from successful lead pain_points. Context do
 Data: {history_ctx}
 CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for historical_phrases. Do NOT synthesize placeholder data.
 
-# TASK 2 — CONSUMER SYMPTOM DORKING (ANTI-SEO PROTOCOL)
+# TASK 2 — CONSUMER SYMPTOM DORKING (SIMPLIFIED V25.3.0)
 Target Pain Point / Bio: '{ctx.bio}'.
-Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW consumer complaints, reviews, and community discussions about this problem.
-Rule: Target consumer-facing sources: Google Maps reviews, social media threads, neighbourhood forums, local Q&A boards, consumer complaint pages (e.g., inurl:review, inurl:complaint, inurl:customer-review, inurl:feedback, site:mouthshut.com, site:consumercomplaints.in).
-Rule: DO NOT use B2B-style operators like filetype:pdf, filetype:pptx, inurl:whitepaper, intitle:"case study". These are corporate research patterns, not consumer signals.
-Rule: You MUST bypass SEO-optimized directories and marketing blogs: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
-Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end. Weave geography into operators organically (e.g., intitle:"Kochi" or inurl:kerala).
+Generate exactly 3 Google Search queries to find RAW consumer complaints, reviews, and community discussions about this problem.
+Rule: MAX 2 boolean groups per query. Overly complex multi-group dorks return 0 results on Google. Keep it simple.
+Rule: The ONLY structural operators allowed are site: targeting (e.g., site:reddit.com, site:quora.com, site:mouthshut.com, site:consumercomplaints.in). Do NOT use inurl:, intitle:, or filetype: — Google deprioritizes and often ignores these.
+Rule: Use natural buyer phrases in quotes (e.g., "terrible service" OR "worst experience") combined with ONE site: operator at most.
 Rule: NEVER use B2B jargon: "lead generation", "pipeline", "go-to-market", "product-market fit", "enterprise sales", "SaaS", "B2B", "stakeholder alignment", "brand story", "unclear positioning".
-Rule: You MUST enclose all OR clauses in parentheses to enforce proper boolean precedence (e.g. `(inurl:review OR inurl:complaint) "difficulty"` instead of `inurl:review OR inurl:complaint "difficulty"`).
-Rule: Always separate operators, keywords, quotation marks, and parentheses with a space. Never output strings like `site:boards.net("difficulty")` (use `site:boards.net ("difficulty")` instead) or `"outbound sales"("IT services")` (use `"outbound sales" ("IT services")` instead).
-Rule: NEVER use wildcard characters in the `site:` operator (e.g. do not output site:*.org or site:*.com). Use site:.org or site:.com instead.
+Rule: Add this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
+Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end. Weave geography into natural phrases if needed.
+Rule: You MUST enclose all OR clauses in parentheses. Always separate operators, keywords, quotes, and parentheses with a space.
+Rule: NEVER use wildcard characters in site: (e.g. NEVER site:*.org). Use site:.org instead.
 
-# TASK 3 — CONSUMER INTENT EXPANSION
+# TASK 3 — CONSUMER INTENT EXPANSION (SIMPLIFIED V25.3.0)
 Audience: '{kw_str}'. Context: '{vector_label}'.
-Generate exactly 3 natural-language queries that a frustrated INDIVIDUAL CONSUMER would type into Google, post on a community forum, or ask in a local WhatsApp/Facebook group. Think: personal complaints, "looking for recommendations", "anyone else having this problem", "worst experience with". These must sound like real people, not corporate professionals.
+Generate exactly 3 short natural-language queries (MAX 12 WORDS each) that a frustrated individual consumer would actually type into Google or post in a community group.
+Rule: Write like a real person venting, not a researcher. Examples: "worst [product] customer service experience", "[brand] keeps ignoring my complaint", "anyone else having [specific problem]".
+Rule: No jargon. No corporate language. No "How do I" question starters.
 
 Return ONLY the JSON object. No explanation, no markdown."""
         else:
@@ -475,38 +477,25 @@ Extract up to 3 short trend phrases from successful lead pain_points. Context do
 Data: {history_ctx}
 CRITICAL: If Data is empty or is '[]', you MUST return an empty array [] for historical_phrases. Do NOT synthesize placeholder data.
 
-# TASK 2 — SYMPTOM DORKING (ANTI-SEO PROTOCOL)
+# TASK 2 — SYMPTOM DORKING (SIMPLIFIED V25.3.0)
 Target Pain Point / Bio: '{ctx.bio}'.
-Generate exactly 3 Google Search operator strings (Boolean dorks) to find RAW, unfiltered web footprints of prospects experiencing this problem.
-Rule: Focus purely on symptoms, complaints, and unpolished data. Allowed high-precision operators: filetype:pdf ONLY when combined with intitle: targeting a decision-maker role (e.g. filetype:pdf intitle:"CMO" "attribution challenge"), inurl:forum, inurl:complaint, inurl:discussion, intitle:"help with", site:reddit.com, site:community.<platform>.
-Rule: PROHIBITED OPERATORS — never use these in symptom_dorks for commercial B2B campaigns: site:.edu (returns academic papers and student projects, not buyers), site:.org (returns NGOs and trade bodies, not commercial buyers), inurl:issues (returns GitHub software issue trackers, not buyer pain), inurl:bug (returns developer bug reports, not business pain), filetype:pdf without a specific intitle: role anchor (returns generic research documents that no prospect will ever convert from).
-Rule: You MUST bypass SEO-optimized directories, aggregators, and marketing blogs.
-Rule: Every single query MUST include this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -site:upwork.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
-Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end of a query. Weave the geographic context organically into the search operators (e.g., intitle:"Oman" or site:.om). The Serper API handles geo-bounding separately.
-Rule: Focus on buyer pain symptoms and competitor friction (e.g. "alternative to", "pricing too high", "support issues", "bounce rates", "going to spam", "domain block"). Do NOT use generic category keywords like "lead generation services" or "outbound marketing agency" that match competitor websites.
-Rule: You MUST enclose all OR clauses in parentheses to enforce proper boolean precedence (e.g. `(inurl:forum OR inurl:bug) "issue"` instead of `inurl:forum OR inurl:bug "issue"`).
-Rule: Always separate operators, keywords, quotation marks, and parentheses with a space. Never output strings like `site:boards.net("difficulty")` (use `site:boards.net ("difficulty")` instead) or `"outbound sales"("IT services")` (use `"outbound sales" ("IT services")` instead).
-Rule: NEVER use wildcard characters in the `site:` operator (e.g. do not output site:*.org or site:*.com). Use site:.org or site:.com instead.
+Generate exactly 3 Google Search queries to find RAW, unfiltered web footprints of prospects experiencing this problem.
+Rule: MAX 2 boolean groups per query. Overly complex multi-group dorks with 4-5 boolean groups return 0 results on Google. Keep it simple.
+Rule: The ONLY structural operators allowed are site: targeting (e.g., site:reddit.com, site:quora.com, site:community.hubspot.com). Do NOT use inurl:, intitle:, or filetype: — Google deprioritizes and often ignores these operators, causing 0-result returns.
+Rule: PROHIBITED: site:.edu, site:.org — these return academic and non-profit content, not B2B buyers.
+Rule: Use natural buyer-pain phrases in quotes (e.g., "alternative to [competitor]" OR "pricing too high") combined with ONE site: operator at most.
+Rule: Focus on buyer pain symptoms and competitor friction (e.g., "alternative to", "pricing too high", "support issues", "bounce rates", "going to spam"). Do NOT use generic category keywords like "lead generation services" that match competitor websites.
+Rule: Add this exact negative payload to every query: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
+Rule: NEVER append AND {{location}} or AND {{city}} at the end. Geo is handled by query text phrasing and downstream scoring.
+Rule: You MUST enclose all OR clauses in parentheses. Always separate operators, keywords, quotes, and parentheses with a space.
+Rule: NEVER use wildcards in site: (e.g., NEVER site:*.org). Use site:.org instead.
 
-# TASK 3 — INTENT EXPANSION
+# TASK 3 — INTENT EXPANSION (SIMPLIFIED V25.3.0)
 Audience: '{kw_str}'. Context: '{vector_label}'.
-Translate the pain point into exactly 3 natural-language conversational queries that a SPECIFIC FRUSTRATED PRACTITIONER would type into a niche forum, Reddit, or community Slack — NOT a question that a marketing blog would answer.
-
-ANTI-FAQ MANDATE: NEVER generate generic question templates. The following openings are BANNED because they match SEO articles, not real buyer pain:
-- "How do B2B companies..." / "How do I..." / "What is the best way to..." / "What are the biggest challenges..."
-- "How can we..." / "What are common mistakes..." / "Tips for..."
-These are FAQ phrases. Every marketing agency blog ranks for them. They return zero buyers.
-
-INSTEAD, write queries that sound like a specific frustrated person venting in a forum thread:
-- "Anyone else fed up with [specific platform] attribution being completely wrong?"
-- "We've tried 3 marketing automation tools and they all [specific failure]"
-- "Our brand messaging feels like it belongs to our competitor — [specific situation]"
-- "Why does [specific pain] get worse after [specific trigger]?"
-
-The queries must feel TOO SPECIFIC to be answered by a generic blog post. Think Reddit r/marketing, GrowthHackers forums, Slack communities.
-
-Do not use generic commercial vendor keywords.
-
+Generate exactly 3 short natural-language queries (MAX 12 WORDS each) that a frustrated business owner or practitioner would actually type into Google or Reddit.
+Rule: Write like a real person venting, not a marketing blog. Examples: "[tool] attribution completely wrong anyone else?", "tried 3 email tools all going to spam", "why does [specific pain] keep getting worse".
+Rule: BANNED openings — these match SEO articles, not buyers: "How do B2B companies", "How do I", "What is the best way", "What are the biggest challenges", "How can we", "Tips for".
+Rule: No jargon. No corporate language. Think: what would a frustrated person with this problem actually type?
 
 Return ONLY the JSON object. No explanation, no markdown."""
 
@@ -515,10 +504,12 @@ Return ONLY the JSON object. No explanation, no markdown."""
             f"You are the Sideio Query Brain operating as an elite OSINT investigator in {vector_label} mode. "
             "Your absolute mission is to find RAW, unpolished web footprints of real intent — "
             "not SEO-optimized directories, listicles, or marketing blogs.\n\n"
-            "ANTI-SEO MANDATE:\n"
+            "ANTI-SEO MANDATE (V25.3.0):\n"
             "Every symptom_dork you generate MUST actively bypass SEO spam. "
-            "Use advanced Google operators (filetype:, inurl:forum, intitle:, site: for niche domains) "
-            "and aggressive negative payloads (-site:yelp.com -site:g2.com -directory -listicle -\"top 10\"). "
+            "Use MAX 2 boolean groups per query. The ONLY structural operator allowed is site: "
+            "targeting niche community domains (e.g., site:reddit.com, site:quora.com). "
+            "Do NOT use inurl:, intitle:, or filetype: — Google deprioritizes these, causing 0-result returns. "
+            "Use aggressive negative payloads (-site:yelp.com -site:g2.com -directory -listicle -\"top 10\"). "
             "Never produce queries that would return listicle pages, review aggregators, or paid directories.\n\n"
             "BUYER INTENT VS SELLER OFFERINGS:\n"
             "You are looking for buyer paint points and competitor complaints. "
@@ -550,31 +541,28 @@ Return ONLY the JSON object. No explanation, no markdown."""
             "GEO ISOLATION RULE:\n"
             "NEVER append AND {location} or AND {city} or AND {country} at the end of any query. "
             "The Serper API receives geo-bounding parameters separately (gl, location). "
-            "If you need to target a region, weave it into the search operators organically "
-            "(e.g., intitle:\"Oman\" or site:.om or inurl:oman). "
+            "If you need to target a region, weave it into natural query phrases "
+            "(e.g., '\"Oman\" \"pricing too high\"' or site:.om). "
             "A trailing AND {place} destroys query precision.\n\n"
             "BOOLEAN PRECEDENCE & SPACING MANDATE:\n"
             "1. You MUST enclose all OR clauses in parentheses to enforce proper operator precedence. "
             "Google treats space as implicit AND which has higher precedence than OR. "
-            "Without parentheses, e.g., 'inurl:forum OR inurl:blog \"difficulty\"', Google parses it as "
-            "'(inurl:forum) OR (inurl:blog \"difficulty\")', leaking/diluting scope. "
-            "Always output: '(inurl:forum OR inurl:blog) \"difficulty\"'.\n"
+            "Without parentheses, boolean scope leaks and dilutes results. "
+            "Example: '(\"pricing too high\" OR \"too expensive\") site:reddit.com'.\n"
             "2. Never use wildcards in site: operators (e.g. NEVER output site:*.org or site:*.com). "
-            "Google does not support wildcard subdomains in site: searches. Use site:.org or site:.com instead.\n"
+            "Google does not support wildcard subdomains. Use site:.org or site:.com instead.\n"
             "3. Enforce strict spacing around quotes, operators, and parentheses. "
-            "For example, write 'site:boards.net (\"difficulty\")' instead of 'site:boards.net(\"difficulty\")', "
-            "and '\"outbound sales\" (\"IT services\")' instead of '\"outbound sales\"(\"IT services\")'.\n"
-            "\nPROHIBITED OPERATORS (B2B campaigns):\n"
-            "NEVER use any of the following in symptom_dorks. These operators return "
-            "academic content, open-source software trackers, or non-commercial entities "
-            "that CANNOT convert into B2B customers:\n"
-            "- site:.edu — university and educational institution pages\n"
-            "- site:.org — NGOs, foundations, and non-profit bodies\n"
-            "- inurl:issues — GitHub and GitLab software issue trackers\n"
-            "- inurl:bug — developer bug report threads\n"
-            "- filetype:pdf alone without intitle: role scoping — returns generic whitepapers\n"
-            "ALLOWED filetype:pdf usage: ONLY combined with intitle: targeting a named "
-            "decision-maker role. Example: filetype:pdf intitle:\"VP Marketing\" \"attribution problem\".\n"
+            "For example, write 'site:boards.net (\"difficulty\")' instead of 'site:boards.net(\"difficulty\")'.\n"
+            "\nPROHIBITED OPERATORS (V25.3.0):\n"
+            "NEVER use any of the following in symptom_dorks — Google deprioritizes or "
+            "ignores these operators, causing queries to return 0 results:\n"
+            "- inurl: — any form (inurl:forum, inurl:review, inurl:complaint, etc.)\n"
+            "- intitle: — any form\n"
+            "- filetype: — any form (filetype:pdf, filetype:pptx, etc.)\n"
+            "- site:.edu — academic content, not buyers\n"
+            "- site:.org — NGOs and non-profits, not buyers\n"
+            "ONLY ALLOWED structural operator: site: targeting specific community domains "
+            "(e.g., site:reddit.com, site:quora.com, site:community.hubspot.com).\n"
         )
         if _is_consumer_vector:
             _system_instruction += (
@@ -583,17 +571,16 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 "When generating symptom_dorks and translated_queries, lean towards pain signals "
                 "found in community forums, social threads, review complaint pages, and niche "
                 f"Q&A boards relevant to the {vector_label} vertical.\n\n"
-                "CONSUMER ANTI-B2B OVERRIDE:\n"
-                "DO NOT use filetype: operators (filetype:pdf, filetype:pptx, filetype:doc) in symptom_dorks. "
-                "These are corporate research patterns that return whitepapers and slide decks, not consumer signals. "
-                "For consumer campaigns, use inurl:review, inurl:complaint, inurl:customer-review, inurl:feedback, "
-                "and site: operators targeting consumer review platforms instead.\n\n"
+                "CONSUMER QUERY SIMPLICITY OVERRIDE (V25.3.0):\n"
+                "Use ONLY site: operators targeting consumer review platforms "
+                "(e.g., site:reddit.com, site:mouthshut.com, site:consumercomplaints.in). "
+                "Do NOT use inurl: or filetype: operators — they cause 0-result returns.\n\n"
                 "DIALOG-CUE DORKING MANDATE:\n"
-                "For consumer campaigns, you MUST weave conversational signals and dialog cues directly into the queries. "
-                "Append operators containing transactional or discussion reply signatures like "
+                "For consumer campaigns, weave conversational dialog cues directly into queries. "
+                "Include transactional or discussion reply signatures like "
                 "(\"pm me\" OR \"pm sent\" OR \"still available\" OR \"send details\" OR \"anyone know\"). "
-                "This forces Google to prioritize active discussion threads and forum posts rather than polished marketing landing pages. "
-                "Example dork: (inurl:forum OR inurl:community) Muscat \"villa\" (\"pm me\" OR \"still available\")\n"
+                "This forces Google to prioritize active discussion threads over marketing pages. "
+                "Example dork: site:reddit.com Muscat \"villa\" (\"pm me\" OR \"still available\")\n"
             )
         # V24.3 (L2-1): D2C competitor-comparison system instruction override.
         # D2C brands need consumer-vs-competitor signals, not local buyer pain.
@@ -604,7 +591,7 @@ Return ONLY the JSON object. No explanation, no markdown."""
                 "who are actively comparing products or switching from competitor brands. Prioritize: "
                 "'tried X alternative', 'switched from [brand]', 'honest review vs', "
                 "'is [product] worth it', 'looking for alternative to'. "
-                "Use site:reddit.com, site:trustpilot.com, inurl:review, inurl:compare. "
+                "Use site:reddit.com, site:trustpilot.com for community signals. "
                 "Do NOT generate B2B SaaS or enterprise buyer signals.\n"
             )
         # V24.3 (L2-3): B2B2C dual-ICP system instruction.

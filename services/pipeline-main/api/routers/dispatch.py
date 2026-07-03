@@ -436,7 +436,10 @@ def dispatch():
         _is_b2c = _is_consumer_archetype(sourcing_vector)
         if is_social or is_shared or _is_b2c:
             parsed     = urlparse(batch_url)
-            exact_path = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
+            # V25.3.0: Include fragment (#review-0, etc.) for signal_harvest
+            # review URLs that use fragments for per-review uniqueness.
+            _frag = f"#{parsed.fragment}" if parsed.fragment else ""
+            exact_path = f"{parsed.netloc}{parsed.path}{_frag}".lower().replace("www.", "")
             dedupe_target = exact_path
         else:
             dedupe_target = b_domain
@@ -444,11 +447,18 @@ def dispatch():
         try:
             cache_key = hashlib.sha256(f"{tenant_id}_{dedupe_target}".encode()).hexdigest()
             cdoc = _db().collection("scraped_cache").document(cache_key).get()
-            txt = ""
             if cdoc.exists:
-                txt = cdoc.to_dict().get("text", "")
+                cdata = cdoc.to_dict()
+                txt = cdata.get("text", "")
                 if txt:
-                    snippet_map[batch_url] = txt
+                    # V25.3.0: Carry harvest metadata so the score gate can
+                    # recognise pre-qualified signal_harvest leads and lower
+                    # the accept_threshold accordingly.
+                    snippet_map[batch_url] = {
+                        "text":         txt,
+                        "source":       cdata.get("source", ""),
+                        "harvest_tier": cdata.get("harvest_tier", ""),
+                    }
 
         except Exception as err:
             log.warning("dispatch_cache_lookup_error", url=batch_url[:80], error=str(err))
@@ -484,7 +494,7 @@ def dispatch():
 
     if filter_urls:
         synthetic_snippets = [
-            {"link": u, "snippet": snippet_map.get(u, ""), "title": ""}
+            {"link": u, "snippet": snippet_map.get(u, {}).get("text", "") if isinstance(snippet_map.get(u), dict) else snippet_map.get(u, ""), "title": ""}
             for u in filter_urls
         ]
         try:
@@ -560,15 +570,16 @@ def dispatch():
             return {"url": url, "status": "skip_no_domain"}
 
         # V24.5.7: Pre-PRISM TLD gate. Non-business TLD domains (academic, government,
-        # nonprofit, personal blog) were previously gated only inside deep_context_serper_dork()
+        # personal blog) were previously gated only inside deep_context_serper_dork()
         # AFTER PRISM already ran (costing 3-5 credits per URL). This gate fires before PRISM
         # so those credits are never spent.
-        # NOTE: .org is a broad block. Legitimate SaaS companies occasionally use .org
-        # (e.g. Wikipedia is .org, not a target). Accept the rare false negative \u2014
-        # the net credit saving is significant (3-8 credits per .org URL per cycle).
+        # V25.3.0: .org REMOVED from block list. Many legitimate B2B/SaaS
+        # companies use .org (e.g. trade-associations-as-prospects, open-source
+        # orgs with commercial arms). The blanket block caused ~15-20% false
+        # negatives in nonprofit-adjacent verticals. Nonprofits that aren't
+        # prospects are filtered out downstream by the scoring model.
         _NON_BUSINESS_TLD_GATE = (
             ".edu", ".ac.in", ".ernet.in", ".gov", ".gov.in", ".mil",
-            ".org",   # nonprofits, trade associations, academic bodies
             ".blog",  # personal/corporate blog hosting TLD
             ".dev",   # personal developer portfolios
             ".page",  # Google Sites personal pages
@@ -588,7 +599,9 @@ def dispatch():
         _is_b2c = _is_consumer_archetype(sourcing_vector)
         if is_social or is_shared or _is_b2c:
             parsed     = urlparse(url)
-            exact_path = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
+            # V25.3.0: Include fragment for signal_harvest review URL uniqueness
+            _frag_per_url = f"#{parsed.fragment}" if parsed.fragment else ""
+            exact_path = f"{parsed.netloc}{parsed.path}{_frag_per_url}".lower().replace("www.", "")
             lock_entity   = hashlib.sha256(exact_path.encode()).hexdigest()
             dedupe_target = exact_path
         else:
@@ -820,12 +833,28 @@ def dispatch():
             # prefix — also treated as thin regardless of char count.
             _is_shadow_thin  = text.strip().startswith("[SHADOW_LEARNER_THIN_PAYLOAD]")
             is_thin_payload  = _is_shadow_thin or len(text.strip()) < 500
-            accept_threshold = 6 if is_thin_payload else 7
+
+            # V25.3.0: Harvest-enriched leads were already pre-qualified by
+            # inline_score_signal() with full content. Double-scoring the same
+            # content at a 7-threshold causes ~50% attrition on pre-qualified leads.
+            _snippet_entry   = snippet_map.get(url, {})
+            _snippet_meta    = _snippet_entry if isinstance(_snippet_entry, dict) else {}
+            is_harvest_lead  = (
+                _snippet_meta.get("source") == "signal_harvest"
+                or _snippet_meta.get("harvest_tier") in ("HIGH", "MEDIUM")
+            )
+            if is_harvest_lead:
+                accept_threshold = 5   # Pre-qualified by inline scoring
+            elif is_thin_payload:
+                accept_threshold = 6
+            else:
+                accept_threshold = 7
 
             log.info("dispatch_score_gate_eval",
                      url=url[:80], score=score, threshold=accept_threshold,
                      text_chars=len(text), thin=is_thin_payload,
-                     shadow_thin=_is_shadow_thin, prism_mode=prism_mode)
+                     shadow_thin=_is_shadow_thin, harvest_lead=is_harvest_lead,
+                     prism_mode=prism_mode)
 
             if score < accept_threshold:
                 log.info("dispatch_score_gate_drop", url=url[:80],
