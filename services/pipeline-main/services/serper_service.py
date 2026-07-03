@@ -160,7 +160,10 @@ _ENTERPRISE_DOMAINS = [
     # They are never scrapeable leads. Block at domain level to fail-fast and
     # avoid wasting the snippet noise-check cycle on known-bad results.
     "linkedin.com",    # B2B posts require login to view
-    "quora.com",       # Answers paywalled; snippet shows "Continue Reading"
+    # V25.2.3: Removed quora.com — query_brain generates site:quora.com queries,
+    # so blocking results here creates a produce-then-discard loop that burns
+    # Serper credits with zero yield. Quora snippets from Serper contain enough
+    # context for Gemini scoring even if PRISM can't scrape the full page.
 ]
 
 _NOISE_PATHS    = ["/legal", "/pricing", "/docs", "/author/", "/login"]
