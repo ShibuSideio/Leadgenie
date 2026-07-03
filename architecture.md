@@ -1,6 +1,6 @@
-# LeadGenie (Sideio) — Platform Architecture V25.2.2
+# LeadGenie (Sideio) — Platform Architecture V25.2.3
 **Technical Specification Document**
-*Last Updated: 2026-07-03 | Version: V25.2.2 — Inbound Radar Hardening + Dependency Standardisation*
+*Last Updated: 2026-07-03 | Version: V25.2.3 — Dependency Conflict Resolution + Cloud Build Hardening*
 
 ---
 
@@ -852,7 +852,19 @@ log.warning("lead_lock_delete_failed",
 
 ---
 
-## 16. KEY DESIGN INVARIANTS (NEVER BREAK)
+## 16. DEPENDENCY CONSTRAINTS (V25.2.3)
+
+| Library | Version | Constraints |
+|---|---|---|
+| `google-cloud-storage` | `2.19.0` | **PIPELINE-MAIN / DIGITAL-TWIN ONLY.** vertexai 1.71.1 requires `storage < 3.0.0`. |
+| `google-cloud-storage` | `3.12.0` | All other services (orchestrator, scraper-heavy, etc.) |
+| `vertexai` | `1.71.1` | Pinned for stability. Do not upgrade without full RCA on `gemini_service.py` compatibility. |
+| `Flask` | `3.0.3` | Standardized baseline across all services. |
+| `tenacity` | `9.1.4` | Standardized retry logic. |
+
+---
+
+## 17. KEY DESIGN INVARIANTS (NEVER BREAK)
 
 1. **Tenant isolation:** Every Firestore document a tenant touches must have `tenant_id == user.uid`. Every BQ query must be scoped by `tenant_id`.
 2. **Lead dedup ID:** Always `sha256(tenant_id + '_' + root_domain)`. Never auto-generate.
@@ -893,7 +905,8 @@ These are structural issues identified in the V24.5.x and V24.6.x post-RCA audit
 
 | Version | Date | Key Changes |
 |---|---|---|
-| **V25.2.2** | **2026-07-03** | **Inbound Radar 9-gap fix: (1) GMB Maps service TypeError fixed — `_score_with_gemini()` missing `query` arg, all Maps signals were crashing silently. (2) Cloud Scheduler auth gap fixed — Scheduler OIDC tokens now validated via SCHEDULER_SA_EMAIL env var; the inbound radar had NEVER auto-run via cron (401 every call). (3) `results_per_query` 5→20, `max_queries` 8→14 (7× throughput). (4) Snippet Inference Rule added to Gemini prompt for forum/Q&A snippets. (5) Vector-aware mode selection: B2C campaigns no longer run B2B-only competitor_churn templates. (6) Cross-run URL dedup cache: Firestore `inbound_dedup/{uid}` 7-day hash store prevents Gemini re-scoring same URLs every 6h. (7) API intent_score floor aligned 0.55→0.45 to match job MIN_INTENT_SCORE. (8) `inbound_signals` 30-day TTL added. (9) Lead lock window 14→3 days. Dependencies: 6 services standardised (Flask 3.0.3, gunicorn 22.0.0, tenacity 9.1.4, google-cloud-storage 3.12.0). INTERNAL_CRON_SECRET now auto-injected by Cloud Build on every deploy. `setup_deployment.sh` added for GCP environment setup.** |
+| **V25.2.3** | **2026-07-03** | **Build failure RCA fix: (1) Reverted google-cloud-storage to 2.19.0 for pipeline-main and digital-twin-engine to resolve vertexai 1.71.1 conflict. (2) cloudbuild.yaml fix: escaped INTERNAL_CRON_SECRET with $$ to prevent invalid substitution error. (3) cloudbuild.yaml smoke-test step updated to storage==2.19.0.** |
+| V25.2.2 | 2026-07-03 | Inbound Radar Hardening + Dependency Standardisation. |
 | **V25.2.1** | **2026-07-03** | **Audit fix batch: PyJWT added to orchestrator requirements; social_redirect.py mint_social_token implemented; credit settlement (_settle_credit) added to cluster analyst; 18 missing lead fields populated in cluster analyst for UI parity; BQ DDL parameterised for env-agnostic deploy; inbound_sentiment_job persona_id gate replaced with bio fallback.** |
 | **V24.6.1** | **2026-07-02** | **Universal context builder (`context_builder.py`): all 15+ campaign fields (effective_bio, pain_point, target_angle_hook, unfair_advantage, persona_targeting_signals, geo_hierarchy) now feed query generation and pre-filter. Handles all user types from lazy (name+location only) to power user (all fields filled). Single source of truth used by both produce.py and dispatch.py.** |
 | **V24.6.0** | **2026-07-02** | **B2B temporal filter: `tbs=qdr:y` added (was all-time — 2022 conference pages competed with 2026 buyer posts). Page-type structural score cap: conference≤3, govt≤2, academic≤3 — prevents Gemini 10/10 on non-buyer pages. Env fix: INTERNAL_CRON_SECRET set on orchestrator revision 00403-jey, Inbound Radar now live. BQ fix: Negative_Signals `sourcing_vector` column added, neg_shield_fetch_failed resolved.** |
