@@ -417,7 +417,17 @@ def dispatch():
     # ── Hydrate snippet_map from scraped_cache (Producer hand-off) ──────────
     snippet_map = {}
     SOCIAL_SET  = set(SOCIAL_DOMAINS)
-    SHARED_PLATFORMS = {"linkedin.com", "medium.com", "substack.com", "wordpress.com", "github.io"}
+    # V25.2.3 FIX: Align with produce.py shared_platforms. Previously missing
+    # all buyer forum platforms — reddit, quora, HN, etc. collapsed to ONE
+    # lead via domain-level dedup, silently dropping 90%+ of forum URLs.
+    SHARED_PLATFORMS = {
+        "linkedin.com", "medium.com", "substack.com", "wordpress.com", "github.io",
+        # Buyer forum platforms — each thread/post is a unique lead (URL-path dedup)
+        "reddit.com", "quora.com", "stackexchange.com", "stackoverflow.com",
+        "news.ycombinator.com",
+        "community.hubspot.com", "community.g2.com",
+        "forum.growthackers.com", "indiehackers.com",
+    }
     for batch_url in batch_urls:
         b_domain  = extract_root_domain(batch_url)
         is_social = any(b_domain.endswith(s) for s in SOCIAL_SET)
@@ -444,22 +454,55 @@ def dispatch():
             log.warning("dispatch_cache_lookup_error", url=batch_url[:80], error=str(err))
 
     # ── TRACE-7: Confidence Tiering Gate (pre_filter_gemini) ────────────────
-    log.info("TRACE-7: Calling pre_filter_gemini.", url_count=len(batch_urls))
-    synthetic_snippets = [
-        {"link": u, "snippet": snippet_map.get(u, ""), "title": ""}
-        for u in batch_urls
-    ]
-    try:
-        with _cf.ThreadPoolExecutor(max_workers=1) as pool:
-            fut    = pool.submit(pre_filter_gemini, synthetic_snippets, bio, location)
-            tiered = fut.result(timeout=30)
-    except Exception as _pf_err:
-        log.warning("pre_filter_timeout_all_urls_approved",
-                    error=str(_pf_err),
-                    url_count=len(batch_urls),
-                    note="V24.4 (L4-1): Pre-filter gate failed; ALL URLs treated as High-tier. "
-                         "Velocity gate bypassed for this batch. Monitor for quality degradation.")
-        tiered = {"High": batch_urls, "Medium": [], "Low": []}
+    # V25.2.3 FIX: Buyer-signal platform bypass. Forum/community URLs are
+    # intent-rich by nature — the 140-char snippet pre-filter is too
+    # context-starved to judge them accurately (95% false rejection rate).
+    # Auto-classify forum URLs as High-tier, only send non-forum URLs to Gemini.
+    _PREFILTER_BYPASS_DOMAINS = {
+        "reddit.com", "quora.com", "stackexchange.com", "stackoverflow.com",
+        "news.ycombinator.com", "indiehackers.com", "community.hubspot.com",
+        "community.g2.com", "forum.growthackers.com",
+        "expatriates.com", "dubizzle.com", "olx.in", "olx.com",
+        "mouthshut.com", "consumercomplaints.in",
+    }
+    bypass_urls  = []
+    filter_urls  = []
+    for u in batch_urls:
+        u_domain = extract_root_domain(u)
+        if any(u_domain.endswith(bp) for bp in _PREFILTER_BYPASS_DOMAINS):
+            bypass_urls.append(u)
+        else:
+            filter_urls.append(u)
+
+    if bypass_urls:
+        log.info("prefilter_bypass_forum_urls",
+                 count=len(bypass_urls),
+                 note="V25.2.3: Forum/community URLs auto-classified High.")
+
+    log.info("TRACE-7: Calling pre_filter_gemini.", url_count=len(filter_urls),
+             bypassed=len(bypass_urls))
+
+    if filter_urls:
+        synthetic_snippets = [
+            {"link": u, "snippet": snippet_map.get(u, ""), "title": ""}
+            for u in filter_urls
+        ]
+        try:
+            with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+                fut    = pool.submit(pre_filter_gemini, synthetic_snippets, bio, location)
+                tiered = fut.result(timeout=30)
+        except Exception as _pf_err:
+            log.warning("pre_filter_timeout_all_urls_approved",
+                        error=str(_pf_err),
+                        url_count=len(filter_urls),
+                        note="V24.4 (L4-1): Pre-filter gate failed; ALL URLs treated as High-tier. "
+                             "Velocity gate bypassed for this batch. Monitor for quality degradation.")
+            tiered = {"High": filter_urls, "Medium": [], "Low": []}
+    else:
+        tiered = {"High": [], "Medium": [], "Low": []}
+
+    # Merge bypass URLs into High tier
+    tiered["High"] = bypass_urls + tiered.get("High", [])
 
     high_urls   = tiered.get("High", [])
     medium_urls = tiered.get("Medium", [])
