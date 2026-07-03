@@ -610,6 +610,74 @@ def produce():
         )
         return jsonify({"error": "Queue write failed", "details": str(exc)}), 500
 
+    # ------------------------------------------------------------------
+    # V25.1.0: Signal Harvest — multi-source intent discovery pathway.
+    #
+    # Runs AFTER the Serper queue write so it cannot block the primary
+    # produce flow. Uses a daemon thread with a 180s wall-clock budget.
+    # The harvest writes directly to scraped_cache and unprocessed_queue
+    # (same collections as the Serper pathway) — dispatch processes both
+    # without any changes.
+    #
+    # Harvest is skipped when:
+    #   - Queue is already saturated (handled above by backpressure gate)
+    #   - HARVEST_ENABLED env var is "false" (opt-out for debugging)
+    # ------------------------------------------------------------------
+    import os as _os
+    import threading as _threading
+
+    harvest_metrics: dict = {}
+    _harvest_enabled = _os.environ.get("HARVEST_ENABLED", "true").lower() != "false"
+
+    if _harvest_enabled:
+        # Extract Serper key for signal_harvest's SerperDiscoverySource
+        # (same key already used by the Serper pathway above)
+        _serper_key_for_harvest = ""
+        try:
+            from core.clients import get_serper_key  # type: ignore[import]
+            _serper_key_for_harvest = get_serper_key() or ""
+        except Exception:
+            pass  # SerperDiscoverySource will be skipped without a key
+
+        # Add campaign id to dict for signal_harvest (it's read from dict)
+        _campaign_with_id = {**campaign, "id": campaign_id, "tenant_id": tenant_id}
+
+        harvest_result_holder: list[dict] = []
+
+        def _run_harvest() -> None:
+            try:
+                from services.signal_harvest import harvest_signals  # type: ignore[import]
+                result = harvest_signals(
+                    campaign      = _campaign_with_id,
+                    db            = get_db(),
+                    serper_api_key= _serper_key_for_harvest,
+                )
+                harvest_result_holder.append(result)
+            except Exception as _h_exc:
+                log.warning(
+                    "signal_harvest_thread_failed",
+                    campaign_id=campaign_id,
+                    error=str(_h_exc),
+                )
+
+        harvest_thread = _threading.Thread(target=_run_harvest, daemon=True)
+        harvest_thread.start()
+        harvest_thread.join(timeout=180)  # 3-minute hard wall-clock budget
+
+        if harvest_result_holder:
+            harvest_metrics = harvest_result_holder[0]
+            log.info(
+                "signal_harvest_pathway_complete",
+                campaign_id=campaign_id,
+                **harvest_metrics,
+            )
+        elif harvest_thread.is_alive():
+            log.warning(
+                "signal_harvest_thread_timeout",
+                campaign_id=campaign_id,
+                note="Harvest thread exceeded 180s budget. Results discarded.",
+            )
+
     log.info("TRACE-DONE: produce() complete.",
              campaign_id=campaign_id, queue_depth=len(combined_queue))
 
@@ -619,4 +687,6 @@ def produce():
         "deduplicated":  duped_count,
         "queued":        queued_count,
         "queue_depth":   len(combined_queue),
+        # V25.1.0: Signal harvest pathway metrics
+        "harvest": harvest_metrics,
     }), 200

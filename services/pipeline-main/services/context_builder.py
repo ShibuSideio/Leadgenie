@@ -20,9 +20,10 @@ USED BY:
 """
 
 from __future__ import annotations
-import structlog
 
-log = structlog.get_logger()
+from core.logging import get_logger  # type: ignore[import]
+
+log = get_logger("pipeline.context_builder")
 
 
 def build_enriched_context(campaign: dict) -> str:

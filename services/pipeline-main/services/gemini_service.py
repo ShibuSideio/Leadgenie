@@ -209,8 +209,206 @@ Snippets: {json.dumps(snippets)}"""
 
 
 # ---------------------------------------------------------------------------
+# Inline signal scorer (V25.1.0 — Signal Harvest pipeline)
+# ---------------------------------------------------------------------------
+#
+# pre_filter_gemini() scores Serper snippets (140 chars) → high rejection rate
+# because there is insufficient content for intent classification.
+#
+# inline_score_signal() scores FULL content from Reddit/HN/RSS/PRISM — the
+# actual words the buyer wrote, not a search-engine summary of them. This is
+# the correct design: Gemini sees what the buyer said, not what Google said
+# about what the buyer said.
+#
+# Used by signal_harvest.py exclusively. dispatch.py still uses pre_filter_gemini
+# for backward compatibility with the Serper pathway.
+# ---------------------------------------------------------------------------
+
+_INLINE_SCORE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "tier": {
+            "type":        "STRING",
+            "enum":        ["HIGH", "MEDIUM", "LOW"],
+            "description": "Intent confidence tier.",
+        },
+        "pain_summary": {
+            "type":        "STRING",
+            "description": "1-2 sentence summary of the specific pain or need expressed.",
+        },
+        "contact_point": {
+            "type":        "STRING",
+            "description": "How to reach this person: username, profile URL, email, or empty if not determinable.",
+        },
+        "buyer_language_quote": {
+            "type":        "STRING",
+            "description": "Exact quote from the signal text that most strongly indicates buying intent.",
+        },
+        "geo_match": {
+            "type":        "BOOLEAN",
+            "description": "True if the signal's geographic context matches the campaign's geo target.",
+        },
+        "archetype_match": {
+            "type":        "STRING",
+            "description": "Which archetype this signal best matches: B2B, B2C, D2C, B2B2C, or NONE.",
+        },
+        "rejection_reason": {
+            "type":        "STRING",
+            "description": "If tier is LOW, explain why. Empty for HIGH/MEDIUM.",
+        },
+    },
+    "required": [
+        "tier", "pain_summary", "contact_point",
+        "buyer_language_quote", "geo_match", "archetype_match",
+    ],
+}
+
+
+def inline_score_signal(
+    signal_text: str,
+    icp_context: str,
+    source_url: str,
+    source_type: str,
+    geo_target: str,
+    archetype: str,
+    buyer_language_context: str = "",
+) -> dict:
+    """Score full signal content against campaign ICP.
+
+    Unlike pre_filter_gemini which uses Serper snippets (140 chars),
+    this function receives the FULL text of a signal — the complete
+    Reddit post body, Hacker News story, RSS article, or job description.
+
+    Args:
+        signal_text:            Full text content of the signal (post/article/job).
+        icp_context:            Campaign ICP context from context_builder.
+        source_url:             Original signal URL (for context).
+        source_type:            Source identifier ("reddit", "hackernews", etc.).
+        geo_target:             Campaign geographic target (may be empty for global).
+        archetype:              Campaign archetype (B2B, B2C, D2C, B2B2C).
+        buyer_language_context: Optional Gemini-derived buyer language summary
+                                from source_router for extra context.
+
+    Returns:
+        Dict with keys: tier, pain_summary, contact_point, buyer_language_quote,
+        geo_match, archetype_match, rejection_reason.
+        Returns LOW tier dict on any error.
+    """
+    if not signal_text or not signal_text.strip():
+        return {
+            "tier":                "LOW",
+            "pain_summary":        "",
+            "contact_point":       "",
+            "buyer_language_quote": "",
+            "geo_match":           False,
+            "archetype_match":     "NONE",
+            "rejection_reason":    "Empty signal text",
+        }
+
+    # Truncate to avoid context window overflow (Gemini 2.5 Flash = 1M tokens,
+    # but we budget 6000 chars per signal to keep batch costs reasonable)
+    truncated = signal_text[:6000]
+    if len(signal_text) > 6000:
+        truncated += "\n... [SIGNAL TRUNCATED — only first 6000 chars shown]"
+
+    geo_instruction = (
+        f"Target geography: {geo_target}. "
+        f"If the signal is not relevant to {geo_target}, set geo_match=false and tier=LOW."
+        if geo_target
+        else "Geography: Global — geo_match=true unless signal is clearly irrelevant to a specific locale that contradicts the ICP."
+    )
+
+    buyer_language_hint = (
+        f"\n\nBUYER LANGUAGE CONTEXT (from source router):\n{buyer_language_context}"
+        if buyer_language_context
+        else ""
+    )
+
+    prompt = f"""You are an OSINT intent analyst for a lead generation platform.
+
+CAMPAIGN ICP (Ideal Customer Profile):
+{icp_context}
+
+CAMPAIGN ARCHETYPE: {archetype}
+{geo_instruction}
+
+SOURCE TYPE: {source_type.upper()} — {source_url[:120]}
+{buyer_language_hint}
+
+FULL SIGNAL CONTENT:
+{truncated}
+
+TASK:
+Analyze the full signal content above. Determine whether this signal represents an
+active buyer who matches the ICP and is currently experiencing a pain that the
+campaign can address.
+
+SCORING RULES:
+HIGH tier: The signal contains explicit buyer intent — someone asking for a vendor
+  recommendation, expressing frustration with a current solution, announcing a budget
+  or project that matches the ICP, or describing a pain that is directly addressable.
+  The person/company is identifiable and reachable.
+
+MEDIUM tier: The signal shows strong contextual relevance to the ICP but lacks explicit
+  buying intent. Could be a decision influencer, a company going through a relevant
+  change, or a topic discussion from the ICP audience.
+
+LOW tier: The signal is a generic article, listicle, review of a past experience,
+  corporate announcement unrelated to buying, or clearly irrelevant to the ICP.
+
+GEO RULE: If a geo_target is set and the signal is clearly from/about a different
+  geography, set geo_match=false and tier=LOW.
+
+SELLER EXCLUSION: If the signal author/company is a direct competitor (sells the same
+  product/service described in the ICP), set tier=LOW.
+
+Return a single JSON object matching the schema."""
+
+    try:
+        result = call_gemini_2_5(
+            prompt,
+            expect_json=True,
+            response_schema=_INLINE_SCORE_SCHEMA,
+        )
+        if not isinstance(result, dict):
+            raise ValueError(f"Unexpected response type: {type(result)}")
+
+        # Normalise tier to uppercase
+        result["tier"] = str(result.get("tier", "LOW")).upper()
+        if result["tier"] not in ("HIGH", "MEDIUM", "LOW"):
+            result["tier"] = "LOW"
+
+        log.info(
+            "inline_score_complete",
+            tier=result["tier"],
+            source_type=source_type,
+            url=source_url[:80],
+            geo_match=result.get("geo_match", False),
+        )
+        return result
+
+    except Exception as exc:
+        log.warning(
+            "inline_score_failed",
+            source_url=source_url[:80],
+            source_type=source_type,
+            error=str(exc),
+        )
+        return {
+            "tier":                "LOW",
+            "pain_summary":        "",
+            "contact_point":       "",
+            "buyer_language_quote": "",
+            "geo_match":           False,
+            "archetype_match":     "NONE",
+            "rejection_reason":    f"Scoring error: {exc}",
+        }
+
+
+# ---------------------------------------------------------------------------
 # Final score + DM generator
 # ---------------------------------------------------------------------------
+
 
 _SCORE_SCHEMA = {
     "type": "OBJECT",
