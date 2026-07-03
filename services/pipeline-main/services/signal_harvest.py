@@ -184,6 +184,36 @@ def harvest_signals(
     metrics["discovered"] = len(all_signals)
     metrics["errors"]     = error_count
 
+    # ------------------------------------------------------------------ #
+    # V25.2.1 — Stamp last_google_reviews_at if reviews ran this harvest  #
+    # Enables the once-daily cooldown gate in source_router._instantiate_  #
+    # sources(). Only written when reviews actually ran (signals > 0 OR   #
+    # source was active, i.e. GoogleReviewSource was in routing.sources). #
+    # ------------------------------------------------------------------ #
+    _reviews_ran = any(
+        s.source_type == "google_review" for s in routing.sources
+    )
+    if _reviews_ran:
+        try:
+            camp_ref = db.collection("campaigns").document(campaign_id)
+            camp_ref.update({
+                "last_google_reviews_at": datetime.datetime.now(
+                    datetime.timezone.utc
+                ).isoformat(),
+            })
+            log.info(
+                "signal_harvest_google_reviews_timestamp_stamped",
+                campaign_id=campaign_id,
+                note="Cooldown clock reset. Google Reviews will skip next 23h of harvests.",
+            )
+        except Exception as _stamp_err:
+            log.warning(
+                "signal_harvest_google_reviews_timestamp_failed",
+                campaign_id=campaign_id,
+                error=str(_stamp_err),
+                note="Non-critical — cooldown will not apply next harvest.",
+            )
+
     if not all_signals:
         log.warning(
             "signal_harvest_no_signals",
@@ -192,6 +222,7 @@ def harvest_signals(
             sources=len(routing.sources),
         )
         return metrics
+
 
     # ------------------------------------------------------------------ #
     # Stage 4 — Deduplicate against existing leads/cache                  #

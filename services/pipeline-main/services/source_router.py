@@ -216,7 +216,7 @@ class SourceRouter:
 
         try:
             raw_config = self._derive_via_gemini(archetype, icp_context, geo)
-            sources    = self._instantiate_sources(raw_config, geo)
+            sources    = self._instantiate_sources(raw_config, geo, campaign=campaign)
             config     = RoutingConfig(
                 sources                = sources,
                 buyer_language_context = raw_config.get("buyer_language_context", ""),
@@ -336,18 +336,74 @@ IMPORTANT:
         result["_icp_context"]  = icp_context
         return result
 
-    def _instantiate_sources(self, config: dict, geo: str) -> list[BaseSignalSource]:
+    def _instantiate_sources(
+        self,
+        config: dict,
+        geo: str,
+        campaign: dict | None = None,
+    ) -> list[BaseSignalSource]:
         """Convert Gemini routing config into BaseSignalSource instances.
 
         Source instantiation order reflects priority:
         B2C/D2C: ClassifiedListings + ConsumerForum first (highest-intent consumer signals)
         B2B:     Reddit + HN + Job Posts first (professional community signals)
         All:     RSS + Serper discovery always last (broadest coverage, lowest specificity)
+
+        Args:
+            config:   Gemini routing config dict (with injected _archetype, _icp_context).
+            geo:      Campaign location string.
+            campaign: Full campaign document dict. Used for once-daily source cooldowns.
         """
+        import datetime as _dt
         sources: list[BaseSignalSource] = []
         geo_filter_terms = config.get("geo_filter_terms", [])
         archetype = config.get("_archetype", "B2B").upper()
         is_consumer = "B2C" in archetype or "D2C" in archetype
+        _campaign = campaign or {}
+
+        # ------------------------------------------------------------------ #
+        # V25.2.1 — Once-daily gate for expensive Serper sources.            #
+        # Google Reviews uses 2 Serper credits per competitor (maps+reviews). #
+        # At 5 competitors × 6 harvests/day × 150 campaigns = 45K Serper     #
+        # calls/day just from reviews. Gate to once per 23h per campaign.    #
+        # ------------------------------------------------------------------ #
+        _REVIEWS_COOLDOWN_H = 23  # hours between Google Reviews runs
+        _reviews_due = True
+        _last_reviews_raw = _campaign.get("last_google_reviews_at")
+        if _last_reviews_raw:
+            try:
+                # Firestore DatetimeWithNanoseconds is tz-aware; handle both.
+                if hasattr(_last_reviews_raw, "tzinfo"):
+                    _last_reviews_ts = _last_reviews_raw
+                    if _last_reviews_ts.tzinfo is None:
+                        _last_reviews_ts = _last_reviews_ts.replace(
+                            tzinfo=_dt.timezone.utc
+                        )
+                else:
+                    # ISO string fallback
+                    _last_reviews_ts = _dt.datetime.fromisoformat(
+                        str(_last_reviews_raw)
+                    ).replace(tzinfo=_dt.timezone.utc)
+                _elapsed_h = (
+                    _dt.datetime.now(_dt.timezone.utc) - _last_reviews_ts
+                ).total_seconds() / 3600
+                if _elapsed_h < _REVIEWS_COOLDOWN_H:
+                    _reviews_due = False
+                    log.info(
+                        "source_router_google_reviews_cooldown_active",
+                        campaign_id=_campaign.get("id", _campaign.get("campaign_id", "unknown")),
+                        elapsed_hours=round(_elapsed_h, 1),
+                        cooldown_hours=_REVIEWS_COOLDOWN_H,
+                        note="Skipping GoogleReviewSource — ran less than 23h ago. "
+                             "Saves ~2 Serper credits per competitor per harvest.",
+                    )
+            except Exception as _cd_err:
+                log.warning(
+                    "source_router_google_reviews_cooldown_parse_failed",
+                    error=str(_cd_err),
+                    fallback="Treating as due — reviews will run this harvest.",
+                )
+                _reviews_due = True
 
         # === B2C / D2C primary sources ===================================
 
@@ -455,7 +511,8 @@ IMPORTANT:
         # 8. Google Reviews (all archetypes — competitor review mining)
         #    Gemini derives competitor names from ICP; Serper Maps + Reviews
         #    fetch buyer-language reviews. Works for B2B service firms too.
-        if self._serper_key:
+        #    V25.2.1: Once-daily cooldown gate — _reviews_due is set above.
+        if self._serper_key and _reviews_due:
             icp_context = config.get("_icp_context", "")
             raw_arch    = config.get("_archetype", "B2B")
             sources.append(GoogleReviewSource(
