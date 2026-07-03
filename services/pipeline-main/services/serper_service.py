@@ -612,16 +612,10 @@ def search_serper(
     if sourcing_vector and _is_consumer_archetype(sourcing_vector):
         payload_dict["tbs"] = "qdr:m"
     else:
-        # V25.2.3: B2B temporal filter REMOVED.
-        # Evidence (2026-07-03): tbs=qdr:2y combined with gl=in and niche
-        # buyer-language forum queries produced fetched=0 across every produce
-        # run for Brand Narrative, Kerala Education, and Oman Realty campaigns.
-        # Google has zero indexed content matching exact phrases like
-        # "struggle to differentiate our brand" within 2 years in the India index.
-        # The Gemini pre-filter and score gate downstream handle freshness —
-        # stale 2022 results are scored low and naturally filtered out.
-        # Removing tbs entirely to restore Serper recall.
-        pass  # no tbs filter for B2B
+        # B2B temporal freshness: 2-year window.
+        # Prevents stale conference/event pages (2019-2022) from entering pipeline.
+        # The 2y window is user-validated (2026-07-03).
+        payload_dict["tbs"] = "qdr:2y"
 
     payload = json.dumps(payload_dict)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}

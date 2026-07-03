@@ -579,10 +579,15 @@ def _write_to_firestore(
     icp_context: str,
     db: Any,
 ) -> int:
-    """Write HIGH/MEDIUM signals to scraped_cache and unprocessed_queue.
+    """Write HIGH/MEDIUM signals to scraped_cache and campaign unprocessed_queue.
 
-    Writes in the same format as produce.py so dispatch.py processes them
-    without any changes to its logic.
+    V25.2.4 FIX: Previously wrote to a top-level ``unprocessed_queue`` collection.
+    Dispatch reads URLs from the *campaign document's* ``unprocessed_queue`` array
+    field, so signals written to the collection were never dispatched — a complete
+    architectural disconnect.
+
+    Now appends URLs to the campaign document's array field via Firestore
+    ``arrayUnion``, matching produce.py's write path exactly.
 
     Returns:
         Count of signals successfully written to unprocessed_queue.
@@ -592,6 +597,7 @@ def _write_to_firestore(
     queued      = 0
     batch       = db.batch()
     batch_count = 0
+    harvest_urls: list[str] = []
 
     for signal, score in scored_results:
         tier = score.get("tier", "LOW")
@@ -602,8 +608,16 @@ def _write_to_firestore(
 
         # ---- scraped_cache document ----
         # Dispatch reads text from scraped_cache.text to run pre_filter_gemini.
-        # By writing full signal content here, the pre_filter runs on real content.
-        cache_ref = db.collection(_SCRAPED_CACHE_COLL).document()
+        # By writing full signal content here, the pre_filter runs on real content
+        # instead of 140-char Serper snippets.
+        import hashlib
+        from urllib.parse import urlparse as _urlparse
+
+        _parsed = _urlparse(signal.url)
+        _dedup_key = f"{_parsed.netloc}{_parsed.path}".lower().replace("www.", "")
+        _cache_key = hashlib.sha256(f"{tenant_id}_{_dedup_key}".encode()).hexdigest()
+
+        cache_ref = db.collection(_SCRAPED_CACHE_COLL).document(_cache_key)
         cache_doc = {
             "url":          signal.url,
             "text":         signal.combined_text(max_chars=8000),
@@ -622,25 +636,13 @@ def _write_to_firestore(
             "harvest_geo_match":         score.get("geo_match", False),
             "signal_metadata":           signal.metadata,
         }
-        batch.set(cache_ref, cache_doc)
+        batch.set(cache_ref, cache_doc, merge=True)
         batch_count += 1
 
-        # ---- unprocessed_queue document ----
-        queue_ref = db.collection(_UNPROCESSED_QUEUE_COLL).document()
-        queue_doc = {
-            "url":          signal.url,
-            "campaign_id":  campaign_id,
-            "tenant_id":    tenant_id,
-            "created_at":   now_ts,
-            "source":       "signal_harvest",
-            "source_type":  signal.source_type,
-            "harvest_tier": tier,
-        }
-        batch.set(queue_ref, queue_doc)
-        batch_count += 1
+        harvest_urls.append(signal.url)
         queued += 1
 
-        # Commit in batches of 400 operations (Firestore limit is 500)
+        # Commit scraped_cache in batches of 400 operations (Firestore limit is 500)
         if batch_count >= 400:
             try:
                 batch.commit()
@@ -653,7 +655,7 @@ def _write_to_firestore(
             batch       = db.batch()
             batch_count = 0
 
-    # Final commit
+    # Final scraped_cache commit
     if batch_count > 0:
         try:
             batch.commit()
@@ -664,9 +666,35 @@ def _write_to_firestore(
                 error=str(exc),
             )
 
+    # ---- Append URLs to campaign document's unprocessed_queue array ----
+    # V25.2.4: This is the critical fix. Dispatch reads from the campaign
+    # document's unprocessed_queue array field, NOT from a top-level collection.
+    # Use arrayUnion for atomic, dedup-safe append.
+    if harvest_urls:
+        try:
+            campaign_ref = db.collection("campaigns").document(campaign_id)
+            # Cap at 200 to match produce.py's queue limit
+            campaign_ref.update({
+                "unprocessed_queue": firestore.ArrayUnion(harvest_urls[:200]),
+            })
+            log.info(
+                "signal_harvest_queue_appended",
+                campaign_id=campaign_id,
+                urls_appended=len(harvest_urls),
+            )
+        except Exception as exc:
+            log.error(
+                "signal_harvest_queue_append_failed",
+                campaign_id=campaign_id,
+                error=str(exc),
+                urls_lost=len(harvest_urls),
+            )
+            queued = 0  # None were actually queued
+
     log.info(
         "signal_harvest_firestore_written",
         campaign_id=campaign_id,
         queued=queued,
     )
     return queued
+
