@@ -134,3 +134,10 @@ def init_vertex() -> None:
         None
     """
     vertexai.init(location="us-central1")
+
+
+# ---------------------------------------------------------------------------
+# Aliases — shorter names used by some routers (e.g. social_redirect.py)
+# ---------------------------------------------------------------------------
+get_sm_client = get_secret_manager_client
+

@@ -1,7 +1,7 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # =============================================================================
 # LeadGenie — Pre-Deployment Setup Script
-# Version: V25.2.2 | 2026-07-03
+# Version: V25.2.3 | 2026-07-03
 #
 # PURPOSE:
 #   Creates all GCP infrastructure that Cloud Build cannot create itself
