@@ -145,6 +145,36 @@ class CampaignQueryContext:
         self.has_local_history: bool = False
 
 
+def _fix_multi_site_query(query: str) -> str:
+    """Convert broken multi-site AND queries to OR'd syntax.
+
+    Gemini generates: site:reddit.com site:consumercomplaints.in ("term")
+    Google treats space as AND → impossible → 0 results.
+    Fix: (site:reddit.com OR site:consumercomplaints.in) ("term")
+
+    Also handles negative site: operators (-site:) which must NOT be ORed.
+    """
+    import re as _re
+    # Find all POSITIVE site: operators (not preceded by -)
+    _positive_sites = _re.findall(r'(?<!-)\bsite:\S+', query)
+    if len(_positive_sites) <= 1:
+        return query
+    # Remove all positive site: operators from query body
+    _cleaned = query
+    for s in _positive_sites:
+        _cleaned = _cleaned.replace(s, '', 1)
+    _cleaned = _cleaned.strip()
+    # Rebuild with OR grouping
+    _site_group = ' OR '.join(_positive_sites)
+    _result = f'({_site_group}) {_cleaned}'
+    # Clean up double spaces
+    _result = _re.sub(r'\s{2,}', ' ', _result).strip()
+    log.info("multi_site_query_fixed",
+             original=query[:120], fixed=_result[:120],
+             site_count=len(_positive_sites))
+    return _result
+
+
 def _clean_query_syntax(raw: str) -> str:
     """Optimize spacing and sanitize wildcard domain operators in queries.
 
@@ -154,8 +184,10 @@ def _clean_query_syntax(raw: str) -> str:
     if not raw:
         return ""
     import re
+    # 0. Fix multi-site AND → OR
+    res = _fix_multi_site_query(raw)
     # 1. Strip wildcard domain prefix site:*. -> site:.
-    res = re.sub(r'(?<!\w)site:\*\.', 'site:.', raw)
+    res = re.sub(r'(?<!\w)site:\*\.', 'site:.', res)
     
     # 2. Insert missing space between quotes and opening parenthesis: "abc"(xyz) -> "abc" (xyz)
     res = re.sub(r'(?<=\")\(', ' (', res)

@@ -442,16 +442,27 @@ def produce():
 
         update_circuit_telemetry("serper_call")
 
+        _raw_count = len(raw_results) if raw_results else 0
         filtered = filter_serper_noise(raw_results)
+        _filtered_count = len(filtered)
+        _new_count = 0
         for r in filtered:
             link = r.get("link")
             if link and link not in raw_urls:
                 raw_urls.append(link)
+                _new_count += 1
                 snippet_db[link] = {
                     "title":   r.get("title", ""),
                     "snippet": r.get("snippet", ""),
                     "query":   search_query,
                 }
+        log.info("produce_serper_query_result",
+                 query=search_query[:120],
+                 campaign_id=campaign_id,
+                 raw=_raw_count,
+                 after_noise_filter=_filtered_count,
+                 new_urls=_new_count,
+                 cumulative=len(raw_urls))
 
     fetched_count = len(raw_urls)
     log.info("TRACE-10: Serper loop complete.", fetched_count=fetched_count)
