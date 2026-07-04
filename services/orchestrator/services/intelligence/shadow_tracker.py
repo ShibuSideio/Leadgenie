@@ -19,6 +19,8 @@ Design contract (V22 TSD §25.1.2, Design Invariant #16):
   * The HTTP 200 on lead approval MUST never wait for BigQuery.
   * BQ failures MUST NOT propagate to the response path.
 """
+from __future__ import annotations
+
 import warnings
 
 warnings.warn(
@@ -27,8 +29,6 @@ warnings.warn(
     DeprecationWarning,
     stacklevel=2,
 )
-
-from __future__ import annotations
 
 import re
 import threading
