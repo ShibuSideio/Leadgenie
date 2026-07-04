@@ -421,7 +421,7 @@ steps:
   - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
   # V23.4: ORCHESTRATOR_URL added to CI/CD inject (previously console-only).
   # Enables serper_service.py telemetry push on every fresh deploy.
-  - --update-env-vars=PROJECT_ID=$PROJECT_ID,LOCATION=asia-south1,CB_WINDOW_MINUTES=15,PIPELINE_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,PIPELINE_MAIN_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,VERSION=$COMMIT_SHA
+  - --update-env-vars=PROJECT_ID=$PROJECT_ID,GCP_PROJECT=$PROJECT_ID,LOCATION=asia-south1,CB_WINDOW_MINUTES=15,PIPELINE_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,ORCHESTRATOR_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,PIPELINE_MAIN_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,VERSION=$COMMIT_SHA
   - --quiet
 
 
