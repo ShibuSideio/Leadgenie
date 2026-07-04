@@ -362,7 +362,9 @@ def update_lead(uid, tenant_id, user_role, doc_id):
     # Phase 4C: Write rejection_reason alongside existing negative signal data.
     # For rejected leads with a granular reason, always insert the BQ signal
     # regardless of whether the reason is in the legacy NEG_SIGNAL_REASONS set.
-    if status in ("rejected", "ignored") and rejection_reason and rejection_reason in VALID_REJECTION_REASONS:
+    # P1-BIZ-1: Only fire for reasons NOT already handled by the first block
+    # to prevent double BQ inserts for overlapping reasons.
+    if status in ("rejected", "ignored") and rejection_reason and rejection_reason in VALID_REJECTION_REASONS and rejection_reason not in NEG_SIGNAL_REASONS:
         _4c_reason = rejection_reason
         try:
             entity_name = (
@@ -469,17 +471,24 @@ def update_lead(uid, tenant_id, user_role, doc_id):
                     _when = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=3)
                     _ts = _ts_pb2.Timestamp()
                     _ts.FromDatetime(_when)
+                    from core.config import ORCHESTRATOR_SA_EMAIL as _sa_email  # type: ignore[import]
+                    _crm_retry_task = {
+                        "schedule_time": _ts,
+                        "http_request": {
+                            "http_method": "POST",
+                            "url": f"{_orch}/api/internal/crm-retry",
+                            "body": _json.dumps({"lead_id": doc_id, "tenant_id": uid}).encode(),
+                            "headers": {"Content-Type": "application/json"},
+                        },
+                    }
+                    if _sa_email:
+                        _crm_retry_task["http_request"]["oidc_token"] = {
+                            "service_account_email": _sa_email,
+                            "audience": _orch,
+                        }
                     _tc.create_task(request={
                         "parent": _queue_path,
-                        "task": {
-                            "schedule_time": _ts,
-                            "http_request": {
-                                "http_method": "POST",
-                                "url": f"{_orch}/api/internal/crm-retry",
-                                "body": _json.dumps({"lead_id": doc_id, "tenant_id": uid}).encode(),
-                                "headers": {"Content-Type": "application/json"},
-                            },
-                        },
+                        "task": _crm_retry_task,
                     })
                     log.info("crm_retry_task_enqueued", lead_id=doc_id, delay_hours=3)
                 except Exception as _retry_err:
@@ -608,9 +617,8 @@ def list_inbound_signals(uid, tenant_id, user_role):
         return jsonify({"signals": signals, "count": len(signals)}), 200
 
     except Exception as e:
-        traceback.print_exc()
-        log.error("list_inbound_signals_fatal_ingress_error", error=str(e), traceback=traceback.format_exc())
-        return jsonify({"signals": [], "error": True}), 200
+        log.exception("list_inbound_signals_fatal_ingress_error", error=str(e))
+        return jsonify({"signals": [], "error": True}), 500
 
 
 # =============================================================================
@@ -661,29 +669,39 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
     if new_status == "converted_to_lead":
         # FIN-02: Check wallet and consume a credit BEFORE creating the lead.
         # Previously credit_settled was set to True without any actual debit.
+        # P1-FIN-1: Wrap credit check + increment in a Firestore transaction
+        # to prevent race conditions where two concurrent signal conversions
+        # both pass the check before either increments.
+        from google.cloud.firestore_v1.transaction import transactional as _fs_txn
+
+        @_fs_txn
+        def _consume_signal_credit_txn(transaction, user_ref):
+            """Transactional credit check + consume for signal-to-lead conversion."""
+            _snap = user_ref.get(transaction=transaction)
+            if not _snap.exists:
+                raise ValueError("Tenant wallet document does not exist.")
+            _w = (_snap.to_dict() or {}).get("wallet", {})
+            _alloc = int(_w.get("allocated_credits", 0) or 0)
+            _total_consumed = int(_w.get("total_consumed", 0) or 0)
+            _legacy_consumed = int(_w.get("consumed_credits", 0) or 0)
+            _reserved = int(_w.get("reserved_credits", 0) or 0)
+            # Use max of both accounting paths (matches check_quota in helpers.py)
+            _consumed = max(_total_consumed, _legacy_consumed)
+            _avail = _alloc - _consumed - _reserved
+            if _avail <= 0:
+                raise ValueError("Insufficient credits to convert signal to lead")
+            transaction.update(user_ref, {"wallet.total_consumed": fs.Increment(1)})
+
         try:
-            _user_doc = _db().collection("users").document(tenant_id).get()
-            _user_data = _user_doc.to_dict() or {} if _user_doc.exists else {}
-            _wallet = _user_data.get("wallet", {})
-            _allocated = int(_wallet.get("allocated_credits", 0) or 0)
-            _consumed = max(
-                int(_wallet.get("total_consumed", 0) or 0),
-                int(_wallet.get("consumed_credits", 0) or 0),
-            )
-            _reserved = int(_wallet.get("reserved_credits", 0) or 0)
-            _available = _allocated - _consumed - _reserved
-            if _available <= 0:
-                log.warning("inbound_signal_conversion_insufficient_credits",
-                            signal_id=signal_doc_id, tenant_id=tenant_id,
-                            allocated=_allocated, consumed=_consumed, reserved=_reserved)
-                return jsonify({"error": "Insufficient credits to convert signal to lead"}), 402
-            # Consume 1 credit atomically
-            _db().collection("users").document(tenant_id).update(
-                {"wallet.total_consumed": fs.Increment(1)}
-            )
+            _user_ref = _db().collection("users").document(tenant_id)
+            _txn = _db().transaction()
+            _consume_signal_credit_txn(_txn, _user_ref)
+        except ValueError as _credit_err:
+            log.warning("inbound_signal_conversion_insufficient_credits",
+                        signal_id=signal_doc_id, tenant_id=tenant_id,
+                        error=str(_credit_err))
+            return jsonify({"error": str(_credit_err)}), 402
         except Exception as _credit_err:
-            if "Insufficient credits" in str(_credit_err):
-                raise
             log.warning("inbound_signal_credit_check_failed", error=str(_credit_err),
                         note="Proceeding with conversion — credit check non-fatal.")
 

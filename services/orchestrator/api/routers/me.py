@@ -68,8 +68,14 @@ def me_endpoint(uid: str, tenant_id: str, user_role: str):
     data = user_doc.to_dict() or {}
     raw_wallet = data.get("wallet", {})
     allocated = int(raw_wallet.get("allocated_credits", 0) or 0)
-    consumed = int(raw_wallet.get("consumed_credits", 0) or 0)
-    consumed += get_wallet_shards_total(db, uid)
+    # P1-FIN-2: Use authoritative field matching check_quota in helpers.py.
+    # Take max(total_consumed, consumed_credits + shard_sum) to cover both
+    # the atomic settle path and the legacy shard path.
+    shard_sum = get_wallet_shards_total(db, uid)
+    consumed = max(
+        int(raw_wallet.get("total_consumed", 0) or 0),
+        int(raw_wallet.get("consumed_credits", 0) or 0) + shard_sum,
+    )
 
     log.info("user_profile_fetched", uid=uid[:8])
 

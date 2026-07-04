@@ -94,7 +94,7 @@ def _do_neg_signal_insert(
     """
     try:
         from google.cloud import bigquery as _bq_lib
-        bq = _bq_lib.Client(project=project_id)
+        bq = _bq_lib.Client(project=project_id, location="asia-south1")
         table_ref = f"{project_id}.swarm_analytics.Negative_Signals"
 
         # INT-06: Resolve suppression key (full URL path for shared platforms)

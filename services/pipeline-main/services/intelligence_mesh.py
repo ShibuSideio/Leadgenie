@@ -163,16 +163,24 @@ def enrich_signals(
     """Run all intelligence providers in parallel. Non-blocking.
 
     Returns combined list of signal dicts from all providers.
-    Individual provider failures are silently swallowed with a warning log.
+    Individual provider failures are logged with a warning.
+
+    P2-SIL-3: When ALL providers fail (zero signals), each returned signal
+    list carries an ``enrichment_failed`` attribute so dispatch can detect
+    total enrichment failure.  Callers can check:
+        ``getattr(result, 'enrichment_failed', False)``
     """
     all_signals: list[dict] = []
+    _provider_failure_count = 0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(_PROVIDERS)) as pool:
         future_map = {
             pool.submit(p.fetch_signals, company_name, domain, serper_fn): p.name
             for p in _PROVIDERS
         }
-        done, _ = concurrent.futures.wait(future_map, timeout=timeout_s)
+        done, not_done = concurrent.futures.wait(future_map, timeout=timeout_s)
+        # Count timed-out providers as failures
+        _provider_failure_count += len(not_done)
         for fut in done:
             provider_name = future_map[fut]
             try:
@@ -180,7 +188,32 @@ def enrich_signals(
                 if result:
                     all_signals.extend(result)
                     log.info("mesh_provider_ok: provider=%s signals=%d", provider_name, len(result))
+                else:
+                    _provider_failure_count += 1
             except Exception as exc:
+                _provider_failure_count += 1
                 log.warning("mesh_provider_failed: provider=%s err=%s", provider_name, exc)
 
+    # P2-SIL-3: Flag total enrichment failure so dispatch can log/handle it.
+    if _provider_failure_count >= len(_PROVIDERS):
+        log.warning(
+            "mesh_all_providers_failed",
+            company_name=company_name,
+            domain=domain,
+            provider_count=len(_PROVIDERS),
+            note="All intelligence mesh providers returned zero signals or errored.",
+        )
+        # Attach flag as list attribute — callers use getattr(result, 'enrichment_failed', False)
+        all_signals = _EnrichmentResult(all_signals)
+        all_signals.enrichment_failed = True  # type: ignore[attr-defined]
+
     return all_signals
+
+
+class _EnrichmentResult(list):
+    """List subclass that carries an ``enrichment_failed`` flag.
+
+    This preserves full list API compatibility while allowing callers to
+    detect total enrichment failure via ``getattr(result, 'enrichment_failed', False)``.
+    """
+    enrichment_failed: bool = False

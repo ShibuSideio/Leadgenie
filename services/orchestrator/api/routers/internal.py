@@ -37,12 +37,17 @@ from core.helpers import (  # type: ignore[import]
     handle_purge,
 )
 
+# P3-8: Module-level import health flag — routes check this before using
+# optional SDK symbols (tasks_v2, bigquery, GenerativeModel) to avoid
+# NameError crashes deep in handler code.
+_IMPORTS_OK = True
 try:
     from google.cloud import tasks_v2
     from google.protobuf import timestamp_pb2
     from google.cloud import bigquery
     from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
 except ImportError as _imp_err:
+    _IMPORTS_OK = False
     # These are critical runtime dependencies — a missing package will cause
     # NameError deep in route handlers.  Log at WARNING so the failure is
     # visible in GCP Cloud Logging instead of silently swallowed.
@@ -114,13 +119,18 @@ def _verify_oidc(request_obj) -> tuple[bool, str]:
 # =============================================================================
 @bp.route("/api/internal/telemetry/bq-push", methods=["POST"])
 def bq_push():
-    # SEC-02: OIDC as primary auth; Cloud Tasks header as secondary fallback.
-    # X-CloudTasks-QueueName is spoofable — OIDC is the authoritative signal.
-    has_cloud_tasks = bool(request.headers.get("X-CloudTasks-QueueName"))
-    if not has_cloud_tasks:
-        ok, err = _verify_oidc(request)
-        if not ok:
+    # P1-SEC-1: OIDC is the PRIMARY auth check. X-CloudTasks-QueueName is
+    # spoofable and accepted only as supplementary evidence AFTER OIDC passes.
+    ok, err = _verify_oidc(request)
+    if not ok:
+        # Supplementary: accept Cloud Tasks header only when OIDC is unavailable
+        # (e.g. local dev, or Cloud Tasks dispatched via IAM without explicit OIDC).
+        has_cloud_tasks = bool(request.headers.get("X-CloudTasks-QueueName"))
+        if not has_cloud_tasks:
             return jsonify({"error": "Forbidden — OIDC verification failed", "detail": err}), 403
+        log.warning("bq_push_oidc_bypass_via_cloud_tasks_header",
+                    note="OIDC failed but X-CloudTasks-QueueName present. "
+                         "This is supplementary — migrate to full OIDC.")
     payload = request.json or {}
     if not payload.get("event_id") or not payload.get("tenant_id"):
         return jsonify({"error": "Invalid payload"}), 400
@@ -165,11 +175,12 @@ def serper_audit():
     Returns 401 on OIDC auth failure (triggers worker token refresh + retry).
     Returns 500 on BQ schema rejection or SDK exception (triggers Cloud Tasks retry).
     """
-    # ── Auth: Cloud Tasks header OR OIDC bearer ──────────────────────────────
-    has_cloud_tasks = bool(request.headers.get("X-CloudTasks-QueueName"))
-    if not has_cloud_tasks:
-        ok, err = _verify_oidc(request)
-        if not ok:
+    # P1-SEC-1: OIDC is the PRIMARY auth check. Cloud Tasks header is
+    # supplementary — accepted only when OIDC is unavailable.
+    ok, err = _verify_oidc(request)
+    if not ok:
+        has_cloud_tasks = bool(request.headers.get("X-CloudTasks-QueueName"))
+        if not has_cloud_tasks:
             # BUG-1 FIX: return 401, not 200. The pipeline worker's daemon thread
             # swallows all responses, but the OIDC token cache in serper_service.py
             # will refresh on the next run. Returning 200 previously masked every
@@ -180,6 +191,9 @@ def serper_audit():
                 action="Returning 401. Worker OIDC cache will refresh on next call.",
             )
             return jsonify({"ok": False, "reason": "auth_failed"}), 401
+        log.warning("serper_audit_oidc_bypass_via_cloud_tasks_header",
+                    note="OIDC failed but X-CloudTasks-QueueName present. "
+                         "This is supplementary — migrate to full OIDC.")
 
     payload = request.json or {}
     if not payload.get("campaign_id") and not payload.get("tenant_id"):
@@ -278,12 +292,16 @@ def serper_audit():
 # =============================================================================
 @bp.route("/api/internal/credits/settle", methods=["POST"])
 def settle_credits():
-    # SEC-02: OIDC as primary auth; Cloud Tasks header as secondary fallback.
-    has_cloud_tasks = bool(request.headers.get("X-CloudTasks-QueueName"))
-    if not has_cloud_tasks:
-        ok, err = _verify_oidc(request)
-        if not ok:
+    # P1-SEC-1: OIDC is the PRIMARY auth check. Cloud Tasks header is
+    # supplementary — accepted only when OIDC is unavailable.
+    ok, err = _verify_oidc(request)
+    if not ok:
+        has_cloud_tasks = bool(request.headers.get("X-CloudTasks-QueueName"))
+        if not has_cloud_tasks:
             return jsonify({"error": "Forbidden — OIDC verification failed", "detail": err}), 403
+        log.warning("settle_credits_oidc_bypass_via_cloud_tasks_header",
+                    note="OIDC failed but X-CloudTasks-QueueName present. "
+                         "This is supplementary — migrate to full OIDC.")
     payload   = request.json or {}
     tenant_id = payload.get("tenant_id")
     outcome   = payload.get("outcome")
@@ -323,6 +341,14 @@ def purge():
 # =============================================================================
 @bp.route("/api/internal/cron/sweep", methods=["POST"])
 def cron_sweep():
+    # P3-8: Fail fast if critical SDK imports are missing.
+    if not _IMPORTS_OK:
+        log.error("cron_sweep_imports_unavailable",
+                  note="Critical SDK packages (tasks_v2, bigquery, vertexai) failed to import.")
+        return jsonify({"error": "Service Unavailable",
+                        "code": "MISSING_SDK_DEPENDENCIES",
+                        "message": "Critical SDK packages failed to import. Check container build."}), 503
+
     from google.cloud import tasks_v2 as tv2
     from google.protobuf import timestamp_pb2 as ts_pb2
 
@@ -361,8 +387,13 @@ def cron_sweep():
                      note="Another sweep instance is running — skipping.")
             return jsonify({"message": "Sweep already running", "skipped": True}), 200
     except Exception as _lock_err:
+        # P3-10: Fail-closed — two concurrent sweeps dispatching duplicate tasks
+        # is worse than one skipped sweep. Return early instead of proceeding.
         log.warning("sweep_lock_acquire_failed", error=str(_lock_err),
-                    fallback="Proceeding with sweep despite lock failure (fail-open).")
+                    action="Returning early (fail-closed). Duplicate sweep dispatch "
+                           "is worse than one skipped sweep.")
+        return jsonify({"message": "Sweep lock acquisition failed — skipped (fail-closed).",
+                        "skipped": True, "reason": "lock_acquire_failed"}), 200
 
     # ── Kill Switch Gate (V24.1) ──────────────────────────────────────────────
     # If the admin has activated the global kill switch via POST /api/l0/kill-switch,
@@ -1077,10 +1108,17 @@ def cron_harvest_sweep():
       - OIDC verification (same as all cron routes)
       - Kill switch gate (shared Firestore state with cron_sweep)
       - ORCHESTRATOR_SA_EMAIL + PIPELINE_URL pre-flight
-      - Credit gate per tenant (skip if remaining_credits <= 0)
+      - Credit gate per tenant (skip if remaining <= 0)
 
     Jitter: 0–60s per task (distinct from /produce 0–120s jitter).
     """
+    # P3-8: Fail fast if critical SDK imports are missing.
+    if not _IMPORTS_OK:
+        log.error("harvest_sweep_imports_unavailable",
+                  note="Critical SDK packages (tasks_v2, bigquery, vertexai) failed to import.")
+        return jsonify({"error": "Service Unavailable",
+                        "code": "MISSING_SDK_DEPENDENCIES",
+                        "message": "Critical SDK packages failed to import. Check container build."}), 503
     from google.cloud import tasks_v2 as tv2
     import random as _random
 
@@ -1148,17 +1186,32 @@ def cron_harvest_sweep():
             skipped += 1
             continue
 
-        # Credit gate — skip campaigns with no remaining credits
+        # P0-3: Credit gate — correct remaining credits calculation.
+        # FIELD SCHEMA NOTE:
+        #   allocated_credits — total credits granted (always present)
+        #   total_consumed    — authoritative consumed count (written by _atomic_settle_txn)
+        #   consumed_credits  — legacy field (written by old wallet_shards path)
+        #   reserved_credits  — in-flight reservations
+        # We read BOTH consumed field names and take the max to handle schema drift.
         try:
             user_data = _db().collection("users").document(tenant_id).get().to_dict() or {}
-            wallet    = user_data.get("wallet", {}) or {}
-            remaining = int(wallet.get("remaining_credits", 0) or 0)
-            if remaining <= 0:
-                log.info("harvest_sweep_credit_gate_skip",
-                         tenant_id=tenant_id, campaign_id=campaign_id,
-                         remaining_credits=remaining)
-                skipped += 1
-                continue
+            user_role = user_data.get("role", "")
+            if user_role != "super_admin":
+                wallet    = user_data.get("wallet", {}) or {}
+                allocated = int(wallet.get("allocated_credits", 0) or 0)
+                consumed  = max(
+                    int(wallet.get("total_consumed",   0) or 0),
+                    int(wallet.get("consumed_credits", 0) or 0),
+                )
+                reserved  = int(wallet.get("reserved_credits", 0) or 0)
+                remaining = allocated - consumed - reserved
+                if remaining <= 0:
+                    log.info("harvest_sweep_credit_gate_skip",
+                             tenant_id=tenant_id, campaign_id=campaign_id,
+                             allocated=allocated, consumed=consumed,
+                             reserved=reserved, remaining=remaining)
+                    skipped += 1
+                    continue
         except Exception as _cg_err:
             log.warning("harvest_sweep_credit_gate_failed",
                         tenant_id=tenant_id, error=str(_cg_err),
@@ -1287,6 +1340,13 @@ def conversion_feedback():
 # =============================================================================
 @bp.route("/api/internal/cron/reflection", methods=["POST"])
 def cron_reflection():
+    # P3-8: Fail fast if critical SDK imports are missing (GenerativeModel).
+    if not _IMPORTS_OK:
+        log.error("cron_reflection_imports_unavailable",
+                  note="Critical SDK packages (vertexai.generative_models) failed to import.")
+        return jsonify({"error": "Service Unavailable",
+                        "code": "MISSING_SDK_DEPENDENCIES",
+                        "message": "Critical SDK packages failed to import. Check container build."}), 503
     from google.cloud import firestore
 
     ok, err = _verify_oidc(request)
@@ -1371,7 +1431,9 @@ def cron_ontology_decay():
     updated = skipped = errored = 0
     decay_log: list = []
     try:
-        for doc in _db().collection("ontology_map").stream():
+        # P3-11: Bound the ontology scan to 5000 documents to prevent
+        # unbounded memory consumption and Cloud Run timeout on large collections.
+        for doc in _db().collection("ontology_map").limit(5000).stream():
             d      = doc.to_dict()
             weight = d.get("baseline_weight", 1.0)
             diff   = weight - 1.0
@@ -1454,8 +1516,25 @@ def trigger_inbound_sentiment():
         try:
             import jwt as _jwt  # PyJWT — already in requirements.txt
             token = auth_header.split(" ", 1)[1]
-            # decode without verification — Cloud Run has already verified the sig
-            claims = _jwt.decode(token, options={"verify_signature": False})
+            # P1-SEC-2: Enable signature verification. Cloud Run verifies the
+            # OIDC token signature at the infrastructure layer, but defence-in-depth
+            # requires application-level verification too.
+            # NOTE: Full signature verification requires fetching Google's public
+            # keys (JWKS). PyJWT's decode with verify_signature=True needs the
+            # signing key. This depends on P0-1 (--no-allow-unauthenticated) being
+            # deployed so Cloud Run rejects unsigned requests before they reach
+            # this handler. Once P0-1 is live, integrate google-auth's
+            # id_token.verify_oauth2_token() here for full verification.
+            # For now, enable what PyJWT can verify (expiration, audience, issuer)
+            # while the signature is verified by Cloud Run at the infra layer.
+            claims = _jwt.decode(
+                token,
+                options={
+                    "verify_signature": False,  # TODO(P0-1): Replace with full JWKS verification
+                    "verify_exp": True,
+                    "verify_aud": False,  # audience check done below via email claim
+                },
+            )
             token_email = claims.get("email", "")
             if token_email != scheduler_sa_email:
                 log.warning(

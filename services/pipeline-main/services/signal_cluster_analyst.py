@@ -399,7 +399,7 @@ def _create_cluster_lead(
             "cluster_platforms":           signal_platforms,
 
             # Scores
-            "score":                       int(cluster.get("convergence_score", 0) / 10),
+            "score":                       round(cluster.get("convergence_score", 0) / 10),
             "normalized_score":            min(int(cluster.get("convergence_score", 0)), 100),
 
             # Intent
@@ -413,11 +413,11 @@ def _create_cluster_lead(
 
             # Standard UI fields — defaults so lead cards render correctly
             # V25.2.1: added missing fields that dispatch.py always writes.
-            "dm":                          False,
+            "dm":                          "",
             "hiring_intent_found":         False,
             "tech_stack_found":            False,
             "icebreaker_angle":            "",
-            "contact_endpoints":           {},
+            "contact_endpoints":           [],
             "decision_maker_name":         "",
             "decision_maker_title":        "",
             "company_name":                cluster.get("buyer_profile", "")[:80],
@@ -451,40 +451,56 @@ def _create_cluster_lead(
 
         # V25.2.1: Deduct credit for cluster leads (same as dispatch-path leads)
         try:
-            from api.routers.dispatch import _settle_credit  # type: ignore[import]
-            _settle_credit(tenant_id, "success", lead_id=lead_id)
-        except Exception as _cr_err:
+            from api.routers.dispatch import _settle_credit  # type: ignore[import]  # noqa: PLC0415
+        except ImportError:
+            _settle_credit = None  # type: ignore[assignment]
             log.warning(
-                "cluster_lead_credit_settle_failed",
-                lead_id=lead_id,
-                tenant_id=tenant_id,
-                error=str(_cr_err),
-                note="Non-blocking — lead written but credit not settled.",
+                "cluster_lead_settle_credit_import_unavailable",
+                note="api.routers.dispatch not on sys.path — credit settlement skipped.",
             )
+        if _settle_credit is not None:
+            try:
+                _settle_credit(tenant_id, "success", lead_id=lead_id)
+            except Exception as _cr_err:
+                log.warning(
+                    "cluster_lead_credit_settle_failed",
+                    lead_id=lead_id,
+                    tenant_id=tenant_id,
+                    error=str(_cr_err),
+                    note="Non-blocking — lead written but credit not settled.",
+                )
 
         # V25.2.1: Mint social passthrough token for social-URL leads
         # Non-blocking — failure does not block lead creation
         if source_url:
             try:
-                from api.routers.social_redirect import mint_social_token  # type: ignore[import]
-                _token = mint_social_token(
-                    lead_id=lead_id,
-                    tenant_id=tenant_id,
-                    url=source_url,
-                    db=db,
-                )
-                if _token:
-                    # Attach token to lead doc so the frontend can build /go/<token> URLs
-                    db.collection("campaigns").document(campaign_id) \
-                      .collection("leads").document(lead_id) \
-                      .update({"social_token": _token})
-            except Exception as _tok_err:
+                from api.routers.social_redirect import mint_social_token  # type: ignore[import]  # noqa: PLC0415
+            except ImportError:
+                mint_social_token = None  # type: ignore[assignment]
                 log.warning(
-                    "cluster_lead_token_mint_failed",
-                    lead_id=lead_id,
-                    error=str(_tok_err),
-                    note="Non-blocking.",
+                    "cluster_lead_mint_social_token_import_unavailable",
+                    note="api.routers.social_redirect not on sys.path — token minting skipped.",
                 )
+            if mint_social_token is not None:
+                try:
+                    _token = mint_social_token(
+                        lead_id=lead_id,
+                        tenant_id=tenant_id,
+                        url=source_url,
+                        db=db,
+                    )
+                    if _token:
+                        # Attach token to lead doc so the frontend can build /go/<token> URLs
+                        db.collection("campaigns").document(campaign_id) \
+                          .collection("leads").document(lead_id) \
+                          .update({"social_token": _token})
+                except Exception as _tok_err:
+                    log.warning(
+                        "cluster_lead_token_mint_failed",
+                        lead_id=lead_id,
+                        error=str(_tok_err),
+                        note="Non-blocking.",
+                    )
 
         return lead_id
 

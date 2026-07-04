@@ -451,6 +451,7 @@ def sanitize_query(query: str) -> str:
 # level; on expiry the cached value in core.clients is cleared and re-fetched.
 _serper_key_cache_local: tuple[str, float] | None = None
 _SERPER_KEY_TTL_S: float = 300.0  # 5 minutes
+_serper_key_cache_lock = threading.Lock()  # P2-RACE-1: guard concurrent check-and-set
 
 
 def _get_serper_api_key() -> str:
@@ -466,17 +467,28 @@ def _get_serper_api_key() -> str:
 
     global _serper_key_cache_local
     now = _time.monotonic()
+    # Fast path — no lock needed if cache is warm
     if _serper_key_cache_local is not None:
         cached_key, cached_ts = _serper_key_cache_local
         if now - cached_ts < _SERPER_KEY_TTL_S:
             return cached_key
-        # TTL expired — clear the upstream process-lifetime cache so
-        # get_serper_key() re-fetches from Secret Manager.
-        _cc._serper_key_cache = None
 
-    key = get_serper_key(SERPER_API_KEY_NAME)
-    _serper_key_cache_local = (key, now)
-    return key
+    # P2-RACE-1: Lock to prevent concurrent threads from racing on
+    # cache invalidation + Secret Manager re-fetch.
+    with _serper_key_cache_lock:
+        # Double-checked locking: re-test after acquiring lock
+        now = _time.monotonic()
+        if _serper_key_cache_local is not None:
+            cached_key, cached_ts = _serper_key_cache_local
+            if now - cached_ts < _SERPER_KEY_TTL_S:
+                return cached_key
+            # TTL expired — clear the upstream process-lifetime cache so
+            # get_serper_key() re-fetches from Secret Manager.
+            _cc._serper_key_cache = None
+
+        key = get_serper_key(SERPER_API_KEY_NAME)
+        _serper_key_cache_local = (key, now)
+        return key
 
 
 # ---------------------------------------------------------------------------
@@ -648,8 +660,8 @@ def _async_serper_audit(**kwargs) -> None:
     try:
         t = threading.Thread(target=_push_serper_audit, kwargs=kwargs, daemon=True)
         t.start()
-    except Exception:
-        pass  # never crash the scraping loop
+    except Exception as _audit_err:
+        log.debug("serper_audit_thread_error", error=str(_audit_err))
 
 
 # ---------------------------------------------------------------------------
@@ -873,8 +885,8 @@ def deep_context_serper_dork(
             resp = httpx.post(serper_url, headers=headers, json=body, timeout=12)
             if resp.status_code == 200:
                 return resp.json()
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("enrichment_fetch_failed", error=str(exc))
         return {}
 
     # V24.1.1 FIX (W3): Consumer vectors get lightweight enrichment instead of

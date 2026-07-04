@@ -30,6 +30,7 @@ log = get_logger("pipeline.gemini")
 # ---------------------------------------------------------------------------
 
 _GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+_FALLBACK_MODEL = "gemini-2.0-flash"
 
 
 def call_gemini_2_5(
@@ -63,42 +64,76 @@ def call_gemini_2_5(
         ResourceExhausted,
         ServiceUnavailable,
         DeadlineExceeded,
+        NotFound,
     )
 
-    model = GenerativeModel(
-        _GEMINI_MODEL,  # SF-014: configurable via GEMINI_MODEL env var
-        system_instruction=system_instruction,
-    )
-    config = (
-        GenerationConfig(
-            response_mime_type="application/json",
-            response_schema=response_schema,
+    def _build_and_invoke(model_name: str):
+        """Build a GenerativeModel for *model_name* and invoke it with retries."""
+        _model = GenerativeModel(
+            model_name,
+            system_instruction=system_instruction,
         )
-        if expect_json
-        else None
-    )
+        _config = (
+            GenerationConfig(
+                response_mime_type="application/json",
+                response_schema=response_schema,
+            )
+            if expect_json
+            else None
+        )
 
-    @retry(
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        stop=stop_after_attempt(5),
-        retry=retry_if_exception_type(
-            (ResourceExhausted, ServiceUnavailable, DeadlineExceeded, ConnectionError)
-        ),
-    )
-    def _invoke():
-        return model.generate_content(prompt, generation_config=config)
+        @retry(
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            stop=stop_after_attempt(5),
+            retry=retry_if_exception_type(
+                (ResourceExhausted, ServiceUnavailable, DeadlineExceeded, ConnectionError)
+            ),
+        )
+        def _invoke():
+            return _model.generate_content(prompt, generation_config=_config)
 
+        return _invoke()
+
+    def _safe_extract(response):
+        """P0-5: Guard response.text — return safe fallback on empty candidates."""
+        if not response.candidates:
+            log.warning(
+                "gemini_empty_candidates",
+                note="Gemini returned no candidates (possible safety block).",
+            )
+            if expect_json:
+                return {}
+            return ""
+        if expect_json:
+            return json.loads(response.text)
+        return response.text
+
+    # P2-EXT-2: Model fallback chain — primary → fallback on model-specific errors
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future   = executor.submit(_invoke)
+            future   = executor.submit(_build_and_invoke, _GEMINI_MODEL)
             response = future.result(timeout=GEMINI_TIMEOUT_S)
+        return _safe_extract(response)
     except concurrent.futures.TimeoutError:
         log.error("gemini_timeout", timeout_s=GEMINI_TIMEOUT_S)
         raise TimeoutError("Vertex AI timeout")
-
-    if expect_json:
-        return json.loads(response.text)
-    return response.text
+    except (NotFound, ResourceExhausted) as fallback_exc:
+        if _GEMINI_MODEL == _FALLBACK_MODEL:
+            raise  # Already on fallback; don't loop
+        log.warning(
+            "gemini_model_fallback",
+            primary_model=_GEMINI_MODEL,
+            fallback_model=_FALLBACK_MODEL,
+            error=str(fallback_exc),
+        )
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future   = executor.submit(_build_and_invoke, _FALLBACK_MODEL)
+                response = future.result(timeout=GEMINI_TIMEOUT_S)
+            return _safe_extract(response)
+        except concurrent.futures.TimeoutError:
+            log.error("gemini_fallback_timeout", timeout_s=GEMINI_TIMEOUT_S)
+            raise TimeoutError("Vertex AI fallback timeout")
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +189,15 @@ def check_topic_coherence(
             max_output_tokens=8,
         )
         response = model.generate_content(coherence_prompt, generation_config=config)
+        # P0-5: Guard response.text access — fail-open on empty candidates
+        if not response.candidates:
+            log.warning(
+                "topic_coherence_empty_candidates",
+                campaign_topic=campaign_topic,
+                title=title[:80],
+                note="Gemini returned no candidates. Failing open.",
+            )
+            return True
         answer = response.text.strip().upper()
         is_coherent = answer.startswith("YES")
 
@@ -754,7 +798,7 @@ DETECTED TECH STACK:
         # Old table {2: 1.3, else: 1.6} inflated base-6 leads → 9.6 (hot-lead alert).
         # New table caps at 1.3× for 4+ campaigns. A base-6 lead scores max 7.8 → 7,
         # staying below the WhatsApp trigger (>=8). Genuine 9+ leads still reach 10.
-        multiplier  = {1: 1.0, 2: 1.1, 3: 1.2}.get(len(matched), 1.3)
+        multiplier  = {1: 1.0, 2: 1.05, 3: 1.1}.get(len(matched), 1.15)
         final_score = int(min(base_score * multiplier, 10.0))
 
         return {

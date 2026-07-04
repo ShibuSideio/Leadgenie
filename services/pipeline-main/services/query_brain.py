@@ -321,7 +321,10 @@ def generate_smart_query(
                       "to prevent B2B pain point leakage.")
     else:
         try:
-            from google.cloud.firestore_v1.base_query import FieldFilter as _FF  # noqa: PLC0415
+            try:
+                from google.cloud.firestore_v1.base_query import FieldFilter as _FF  # noqa: PLC0415
+            except ImportError:
+                from google.cloud.firestore_v1 import FieldFilter as _FF  # noqa: PLC0415
             q = get_db().collection("leads").where(filter=_FF("tenant_id", "==", ctx.tenant_id))
             if ctx.campaign_id:
                 q = q.where(filter=_FF("campaign_id", "==", ctx.campaign_id))
@@ -1081,7 +1084,7 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
     historical_str = ""
     if ctx.pain_points:
         phrases_esc  = [f'"{p}"' for p in ctx.pain_points[:3]]
-        historical_str = " AND (" + " OR ".join(phrases_esc) + ")"
+        historical_str = " (" + " OR ".join(phrases_esc) + ")"
 
     smart_queries: list[str] = []
     kw_str = ", ".join(ctx.target_audience) if ctx.target_audience else ""

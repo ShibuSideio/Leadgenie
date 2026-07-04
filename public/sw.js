@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v25.4.0'; // V25.4.0: Frontend security hardening — XSS fixes, double-click guard
+const CACHE_NAME = 'sideio-v25.5.1'; // V25.5.1: XSS hardening, LQS badges, rejection reasons, infra lockdown
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=25.4.0',
-     '/styles.css?v=25.4.0',
+     '/app.js?v=25.5.1',
+     '/styles.css?v=25.5.1',
      '/manifest.json'
  ];
 

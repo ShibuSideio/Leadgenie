@@ -123,7 +123,12 @@ def get_l0_telemetry(uid, tenant_id, user_role):
     macro_totals["total_leads"] = sum(macro_totals.values())
 
     tenants = []
-    for user_doc in db.collection("users").stream():
+    # P3-13: Limit user stream to prevent timeout with many tenants.
+    _user_docs = list(db.collection("users").limit(100).stream())
+    if len(_user_docs) >= 100:
+        log.warning("l0_telemetry_user_limit_hit",
+                    note="User stream capped at 100. Some tenants may be missing from telemetry.")
+    for user_doc in _user_docs:
         u_data = user_doc.to_dict() or {}
         t_id   = u_data.get("tenant_id", user_doc.id)
         leads_count = db.collection("leads").where(filter=FieldFilter("tenant_id", "==", t_id)).count().get()[0][0].value
@@ -132,15 +137,22 @@ def get_l0_telemetry(uid, tenant_id, user_role):
             s.to_dict().get("consumed_credits", 0)
             for s in db.collection("users").document(t_id).collection("wallet_shards").stream()
         )
+        # P1-FIN-3: Use correct dual-accounting formula matching helpers.py.
+        _allocated = int(wallet.get("allocated_credits", 0) or 0)
+        _total_consumed = int(wallet.get("total_consumed", 0) or 0)
+        _legacy_consumed = int(wallet.get("consumed_credits", 0) or 0)
+        _consumed = max(_total_consumed, _legacy_consumed + shard_sum)
+        _reserved = int(wallet.get("reserved_credits", 0) or 0)
+        _balance = _allocated - _consumed - _reserved
         t_info = {
             "tenant_id":              t_id,
             "email":                  u_data.get("email", ""),
             "role":                   u_data.get("role", "admin"),
             "approval_status":        u_data.get("approval_status", "pending"),
             "is_active":              u_data.get("is_active", True),
-            "wallet_allocated":       wallet.get("allocated_credits", 0),
-            "wallet_consumed":        wallet.get("consumed_credits", 0),
-            "wallet_balance":         wallet.get("allocated_credits", 0) - wallet.get("consumed_credits", 0) - shard_sum,
+            "wallet_allocated":       _allocated,
+            "wallet_consumed":        _consumed,
+            "wallet_balance":         _balance,
             "total_leads_generated": leads_count,
         }
         tenants.append(t_info)

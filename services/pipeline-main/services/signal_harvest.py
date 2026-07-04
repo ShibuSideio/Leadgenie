@@ -33,6 +33,7 @@ import concurrent.futures
 import datetime
 import hashlib
 import os
+import re
 from typing import Optional, Any
 
 import httpx                           # type: ignore[import]
@@ -65,6 +66,75 @@ _SOCIAL_SNIPPET_DOMAINS = frozenset({
     "linkedin.com", "x.com", "twitter.com",
     "facebook.com", "instagram.com", "threads.net",
 })
+
+# ---------------------------------------------------------------------------
+# Staleness detection (P2-V25-1)
+# Replicated from produce.py._is_stale_content for signal-level filtering.
+# ---------------------------------------------------------------------------
+
+_STALE_DAYS_B2C = 14   # B2C: 2 weeks — forum posts older than this are cold leads
+_STALE_DAYS_B2B = 60   # B2B: 2 months — business discussions stay relevant longer
+
+
+def _is_stale_signal(signal, *, is_consumer: bool) -> bool:
+    """Return True if a signal's date metadata indicates stale content.
+
+    Checks ``signal.metadata["date"]`` and ``signal.metadata["published_at"]``
+    against age thresholds. Fails open (returns False) when date cannot be
+    determined.
+
+    Args:
+        signal:      A SignalItem instance.
+        is_consumer: True for B2C/D2C campaigns (shorter staleness window).
+
+    Returns:
+        True if the signal is older than the archetype threshold.
+    """
+    max_days = _STALE_DAYS_B2C if is_consumer else _STALE_DAYS_B2B
+    raw_date = (
+        signal.metadata.get("date")
+        or signal.metadata.get("published_at")
+        or ""
+    )
+    if isinstance(raw_date, datetime.datetime):
+        _dt = raw_date
+        if _dt.tzinfo is None:
+            _dt = _dt.replace(tzinfo=datetime.timezone.utc)
+        age_days = (datetime.datetime.now(datetime.timezone.utc) - _dt).days
+        return age_days > max_days
+    if not isinstance(raw_date, str) or not raw_date.strip():
+        return False  # No date info — fail-open
+
+    raw_date = raw_date.strip()
+
+    # Try relative date parsing ("3 days ago", "2 months ago")
+    _rel_match = re.match(
+        r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago",
+        raw_date, re.IGNORECASE,
+    )
+    if _rel_match:
+        _count = int(_rel_match.group(1))
+        _unit = _rel_match.group(2).lower()
+        _multipliers = {
+            "second": 0, "minute": 0, "hour": 0,
+            "day": 1, "week": 7, "month": 30, "year": 365,
+        }
+        age_days = _count * _multipliers.get(_unit, 0)
+        return age_days > max_days
+
+    # Try ISO-8601 / common date formats
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%b %d, %Y", "%B %d, %Y"):
+        try:
+            parsed = datetime.datetime.strptime(raw_date[:20], fmt)
+            age = (
+                datetime.datetime.now(datetime.timezone.utc)
+                - parsed.replace(tzinfo=datetime.timezone.utc)
+            ).days
+            return age > max_days
+        except (ValueError, TypeError):
+            continue
+
+    return False  # Unparseable — fail-open
 
 
 # ---------------------------------------------------------------------------
@@ -158,29 +228,45 @@ def harvest_signals(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=_SOURCE_CONCURRENCY) as pool:
         future_to_source = {pool.submit(src.discover): src for src in routing.sources}
-        for future in concurrent.futures.as_completed(future_to_source, timeout=90):
-            src = future_to_source[future]
-            try:
-                batch = future.result()
-                all_signals.extend(batch)
-                log.info(
-                    "signal_harvest_source_done",
-                    source_type=src.source_type,
-                    signals=len(batch),
-                )
-            except concurrent.futures.TimeoutError:
-                error_count += 1
-                log.warning(
-                    "signal_harvest_source_timeout",
-                    source_type=src.source_type,
-                )
-            except Exception as exc:
-                error_count += 1
-                log.warning(
-                    "signal_harvest_source_error",
-                    source_type=src.source_type,
-                    error=str(exc),
-                )
+        # P1-CRASH-1: Wrap as_completed in try/except TimeoutError to process
+        # whatever completed before the 90s ceiling instead of crashing.
+        try:
+            for future in concurrent.futures.as_completed(future_to_source, timeout=90):
+                src = future_to_source[future]
+                try:
+                    batch = future.result()
+                    all_signals.extend(batch)
+                    log.info(
+                        "signal_harvest_source_done",
+                        source_type=src.source_type,
+                        signals=len(batch),
+                    )
+                except concurrent.futures.TimeoutError:
+                    error_count += 1
+                    log.warning(
+                        "signal_harvest_source_timeout",
+                        source_type=src.source_type,
+                    )
+                except Exception as exc:
+                    error_count += 1
+                    log.warning(
+                        "signal_harvest_source_error",
+                        source_type=src.source_type,
+                        error=str(exc),
+                    )
+        except concurrent.futures.TimeoutError:
+            _timed_out_sources = [
+                src.source_type for fut, src in future_to_source.items()
+                if not fut.done()
+            ]
+            log.warning(
+                "signal_harvest_source_pool_timeout",
+                campaign_id=campaign_id,
+                timed_out_sources=_timed_out_sources,
+                completed_signals=len(all_signals),
+                note="Processing whatever sources completed within 90s.",
+            )
+            error_count += len(_timed_out_sources)
 
     metrics["discovered"] = len(all_signals)
     metrics["errors"]     = error_count
@@ -240,6 +326,39 @@ def harvest_signals(
 
     # Cap signals to prevent runaway cost
     fresh_signals = fresh_signals[:_MAX_SIGNALS_PER_RUN]
+
+    # ------------------------------------------------------------------ #
+    # Stage 4.1 — Staleness filtering (P2-V25-1)                          #
+    # Drop signals whose date metadata indicates content older than the    #
+    # archetype threshold (B2C=14d, B2B=60d). Fail-open: no date → keep.  #
+    # ------------------------------------------------------------------ #
+    _is_consumer = archetype in ("B2C", "D2C")
+    _pre_stale_count = len(fresh_signals)
+    fresh_signals = [
+        s for s in fresh_signals
+        if not _is_stale_signal(s, is_consumer=_is_consumer)
+    ]
+    _stale_dropped = _pre_stale_count - len(fresh_signals)
+    if _stale_dropped > 0:
+        log.info(
+            "signal_harvest_staleness_filter",
+            campaign_id=campaign_id,
+            dropped=_stale_dropped,
+            remaining=len(fresh_signals),
+        )
+    metrics["stale_dropped"] = _stale_dropped
+
+    # P2-V25-2: Source exhaustion warning — zero actionable signals after
+    # dedup + staleness filtering means all sources returned stale/duplicate content.
+    if not fresh_signals:
+        log.warning(
+            "signal_harvest_source_exhaustion",
+            campaign_id=campaign_id,
+            archetype=archetype,
+            total_discovered=metrics["discovered"],
+            note="Zero fresh signals after dedup + staleness filter. All sources exhausted.",
+        )
+        return metrics
 
     # ------------------------------------------------------------------ #
     # Stage 4.5 — Social snippet injection (V25.2.0)                      #
@@ -332,18 +451,31 @@ def harvest_signals(
             ): signal
             for signal in rich_signals
         }
-        for future in concurrent.futures.as_completed(future_to_signal, timeout=120):
-            signal = future_to_signal[future]
-            try:
-                score = future.result()
-                metrics["scored"] += 1
-                scored_results.append((signal, score))
-            except Exception as exc:
-                log.warning(
-                    "signal_harvest_score_error",
-                    url=signal.url[:80],
-                    error=str(exc),
-                )
+        # P1-CRASH-1: Wrap as_completed in try/except TimeoutError
+        try:
+            for future in concurrent.futures.as_completed(future_to_signal, timeout=120):
+                signal = future_to_signal[future]
+                try:
+                    score = future.result()
+                    metrics["scored"] += 1
+                    scored_results.append((signal, score))
+                except Exception as exc:
+                    log.warning(
+                        "signal_harvest_score_error",
+                        url=signal.url[:80],
+                        error=str(exc),
+                    )
+        except concurrent.futures.TimeoutError:
+            _timed_out_count = sum(
+                1 for fut in future_to_signal if not fut.done()
+            )
+            log.warning(
+                "signal_harvest_scoring_pool_timeout",
+                campaign_id=campaign_id,
+                scored_before_timeout=metrics["scored"],
+                timed_out=_timed_out_count,
+                note="Processing scores completed within 120s ceiling.",
+            )
 
     # ------------------------------------------------------------------ #
     # Stage 7 — Write HIGH/MEDIUM to Firestore                            #
@@ -757,7 +889,7 @@ def _write_to_firestore(
         if tier not in ("HIGH", "MEDIUM"):
             continue
 
-        now_ts = datetime.datetime.utcnow()
+        now_ts = datetime.datetime.now(datetime.timezone.utc)
 
         # 3A: Compute LQS composite score before writing
         lqs = _compute_lqs(signal, score)
@@ -866,8 +998,8 @@ def _write_to_firestore(
             lead_doc = {
                 "url":              signal.url,
                 "status":           "new",
-                "score":            8,
-                "normalized_score": 80,
+                "score":            min(max(int(score.get("raw_score", 8)), 1), 10),
+                "normalized_score": min(max(int(score.get("raw_score", 8)), 1), 10) * 10,
                 "pain_point":       _pain_summary,
                 "intent_signal":    _buyer_quote,
                 "decision_maker":   {"name": _reviewer_name},
@@ -876,7 +1008,7 @@ def _write_to_firestore(
                 "is_cluster_lead":  False,
                 "tenant_id":        tenant_id,
                 "campaign_id":      campaign_id,
-                "matched_campaigns": [{"campaign_id": campaign_id, "raw_score": 8}],
+                "matched_campaigns": [{"campaign_id": campaign_id, "raw_score": min(max(int(score.get("raw_score", 8)), 1), 10)}],
                 "contact_endpoints": [{"platform": "google_maps", "uri": signal.url}],
                 "dm":               _dm_value,
                 "icebreaker_angle": _pain_summary,
@@ -899,7 +1031,7 @@ def _write_to_firestore(
 
             try:
                 lead_ref = db.collection("leads").document(lead_id)
-                lead_ref.create(lead_doc)
+                lead_ref.set(lead_doc)
                 direct_leads_count += 1
 
                 # FIN-01 FIX: Settle credit after successful direct lead creation

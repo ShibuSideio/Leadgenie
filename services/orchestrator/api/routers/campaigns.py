@@ -664,10 +664,22 @@ def run_campaign(uid, tenant_id, user_role, campaign_id):
         promoted = _pop_from_predictive_cache(tenant_id, db, autonomous_target)
         deficit  = autonomous_target - len(promoted)
         if deficit > 0:
-            if role != "super_admin" and reserve_credits(tenant_id, deficit):
+            deficit_reserve_ok = (role == "super_admin") or reserve_credits(tenant_id, deficit)
+            if deficit_reserve_ok:
                 cartographer_target += deficit
                 cartographer_cost   += deficit
                 audit_trail.append(f"Cache deficit={deficit}: reallocated to Cartographer.")
+            else:
+                # P1-FIN-4: Deficit reservation failed — refund the original
+                # cartographer_cost to prevent permanently leaked credits.
+                if role != "super_admin" and cartographer_cost > 0:
+                    release_reservation(tenant_id, cartographer_cost)
+                audit_trail.append(f"Cache deficit={deficit}: reserve failed, {cartographer_cost} credits refunded.")
+                return jsonify({
+                    "error": "Insufficient credits for cache deficit reallocation.",
+                    "code": "insufficient_credits",
+                    "audit_trail": audit_trail,
+                }), 402
 
     # Explore: enqueue Cartographer Cloud Task
     produce_dispatched = 0

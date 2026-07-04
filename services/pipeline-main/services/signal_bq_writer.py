@@ -100,6 +100,36 @@ def _write_batch(scored_results: list[tuple[SignalItem, dict]], campaign: dict) 
                 error_count=len(errors),
                 first_error=str(errors[0])[:200],
             )
+            # P2-EXT-3: Retry failed rows once.
+            # BQ insert_rows_json returns a list of dicts; each dict has an
+            # 'index' key indicating which row failed and an 'errors' key
+            # with the failure details.
+            failed_indices: set[int] = set()
+            for err_entry in errors:
+                if isinstance(err_entry, dict) and "index" in err_entry:
+                    failed_indices.add(err_entry["index"])
+            if failed_indices:
+                retry_rows = [rows[i] for i in sorted(failed_indices) if i < len(rows)]
+                if retry_rows:
+                    log.info(
+                        "signal_bq_writer_retrying",
+                        retry_count=len(retry_rows),
+                        table=_TABLE_REF,
+                    )
+                    retry_errors = client.insert_rows_json(_TABLE_REF, retry_rows)
+                    if retry_errors:
+                        log.warning(
+                            "signal_bq_writer_retry_failed",
+                            table=_TABLE_REF,
+                            retry_error_count=len(retry_errors),
+                            first_retry_error=str(retry_errors[0])[:200],
+                        )
+                    else:
+                        log.info(
+                            "signal_bq_writer_retry_success",
+                            recovered_rows=len(retry_rows),
+                            table=_TABLE_REF,
+                        )
         else:
             log.info(
                 "signal_bq_writer_complete",

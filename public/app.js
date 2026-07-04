@@ -258,7 +258,7 @@ function setupCustomMultiselect(selectId, containerId, triggerId, dropdownId) {
             triggerEl.querySelector('.trigger-label').textContent = displayVal;
             
             // Set value on the hidden select
-            selectEl.innerHTML = selectVal ? `<option value="${selectVal}">${selectVal}</option>` : '<option value="">📍 Region</option>';
+            selectEl.innerHTML = selectVal ? `<option value="${_escapeHTML(selectVal)}">${_escapeHTML(selectVal)}</option>` : '<option value="">📍 Region</option>';
             selectEl.value = selectVal;
 
             if (typeof selectEl.onchange === 'function') {
@@ -327,7 +327,7 @@ async function initGeoCascade(existingGeoHierarchy, existingGl, existingLocation
     // Populate continents
     continentEl.innerHTML = '<option value="">🌍 Continent</option>';
     data.continents.forEach(c => {
-        continentEl.innerHTML += `<option value="${c.name}">${c.name}</option>`;
+        continentEl.innerHTML += `<option value="${_escapeHTML(c.name)}">${_escapeHTML(c.name)}</option>`;
     });
 
     _resetSelect(countryEl, '🏳️ Country');
@@ -343,7 +343,7 @@ async function initGeoCascade(existingGeoHierarchy, existingGl, existingLocation
         if (!continent) { _updateGeoPreview(); return; }
         countryEl.disabled = false;
         continent.countries.forEach(co => {
-            countryEl.innerHTML += `<option value="${co.name}">${co.name}</option>`;
+            countryEl.innerHTML += `<option value="${_escapeHTML(co.name)}">${_escapeHTML(co.name)}</option>`;
         });
         _updateGeoPreview();
     };
@@ -365,7 +365,7 @@ async function initGeoCascade(existingGeoHierarchy, existingGl, existingLocation
             container.populateRegions(country.regions || [], regionEl._targetSelectedRegions || []);
         } else {
             country.regions.forEach(r => {
-                regionEl.innerHTML += `<option value="${r}">${r}</option>`;
+                regionEl.innerHTML += `<option value="${_escapeHTML(r)}">${_escapeHTML(r)}</option>`;
             });
             _updateGeoPreview();
         }
@@ -457,7 +457,7 @@ async function initGeoCascadeFor(prefix, existingGeoHierarchy, existingGl, exist
     // Populate continents
     continentEl.innerHTML = '<option value="">🌍 Continent</option>';
     data.continents.forEach(c => {
-        continentEl.innerHTML += `<option value="${c.name}">${c.name}</option>`;
+        continentEl.innerHTML += `<option value="${_escapeHTML(c.name)}">${_escapeHTML(c.name)}</option>`;
     });
     _resetSelect(countryEl, '🏳️ Country');
     _resetSelect(regionEl,  '📍 Region');
@@ -471,7 +471,7 @@ async function initGeoCascadeFor(prefix, existingGeoHierarchy, existingGl, exist
         if (!continent) { updatePreview(); return; }
         countryEl.disabled = false;
         continent.countries.forEach(co => {
-            countryEl.innerHTML += `<option value="${co.name}">${co.name}</option>`;
+            countryEl.innerHTML += `<option value="${_escapeHTML(co.name)}">${_escapeHTML(co.name)}</option>`;
         });
         updatePreview();
     };
@@ -493,7 +493,7 @@ async function initGeoCascadeFor(prefix, existingGeoHierarchy, existingGl, exist
             container.populateRegions(country.regions || [], regionEl._targetSelectedRegions || []);
         } else {
             country.regions.forEach(r => {
-                regionEl.innerHTML += `<option value="${r}">${r}</option>`;
+                regionEl.innerHTML += `<option value="${_escapeHTML(r)}">${_escapeHTML(r)}</option>`;
             });
             updatePreview();
         }
@@ -979,7 +979,7 @@ async function loadCampaigns() {
 
         campaigns.forEach(camp => {
             if (camp.status === 'active') activeCount++;
-            filterOpts += `<option value="${camp.id}">${camp.name}</option>`;
+            filterOpts += `<option value="${_escapeHTML(camp.id)}">${_escapeHTML(camp.name)}</option>`;
         });
 
         window.activeCampaignCount = activeCount;
@@ -1031,11 +1031,11 @@ function renderCampaignsTable(campaigns, activeCount) {
         tableRows += `
             <tr style="border-bottom:1px solid var(--glass-border);">
                 <td style="padding:12px;">
-                    <strong>${camp.name || 'Untitled'}</strong>
+                    <strong>${_escapeHTML(camp.name || 'Untitled')}</strong>
                     ${geoWarn}
                 </td>
                 <td style="padding:12px;">
-                    <span style="color:var(--text-muted);font-size:0.85rem;">${kwDisplay}</span>
+                    <span style="color:var(--text-muted);font-size:0.85rem;">${_escapeHTML(kwDisplay)}</span>
                 </td>
                 <td style="padding:12px;">${statusBadge}</td>
                 <td style="padding:12px;text-align:right;white-space:nowrap;">
@@ -1290,8 +1290,8 @@ window.viewLeadTimeline = function(eventsJson) {
         } else {
             feed.innerHTML = events.map(e => `
                 <div style="padding:12px;border-left:3px solid var(--primary);margin-bottom:12px;background:white;border-radius:0 4px 4px 0;box-shadow:0 1px 2px rgba(0,0,0,0.05);">
-                    <small style="color:var(--text-muted);display:block;margin-bottom:4px;">${e.date}</small>
-                    <strong style="color:var(--text-main);font-size:0.95rem;">${e.action}</strong>
+                    <small style="color:var(--text-muted);display:block;margin-bottom:4px;">${_escapeHTML(e.date)}</small>
+                    <strong style="color:var(--text-main);font-size:0.95rem;">${_escapeHTML(e.action)}</strong>
                 </div>`).join('');
         }
         document.getElementById('audit-log-modal').style.display = 'flex';
@@ -1383,14 +1383,15 @@ window.openRejectionModal = function(docId) {
 };
 
 window.submitRejection = async function(reason) {
-    const VALID = ['not_b2b', 'wrong_industry', 'too_small', 'competitor', 'bad_data', 'author'];
+    const VALID = ['wrong_topic', 'wrong_geography', 'news_article', 'too_old', 'cant_contact', 'competitor', 'other'];
     if (!VALID.includes(reason)) return;
     const docId = document.getElementById('rejection-lead-id').value;
     if (!docId) return;
     closeModal('rejection-modal');
-    const labels = { not_b2b: 'Not B2B', wrong_industry: 'Wrong Industry',
-                     too_small: 'Too Small', competitor: 'Competitor', bad_data: 'Bad Data',
-                     author: 'Author / Non-Prospect' };
+    const labels = { wrong_topic: 'Wrong Topic', wrong_geography: 'Wrong Geography',
+                     news_article: 'News Article', too_old: 'Too Old',
+                     cant_contact: "Can't Contact", competitor: 'Competitor',
+                     other: 'Other' };
     try {
         const user = firebase.auth().currentUser;
         if (!user) return;
@@ -2253,7 +2254,7 @@ window.fetchGlobalOperations = async function() {
                     const flag = r.region ? r.region.slice(0,2).toUpperCase() : '';
                     return `<div style="margin-bottom:10px;">
                         <div style="display:flex; justify-content:space-between; font-size:0.82rem; margin-bottom:4px;">
-                            <span style="font-weight:500;">${r.region}</span>
+                            <span style="font-weight:500;">${_escapeHTML(r.region)}</span>
                             <span style="color:var(--text-muted);">${r.active_campaigns} campaigns</span>
                         </div>
                         <div style="height:10px; background:#f1f5f9; border-radius:6px; overflow:hidden;">
@@ -2280,7 +2281,7 @@ window.fetchGlobalOperations = async function() {
                     return `<div style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid #f1f5f9;">
                         <div style="font-size:0.72rem; font-weight:700; color:var(--text-muted); width:18px; text-align:right;">${i+1}</div>
                         <div style="flex:1; min-width:0;">
-                            <div style="font-size:0.83rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${dm.domain}</div>
+                            <div style="font-size:0.83rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${_escapeHTML(dm.domain)}</div>
                             <div style="height:4px; background:#f1f5f9; border-radius:4px; margin-top:4px; overflow:hidden;">
                                 <div style="height:100%; width:${barPct}%; background:linear-gradient(90deg,#6366f1,#a21caf); border-radius:4px;"></div>
                             </div>
@@ -2323,11 +2324,13 @@ window.fetchGlobalOperations = async function() {
 // L0 SHADOW LEDGER — Rejected Leads Table
 // =============================================================================
 const REJECTION_LABELS = {
-    not_b2b: '&#128683; Not B2B',
-    wrong_industry: '&#127981; Wrong Industry',
-    too_small: '&#128204; Too Small',
+    wrong_topic: '&#128683; Wrong Topic',
+    wrong_geography: '&#127758; Wrong Geography',
+    news_article: '&#128240; News Article',
+    too_old: '&#9203; Too Old',
+    cant_contact: '&#128222; Can&#39;t Contact',
     competitor: '&#9876;&#65039; Competitor',
-    bad_data: '&#128465;&#65039; Bad Data'
+    other: '&#128300; Other'
 };
 
 window.fetchShadowLedger = async function() {
@@ -3815,6 +3818,13 @@ window.createLeadCardV2 = function(docId, lead) {
     if (lead.trend_mapped) badges.push({t:'Trend Mapped',bg:'#fff1f2',c:'#be123c',b:'#fecdd3'});
     else if (lead.matched_campaign_ids && lead.matched_campaign_ids.length > 1) {
         badges.push({t:'Cross-Pollinated',bg:'#eff6ff',c:'#1d4ed8',b:'#bfdbfe'});
+    }
+    var lqs = lead.lqs_score;
+    if (lqs !== undefined && lqs !== null) {
+        var lqsColor = lqs >= 0.7 ? '#22c55e' : lqs >= 0.4 ? '#f59e0b' : '#ef4444';
+        var lqsBg    = lqs >= 0.7 ? '#f0fdf4' : lqs >= 0.4 ? '#fffbeb' : '#fef2f2';
+        var lqsBorder = lqs >= 0.7 ? '#bbf7d0' : lqs >= 0.4 ? '#fde68a' : '#fecaca';
+        badges.push({t:'LQS ' + (lqs * 100).toFixed(0) + '%', bg:lqsBg, c:lqsColor, b:lqsBorder});
     }
     var bHTML = badges.map(function(x) {
         return '<span class="lc-badge" style="background:'+x.bg+';color:'+x.c+';border-color:'+x.b+'">'+x.t+'</span>';

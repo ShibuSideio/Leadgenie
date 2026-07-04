@@ -59,7 +59,7 @@ def build_enriched_context(campaign: dict) -> str:
             "child_campaign_override", "shadow_learner",
         }
         lowered = val.lower()
-        return len(val) < 10 or any(j in lowered for j in junk_tokens)
+        return len(val) < 3 or any(j in lowered for j in junk_tokens)
 
     parts: list[str] = []
     seen_content: set[str] = set()

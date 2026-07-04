@@ -3,6 +3,12 @@ Orchestrator — Shadow Tracker intelligence service.
 
 Extracted from the monolithic main.py N-gram accumulation block.
 
+.. deprecated:: V24.6
+   This module is DEPRECATED. Use ``core.helpers._async_shadow_track`` and
+   ``core.helpers._do_shadow_track`` instead. All public functions in this
+   module now delegate to their ``core.helpers`` counterparts and will be
+   removed in a future release.
+
 Responsibilities:
   1. ``_extract_ngrams()``       — Pure Python NLP, zero external dependencies.
   2. ``_do_shadow_track()``      — Synchronous BigQuery MERGE upsert.
@@ -13,6 +19,15 @@ Design contract (V22 TSD §25.1.2, Design Invariant #16):
   * The HTTP 200 on lead approval MUST never wait for BigQuery.
   * BQ failures MUST NOT propagate to the response path.
 """
+import warnings
+
+warnings.warn(
+    "services.intelligence.shadow_tracker is deprecated. "
+    "Use core.helpers._async_shadow_track instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 from __future__ import annotations
 
 import re
@@ -22,6 +37,7 @@ from collections import Counter
 from typing import Optional
 
 from core.logging import get_logger
+from core.helpers import _async_shadow_track as _helpers_async_shadow_track  # type: ignore[import]
 
 log = get_logger(__name__)
 
@@ -83,6 +99,9 @@ def extract_ngrams(
 ) -> list[str]:
     """Extract top-k most frequent N-grams from *text*.
 
+    .. deprecated:: V24.6
+       Use ``core.helpers`` equivalent. This wrapper delegates and will be removed.
+
     Filters stop-words before creating N-gram windows to surface
     meaningful buyer-syntax phrases (e.g. ``"struggling with churn"``).
 
@@ -95,6 +114,7 @@ def extract_ngrams(
     Returns:
         List of lowercase N-gram strings ordered by frequency.
     """
+    log.warning("DEPRECATED: Use core.helpers._async_shadow_track instead")
     if not text:
         return []
     tokens = re.findall(r"\b[a-z]{3,}\b", text.lower())
@@ -116,6 +136,9 @@ def _do_shadow_track(
 ) -> None:
     """Synchronous BQ MERGE upsert for Intent_Keywords.
 
+    .. deprecated:: V24.6
+       Delegates to ``core.helpers._do_shadow_track``. Will be removed.
+
     Runs exclusively inside a daemon thread.  Never raises — all failures
     are logged at WARNING and swallowed (Design Invariant #16).
 
@@ -125,6 +148,7 @@ def _do_shadow_track(
         tenant_id:        Tenant UID.
         project_id:       GCP project ID for BigQuery.
     """
+    log.warning("DEPRECATED: Use core.helpers._async_shadow_track instead")
     try:
         from google.cloud import bigquery as _bq_lib
         # V24.2 (L8-2): Scrub PII before N-gram extraction and BQ write.
@@ -205,6 +229,9 @@ def async_shadow_track(
 ) -> None:
     """Spawn a daemon thread to upsert N-grams to Intent_Keywords.
 
+    .. deprecated:: V24.6
+       Delegates to ``core.helpers._async_shadow_track``. Will be removed.
+
     Fire-and-forget — never raises.  The HTTP 200 to the UI is never delayed.
 
     Args:
@@ -213,12 +240,9 @@ def async_shadow_track(
         tenant_id:        Tenant UID.
         project_id:       GCP project ID.
     """
+    log.warning("DEPRECATED: Use core.helpers._async_shadow_track instead")
     try:
-        t = threading.Thread(
-            target=_do_shadow_track,
-            args=(persona_category, pain_point, tenant_id, project_id, event_type),
-            daemon=True,
-        )
-        t.start()
+        # Delegate to the canonical implementation in core.helpers
+        _helpers_async_shadow_track(persona_category, pain_point, tenant_id)
     except Exception as exc:
         log.warning("shadow_tracker_thread_spawn_failed", error=str(exc))

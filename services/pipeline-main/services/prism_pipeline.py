@@ -208,16 +208,12 @@ class WalledGardenHook:
         return [q1, q2, q3]
 
     def _run_serper(self, query: str) -> dict:
-        headers = {"X-API-KEY": self._serper_key, "Content-Type": "application/json"}
+        """Execute a Serper search via the centralized service (circuit breaker + audit)."""
         try:
-            resp = httpx.post(
-                "https://google.serper.dev/search",
-                headers=headers,
-                json={"q": query, "num": 10},
-                timeout=6.0,
-            )
-            if resp.status_code == 200:
-                return resp.json()
+            from services.serper_service import search_serper  # type: ignore[import]
+            results = search_serper(query)
+            # search_serper returns organic list; wrap in dict for _extract_snippets
+            return {"organic": results} if results else {}
         except Exception as e:
             log.warning("walled_garden_serper_failed", query=query[:60], error=str(e))
         return {}
@@ -263,6 +259,7 @@ class WalledGardenHook:
                         "phones":       c.get("phones", []),
                         "mode":         "WalledGarden",
                         "fallback_used": False,
+                        "company_name": "",
                     }
                 elif cached_text:
                     log.info("walled_garden_cache_thin_skip",
@@ -331,6 +328,7 @@ class WalledGardenHook:
             "phones":       [],
             "mode":         "WalledGarden",
             "fallback_used": False,
+            "company_name": "",
         }
 
 
@@ -512,17 +510,11 @@ class B2B2CIntermediaryFinder:
         self._serper_key = serper_key
 
     def _serper_search(self, query: str, gl: str | None = None) -> list[dict]:
-        headers = {"X-API-KEY": self._serper_key, "Content-Type": "application/json"}
-        payload: dict = {"q": query, "num": 10}
-        if gl:
-            payload["gl"] = gl
+        """Execute a Serper search via the centralized service (circuit breaker + audit)."""
         try:
-            resp = httpx.post(
-                "https://google.serper.dev/search",
-                headers=headers, json=payload, timeout=6.0,
-            )
-            if resp.status_code == 200:
-                return resp.json().get("organic", [])
+            from services.serper_service import search_serper  # type: ignore[import]
+            results = search_serper(query, gl=gl)
+            return results if results else []
         except Exception as e:
             log.warning("b2b2c_serper_failed", query=query[:60], error=str(e))
         return []
@@ -607,6 +599,7 @@ class B2B2CIntermediaryFinder:
             "mode":               "B2B2C",
             "fallback_used":      False,
             "persona_match_score": 5,
+            "company_name":       "",
         }
 
 

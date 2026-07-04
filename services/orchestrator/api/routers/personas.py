@@ -136,8 +136,10 @@ def update_persona(uid, tenant_id, user_role, persona_id):
         )
         wiped = 0
         for camp_doc in linked_camps:
+            # P1-BIZ-2: Use correct tenant-scoped subcollection path
             cache_docs = list(
-                db.collection("predictive_cache")
+                db.collection("users").document(tenant_id)
+                  .collection("predictive_cache")
                   .where(filter=FieldFilter("campaign_id", "==", camp_doc.id))
                   .limit(200).stream()
             )

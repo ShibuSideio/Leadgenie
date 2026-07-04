@@ -17,6 +17,8 @@ Design contract (V22 TSD §25.2.1, amended 2026-06-20):
 from __future__ import annotations
 
 import concurrent.futures
+import re
+import threading
 import time
 from typing import Optional
 
@@ -38,12 +40,14 @@ _CACHE_TTL_S: float = 600.0  # 10 minutes
 # V24.3 (L8-1): Cache key is now (tenant_id, sourcing_vector) to prevent
 # B2B rejection signals from polluting B2C/D2C search quality.
 _cache: dict[str, tuple[float, list[str], list[str]]] = {}
+_cache_lock = threading.Lock()  # P2-RACE-2: guard concurrent cache access
 
 
 def _cache_get(tenant_id: str, sourcing_vector: str = "B2B") -> Optional[tuple[list[str], list[str]]]:
     """Return cached (domains, entities) if TTL has not expired, else None."""
     cache_key = f"{tenant_id}::{sourcing_vector}"
-    entry = _cache.get(cache_key)
+    with _cache_lock:
+        entry = _cache.get(cache_key)
     if entry is None:
         return None
     ts, domains, entities = entry
@@ -55,7 +59,8 @@ def _cache_get(tenant_id: str, sourcing_vector: str = "B2B") -> Optional[tuple[l
 def _cache_get_stale(tenant_id: str, sourcing_vector: str = "B2B") -> Optional[tuple[list[str], list[str]]]:
     """Return cached result even if expired (last-known-good fallback)."""
     cache_key = f"{tenant_id}::{sourcing_vector}"
-    entry = _cache.get(cache_key)
+    with _cache_lock:
+        entry = _cache.get(cache_key)
     if entry is None:
         return None
     _, domains, entities = entry
@@ -65,11 +70,12 @@ def _cache_get_stale(tenant_id: str, sourcing_vector: str = "B2B") -> Optional[t
 def _cache_put(tenant_id: str, sourcing_vector: str, domains: list[str], entities: list[str]) -> None:
     """Store result in cache with current timestamp."""
     cache_key = f"{tenant_id}::{sourcing_vector}"
-    _cache[cache_key] = (time.monotonic(), domains, entities)
-    # Evict oldest entries if cache grows beyond 200 keys
-    if len(_cache) > 200:
-        oldest_key = min(_cache, key=lambda k: _cache[k][0])
-        _cache.pop(oldest_key, None)
+    with _cache_lock:
+        _cache[cache_key] = (time.monotonic(), domains, entities)
+        # Evict oldest entries if cache grows beyond 200 keys
+        if len(_cache) > 200:
+            oldest_key = min(_cache, key=lambda k: _cache[k][0])
+            _cache.pop(oldest_key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +124,14 @@ def fetch_neg_shield(tenant_id: str, sourcing_vector: str = "B2B") -> tuple[list
         # INT-02: 90-day TTL — exclude expired neg signals so domains
         # don't stay suppressed forever. Respects explicit expires_at if
         # set, otherwise falls back to 90-day window from timestamp.
+        # P3-5: BQ does not support parameterized table names (only column values).
+        # Validate PROJECT_ID against the GCP project ID regex to prevent injection.
+        _PROJECT_ID_PATTERN = re.compile(r'^[a-z][a-z0-9-]{4,28}[a-z0-9]$')
+        if not _PROJECT_ID_PATTERN.match(PROJECT_ID or ""):
+            raise ValueError(
+                f"PROJECT_ID '{PROJECT_ID}' does not match GCP project ID format. "
+                "Refusing to interpolate into BQ query to prevent injection."
+            )
         query = """
             SELECT root_domain, entity_name
             FROM `{project}.swarm_analytics.Negative_Signals`
