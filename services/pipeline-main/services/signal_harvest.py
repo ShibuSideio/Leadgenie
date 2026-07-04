@@ -44,7 +44,7 @@ from core.clients import get_db                                              # t
 from services.context_builder import build_enriched_context                 # type: ignore[import]
 from services.source_router import SourceRouter, RoutingConfig               # type: ignore[import]
 from services.signal_sources.base import SignalItem                          # type: ignore[import]
-from services.gemini_service import inline_score_signal                      # type: ignore[import]
+from services.gemini_service import inline_score_signal, check_topic_coherence  # type: ignore[import]
 
 log = get_logger("pipeline.signal_harvest")
 
@@ -265,6 +265,48 @@ def harvest_signals(
         )
     else:
         rich_signals = fresh_signals
+
+    # ------------------------------------------------------------------ #
+    # Stage 5.5 — Topic coherence gate (V25.5.0)                           #
+    # Cheap Gemini Flash YES/NO check: "Is this content PRIMARILY about    #
+    # the campaign topic?" Rejects signals that only mention the topic     #
+    # incidentally (e.g., geopolitics thread mentioning "Oman" in passing).#
+    # Runs BEFORE the expensive full scoring to save Gemini credits.       #
+    # ------------------------------------------------------------------ #
+    _campaign_topic = (
+        campaign.get("bio", "")[:200]
+        or " ".join(campaign.get("keywords", [])[:5])
+    )
+    if _campaign_topic:
+        coherent_signals = []
+        _coherence_rejected = 0
+        for sig in rich_signals:
+            _sig_title = sig.title or ""
+            _sig_snippet = (sig.combined_text(max_chars=300) or "")[:300]
+            if check_topic_coherence(
+                title=_sig_title,
+                snippet=_sig_snippet,
+                campaign_topic=_campaign_topic,
+            ):
+                coherent_signals.append(sig)
+            else:
+                _coherence_rejected += 1
+                log.info(
+                    "signal_harvest_coherence_rejected",
+                    url=sig.url[:80],
+                    title=_sig_title[:80],
+                    campaign_id=campaign_id,
+                )
+        if _coherence_rejected > 0:
+            log.info(
+                "signal_harvest_coherence_gate_summary",
+                campaign_id=campaign_id,
+                input_count=len(rich_signals),
+                passed=len(coherent_signals),
+                rejected=_coherence_rejected,
+            )
+        metrics["coherence_rejected"] = _coherence_rejected
+        rich_signals = coherent_signals
 
     # ------------------------------------------------------------------ #
     # Stage 6 — Gemini inline scoring (parallel)                          #

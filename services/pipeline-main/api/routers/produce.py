@@ -20,6 +20,8 @@ Auth:
 from __future__ import annotations
 
 import hashlib
+import re
+from datetime import datetime, timezone, timedelta
 
 from google.cloud import firestore  # type: ignore[import]
 from google.cloud.firestore_v1.base_query import FieldFilter  # type: ignore[import]
@@ -28,6 +30,56 @@ from flask import Blueprint, jsonify, request
 from core.logging import get_logger    # type: ignore[import]
 from core.clients import get_db        # type: ignore[import]
 from middleware.oidc import require_tasks_oidc  # type: ignore[import]
+
+
+# ---------------------------------------------------------------------------
+# V25.5.0: Content age filter — reject stale Reddit/forum posts
+# ---------------------------------------------------------------------------
+# Reddit URL slugs encode post date via the base36 ID. However, Serper results
+# include a `date` field (ISO-8601 or relative like "2 months ago") that we can
+# parse. For non-Reddit forums, we check snippet text for date indicators.
+
+_STALE_DAYS_B2C = 14    # B2C: 2 weeks — forum posts older than this are cold leads
+_STALE_DAYS_B2B = 60    # B2B: 2 months — business discussions stay relevant longer
+
+
+def _is_stale_content(result: dict, is_consumer: bool) -> bool:
+    """Return True if Serper result is too old to be actionable.
+
+    Checks the Serper ``date`` field (if present) against age thresholds.
+    Falls back to title/snippet heuristics for date indicators.
+    Returns False (not stale) if date cannot be determined — fail-open.
+    """
+    max_days = _STALE_DAYS_B2C if is_consumer else _STALE_DAYS_B2B
+    raw_date = (result.get("date") or "").strip()
+    if not raw_date:
+        return False  # No date info — fail-open, let scoring decide
+
+    # Try relative date parsing ("3 days ago", "2 months ago", "1 year ago")
+    _rel_match = re.match(
+        r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago",
+        raw_date, re.IGNORECASE,
+    )
+    if _rel_match:
+        _count = int(_rel_match.group(1))
+        _unit = _rel_match.group(2).lower()
+        _multipliers = {
+            "second": 0, "minute": 0, "hour": 0,
+            "day": 1, "week": 7, "month": 30, "year": 365,
+        }
+        age_days = _count * _multipliers.get(_unit, 0)
+        return age_days > max_days
+
+    # Try ISO-8601 date parsing ("2026-01-15T..." or "Jan 15, 2026")
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%b %d, %Y", "%B %d, %Y"):
+        try:
+            parsed = datetime.strptime(raw_date[:20], fmt)
+            age = (datetime.now(timezone.utc) - parsed.replace(tzinfo=timezone.utc)).days
+            return age > max_days
+        except (ValueError, TypeError):
+            continue
+
+    return False  # Unparseable — fail-open
 from services.query_brain import generate_smart_query  # type: ignore[import]
 from services.query_brain import _is_consumer_archetype  # type: ignore[import]
 from services.serper_service import (  # type: ignore[import]
@@ -446,21 +498,28 @@ def produce():
         filtered = filter_serper_noise(raw_results)
         _filtered_count = len(filtered)
         _new_count = 0
+        _rejected_stale = 0
         for r in filtered:
             link = r.get("link")
-            if link and link not in raw_urls:
-                raw_urls.append(link)
-                _new_count += 1
-                snippet_db[link] = {
-                    "title":   r.get("title", ""),
-                    "snippet": r.get("snippet", ""),
-                    "query":   search_query,
-                }
+            if not link or link in raw_urls:
+                continue
+            # V25.5.0: Content age filter — reject stale Reddit/forum posts
+            if _is_stale_content(r, _is_consumer_vector):
+                _rejected_stale += 1
+                continue
+            raw_urls.append(link)
+            _new_count += 1
+            snippet_db[link] = {
+                "title":   r.get("title", ""),
+                "snippet": r.get("snippet", ""),
+                "query":   search_query,
+            }
         log.info("produce_serper_query_result",
                  query=search_query[:120],
                  campaign_id=campaign_id,
                  raw=_raw_count,
                  after_noise_filter=_filtered_count,
+                 rejected_stale=_rejected_stale,
                  new_urls=_new_count,
                  cumulative=len(raw_urls))
 
@@ -599,6 +658,44 @@ def produce():
         deduplicated=duped_count,
         queued=queued_count,
     )
+
+    # ------------------------------------------------------------------
+    # V25.5.0: Query exhaustion detection
+    # If 0 new URLs after dedup for 3+ consecutive cycles, the market is
+    # saturated or queries are stale. Log a warning and set a flag for
+    # query_brain to generate fresh query angles next cycle.
+    # ------------------------------------------------------------------
+    _exhaustion_counter_field = "_query_exhaustion_consecutive_zeros"
+    if queued_count == 0:
+        _prev_zeros = campaign.get(_exhaustion_counter_field, 0)
+        _new_zeros = _prev_zeros + 1
+        try:
+            campaign_ref.update({_exhaustion_counter_field: _new_zeros})
+        except Exception:
+            pass  # non-fatal metadata
+        if _new_zeros >= 3:
+            log.warning(
+                "produce_query_exhaustion_detected",
+                campaign_id=campaign_id,
+                consecutive_zero_cycles=_new_zeros,
+                note="Market may be saturated or queries are stale. "
+                     "query_brain should generate fresh query angles.",
+            )
+            # Set a flag that query_brain reads on the next cycle
+            try:
+                campaign_ref.update({"_force_query_refresh": True})
+            except Exception:
+                pass
+    else:
+        # Reset counter on successful produce
+        if campaign.get(_exhaustion_counter_field, 0) > 0:
+            try:
+                campaign_ref.update({
+                    _exhaustion_counter_field: 0,
+                    "_force_query_refresh": firestore.DELETE_FIELD,
+                })
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Write to unprocessed_queue (atomic ArrayUnion, cap at 200)

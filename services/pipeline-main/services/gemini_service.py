@@ -102,6 +102,82 @@ def call_gemini_2_5(
 
 
 # ---------------------------------------------------------------------------
+# Topic coherence gate (Phase 1B)
+# ---------------------------------------------------------------------------
+
+
+def check_topic_coherence(
+    title: str,
+    snippet: str,
+    campaign_topic: str,
+) -> bool:
+    """Cheap Gemini Flash gate: is this content *primarily* about the campaign topic?
+
+    Uses temperature=0.1 for near-deterministic YES/NO classification.
+    Fail-open on any exception (returns True) so the pipeline never blocks
+    on a transient Gemini error.
+
+    Cost: ~$0.0001 per call (minimal prompt, no schema enforcement).
+
+    Args:
+        title:          Content title (headline, post title, etc.).
+        snippet:        First ~300 chars of the content body.
+        campaign_topic: The campaign's core topic string.
+
+    Returns:
+        True if the content is primarily about the campaign topic (or on
+        any error), False if the content merely mentions it in passing.
+    """
+    if not campaign_topic or not campaign_topic.strip():
+        log.debug("topic_coherence_skip", reason="empty_campaign_topic")
+        return True
+
+    coherence_prompt = (
+        f"Is this content PRIMARILY about {campaign_topic}? "
+        f"Title: {title}. "
+        f"Snippet: {snippet[:300]}. "
+        "Answer only YES or NO."
+    )
+
+    try:
+        # Lazy init — safe under Gunicorn pre-fork
+        init_vertex()
+
+        from vertexai.generative_models import (  # type: ignore[import]
+            GenerativeModel,
+            GenerationConfig,
+        )
+
+        model = GenerativeModel(_GEMINI_MODEL)
+        config = GenerationConfig(
+            temperature=0.1,
+            max_output_tokens=8,
+        )
+        response = model.generate_content(coherence_prompt, generation_config=config)
+        answer = response.text.strip().upper()
+        is_coherent = answer.startswith("YES")
+
+        log.info(
+            "topic_coherence_result",
+            campaign_topic=campaign_topic,
+            title=title[:80],
+            answer=answer,
+            is_coherent=is_coherent,
+        )
+        return is_coherent
+
+    except Exception as exc:
+        # Fail-open: never block the pipeline on a coherence check failure
+        log.warning(
+            "topic_coherence_error_failopen",
+            campaign_topic=campaign_topic,
+            title=title[:80],
+            error=str(exc),
+        )
+        return True
+
+
+# ---------------------------------------------------------------------------
 # Pre-filter tiering gate
 # ---------------------------------------------------------------------------
 
@@ -262,6 +338,10 @@ _INLINE_SCORE_SCHEMA = {
             "type":        "STRING",
             "description": "If tier is LOW, explain why. Empty for HIGH/MEDIUM.",
         },
+        "topic_coherence": {
+            "type":        "NUMBER",
+            "description": "0.0-1.0 — how strongly the content is PRIMARILY about the campaign topic vs. mentioning it incidentally.",
+        },
     },
     "required": [
         "tier", "pain_summary", "contact_point",
@@ -371,6 +451,20 @@ LOW tier: The signal is a generic article, listicle, corporate announcement unre
   service" with no detail), (b) the reviewer is clearly outside the ICP geo/category,
   or (c) the review is from a competitor/seller, not a buyer.
 
+SCORING CALIBRATION (use these anchors when estimating the topic_coherence field):
+- 0.9-1.0: Person explicitly states intent to buy/hire within 30 days
+- 0.7-0.8: Actively researching, comparing options, asking for recommendations
+- 0.5-0.6: Mentions topic but no clear buying signal
+- 0.3-0.4: Tangentially related, no individual buyer
+- 0.1-0.2: News, editorial, academic, or irrelevant
+If content is news/megathread/editorial mentioning topic in passing, score topic_coherence 0.1-0.3.
+
+TOPIC COHERENCE FIELD:
+Set topic_coherence (0.0-1.0) to reflect how PRIMARILY the content is about the
+campaign topic. 1.0 = entirely focused on the campaign topic with clear buyer intent.
+0.0 = campaign topic is not present at all. Content that merely name-drops the topic
+in a news roundup or editorial listicle should receive 0.1-0.3.
+
 GEO RULE: If a geo_target is set and the signal is clearly from/about a different
   geography, set geo_match=false and tier=LOW.
 
@@ -417,6 +511,7 @@ Return a single JSON object matching the schema."""
             "geo_match":           False,
             "archetype_match":     "NONE",
             "rejection_reason":    f"Scoring error: {exc}",
+            "topic_coherence":     0.0,
         }
 
 

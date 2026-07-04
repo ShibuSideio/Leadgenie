@@ -169,6 +169,53 @@ _ENTERPRISE_DOMAINS = [
 _NOISE_PATHS    = ["/legal", "/pricing", "/docs", "/author/", "/login"]
 _NOISE_SNIPPETS = ["sign in", "access denied", "forgot password", "please enable cookies"]
 
+# V25.7.4 Phase 1A: Reddit news-subreddit blocklist.
+# Organic Reddit results from these subreddits are never business leads — they
+# are news commentary, entertainment, or opinion threads that waste Gemini
+# scoring cycles and pollute the pipeline with zero-conversion noise.
+_REDDIT_NEWS_SUBREDDITS = {
+    "politics", "worldnews", "economics", "news", "videos",
+    "credibledefense", "irstudies", "askpolitics", "geopolitics",
+    "worldpolitics", "conservative", "liberal", "technology",
+    "science", "todayilearned", "askreddit", "explainlikeimfive",
+    "outoftheloop", "nottheonion", "upliftingnews", "pics",
+    "funny", "gaming", "movies", "television", "music",
+    "sports", "nfl", "nba", "soccer", "formula1",
+    "memes", "dankmemes", "aww", "cats", "dogs",
+    "showerthoughts", "lifeprotips", "unpopularopinion",
+    "amitheasshole", "tifu", "relationships",
+}
+
+# V25.7.4 Phase 1A: Megathread / aggregation title patterns.
+# Results with these title fragments are aggregation pages (megathreads, weekly
+# roundups, daily discussions) that contain no single-entity lead signal.
+_MEGATHREAD_PATTERNS = [
+    "megathread", "mega thread", "daily discussion",
+    "weekly roundup", "weekly thread", "monthly roundup",
+    "monthly thread", "daily thread", "match thread",
+    "game thread", "general discussion", "open thread",
+    "free talk", "rant thread", "unpopular opinion thread",
+]
+
+# V25.7.4 Phase 1A: Content farm / news outlet domains.
+# These domains produce high-traffic, low-signal pages that Gemini may score
+# highly due to keyword overlap but never convert to actionable leads.
+_CONTENT_FARM_DOMAINS = {
+    "buzzfeed.com", "wikihow.com", "reuters.com", "bloomberg.com",
+    "bbc.com", "bbc.co.uk", "cnn.com", "ndtv.com",
+    "timesofindia.indiatimes.com", "gulfnews.com", "khaleejtimes.com",
+    "huffpost.com", "huffingtonpost.com", "foxnews.com",
+    "dailymail.co.uk", "nypost.com", "washingtonpost.com",
+    "nytimes.com", "theguardian.com", "aljazeera.com",
+    "cnbc.com", "abcnews.go.com", "nbcnews.com", "cbsnews.com",
+    "usatoday.com", "apnews.com", "businessinsider.com",
+    "insider.com", "vice.com", "vox.com", "theverge.com",
+    "mashable.com", "boredpanda.com", "ranker.com",
+    "screenrant.com", "gamerant.com", "cbr.com",
+    "hindustantimes.com", "indiatoday.in", "firstpost.com",
+    "news18.com", "thehindu.com", "livemint.com",
+}
+
 # V24.5.7: CDN/static subdomain prefixes. These are asset-delivery servers, not
 # business websites. They return empty PRISM scrapes and waste 3-5 Serper credits.
 # The root domain may be a legitimate company (cdngetgo.com), but the 'assets.'
@@ -216,10 +263,13 @@ def filter_serper_noise(serper_results: list) -> list:
     """
     clean = []
     # V24.6.3: per-reason counters for observability
-    _rejected_enterprise = 0
-    _rejected_cdn        = 0
-    _rejected_path       = 0
-    _rejected_snippet    = 0
+    _rejected_enterprise    = 0
+    _rejected_cdn          = 0
+    _rejected_path         = 0
+    _rejected_snippet      = 0
+    _rejected_subreddit    = 0
+    _rejected_megathread   = 0
+    _rejected_content_farm = 0
     for r in serper_results:
         link    = r.get("link", "").lower()
         snippet = r.get("snippet", "").lower()
@@ -249,10 +299,34 @@ def filter_serper_noise(serper_results: list) -> list:
         if any(s in snippet for s in _NOISE_SNIPPETS):
             _rejected_snippet += 1
             continue
+        # V25.7.4 Phase 1A Layer 1: Reddit news-subreddit blocklist.
+        # Extract subreddit name from reddit.com/r/<subreddit>/... URLs.
+        if "reddit.com" in link_domain:
+            try:
+                path_parts = urlparse(link).path.strip("/").lower().split("/")
+                if len(path_parts) >= 2 and path_parts[0] == "r":
+                    subreddit_name = path_parts[1]
+                    if subreddit_name in _REDDIT_NEWS_SUBREDDITS:
+                        _rejected_subreddit += 1
+                        continue
+            except Exception:
+                pass  # Malformed URL — fall through to remaining checks
+        # V25.7.4 Phase 1A Layer 2: Megathread / aggregation title detection.
+        title_lower = r.get("title", "").lower()
+        if any(pat in title_lower for pat in _MEGATHREAD_PATTERNS):
+            _rejected_megathread += 1
+            continue
+        # V25.7.4 Phase 1A Layer 3: Content farm / news domain blocking.
+        if link_domain in _CONTENT_FARM_DOMAINS:
+            _rejected_content_farm += 1
+            continue
         clean.append(r)
     # V24.6.3: emit summary only when results were rejected — avoids log spam on clean batches
     total_in = len(serper_results)
-    total_rejected = _rejected_enterprise + _rejected_cdn + _rejected_path + _rejected_snippet
+    total_rejected = (
+        _rejected_enterprise + _rejected_cdn + _rejected_path + _rejected_snippet
+        + _rejected_subreddit + _rejected_megathread + _rejected_content_farm
+    )
     if total_rejected > 0:
         log.info(
             "noise_filter_summary",
@@ -263,6 +337,9 @@ def filter_serper_noise(serper_results: list) -> list:
             rejected_cdn=_rejected_cdn,
             rejected_path=_rejected_path,
             rejected_snippet=_rejected_snippet,
+            rejected_subreddit=_rejected_subreddit,
+            rejected_megathread=_rejected_megathread,
+            rejected_content_farm=_rejected_content_farm,
         )
     return clean
 

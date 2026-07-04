@@ -202,6 +202,58 @@ def _clean_query_syntax(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Buyer Language Injection (V25.4.0 — Phase 2B)
+# ---------------------------------------------------------------------------
+
+_BUYER_LANGUAGE_PHRASES = (
+    '"looking for"', '"need help"', '"can anyone recommend"', '"recommendations"',
+)
+# Pre-compiled lower-cased set for membership checks.
+_BUYER_LANGUAGE_CHECK = frozenset({
+    "looking for", "need help", "can anyone recommend", "recommendations",
+    "recommend", "suggestion", "anyone know", "help me find",
+    "where can i find", "any recommendations",
+})
+
+# Maximum total queries after buyer-language expansion.
+_MAX_QUERIES_AFTER_BUYER_INJECT = 10
+
+
+def _inject_buyer_language(queries: list[str]) -> list[str]:
+    """Create buyer-intent variants for queries lacking buyer language.
+
+    For each query that does not already contain buyer-language phrases,
+    an additional variant is appended with buyer intent terms OR-grouped.
+    The result is capped at ``_MAX_QUERIES_AFTER_BUYER_INJECT`` to respect
+    downstream Serper credit budgets.
+
+    Called after query assembly but before ``_clean_query_syntax()``.
+    """
+    if not queries:
+        return queries
+
+    _buyer_suffix = " (" + " OR ".join(_BUYER_LANGUAGE_PHRASES) + ")"
+    result: list[str] = list(queries)  # preserve originals first
+
+    for q in queries:
+        if len(result) >= _MAX_QUERIES_AFTER_BUYER_INJECT:
+            break
+        q_lower = q.lower()
+        if any(phrase in q_lower for phrase in _BUYER_LANGUAGE_CHECK):
+            continue  # already has buyer language — skip
+        result.append(q + _buyer_suffix)
+
+    if len(result) > len(queries):
+        log.info(
+            "buyer_language_injected",
+            original_count=len(queries),
+            expanded_count=len(result),
+            cap=_MAX_QUERIES_AFTER_BUYER_INJECT,
+        )
+    return result[:_MAX_QUERIES_AFTER_BUYER_INJECT]
+
+
+# ---------------------------------------------------------------------------
 # Main function
 # ---------------------------------------------------------------------------
 
@@ -491,6 +543,10 @@ Rule: MAX 2 boolean groups per query. Overly complex multi-group dorks return 0 
 Rule: The ONLY structural operators allowed are site: targeting (e.g., site:reddit.com, site:quora.com, site:mouthshut.com, site:consumercomplaints.in). Do NOT use inurl:, intitle:, or filetype: — Google deprioritizes and often ignores these.
 Rule: Use natural buyer phrases in quotes (e.g., "terrible service" OR "worst experience") combined with ONE site: operator at most.
 Rule: NEVER use B2B jargon: "lead generation", "pipeline", "go-to-market", "product-market fit", "enterprise sales", "SaaS", "B2B", "stakeholder alignment", "brand story", "unclear positioning".
+REDDIT RULE: When targeting Reddit, use subreddit-specific searches.
+Instead of site:reddit.com, use site:reddit.com/r/{{relevant_subreddit}}.
+Suggest 2-3 subreddits likely to contain buyer discussions for this business.
+NEVER target r/AskReddit, r/politics, r/news, r/worldnews, r/videos.
 Rule: Add this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end. Weave geography into natural phrases if needed.
 Rule: You MUST enclose all OR clauses in parentheses. Always separate operators, keywords, quotes, and parentheses with a space.
@@ -520,6 +576,10 @@ Rule: The ONLY structural operators allowed are site: targeting (e.g., site:redd
 Rule: PROHIBITED: site:.edu, site:.org — these return academic and non-profit content, not B2B buyers.
 Rule: Use natural buyer-pain phrases in quotes (e.g., "alternative to [competitor]" OR "pricing too high") combined with ONE site: operator at most.
 Rule: Focus on buyer pain symptoms and competitor friction (e.g., "alternative to", "pricing too high", "support issues", "bounce rates", "going to spam"). Do NOT use generic category keywords like "lead generation services" that match competitor websites.
+REDDIT RULE: When targeting Reddit, use subreddit-specific searches.
+Instead of site:reddit.com, use site:reddit.com/r/{{relevant_subreddit}}.
+Suggest 2-3 subreddits likely to contain buyer discussions for this business.
+NEVER target r/AskReddit, r/politics, r/news, r/worldnews, r/videos.
 Rule: Add this exact negative payload to every query: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 Rule: NEVER append AND {{location}} or AND {{city}} at the end. Geo is handled by query text phrasing and downstream scoring.
 Rule: You MUST enclose all OR clauses in parentheses. Always separate operators, keywords, quotes, and parentheses with a space.
@@ -597,7 +657,14 @@ Return ONLY the JSON object. No explanation, no markdown."""
             "- site:.edu — academic content, not buyers\n"
             "- site:.org — NGOs and non-profits, not buyers\n"
             "ONLY ALLOWED structural operator: site: targeting specific community domains "
-            "(e.g., site:reddit.com, site:quora.com, site:community.hubspot.com).\n"
+            "(e.g., site:reddit.com, site:quora.com, site:community.hubspot.com).\n\n"
+            "REDDIT SUBREDDIT TARGETING (V25.4.0):\n"
+            "When targeting Reddit, ALWAYS use subreddit-specific site: operators "
+            "(e.g. site:reddit.com/r/sysadmin, site:reddit.com/r/smallbusiness) "
+            "instead of the broad site:reddit.com. Choose 2-3 subreddits most likely "
+            "to contain buyer discussions for this campaign's vertical.\n"
+            "NEVER target generic subreddits: r/AskReddit, r/politics, r/news, "
+            "r/worldnews, r/videos — these contain zero buyer intent.\n"
         )
         if _is_consumer_vector:
             _system_instruction += (
@@ -1020,6 +1087,9 @@ Return ONLY the JSON object. No explanation, no markdown."""
             continue
         _bl = _deconflict_blacklist(sd, blacklist)
         smart_queries.append(f"{sd} {_bl}")
+
+    # V25.4.0 Phase 2B: Inject buyer-language variants before syntax cleaning.
+    smart_queries = _inject_buyer_language(smart_queries)
 
     return [_clean_query_syntax(q) for q in smart_queries]
 
