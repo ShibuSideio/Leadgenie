@@ -2,8 +2,8 @@ const CACHE_NAME = 'sideio-v26.0.0'; // V26.0.0: Multi-strategy OSINT intelligen
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=26.0.0',
-     '/styles.css?v=26.0.0',
+     '/app.js?v=26.0.2',
+     '/styles.css?v=26.0.2',
      '/manifest.json'
  ];
 

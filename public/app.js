@@ -1028,17 +1028,17 @@ function renderCampaignsTable(campaigns, activeCount) {
         const kw = (camp.keywords || 'N/A');
         const kwDisplay = kw.length > 80 ? kw.substring(0, 80) + '\u2026' : kw;
 
-        // V26.0: Intelligence strategy badge
+        // V26.0.2: Intelligence strategy badge — plain English labels
         const _stratMap = {
-            'PLATFORM_MINING':       { icon: '\uD83D\uDCA0', label: 'Platform', color: '#8b5cf6' },
-            'COLLOQUIAL_DISCOVERY':  { icon: '\uD83D\uDCAC', label: 'Colloquial', color: '#06b6d4' },
-            'COMPETITOR_TOUCHPOINT': { icon: '\u2B50', label: 'Competitor', color: '#f59e0b' },
-            'PROFESSIONAL_NETWORK':  { icon: '\uD83D\uDD17', label: 'Professional', color: '#3b82f6' },
-            'EVENT_TRIGGER_MINING':  { icon: '\uD83D\uDCF0', label: 'Events', color: '#ef4444' },
+            'PLATFORM_MINING':       { icon: '💠', label: 'Scanning directories', color: '#8b5cf6' },
+            'COLLOQUIAL_DISCOVERY':  { icon: '💬', label: 'Searching forums', color: '#06b6d4' },
+            'COMPETITOR_TOUCHPOINT': { icon: '⭐', label: 'Mining reviews', color: '#f59e0b' },
+            'PROFESSIONAL_NETWORK':  { icon: '🔗', label: 'Finding professionals', color: '#3b82f6' },
+            'EVENT_TRIGGER_MINING':  { icon: '📰', label: 'Tracking events', color: '#ef4444' },
         };
         const _strat = (camp.intelligence_strategy || {}).primary || '';
-        const _stratInfo = _stratMap[_strat] || { icon: '\u2014', label: 'Legacy', color: '#6b7280' };
-        const stratBadge = `<span style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid ${_stratInfo.color};color:${_stratInfo.color};white-space:nowrap;margin-left:6px;" title="${_escapeHTML(_strat) || 'No strategy classified'}">${_stratInfo.icon} ${_stratInfo.label}</span>`;
+        const _stratInfo = _stratMap[_strat] || { icon: '🔄', label: 'Awaiting AI scan', color: '#6b7280' };
+        const stratBadge = `<span style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid ${_stratInfo.color};color:${_stratInfo.color};white-space:nowrap;margin-left:6px;" title="AI will pick the best discovery method on next update">${_stratInfo.icon} ${_stratInfo.label}</span>`;
 
         tableRows += `
             <tr style="border-bottom:1px solid var(--glass-border);">
@@ -1611,24 +1611,20 @@ window.openEditModal = function(id) {
     // Initialise the cascade and hydrate from geo_hierarchy (new) or gl/location (legacy)
     initGeoCascade(camp.geo_hierarchy || null, camp.gl || '', camp.location || '');
 
-    // ── V26.0: Intelligence Strategy hydration ──────────────────────────────
-    const _stratSelect = document.getElementById('edit-strategy-select');
+    // ── V26.0.2: Intelligence Strategy hydration (read-only, plain English) ──
     const _stratHint   = document.getElementById('edit-strategy-current');
     const _autoStrat   = (camp.intelligence_strategy || {}).primary || '';
-    if (_stratSelect) {
-        _stratSelect.value = '';  // Default to "Auto" (empty = no override)
-    }
     if (_stratHint && _autoStrat) {
-        const _stratLabels = {
-            'PLATFORM_MINING': '\uD83D\uDCA0 Platform Mining',
-            'COLLOQUIAL_DISCOVERY': '\uD83D\uDCAC Colloquial Discovery',
-            'COMPETITOR_TOUCHPOINT': '\u2B50 Competitor Touchpoint',
-            'PROFESSIONAL_NETWORK': '\uD83D\uDD17 Professional Network',
-            'EVENT_TRIGGER_MINING': '\uD83D\uDCF0 Event Trigger Mining',
+        const _stratDescriptions = {
+            'PLATFORM_MINING':       '💠 Scanning business directories and listing platforms to find leads already listed by competitors.',
+            'COLLOQUIAL_DISCOVERY':  '💬 Searching forums and social media for people talking about problems your business solves.',
+            'COMPETITOR_TOUCHPOINT': '⭐ Mining competitor reviews and ratings to find their unhappy customers.',
+            'PROFESSIONAL_NETWORK':  '🔗 Finding decision-makers discussing relevant topics on professional platforms.',
+            'EVENT_TRIGGER_MINING':  '📰 Tracking public events (funding, hiring, expansions) that signal buying intent.',
         };
-        _stratHint.textContent = `Currently: ${_stratLabels[_autoStrat] || _autoStrat} (auto-classified)`;
+        _stratHint.textContent = _stratDescriptions[_autoStrat] || `AI Mode: ${_autoStrat}`;
     } else if (_stratHint) {
-        _stratHint.textContent = 'No strategy classified yet (legacy campaign).';
+        _stratHint.textContent = '🔄 Not classified yet — save any edit and our AI will pick the best discovery method automatically.';
     }
 
     showModal('edit-campaign-modal');
@@ -1656,12 +1652,8 @@ window.saveEditedCampaign = async function() {
     if (!id)   { showToast('Campaign ID missing. Please refresh.', 'error'); return; }
     if (!name) { showToast('Campaign name is required.', 'error'); return; }
 
-    // V26.0: Strategy override (only sent if user explicitly selected one)
-    const strategyOverride = document.getElementById('edit-strategy-select')?.value || '';
+    // V26.0.2: Strategy is 100% backend — no client-side override
     const payload = { name, bio, keywords, gl, location, geo_hierarchy };
-    if (strategyOverride) {
-        payload.strategy_override = strategyOverride;
-    }
 
     try {
         const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', payload);

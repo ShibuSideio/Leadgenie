@@ -499,20 +499,46 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
     # Server-side field sanitization — last line of defense
     _sanitize_campaign_fields(data)
 
-    # V26.0: Handle intelligence strategy override (before allowlist filter strips it)
-    _strategy_override = data.pop("strategy_override", None)
-    if _strategy_override:
-        from core.helpers import _VALID_STRATEGIES  # type: ignore[import]
-        if _strategy_override in _VALID_STRATEGIES:
-            _existing_strategy = existing_data.get("intelligence_strategy", {})
-            _existing_strategy["primary"] = _strategy_override
-            _existing_strategy["overridden_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            doc_ref.update({"intelligence_strategy": _existing_strategy})
-            log.info("intelligence_strategy_overridden",
-                     campaign_id=doc_id, new_strategy=_strategy_override)
-        else:
-            log.warning("intelligence_strategy_override_invalid",
-                        campaign_id=doc_id, value=_strategy_override)
+    # V26.0.2: Auto-reclassify intelligence strategy on meaningful edits.
+    # The user never picks a strategy — the AI always decides. Triggers when:
+    # 1. Bio or keywords changed (ICP may have shifted)
+    # 2. Legacy campaign has no strategy yet (upgrade path)
+    # Any stale strategy_override from old frontend versions is silently discarded.
+    data.pop("strategy_override", None)  # Strip client-side override — backend is authoritative
+
+    _needs_reclassify = (
+        _keywords_changed or _bio_changed
+        or not existing_data.get("intelligence_strategy", {}).get("primary")
+    )
+    if _needs_reclassify:
+        _reclass_bio = (
+            data.get("bio") or existing_data.get("effective_bio")
+            or existing_data.get("bio") or ""
+        )
+        _reclass_kw = data.get("keywords") or existing_data.get("keywords", "")
+        _reclass_focus = existing_data.get("campaign_focus", "")
+        _reclass_pain = existing_data.get("pain_point", "")
+        _reclass_sv = data.get("sourcing_vector") or existing_data.get("sourcing_vector", "B2B")
+        _reclass_loc = data.get("location") or existing_data.get("location", "")
+
+        if _reclass_bio or _reclass_kw:
+            try:
+                _new_strategy = classify_intelligence_strategy(
+                    effective_bio=_reclass_bio,
+                    keywords=_reclass_kw,
+                    campaign_focus=_reclass_focus,
+                    pain_point=_reclass_pain,
+                    sourcing_vector=_reclass_sv,
+                    location=_reclass_loc,
+                )
+                doc_ref.update({"intelligence_strategy": _new_strategy})
+                log.info("intelligence_strategy_auto_reclassified",
+                         campaign_id=doc_id,
+                         primary=_new_strategy.get("primary"),
+                         trigger="bio_keywords_changed" if (_keywords_changed or _bio_changed) else "legacy_upgrade")
+            except Exception as _strat_err:
+                log.warning("intelligence_strategy_reclassify_failed",
+                            campaign_id=doc_id, error=str(_strat_err))
 
     data = {k: v for k, v in data.items() if k in _CAMPAIGN_UPDATE_ALLOWED}
 

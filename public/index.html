@@ -50,7 +50,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
-    <link rel="stylesheet" href="styles.css?v=26.0.0">
+    <link rel="stylesheet" href="styles.css?v=26.0.2">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -1376,19 +1376,11 @@
             <input type="hidden" id="edit-camp-location">
         </div>
 
-        <!-- V26.0: Intelligence Strategy Override -->
+        <!-- V26.0.2: Intelligence Strategy (read-only — AI decides, not the user) -->
         <div class="edit-field-group" id="edit-strategy-group">
-            <label class="edit-field-label" for="edit-strategy-select">🎯 Intelligence Strategy</label>
-            <p style="font-size:0.72rem; color:#6b7280; margin:0 0 6px;">Auto-classified by AI. Override only if you know the discovery method should differ.</p>
-            <select id="edit-strategy-select" class="edit-field-input" style="cursor:pointer;" aria-label="Intelligence strategy override">
-                <option value="">— Auto (AI-classified) —</option>
-                <option value="PLATFORM_MINING">💠 Platform Mining — Find leads ON competitor platforms</option>
-                <option value="COLLOQUIAL_DISCOVERY">💬 Colloquial Discovery — Search in buyer's own language</option>
-                <option value="COMPETITOR_TOUCHPOINT">⭐ Competitor Touchpoint — Mine competitor reviews/engagement</option>
-                <option value="PROFESSIONAL_NETWORK">🔗 Professional Network — LinkedIn decision-maker posts</option>
-                <option value="EVENT_TRIGGER_MINING">📰 Event Trigger Mining — Public events signal purchase need</option>
-            </select>
-            <p id="edit-strategy-current" style="margin:4px 0 0; font-size:0.7rem; color:#7c3aed; font-style:italic;"></p>
+            <label class="edit-field-label">🎯 AI Discovery Mode</label>
+            <p id="edit-strategy-current" style="margin:4px 0 0; font-size:0.82rem; color:#7c3aed; font-style:italic; padding:8px 12px; background:rgba(124,58,237,0.06); border-radius:8px; border:1px solid rgba(124,58,237,0.15);"></p>
+            <p style="font-size:0.7rem; color:#9ca3af; margin:6px 0 0;">Our AI automatically picks the best way to find leads for your campaign. It re-evaluates every time you update your description or keywords.</p>
         </div>
 
         <!-- V24.0: Competitive Intelligence Add-on -->
@@ -1558,6 +1550,6 @@
         });
     }
 </script>
-<script src="app.js?v=26.0.0"></script>
+<script src="app.js?v=26.0.2"></script>
 </body>
 </html>
