@@ -635,7 +635,7 @@ REDDIT RULE: When targeting Reddit, use subreddit-specific searches.
 Instead of site:reddit.com, use site:reddit.com/r/{{relevant_subreddit}}.
 Suggest 2-3 subreddits likely to contain buyer discussions for this business.
 NEVER target r/AskReddit, r/politics, r/news, r/worldnews, r/videos.
-Rule: Add this exact negative payload to nuke SEO spam: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
+Rule: Add this exact negative payload to nuke SEO spam: -site:expertise.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 Rule: NEVER append AND {{location}} or AND {{city}} or AND {{country}} at the end. Weave geography into natural phrases if needed.
 Rule: You MUST enclose all OR clauses in parentheses. Always separate operators, keywords, quotes, and parentheses with a space.
 Rule: NEVER use wildcard characters in site: (e.g. NEVER site:*.org). Use site:.org instead.
@@ -668,7 +668,7 @@ REDDIT RULE: When targeting Reddit, use subreddit-specific searches.
 Instead of site:reddit.com, use site:reddit.com/r/{{relevant_subreddit}}.
 Suggest 2-3 subreddits likely to contain buyer discussions for this business.
 NEVER target r/AskReddit, r/politics, r/news, r/worldnews, r/videos.
-Rule: Add this exact negative payload to every query: -site:yelp.com -site:expertise.com -site:g2.com -site:capterra.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
+Rule: Add this exact negative payload to every query: -site:expertise.com -directory -listicle -"top 10" -"best" -shop -cart -amazon
 Rule: NEVER append AND {{location}} or AND {{city}} at the end. Geo is handled by query text phrasing and downstream scoring.
 Rule: You MUST enclose all OR clauses in parentheses. Always separate operators, keywords, quotes, and parentheses with a space.
 Rule: NEVER use wildcards in site: (e.g., NEVER site:*.org). Use site:.org instead.
@@ -692,7 +692,7 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
             "Use MAX 2 boolean groups per query. The ONLY structural operator allowed is site: "
             "targeting niche community domains (e.g., site:reddit.com, site:quora.com). "
             "Do NOT use inurl:, intitle:, or filetype: — Google deprioritizes these, causing 0-result returns. "
-            "Use aggressive negative payloads (-site:yelp.com -site:g2.com -directory -listicle -\"top 10\"). "
+            "Use aggressive negative payloads (-directory -listicle -\"top 10\"). "
             "Never produce queries that would return listicle pages, review aggregators, or paid directories.\n\n"
             "BUYER INTENT VS SELLER OFFERINGS:\n"
             "You are looking for buyer paint points and competitor complaints. "
@@ -881,18 +881,26 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
                          tenant_id=ctx.tenant_id,
                          campaign_id=ctx.campaign_id)
 
-                # ── V26 Colloquial Translation (Task 2.1) ─────────────────
-                # When vocabulary_notes is present, run a SECOND Gemini call
-                # to rewrite professional queries in the ICP's actual vocabulary.
-                # This only fires after the main Gemini call succeeds.
-                if ctx.vocabulary_notes and ctx.vocabulary_notes.strip():
+                # ── V26.0.3 HYBRID: Universal Colloquial Translation ────────
+                # Every strategy benefits from buyer-language queries. When
+                # vocabulary_notes exist, use them. Otherwise, derive the
+                # audience context from the campaign bio so no campaign is
+                # left without colloquial search terms.
+                _vocab_context = (ctx.vocabulary_notes or "").strip()
+                if not _vocab_context and ctx.bio:
+                    # Derive a lightweight audience description from the bio
+                    _vocab_context = (
+                        f"People who need: {ctx.bio[:300]}. "
+                        "These are everyday people — not industry professionals."
+                    )
+                if _vocab_context:
                     _all_queries_for_translation = ctx.symptom_dorks + ctx.intents
                     if _all_queries_for_translation:
                         _colloquial_prompt = (
                             "You are a vocabulary translator for search queries. "
                             "You are given professional/jargon queries and must rewrite them "
                             "in the EXACT vocabulary of this audience:\n\n"
-                            f"Audience: {ctx.vocabulary_notes}\n\n"
+                            f"Audience: {_vocab_context}\n\n"
                             "Rewrite each query below so it sounds like this audience would "
                             "ACTUALLY type it into Google or post on a forum. Remove all "
                             "industry jargon. Use everyday language.\n\n"
@@ -1081,51 +1089,23 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
     if _pre_exclusions:
         _persona_blacklist = " " + " ".join(_pre_exclusions)
 
-    # ── V26 Strategy-aware blacklist filtering (Task 2.3) ──────────────────
-    # Certain intelligence strategies NEED review/social platforms as sources.
-    # Remove conflicting exclusions from _DEFAULT_BLACKLIST based on strategy.
+    # ── V26.0.3 HYBRID: Universal blacklist — review sites always allowed ───
+    # Review/aggregator platforms contain leads for ALL strategies:
+    # - PLATFORM_MINING: entities listed on the platform
+    # - COMPETITOR_TOUCHPOINT: reviewers are leads
+    # - COLLOQUIAL_DISCOVERY: reviewers describe pain in plain language
+    # - PROFESSIONAL_NETWORK: B2B review sites (G2) have decision-maker names
+    # - EVENT_TRIGGER_MINING: news sources should never be blacklisted
+    #
+    # The default blacklist only filters true noise (freelancer spam, portfolios).
+    # Review sites (g2, capterra, yelp, trustpilot) are NOT in _DEFAULT_BLACKLIST
+    # by design — they're intelligence sources, not noise.
     _effective_default_blacklist = _DEFAULT_BLACKLIST
     _strategy_upper = ctx.strategy.upper()
 
-    if _strategy_upper == "PLATFORM_MINING":
-        # Review/aggregator platforms are intelligence SOURCES, not noise
-        _effective_default_blacklist = _effective_default_blacklist.replace(
-            "-site:g2.com", ""
-        ).replace(
-            "-site:capterra.com", ""
-        ).replace(
-            "-site:yelp.com", ""
-        )
-        log.info("blacklist_strategy_override",
-                 strategy=ctx.strategy,
-                 note="PLATFORM_MINING: Kept g2, capterra, yelp as intelligence sources.")
-
-    elif _strategy_upper == "COMPETITOR_TOUCHPOINT":
-        # Review platforms are where competitor reviewers (= leads) post
-        _effective_default_blacklist = _effective_default_blacklist.replace(
-            "-site:g2.com", ""
-        ).replace(
-            "-site:capterra.com", ""
-        ).replace(
-            "-site:yelp.com", ""
-        )
-        log.info("blacklist_strategy_override",
-                 strategy=ctx.strategy,
-                 note="COMPETITOR_TOUCHPOINT: Kept review platforms for reviewer discovery.")
-
-    elif _strategy_upper == "PROFESSIONAL_NETWORK":
-        # LinkedIn is the PRIMARY intelligence surface
-        _effective_default_blacklist = _effective_default_blacklist.replace(
-            "-site:linkedin.com", ""
-        )
-        log.info("blacklist_strategy_override",
-                 strategy=ctx.strategy,
-                 note="PROFESSIONAL_NETWORK: Removed LinkedIn exclusion — primary surface.")
-
-    elif _strategy_upper == "EVENT_TRIGGER_MINING":
-        # Minimal blacklist — only user's own domain matters
-        # Strip almost all default exclusions; downstream neg_shield and RLHF
-        # exclusions (which are campaign-specific) are still applied.
+    # For EVENT_TRIGGER_MINING, even the default noise filters are too aggressive
+    # (event-related pages sometimes contain "our portfolio" or "case studies")
+    if _strategy_upper == "EVENT_TRIGGER_MINING":
         _effective_default_blacklist = ""
         log.info("blacklist_strategy_override",
                  strategy=ctx.strategy,
@@ -1333,12 +1313,15 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
     # The PLATFORM_MINING/COMPETITOR_TOUCHPOINT/PROFESSIONAL_NETWORK strategies
     # need certain platforms to remain unsuppressed. Gemini may inject -site:
     # exclusions into its generated dorks. Strip them here as a last-mile fix.
-    _strategy_keep_sites: list[str] = []
-    if _strategy_upper in ("PLATFORM_MINING", "COMPETITOR_TOUCHPOINT"):
-        _strategy_keep_sites = ["g2.com", "capterra.com", "yelp.com",
-                                "trustpilot.com", "glassdoor.com"]
-    elif _strategy_upper == "PROFESSIONAL_NETWORK":
-        _strategy_keep_sites = ["linkedin.com"]
+    # V26.0.3: Post-generation -site: strip — UNIVERSAL for all strategies.
+    # Gemini's training priors may inject -site: exclusions for review/aggregator
+    # sites even when the prompt doesn't ask for them. Strip exclusions for ALL
+    # intelligence-valuable sites regardless of strategy.
+    _strategy_keep_sites = [
+        "g2.com", "capterra.com", "yelp.com", "trustpilot.com",
+        "glassdoor.com", "linkedin.com", "mouthshut.com",
+        "justdial.com", "indiamart.com", "sulekha.com",
+    ]
 
     if _strategy_keep_sites and smart_queries:
         import re as _site_strip_re

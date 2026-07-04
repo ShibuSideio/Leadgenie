@@ -729,16 +729,43 @@ def dispatch():
             except Exception:
                 pass
 
-            # ── V26.0: Strategy-Aware Processing Branch ──────────────────────────
-            # PLATFORM_MINING and COMPETITOR_TOUCHPOINT strategies use entity
-            # extraction instead of text scoring. One aggregator page → N leads.
+            # ── V26.0.3 HYBRID: Opportunistic Entity Extraction ─────────────────
+            # Entity extraction fires when:
+            # 1. Strategy explicitly calls for it (PLATFORM_MINING, COMPETITOR_TOUCHPOINT)
+            # 2. ANY strategy hits a known aggregator/directory/review URL
+            # Principle: A listing page is a listing page — extract every lead from it.
             _intel_strategy = campaign.get("intelligence_strategy", {})
             _primary_strategy = _intel_strategy.get("primary", "")
-            if _primary_strategy in ("PLATFORM_MINING", "COMPETITOR_TOUCHPOINT") and text:
+
+            _AGGREGATOR_DOMAINS = frozenset({
+                "g2.com", "capterra.com", "trustpilot.com", "yelp.com",
+                "glassdoor.com", "yellowpages.com", "justdial.com",
+                "mouthshut.com", "sulekha.com", "indiamart.com",
+                "thomasnet.com", "clutch.co", "goodfirms.co",
+                "propertyfinder.com", "bayut.com", "dubizzle.com",
+                "olx.com", "craigslist.org", "gumtree.com",
+            })
+            _url_domain = (url.split("//")[-1].split("/")[0].split("?")[0]
+                           .replace("www.", "").lower()) if url else ""
+            _is_aggregator_url = any(
+                _url_domain == d or _url_domain.endswith("." + d)
+                for d in _AGGREGATOR_DOMAINS
+            )
+            _strategy_wants_extraction = _primary_strategy in (
+                "PLATFORM_MINING", "COMPETITOR_TOUCHPOINT"
+            )
+            _should_extract = (_strategy_wants_extraction or _is_aggregator_url) and text
+
+            if _should_extract:
+                _extraction_trigger = (
+                    f"strategy:{_primary_strategy}" if _strategy_wants_extraction
+                    else f"aggregator_url:{_url_domain}"
+                )
                 _icp_context = campaign.get("effective_bio") or campaign.get("bio") or ""
                 _icp_context += " | " + (campaign.get("keywords") or "")
                 log.info("dispatch_entity_extraction_branch",
                          url=url[:80], strategy=_primary_strategy,
+                         trigger=_extraction_trigger,
                          text_chars=len(text), lead_id=lead_id)
 
                 extracted = _extract_entities_from_dom(

@@ -581,16 +581,24 @@ IMPORTANT:
             if isinstance(_campaign_strat, dict) else ""
         ).upper().strip()
 
+        # ── V26.0.3 HYBRID: Strategy PRIORITIZES sources, never REMOVES them ──
+        # All sources stay active. Strategy determines which run first (get more
+        # query slots) and which additional sources get force-added.
+        # Principle: Maximum lead yield. A Reddit post is still a lead even if
+        # the primary strategy is PLATFORM_MINING.
         if _strat_primary:
             _existing_types = {s.source_type for s in sources}
 
+            # Helper: move matching sources to front of list (priority order)
+            def _prioritize(src_list, priority_types):
+                """Reorder so priority_types come first, rest stay in original order."""
+                front = [s for s in src_list if s.source_type in priority_types]
+                back = [s for s in src_list if s.source_type not in priority_types]
+                return front + back
+
             if _strat_primary == "PLATFORM_MINING":
-                # Prioritize: SerperDiscovery + ClassifiedListings
-                # Disable: Reddit, HackerNews
-                sources = [
-                    s for s in sources
-                    if s.source_type not in ("reddit", "hackernews")
-                ]
+                # Prioritize: SerperDiscovery + ClassifiedListings + GoogleReviews
+                sources = _prioritize(sources, {"serper_discovery", "classified_listings", "google_reviews"})
                 # Force-add ClassifiedListings if not present
                 if "classified_listings" not in _existing_types:
                     _platform_targets = _campaign_strat.get("platform_targets", [])
@@ -601,17 +609,10 @@ IMPORTANT:
                             platform_types=["classified", "property", "expat"],
                             max_age_days=14,
                         ))
-                log.info("source_router_strategy_override",
-                         strategy=_strat_primary,
-                         source_types=[s.source_type for s in sources])
 
             elif _strat_primary == "COMPETITOR_TOUCHPOINT":
-                # Prioritize: GoogleReviews + SerperDiscovery
-                # Disable: JobPosts
-                sources = [
-                    s for s in sources
-                    if s.source_type != "job_posts"
-                ]
+                # Prioritize: GoogleReviews + SerperDiscovery + Reddit
+                sources = _prioritize(sources, {"google_reviews", "serper_discovery", "reddit"})
                 # Force-add GoogleReviewSource if not present and reviews are due
                 if "google_reviews" not in _existing_types and self._serper_key and _reviews_due:
                     icp_ctx = config.get("_icp_context", "")
@@ -623,17 +624,10 @@ IMPORTANT:
                         serper_api_key=self._serper_key,
                         max_age_days=60,
                     ))
-                log.info("source_router_strategy_override",
-                         strategy=_strat_primary,
-                         source_types=[s.source_type for s in sources])
 
             elif _strat_primary == "PROFESSIONAL_NETWORK":
-                # Prioritize: SerperDiscovery (LinkedIn queries) + HackerNews
-                # Disable: ClassifiedListings
-                sources = [
-                    s for s in sources
-                    if s.source_type != "classified_listings"
-                ]
+                # Prioritize: SerperDiscovery (LinkedIn queries) + HackerNews + JobPosts
+                sources = _prioritize(sources, {"serper_discovery", "hackernews", "job_posts"})
                 # Force-add HackerNewsSource if not present
                 if "hackernews" not in _existing_types:
                     _decision_titles = _campaign_strat.get("decision_maker_titles", [])
@@ -648,17 +642,10 @@ IMPORTANT:
                         include_stories=True,
                         min_comments=2,
                     ))
-                log.info("source_router_strategy_override",
-                         strategy=_strat_primary,
-                         source_types=[s.source_type for s in sources])
 
             elif _strat_primary == "EVENT_TRIGGER_MINING":
-                # Prioritize: RssFeed (news) + SerperDiscovery (news queries)
-                # Disable: ClassifiedListings
-                sources = [
-                    s for s in sources
-                    if s.source_type != "classified_listings"
-                ]
+                # Prioritize: RssFeed (news) + SerperDiscovery + HackerNews
+                sources = _prioritize(sources, {"rss_feed", "serper_discovery", "hackernews"})
                 # Force-add RssFeedSource for news if not present
                 if "rss_feed" not in _existing_types:
                     _event_types = _campaign_strat.get("event_types", ["funding", "expansion"])
@@ -671,9 +658,12 @@ IMPORTANT:
                         feed_urls=_news_urls,
                         max_age_days=7,
                     ))
-                log.info("source_router_strategy_override",
-                         strategy=_strat_primary,
-                         source_types=[s.source_type for s in sources])
+
+            log.info("source_router_strategy_hybrid",
+                     strategy=_strat_primary,
+                     source_count=len(sources),
+                     source_order=[s.source_type for s in sources],
+                     note="All sources active — strategy sets priority order only.")
 
         return sources
 
