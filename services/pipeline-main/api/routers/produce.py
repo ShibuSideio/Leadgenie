@@ -366,6 +366,12 @@ def produce():
         campaign.get("persona_name") or campaign.get("name") or "general"
     ).strip()
 
+    # V26: Extract intelligence_strategy fields for query_brain
+    _intel_strategy = campaign.get("intelligence_strategy") or {}
+    _vocab_notes = ""
+    if isinstance(_intel_strategy, dict):
+        _vocab_notes = (_intel_strategy.get("vocabulary_notes") or "").strip()
+
     try:
         smart_keywords = generate_smart_query(
             keywords, tenant_id, bio, sourcing_vector,
@@ -373,6 +379,8 @@ def produce():
             targeting_signals=_targeting_signals,
             campaign_id=campaign_id,
             force_query_refresh=bool(campaign.get("_force_query_refresh")),
+            vocabulary_notes=_vocab_notes,
+            intelligence_strategy=_intel_strategy if _intel_strategy else None,
         )
     except Exception as exc:
         log.critical(
@@ -435,8 +443,29 @@ def produce():
     raw_urls:   list[str] = []
     snippet_db: dict[str, dict] = {}
 
-    log.info("TRACE-9: Entering Serper execution loop.",
-             keyword_count=len(smart_keywords))
+    # ------------------------------------------------------------------
+    # V26 (Task 2.4): Case-insensitive deduplication of smart_keywords.
+    # Colloquial translation and multi-strategy queries can produce near-
+    # duplicate queries that waste Serper credits for identical results.
+    # ------------------------------------------------------------------
+    _seen_queries: set[str] = set()
+    _deduped_keywords: list[str] = []
+    for _kw in smart_keywords:
+        _dedup_key = _kw.strip().lower()
+        if _dedup_key not in _seen_queries:
+            _seen_queries.add(_dedup_key)
+            _deduped_keywords.append(_kw)
+    _dedup_dropped = len(smart_keywords) - len(_deduped_keywords)
+    if _dedup_dropped > 0:
+        log.info(
+            "produce_query_dedup",
+            campaign_id=campaign_id,
+            original_count=len(smart_keywords),
+            deduped_count=len(_deduped_keywords),
+            dropped=_dedup_dropped,
+            note="Case-insensitive dedup removed duplicate queries before Serper loop.",
+        )
+    smart_keywords = _deduped_keywords
 
     for kw in smart_keywords:
         clean_location = location if location and location.lower() != "all" else ""

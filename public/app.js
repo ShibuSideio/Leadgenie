@@ -1028,6 +1028,18 @@ function renderCampaignsTable(campaigns, activeCount) {
         const kw = (camp.keywords || 'N/A');
         const kwDisplay = kw.length > 80 ? kw.substring(0, 80) + '\u2026' : kw;
 
+        // V26.0: Intelligence strategy badge
+        const _stratMap = {
+            'PLATFORM_MINING':       { icon: '\uD83D\uDCA0', label: 'Platform', color: '#8b5cf6' },
+            'COLLOQUIAL_DISCOVERY':  { icon: '\uD83D\uDCAC', label: 'Colloquial', color: '#06b6d4' },
+            'COMPETITOR_TOUCHPOINT': { icon: '\u2B50', label: 'Competitor', color: '#f59e0b' },
+            'PROFESSIONAL_NETWORK':  { icon: '\uD83D\uDD17', label: 'Professional', color: '#3b82f6' },
+            'EVENT_TRIGGER_MINING':  { icon: '\uD83D\uDCF0', label: 'Events', color: '#ef4444' },
+        };
+        const _strat = (camp.intelligence_strategy || {}).primary || '';
+        const _stratInfo = _stratMap[_strat] || { icon: '\u2014', label: 'Legacy', color: '#6b7280' };
+        const stratBadge = `<span style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid ${_stratInfo.color};color:${_stratInfo.color};white-space:nowrap;margin-left:6px;" title="${_strat || 'No strategy classified'}">${_stratInfo.icon} ${_stratInfo.label}</span>`;
+
         tableRows += `
             <tr style="border-bottom:1px solid var(--glass-border);">
                 <td style="padding:12px;">
@@ -1037,7 +1049,7 @@ function renderCampaignsTable(campaigns, activeCount) {
                 <td style="padding:12px;">
                     <span style="color:var(--text-muted);font-size:0.85rem;">${_escapeHTML(kwDisplay)}</span>
                 </td>
-                <td style="padding:12px;">${statusBadge}</td>
+                <td style="padding:12px;">${statusBadge} ${stratBadge}</td>
                 <td style="padding:12px;text-align:right;white-space:nowrap;">
                     <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;margin-right:4px;"
                         data-campaign-id="${id}"
@@ -1599,6 +1611,26 @@ window.openEditModal = function(id) {
     // Initialise the cascade and hydrate from geo_hierarchy (new) or gl/location (legacy)
     initGeoCascade(camp.geo_hierarchy || null, camp.gl || '', camp.location || '');
 
+    // ── V26.0: Intelligence Strategy hydration ──────────────────────────────
+    const _stratSelect = document.getElementById('edit-strategy-select');
+    const _stratHint   = document.getElementById('edit-strategy-current');
+    const _autoStrat   = (camp.intelligence_strategy || {}).primary || '';
+    if (_stratSelect) {
+        _stratSelect.value = '';  // Default to "Auto" (empty = no override)
+    }
+    if (_stratHint && _autoStrat) {
+        const _stratLabels = {
+            'PLATFORM_MINING': '\uD83D\uDCA0 Platform Mining',
+            'COLLOQUIAL_DISCOVERY': '\uD83D\uDCAC Colloquial Discovery',
+            'COMPETITOR_TOUCHPOINT': '\u2B50 Competitor Touchpoint',
+            'PROFESSIONAL_NETWORK': '\uD83D\uDD17 Professional Network',
+            'EVENT_TRIGGER_MINING': '\uD83D\uDCF0 Event Trigger Mining',
+        };
+        _stratHint.textContent = `Currently: ${_stratLabels[_autoStrat] || _autoStrat} (auto-classified)`;
+    } else if (_stratHint) {
+        _stratHint.textContent = 'No strategy classified yet (legacy campaign).';
+    }
+
     showModal('edit-campaign-modal');
 };
 
@@ -1624,10 +1656,15 @@ window.saveEditedCampaign = async function() {
     if (!id)   { showToast('Campaign ID missing. Please refresh.', 'error'); return; }
     if (!name) { showToast('Campaign name is required.', 'error'); return; }
 
+    // V26.0: Strategy override (only sent if user explicitly selected one)
+    const strategyOverride = document.getElementById('edit-strategy-select')?.value || '';
+    const payload = { name, bio, keywords, gl, location, geo_hierarchy };
+    if (strategyOverride) {
+        payload.strategy_override = strategyOverride;
+    }
+
     try {
-        const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', {
-            name, bio, keywords, gl, location, geo_hierarchy
-        });
+        const success = await performApiMutation(`/api/campaigns/${id}`, 'PUT', payload);
         if (success) {
             showToast('Campaign updated successfully!', 'success');
             window.closeEditModal();

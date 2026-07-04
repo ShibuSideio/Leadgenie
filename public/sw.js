@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sideio-v25.5.1'; // V25.5.1: XSS hardening, LQS badges, rejection reasons, infra lockdown
+const CACHE_NAME = 'sideio-v26.0.0'; // V26.0.0: Multi-strategy OSINT intelligence engine
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',

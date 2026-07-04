@@ -568,6 +568,7 @@ def dispatch():
              url_count=len(approved_urls))
     all_results    = []
     scrape_success = scrape_failed = 0
+    _ENTITY_DOMAIN_COUNTS.clear()  # V26.0: Reset per-domain rate limiter per batch
 
     def _process_single_url(url: str) -> dict:
         """Process one URL through lock → dedup → PRISM → Gemini → Firestore.
@@ -727,6 +728,58 @@ def dispatch():
                 doc_ref.update({"prism_mode": prism_mode, "fallback_used": fallback_used})
             except Exception:
                 pass
+
+            # ── V26.0: Strategy-Aware Processing Branch ──────────────────────────
+            # PLATFORM_MINING and COMPETITOR_TOUCHPOINT strategies use entity
+            # extraction instead of text scoring. One aggregator page → N leads.
+            _intel_strategy = campaign.get("intelligence_strategy", {})
+            _primary_strategy = _intel_strategy.get("primary", "")
+            if _primary_strategy in ("PLATFORM_MINING", "COMPETITOR_TOUCHPOINT") and text:
+                _icp_context = campaign.get("effective_bio") or campaign.get("bio") or ""
+                _icp_context += " | " + (campaign.get("keywords") or "")
+                log.info("dispatch_entity_extraction_branch",
+                         url=url[:80], strategy=_primary_strategy,
+                         text_chars=len(text), lead_id=lead_id)
+
+                extracted = _extract_entities_from_dom(
+                    text=text,
+                    icp_context=_icp_context,
+                    campaign=campaign,
+                    source_url=url,
+                    tenant_id=tenant_id,
+                    campaign_id=campaign_id,
+                    lead_id=lead_id,
+                )
+
+                if extracted:
+                    # Update the original stub lead to mark it as an extraction source
+                    doc_ref.update({
+                        "status": "entity_extraction_source",
+                        "entity_count": len(extracted),
+                        "origin_engine": "entity_extractor",
+                        "prism_mode": "entity_extraction",
+                        "updatedAt": firestore.SERVER_TIMESTAMP,
+                    })
+                    try:
+                        _settle_credit(tenant_id, "success", lead_id=lead_id)
+                    except Exception as _settle_err:
+                        log.warning("settle_credit_entity_branch_failed",
+                                    lead_id=lead_id, error=str(_settle_err))
+                    log.info("dispatch_entity_extraction_success",
+                             url=url[:80], entities_created=len(extracted),
+                             strategy=_primary_strategy)
+                    return {
+                        "url": url,
+                        "status": "entity_extraction_complete",
+                        "entities": len(extracted),
+                    }
+                else:
+                    # Entity extraction yielded nothing — fall through to normal
+                    # scoring pipeline as fallback.
+                    log.info("dispatch_entity_extraction_fallthrough",
+                             url=url[:80], strategy=_primary_strategy,
+                             note="Entity extraction returned 0 entities. "
+                                  "Falling through to standard scoring.")
 
             # ── STEP 2: Deep web enrichment ──────────────────────────────────────
             context_payload, native_hiring_intent = deep_context_serper_dork(
@@ -1596,3 +1649,250 @@ def _maybe_notify_whatsapp(tenant_id: str, url: str, lead_id: str,
             log.info("whatsapp_notification_sent_no_id", tenant_id=tenant_id, score=score)
     except Exception as wa_err:
         log.warning("whatsapp_notification_failed", error=str(wa_err))
+
+
+# ── V26.0 Phase 4: Entity Extraction Engine ──────────────────────────────────
+# For PLATFORM_MINING and COMPETITOR_TOUCHPOINT strategies, a single aggregator
+# page can yield 5-10 individual leads (agents, businesses, reviewers).
+# This function replaces the standard text scoring with structured entity
+# extraction from the DOM.
+#
+# Per-domain rate limiting: Track domain scrape counts in memory to prevent
+# hammering a single platform. Max 5 pages per domain per dispatch batch.
+
+_ENTITY_DOMAIN_COUNTS: dict[str, int] = {}  # Reset each dispatch batch
+_ENTITY_DOMAIN_MAX = 5
+
+_ENTITY_EXTRACTION_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "entities": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "name": {
+                        "type": "STRING",
+                        "description": "Full name of the person or business.",
+                    },
+                    "role_or_title": {
+                        "type": "STRING",
+                        "description": "Job title, professional role, or business category.",
+                    },
+                    "company": {
+                        "type": "STRING",
+                        "description": "Company or organization name. Use the entity name itself if it IS a company.",
+                    },
+                    "phone": {
+                        "type": "STRING",
+                        "description": "Phone number if visible on the page. Empty string if not found.",
+                    },
+                    "email": {
+                        "type": "STRING",
+                        "description": "Email address if visible on the page. Empty string if not found.",
+                    },
+                    "profile_url": {
+                        "type": "STRING",
+                        "description": "Direct URL to this entity's profile page if available.",
+                    },
+                    "relevance_score": {
+                        "type": "INTEGER",
+                        "description": "0-100 relevance score to the ICP context. 100 = perfect match.",
+                    },
+                    "extraction_note": {
+                        "type": "STRING",
+                        "description": "Brief note on why this entity is relevant.",
+                    },
+                },
+                "required": ["name", "relevance_score"],
+            },
+            "description": "All individual entities (people, businesses, agents) found on this page.",
+        },
+        "page_type": {
+            "type": "STRING",
+            "description": "Classification of the source page: 'directory', 'review_page', 'listing', 'social_post', 'other'.",
+        },
+        "entity_count": {
+            "type": "INTEGER",
+            "description": "Total number of entities extracted.",
+        },
+    },
+    "required": ["entities", "page_type", "entity_count"],
+}
+
+
+def _extract_entities_from_dom(
+    text: str,
+    icp_context: str,
+    campaign: dict,
+    source_url: str,
+    tenant_id: str,
+    campaign_id: str,
+    lead_id: str,
+) -> list[dict]:
+    """Extract structured entities from an aggregator/review page DOM.
+
+    For PLATFORM_MINING and COMPETITOR_TOUCHPOINT strategies.
+    Each extracted entity becomes a separate lead in Firestore.
+
+    Returns list of entity dicts with: name, role, company, phone, email,
+    profile_url, relevance_score, extraction_note.
+
+    Non-fatal: returns empty list on any failure.
+    """
+    log = get_logger()
+
+    # Per-domain rate limit
+    from urllib.parse import urlparse as _urlparse
+    _domain = _urlparse(source_url).netloc.lower() if source_url else ""
+    _domain_count = _ENTITY_DOMAIN_COUNTS.get(_domain, 0)
+    if _domain_count >= _ENTITY_DOMAIN_MAX:
+        log.info("entity_extraction_domain_rate_limited",
+                 domain=_domain, count=_domain_count, max=_ENTITY_DOMAIN_MAX,
+                 note="Skipping entity extraction to avoid platform rate-limiting.")
+        return []
+    _ENTITY_DOMAIN_COUNTS[_domain] = _domain_count + 1
+
+    # Guard against very short text
+    if len(text.strip()) < 200:
+        log.info("entity_extraction_text_too_short",
+                 text_chars=len(text), url=source_url[:80])
+        return []
+
+    strategy_info = campaign.get("intelligence_strategy", {})
+    strategy = strategy_info.get("primary", "")
+    platform_targets = strategy_info.get("platform_targets", [])
+    competitor_names = strategy_info.get("competitor_names", [])
+
+    try:
+        from services.gemini_service import call_gemini_2_5  # type: ignore[import]
+
+        prompt = (
+            "You are an OSINT entity extractor. Analyze this webpage content and extract "
+            "ALL individual people, businesses, agents, or companies listed on it.\n\n"
+            f"TARGET ICP: {icp_context[:1500]}\n\n"
+            f"STRATEGY: {strategy}\n"
+        )
+
+        if strategy == "PLATFORM_MINING":
+            prompt += (
+                f"\nPLATFORM TARGETS: {', '.join(platform_targets[:5])}\n"
+                "This is a DIRECTORY/LISTING page. Extract every agent, vendor, or "
+                "business profile visible. Include their contact info if shown.\n"
+                "Each extracted entity is a potential lead to contact.\n"
+            )
+        elif strategy == "COMPETITOR_TOUCHPOINT":
+            prompt += (
+                f"\nCOMPETITOR NAMES: {', '.join(competitor_names[:5])}\n"
+                "This is a REVIEW/ENGAGEMENT page. Extract:\n"
+                "- Reviewers who left reviews (they may need the same service)\n"
+                "- Businesses that responded to reviews (competitors to study)\n"
+                "- People who commented or engaged publicly\n"
+                "The REVIEWER is the lead — they have an active need.\n"
+            )
+
+        prompt += (
+            f"\n\nWEBPAGE CONTENT (first 8000 chars):\n{text[:8000]}\n\n"
+            "RULES:\n"
+            "- Extract REAL entities only — no generic placeholders\n"
+            "- Include contact info (phone, email, profile URL) when visible\n"
+            "- Score each entity 0-100 based on ICP relevance\n"
+            "- Skip entities that are clearly bots, spam, or irrelevant\n"
+            "- Maximum 15 entities per page\n"
+        )
+
+        from vertexai.generative_models import GenerationConfig  # type: ignore[import]
+
+        result = call_gemini_2_5(
+            prompt,
+            schema=_ENTITY_EXTRACTION_SCHEMA,
+            temperature=0.1,
+        )
+
+        if not result or not isinstance(result, dict):
+            log.warning("entity_extraction_empty_result", url=source_url[:80])
+            return []
+
+        entities = result.get("entities", [])
+        page_type = result.get("page_type", "other")
+
+        # Filter: only entities with relevance >= 30
+        qualified = [
+            e for e in entities
+            if isinstance(e, dict) and e.get("relevance_score", 0) >= 30
+        ]
+
+        log.info("entity_extraction_complete",
+                 url=source_url[:80],
+                 raw_count=len(entities),
+                 qualified_count=len(qualified),
+                 page_type=page_type,
+                 strategy=strategy)
+
+        # Create leads for each qualified entity
+        created_leads = []
+        for idx, entity in enumerate(qualified[:10]):  # Cap at 10 per page
+            entity_name = (entity.get("name") or "").strip()
+            if not entity_name or len(entity_name) < 2:
+                continue
+
+            entity_lead_id = f"{lead_id}_entity_{idx}"
+            entity_payload = {
+                "id":                   entity_lead_id,
+                "source_url":           entity.get("profile_url") or source_url,
+                "tenant_id":            tenant_id,
+                "campaign_id":          campaign_id,
+                "origin_engine":        "entity_extractor",
+                "score":                min(entity.get("relevance_score", 50), 100) // 10,
+                "normalized_score":     min(entity.get("relevance_score", 50), 100),
+                "company_name":         entity.get("company") or entity_name,
+                "decision_maker_name":  entity_name,
+                "decision_maker_title": entity.get("role_or_title", "Unknown"),
+                "pain_point":           entity.get("extraction_note", ""),
+                "intent_signal":        f"Extracted from {page_type} page: {source_url[:60]}",
+                "contact_endpoints":    [
+                    ep for ep in [entity.get("email"), entity.get("phone")]
+                    if ep and ep.strip()
+                ],
+                "signal_source_type":   "platform_entity",
+                "signal_platform":      _domain,
+                "source_type":          "platform_entity",
+                "status":               "new",
+                "is_in_crm":            False,
+                "sourcing_vector":      campaign.get("sourcing_vector", "B2B"),
+                "prism_mode":           "entity_extraction",
+                "is_cluster_lead":      False,
+                "cluster_id":           "",
+                "convergence_score":    0.0,
+                "cluster_signals":      [],
+                "cluster_snippets":     [],
+                "cluster_platforms":    [],
+                "cluster_summary":      "",
+                "source_diversity":     0,
+                "cluster_label":        "",
+                "createdAt":            firestore.SERVER_TIMESTAMP,
+                "updatedAt":            firestore.SERVER_TIMESTAMP,
+            }
+
+            try:
+                _db().collection("leads").document(entity_lead_id).set(
+                    entity_payload, merge=True
+                )
+                created_leads.append(entity_payload)
+                log.info("entity_lead_created",
+                         entity_name=entity_name[:50],
+                         relevance=entity.get("relevance_score", 0),
+                         lead_id=entity_lead_id,
+                         campaign_id=campaign_id)
+            except Exception as _entity_write_err:
+                log.warning("entity_lead_write_failed",
+                            entity_name=entity_name[:50],
+                            error=str(_entity_write_err))
+
+        return created_leads
+
+    except Exception as _extract_err:
+        log.warning("entity_extraction_failed",
+                    url=source_url[:80],
+                    error=str(_extract_err))
+        return []

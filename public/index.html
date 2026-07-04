@@ -1376,6 +1376,21 @@
             <input type="hidden" id="edit-camp-location">
         </div>
 
+        <!-- V26.0: Intelligence Strategy Override -->
+        <div class="edit-field-group" id="edit-strategy-group">
+            <label class="edit-field-label" for="edit-strategy-select">🎯 Intelligence Strategy</label>
+            <p style="font-size:0.72rem; color:#6b7280; margin:0 0 6px;">Auto-classified by AI. Override only if you know the discovery method should differ.</p>
+            <select id="edit-strategy-select" class="edit-field-input" style="cursor:pointer;" aria-label="Intelligence strategy override">
+                <option value="">— Auto (AI-classified) —</option>
+                <option value="PLATFORM_MINING">💠 Platform Mining — Find leads ON competitor platforms</option>
+                <option value="COLLOQUIAL_DISCOVERY">💬 Colloquial Discovery — Search in buyer's own language</option>
+                <option value="COMPETITOR_TOUCHPOINT">⭐ Competitor Touchpoint — Mine competitor reviews/engagement</option>
+                <option value="PROFESSIONAL_NETWORK">🔗 Professional Network — LinkedIn decision-maker posts</option>
+                <option value="EVENT_TRIGGER_MINING">📰 Event Trigger Mining — Public events signal purchase need</option>
+            </select>
+            <p id="edit-strategy-current" style="margin:4px 0 0; font-size:0.7rem; color:#7c3aed; font-style:italic;"></p>
+        </div>
+
         <!-- V24.0: Competitive Intelligence Add-on -->
         <div class="sio-form-group" id="competitive-intel-section">
             <label for="competitor-url-input" class="edit-field-label">🔍 Competitive Intelligence (Optional)</label>
@@ -1543,6 +1558,6 @@
         });
     }
 </script>
-<script src="app.js?v=25.5.1"></script>
+<script src="app.js?v=26.0.0"></script>
 </body>
 </html>

@@ -300,6 +300,192 @@ def classify_sourcing_vector(bio: str, industry_weights: dict) -> str:
         return "B2B"
 
 
+# ── V26.0: Intelligence Strategy Classification ──────────────────────────────
+# Determines the optimal OSINT intelligence collection method per campaign.
+# Unlike sourcing_vector (B2B/B2C), this classifies HOW to find leads:
+#   PLATFORM_MINING      — leads are ON competitor/aggregator platform pages
+#   COLLOQUIAL_DISCOVERY — leads post online in everyday language, not jargon
+#   COMPETITOR_TOUCHPOINT — leads engaged publicly with competitors (reviews etc.)
+#   PROFESSIONAL_NETWORK — leads discuss on LinkedIn/professional platforms
+#   EVENT_TRIGGER_MINING  — public events (funding, breaches, policy) signal need
+
+_VALID_STRATEGIES = frozenset({
+    "PLATFORM_MINING",
+    "COLLOQUIAL_DISCOVERY",
+    "COMPETITOR_TOUCHPOINT",
+    "PROFESSIONAL_NETWORK",
+    "EVENT_TRIGGER_MINING",
+})
+
+_INTELLIGENCE_STRATEGY_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "primary": {
+            "type": "STRING",
+            "enum": list(_VALID_STRATEGIES),
+            "description": "The dominant intelligence collection strategy.",
+        },
+        "secondary": {
+            "type": "STRING",
+            "enum": list(_VALID_STRATEGIES) + ["NONE"],
+            "description": "Optional supporting strategy. Use NONE if not needed.",
+        },
+        "platform_targets": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+            "description": (
+                "For PLATFORM_MINING: competitor/aggregator domain names to mine "
+                "for entity data (e.g. 'dubizzle.com.om', 'g2.com'). Empty for other strategies."
+            ),
+        },
+        "competitor_names": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+            "description": (
+                "For COMPETITOR_TOUCHPOINT: business names of competitors whose "
+                "reviews/social engagement to mine. Empty for other strategies."
+            ),
+        },
+        "event_types": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+            "description": (
+                "For EVENT_TRIGGER_MINING: types of events to monitor "
+                "(e.g. 'funding', 'breach', 'regulatory', 'expansion', 'incorporation'). "
+                "Empty for other strategies."
+            ),
+        },
+        "vocabulary_notes": {
+            "type": "STRING",
+            "description": (
+                "A 1-3 sentence description of how the target ICP actually speaks "
+                "and searches online. Include their geo/cultural context, education "
+                "level, and the everyday words they use instead of industry jargon."
+            ),
+        },
+        "decision_maker_titles": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+            "description": (
+                "For PROFESSIONAL_NETWORK: job titles of decision-makers to target "
+                "on LinkedIn (e.g. 'CTO', 'VP Engineering'). Empty for other strategies."
+            ),
+        },
+    },
+    "required": [
+        "primary", "secondary", "platform_targets", "competitor_names",
+        "event_types", "vocabulary_notes", "decision_maker_titles",
+    ],
+}
+
+
+def classify_intelligence_strategy(
+    effective_bio: str,
+    keywords: str = "",
+    campaign_focus: str = "",
+    pain_point: str = "",
+    sourcing_vector: str = "B2B",
+    location: str = "",
+) -> dict:
+    """Classify the optimal OSINT intelligence strategy for a campaign.
+
+    Called at campaign creation time. Returns a dict matching
+    ``_INTELLIGENCE_STRATEGY_SCHEMA`` with strategy type, auto-derived
+    platform targets, competitor names, vocabulary notes, etc.
+
+    Falls back to ``COLLOQUIAL_DISCOVERY`` (the safest default) on
+    classification failure.
+    """
+    _default = {
+        "primary": "COLLOQUIAL_DISCOVERY",
+        "secondary": "NONE",
+        "platform_targets": [],
+        "competitor_names": [],
+        "event_types": [],
+        "vocabulary_notes": "",
+        "decision_maker_titles": [],
+        "classified_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+    context_parts = [p for p in [effective_bio, campaign_focus, pain_point, keywords, location] if p]
+    context = " | ".join(context_parts)
+    if not context.strip():
+        return _default
+
+    try:
+        from vertexai.generative_models import GenerativeModel, GenerationConfig  # type: ignore[import]
+
+        prompt = (
+            "You are an OSINT intelligence strategist. Classify this campaign into "
+            "the optimal lead discovery strategy.\n\n"
+            f"Campaign context: \"{context}\"\n"
+            f"Business model: {sourcing_vector}\n"
+            f"Location: {location or 'Global'}\n\n"
+            "STRATEGY DEFINITIONS:\n"
+            "1. PLATFORM_MINING — The ideal leads are entities LISTED ON competitor/aggregator "
+            "platforms (agents on property portals, companies on G2/Capterra, profiles on "
+            "directories). The platform pages ARE the intelligence source. Use when the client "
+            "wants to acquire users/listers from competitor platforms, or when the ICP is "
+            "supply-side (sellers, agents, vendors) rather than demand-side (buyers).\n\n"
+            "2. COLLOQUIAL_DISCOVERY — The ideal leads post their pain on forums/social media "
+            "in everyday language (NOT industry jargon). This is the most common strategy. "
+            "Use when buyers DO leave traces online but in colloquial vocabulary.\n\n"
+            "3. COMPETITOR_TOUCHPOINT — The ideal leads have publicly engaged with competitors: "
+            "left Google Reviews, G2/Capterra reviews, YouTube comments, or social engagement. "
+            "The reviewer/commenter IS the lead or knows the lead. Use when competitor review "
+            "pages are rich with buyer signals.\n\n"
+            "4. PROFESSIONAL_NETWORK — The ideal leads discuss on LinkedIn. B2B decision-makers "
+            "posting about evaluation, RFPs, vendor selection, or implementation. The post "
+            "AUTHOR is the lead. Use for enterprise B2B where LinkedIn is the primary surface.\n\n"
+            "5. EVENT_TRIGGER_MINING — Public EVENTS signal purchase urgency: funding rounds, "
+            "data breaches, regulatory changes, expansion announcements, new incorporations, "
+            "policy mandates. The event itself qualifies the lead. Use when leads don't express "
+            "pain online but external events create urgency.\n\n"
+            "RULES:\n"
+            "- Choose the strategy where ACTUAL leads leave the most traces\n"
+            "- For platform_targets: auto-derive 3-5 relevant competitor platform domains\n"
+            "- For competitor_names: auto-derive 3-5 specific competitor business names\n"
+            "- For vocabulary_notes: describe how the ICP ACTUALLY speaks (not professional jargon)\n"
+            "- For decision_maker_titles: list 3-5 relevant job titles\n"
+            "- For event_types: list relevant event categories\n"
+            "- Only populate fields relevant to the chosen primary/secondary strategy\n"
+            "- secondary can be NONE if one strategy is sufficient"
+        )
+
+        model = GenerativeModel("gemini-2.5-flash")
+        response = model.generate_content(
+            prompt,
+            generation_config=GenerationConfig(
+                response_mime_type="application/json",
+                response_schema=_INTELLIGENCE_STRATEGY_SCHEMA,
+                temperature=0.2,
+            ),
+        )
+
+        result = json.loads(response.text) if isinstance(response.text, str) else response.text
+
+        # Validate primary strategy
+        if result.get("primary") not in _VALID_STRATEGIES:
+            result["primary"] = "COLLOQUIAL_DISCOVERY"
+        if result.get("secondary") not in (_VALID_STRATEGIES | {"NONE"}):
+            result["secondary"] = "NONE"
+
+        # Ensure list fields are actually lists (Gemini sometimes returns None)
+        for list_field in ("platform_targets", "competitor_names", "event_types", "decision_maker_titles"):
+            if not isinstance(result.get(list_field), list):
+                result[list_field] = []
+
+        # Ensure vocabulary_notes is a string
+        if not isinstance(result.get("vocabulary_notes"), str):
+            result["vocabulary_notes"] = ""
+
+        result["classified_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        return result
+
+    except Exception as e:
+        print(f"[INTELLIGENCE STRATEGY] Classification failed: {e}")
+        return _default
+
 
 def _get_router_config(db_client=None) -> dict:
     db_client = db_client or _db()

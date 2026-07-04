@@ -30,6 +30,7 @@ from core.helpers import (  # type: ignore[import]
     get_service_account_email,
     get_vector_weights,
     classify_sourcing_vector,
+    classify_intelligence_strategy,
     is_consumer_archetype,
     reserve_credits,
     release_reservation,
@@ -339,6 +340,44 @@ def create_campaign(uid, tenant_id, user_role):
         doc_ref.update({"sourcing_vector": vector, "effective_bio": effective_bio})
         log.info("sourcing_vector_classified_child", campaign_id=doc_ref.id, vector=vector)
 
+    # ── V26.0: Intelligence Strategy Classification ──────────────────────────
+    # Determines HOW to find leads (PLATFORM_MINING, COLLOQUIAL_DISCOVERY, etc.)
+    # Auto-derives competitor platforms, vocabulary notes, event types from ICP.
+    _strategy_bio = data.get("effective_bio") or data.get("bio") or ""
+    if _strategy_bio and _strategy_bio != "CHILD_CAMPAIGN_OVERRIDE":
+        _strategy_bio_final = _strategy_bio
+    elif _strategy_bio == "CHILD_CAMPAIGN_OVERRIDE":
+        _strategy_bio_final = " | ".join(filter(None, [
+            data.get("campaign_focus", ""),
+            data.get("pain_point", ""),
+            data.get("unfair_advantage", ""),
+        ]))
+    else:
+        _strategy_bio_final = ""
+
+    if _strategy_bio_final:
+        try:
+            _intel_strategy = classify_intelligence_strategy(
+                effective_bio=_strategy_bio_final,
+                keywords=data.get("keywords", ""),
+                campaign_focus=data.get("campaign_focus", ""),
+                pain_point=data.get("pain_point", ""),
+                sourcing_vector=data.get("sourcing_vector", vector if 'vector' in dir() else "B2B"),
+                location=data.get("location", ""),
+            )
+            doc_ref.update({"intelligence_strategy": _intel_strategy})
+            log.info(
+                "intelligence_strategy_classified",
+                campaign_id=doc_ref.id,
+                primary=_intel_strategy.get("primary"),
+                secondary=_intel_strategy.get("secondary"),
+                platform_targets=len(_intel_strategy.get("platform_targets", [])),
+                competitor_names=len(_intel_strategy.get("competitor_names", [])),
+            )
+        except Exception as _strat_exc:
+            log.warning("intelligence_strategy_classification_failed",
+                        campaign_id=doc_ref.id, error=str(_strat_exc))
+
     # Zero-wait timestamps
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     doc_ref.update({
@@ -459,6 +498,21 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
 
     # Server-side field sanitization — last line of defense
     _sanitize_campaign_fields(data)
+
+    # V26.0: Handle intelligence strategy override (before allowlist filter strips it)
+    _strategy_override = data.pop("strategy_override", None)
+    if _strategy_override:
+        from core.helpers import _VALID_STRATEGIES  # type: ignore[import]
+        if _strategy_override in _VALID_STRATEGIES:
+            _existing_strategy = existing_data.get("intelligence_strategy", {})
+            _existing_strategy["primary"] = _strategy_override
+            _existing_strategy["overridden_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            doc_ref.update({"intelligence_strategy": _existing_strategy})
+            log.info("intelligence_strategy_overridden",
+                     campaign_id=doc_id, new_strategy=_strategy_override)
+        else:
+            log.warning("intelligence_strategy_override_invalid",
+                        campaign_id=doc_id, value=_strategy_override)
 
     data = {k: v for k, v in data.items() if k in _CAMPAIGN_UPDATE_ALLOWED}
 

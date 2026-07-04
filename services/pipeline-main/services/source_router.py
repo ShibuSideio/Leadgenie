@@ -215,7 +215,7 @@ class SourceRouter:
         )
 
         try:
-            raw_config = self._derive_via_gemini(archetype, icp_context, geo)
+            raw_config = self._derive_via_gemini(archetype, icp_context, geo, campaign=campaign)
             sources    = self._instantiate_sources(raw_config, geo, campaign=campaign)
             config     = RoutingConfig(
                 sources                = sources,
@@ -250,12 +250,29 @@ class SourceRouter:
         archetype: str,
         icp_context: str,
         geo: str,
+        campaign: dict | None = None,
     ) -> dict:
         """Ask Gemini to analyze the ICP and output source configuration."""
         geo_note = f"Target geography: {geo}" if geo else "Geography: Global / not restricted."
 
         # Build archetype-specific instruction block
         archetype_instructions = _build_archetype_instructions(archetype)
+
+        # V26: Prepend strategy-specific instructions if intelligence_strategy is present
+        strategy_instructions = ""
+        if campaign:
+            _intel_strategy = campaign.get("intelligence_strategy")
+            if isinstance(_intel_strategy, dict) and _intel_strategy.get("primary"):
+                strategy_instructions = _build_strategy_instructions(
+                    _intel_strategy.get("primary", ""),
+                    campaign,
+                )
+                if strategy_instructions:
+                    archetype_instructions = (
+                        strategy_instructions + "\n\n"
+                        "--- ARCHETYPE CONTEXT (secondary) ---\n"
+                        + archetype_instructions
+                    )
 
         prompt = f"""You are an OSINT signal source router for a B2B/B2C/D2C/B2B2C intent lead generation platform.
 
@@ -334,6 +351,8 @@ IMPORTANT:
         # Inject private routing hints for _instantiate_sources
         result["_archetype"]    = archetype
         result["_icp_context"]  = icp_context
+        # V26: Pass campaign through for strategy-aware source instantiation
+        result["_campaign"]     = campaign if campaign else {}
         return result
 
     def _instantiate_sources(
@@ -366,8 +385,16 @@ IMPORTANT:
         # Google Reviews uses 2 Serper credits per competitor (maps+reviews). #
         # At 5 competitors × 6 harvests/day × 150 campaigns = 45K Serper     #
         # calls/day just from reviews. Gate to once per 23h per campaign.    #
+        # V26: COMPETITOR_TOUCHPOINT strategy reduces cooldown to 6h.        #
         # ------------------------------------------------------------------ #
-        _REVIEWS_COOLDOWN_H = 23  # hours between Google Reviews runs
+        _intel_strategy_cfg = _campaign.get("intelligence_strategy") or {}
+        _primary_strat = (
+            _intel_strategy_cfg.get("primary", "")
+            if isinstance(_intel_strategy_cfg, dict) else ""
+        ).upper().strip()
+        _REVIEWS_COOLDOWN_H = (
+            6 if _primary_strat == "COMPETITOR_TOUCHPOINT" else 23
+        )
         _reviews_due = True
         _last_reviews_raw = _campaign.get("last_google_reviews_at")
         if _last_reviews_raw:
@@ -394,7 +421,8 @@ IMPORTANT:
                         campaign_id=_campaign.get("id", _campaign.get("campaign_id", "unknown")),
                         elapsed_hours=round(_elapsed_h, 1),
                         cooldown_hours=_REVIEWS_COOLDOWN_H,
-                        note="Skipping GoogleReviewSource — ran less than 23h ago. "
+                        strategy=_primary_strat or "DEFAULT",
+                        note=f"Skipping GoogleReviewSource — ran less than {_REVIEWS_COOLDOWN_H}h ago. "
                              "Saves ~2 Serper credits per competitor per harvest.",
                     )
             except Exception as _cd_err:
@@ -543,6 +571,109 @@ IMPORTANT:
                     archetype=raw_arch,
                     queries=len(yt_queries),
                 )
+
+        # ── V26 Strategy-aware source prioritization (Task 3.2) ───────────
+        # Based on intelligence_strategy.primary, force-enable or force-disable
+        # specific source types.
+        _campaign_strat = config.get("_campaign", {}).get("intelligence_strategy") or {}
+        _strat_primary = (
+            _campaign_strat.get("primary", "")
+            if isinstance(_campaign_strat, dict) else ""
+        ).upper().strip()
+
+        if _strat_primary:
+            _existing_types = {s.source_type for s in sources}
+
+            if _strat_primary == "PLATFORM_MINING":
+                # Prioritize: SerperDiscovery + ClassifiedListings
+                # Disable: Reddit, HackerNews
+                sources = [
+                    s for s in sources
+                    if s.source_type not in ("reddit", "hackernews")
+                ]
+                # Force-add ClassifiedListings if not present
+                if "classified_listings" not in _existing_types:
+                    _platform_targets = _campaign_strat.get("platform_targets", [])
+                    if _platform_targets:
+                        sources.insert(0, ClassifiedListingSource(
+                            categories=_platform_targets[:5],
+                            geo=geo,
+                            platform_types=["classified", "property", "expat"],
+                            max_age_days=14,
+                        ))
+                log.info("source_router_strategy_override",
+                         strategy=_strat_primary,
+                         source_types=[s.source_type for s in sources])
+
+            elif _strat_primary == "COMPETITOR_TOUCHPOINT":
+                # Prioritize: GoogleReviews + SerperDiscovery
+                # Disable: JobPosts
+                sources = [
+                    s for s in sources
+                    if s.source_type != "job_posts"
+                ]
+                # Force-add GoogleReviewSource if not present and reviews are due
+                if "google_reviews" not in _existing_types and self._serper_key and _reviews_due:
+                    icp_ctx = config.get("_icp_context", "")
+                    raw_a = config.get("_archetype", "B2B")
+                    sources.insert(0, GoogleReviewSource(
+                        icp_context=icp_ctx,
+                        geo=geo,
+                        archetype=raw_a,
+                        serper_api_key=self._serper_key,
+                        max_age_days=60,
+                    ))
+                log.info("source_router_strategy_override",
+                         strategy=_strat_primary,
+                         source_types=[s.source_type for s in sources])
+
+            elif _strat_primary == "PROFESSIONAL_NETWORK":
+                # Prioritize: SerperDiscovery (LinkedIn queries) + HackerNews
+                # Disable: ClassifiedListings
+                sources = [
+                    s for s in sources
+                    if s.source_type != "classified_listings"
+                ]
+                # Force-add HackerNewsSource if not present
+                if "hackernews" not in _existing_types:
+                    _decision_titles = _campaign_strat.get("decision_maker_titles", [])
+                    _hn_queries = [
+                        f'"{t}" evaluating OR implemented'
+                        for t in (_decision_titles or ["CTO", "VP Engineering"])[:3]
+                    ]
+                    sources.append(HackerNewsSource(
+                        search_queries=_hn_queries,
+                        max_age_days=30,
+                        include_ask=True,
+                        include_stories=True,
+                        min_comments=2,
+                    ))
+                log.info("source_router_strategy_override",
+                         strategy=_strat_primary,
+                         source_types=[s.source_type for s in sources])
+
+            elif _strat_primary == "EVENT_TRIGGER_MINING":
+                # Prioritize: RssFeed (news) + SerperDiscovery (news queries)
+                # Disable: ClassifiedListings
+                sources = [
+                    s for s in sources
+                    if s.source_type != "classified_listings"
+                ]
+                # Force-add RssFeedSource for news if not present
+                if "rss_feed" not in _existing_types:
+                    _event_types = _campaign_strat.get("event_types", ["funding", "expansion"])
+                    from urllib.parse import quote_plus as _qp
+                    _news_urls = [
+                        f"https://news.google.com/rss/search?q={_qp(evt)}&hl=en"
+                        for evt in (_event_types or ["funding"])[:3]
+                    ]
+                    sources.insert(0, RssFeedSource(
+                        feed_urls=_news_urls,
+                        max_age_days=7,
+                    ))
+                log.info("source_router_strategy_override",
+                         strategy=_strat_primary,
+                         source_types=[s.source_type for s in sources])
 
         return sources
 
@@ -754,3 +885,73 @@ Signal sources priority:
    - site:community.hubspot.com, site:indiehackers.com, site:reddit.com
 6. classified_listing_config: LEAVE EMPTY (B2B buyers don't post on classified sites)
 7. consumer_forum_config: LEAVE EMPTY"""
+
+
+# ---------------------------------------------------------------------------
+# V26 Strategy-specific instruction builder
+# ---------------------------------------------------------------------------
+
+def _build_strategy_instructions(strategy: str, campaign: dict) -> str:
+    """Return intelligence-strategy-specific Gemini instructions.
+
+    These instructions are PREPENDED to the archetype instructions, overriding
+    default source selection priorities when the campaign has an explicit
+    intelligence strategy configured.
+
+    Args:
+        strategy: Primary intelligence strategy string (e.g. 'PLATFORM_MINING').
+        campaign: Full campaign dict for extracting strategy parameters.
+
+    Returns:
+        Strategy instruction string, or empty string if strategy is unknown.
+    """
+    _strat = (strategy or "").upper().strip()
+    _intel = campaign.get("intelligence_strategy") or {}
+    if not isinstance(_intel, dict):
+        _intel = {}
+
+    if _strat == "PLATFORM_MINING":
+        _platform_targets = _intel.get("platform_targets", [])
+        _targets_str = ", ".join(_platform_targets) if _platform_targets else "(none specified)"
+        return f"""--- INTELLIGENCE STRATEGY: PLATFORM MINING ---
+PRIMARY OBJECTIVE: Find pages on competitor/aggregator platforms that list individual entities (agents, companies, profiles, reviewers).
+TARGET PLATFORMS: {_targets_str}
+Generate queries that search INSIDE these platforms for entity profiles, contact info, and listings.
+Examples: site:dubizzle.com.om "agent" "villa" "contact"
+          site:g2.com/products/*/reviews "hospital" "implemented"
+Do NOT generate generic forum queries — platform mining is the priority."""
+
+    if _strat == "COLLOQUIAL_DISCOVERY":
+        _vocab_notes = _intel.get("vocabulary_notes", "")
+        return f"""--- INTELLIGENCE STRATEGY: COLLOQUIAL DISCOVERY ---
+VOCABULARY RULE: {_vocab_notes}
+All queries must use EVERYDAY LANGUAGE of the target buyer, NOT industry jargon.
+The buyer does NOT use professional terms. Think about how a real person would type their frustration into Google."""
+
+    if _strat == "COMPETITOR_TOUCHPOINT":
+        _competitor_names = _intel.get("competitor_names", [])
+        _names_str = ", ".join(_competitor_names) if _competitor_names else "(none specified)"
+        return f"""--- INTELLIGENCE STRATEGY: COMPETITOR TOUCHPOINT ---
+PRIMARY OBJECTIVE: Find reviews, comments, and public engagement with these competitors: {_names_str}
+Prioritize: Google Reviews, G2/Capterra reviews, YouTube comments, public social posts.
+The REVIEWER/COMMENTER is the lead — not the competitor page itself."""
+
+    if _strat == "PROFESSIONAL_NETWORK":
+        _decision_titles = _intel.get("decision_maker_titles", [])
+        _titles_str = ", ".join(_decision_titles) if _decision_titles else "(none specified)"
+        return f"""--- INTELLIGENCE STRATEGY: PROFESSIONAL NETWORK ---
+PRIMARY OBJECTIVE: Find decision-maker posts on LinkedIn about evaluation and purchase decisions.
+Target titles: {_titles_str}
+Generate LinkedIn-focused queries: site:linkedin.com/posts "evaluating" OR "implemented" OR "RFP"
+Do NOT exclude LinkedIn — it is the PRIMARY intelligence surface."""
+
+    if _strat == "EVENT_TRIGGER_MINING":
+        _event_types = _intel.get("event_types", [])
+        _events_str = ", ".join(_event_types) if _event_types else "(none specified)"
+        return f"""--- INTELLIGENCE STRATEGY: EVENT TRIGGER MINING ---
+PRIMARY OBJECTIVE: Find NEWS EVENTS that signal purchase urgency.
+Event types: {_events_str}
+Generate Google News queries, regulatory filing queries, and announcement queries.
+The event ITSELF qualifies the lead — no forum posts needed."""
+
+    return ""

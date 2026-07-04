@@ -128,6 +128,8 @@ class CampaignQueryContext:
         sourcing_vector: Optional[str] = None,
         persona_category: Optional[str] = None,
         targeting_signals: Optional[list] = None,
+        vocabulary_notes: str = "",
+        strategy: str = "COLLOQUIAL_DISCOVERY",
     ):
         self.campaign_id = campaign_id
         self.tenant_id = tenant_id
@@ -136,6 +138,9 @@ class CampaignQueryContext:
         self.sourcing_vector = sourcing_vector
         self.persona_category = persona_category
         self.targeting_signals = list(targeting_signals) if targeting_signals else []
+        # V26 Multi-Strategy OSINT Engine fields
+        self.vocabulary_notes = vocabulary_notes or ""
+        self.strategy = (strategy or "COLLOQUIAL_DISCOVERY").upper().strip()
         
         # Scoped dynamic arrays
         self.pain_points: list[str] = []
@@ -267,6 +272,8 @@ def generate_smart_query(
     targeting_signals: Optional[list] = None,
     campaign_id: Optional[str] = None,
     force_query_refresh: bool = False,
+    vocabulary_notes: str = "",
+    intelligence_strategy: Optional[dict] = None,
 ) -> list[str]:
     """Generate Serper query strings via statistical router or Gemini fallback.
 
@@ -282,6 +289,12 @@ def generate_smart_query(
         force_query_refresh: When True (set by produce.py exhaustion detector),
                             injects a diversification mandate into the Gemini
                             prompt to force completely new query angles.
+        vocabulary_notes:   V26 — How the ICP actually speaks. When present,
+                            triggers a second Gemini call to translate
+                            professional queries into colloquial language.
+        intelligence_strategy: V26 — Full intelligence_strategy dict from the
+                            campaign document. Used for strategy-aware blacklist
+                            filtering.
 
     Returns:
         List of ready-to-use Serper query strings (may be empty on error).
@@ -289,6 +302,13 @@ def generate_smart_query(
     from services.neg_shield import fetch_neg_shield  # type: ignore[import]
     from services.gemini_service import call_gemini_2_5  # type: ignore[import]
     import json
+
+    # V26: Extract strategy from intelligence_strategy dict
+    _intel_strategy = intelligence_strategy or {}
+    _primary_strategy = (
+        _intel_strategy.get("primary", "COLLOQUIAL_DISCOVERY")
+        if isinstance(_intel_strategy, dict) else "COLLOQUIAL_DISCOVERY"
+    )
 
     # Instantiate the campaign scoped context to ensure absolute data boundary isolation.
     ctx = CampaignQueryContext(
@@ -299,6 +319,8 @@ def generate_smart_query(
         sourcing_vector=sourcing_vector,
         persona_category=persona_category,
         targeting_signals=targeting_signals,
+        vocabulary_notes=vocabulary_notes,
+        strategy=_primary_strategy,
     )
 
     # ── Step 1: RLHF history (Firestore read) ─────────────────────────────────
@@ -858,6 +880,90 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
                          is_consumer=_is_consumer_vector,
                          tenant_id=ctx.tenant_id,
                          campaign_id=ctx.campaign_id)
+
+                # ── V26 Colloquial Translation (Task 2.1) ─────────────────
+                # When vocabulary_notes is present, run a SECOND Gemini call
+                # to rewrite professional queries in the ICP's actual vocabulary.
+                # This only fires after the main Gemini call succeeds.
+                if ctx.vocabulary_notes and ctx.vocabulary_notes.strip():
+                    _all_queries_for_translation = ctx.symptom_dorks + ctx.intents
+                    if _all_queries_for_translation:
+                        _colloquial_prompt = (
+                            "You are a vocabulary translator for search queries. "
+                            "You are given professional/jargon queries and must rewrite them "
+                            "in the EXACT vocabulary of this audience:\n\n"
+                            f"Audience: {ctx.vocabulary_notes}\n\n"
+                            "Rewrite each query below so it sounds like this audience would "
+                            "ACTUALLY type it into Google or post on a forum. Remove all "
+                            "industry jargon. Use everyday language.\n\n"
+                            "Queries to translate:\n"
+                        )
+                        for _idx, _q in enumerate(_all_queries_for_translation, 1):
+                            _colloquial_prompt += f"{_idx}. {_q}\n"
+                        _colloquial_prompt += (
+                            "\nReturn the same number of queries, rewritten in colloquial "
+                            "language. Return ONLY a JSON array of strings. No explanation."
+                        )
+
+                        _COLLOQUIAL_SCHEMA = {
+                            "type": "ARRAY",
+                            "items": {"type": "STRING"},
+                        }
+
+                        try:
+                            _colloquial_result = call_gemini_2_5(
+                                _colloquial_prompt,
+                                expect_json=True,
+                                response_schema=_COLLOQUIAL_SCHEMA,
+                                temperature=0.4,
+                            )
+                            if isinstance(_colloquial_result, list) and _colloquial_result:
+                                _colloquial_queries = [
+                                    _clean_query_syntax(q.strip())
+                                    for q in _colloquial_result
+                                    if isinstance(q, str) and q.strip()
+                                ]
+                                if _colloquial_queries:
+                                    # Append colloquial variants — do NOT replace originals.
+                                    # Original professional queries are kept for precision;
+                                    # colloquial variants add recall from everyday searches.
+                                    _orig_dork_count = len(ctx.symptom_dorks)
+                                    _orig_intent_count = len(ctx.intents)
+                                    # Split colloquial results back into dorks vs intents
+                                    _colloquial_dorks = _colloquial_queries[:_orig_dork_count]
+                                    _colloquial_intents = _colloquial_queries[_orig_dork_count:]
+                                    ctx.symptom_dorks.extend(_colloquial_dorks)
+                                    ctx.intents.extend(_colloquial_intents)
+                                    log.info(
+                                        "query_brain_colloquial_translation_ok",
+                                        original_count=len(_all_queries_for_translation),
+                                        colloquial_count=len(_colloquial_queries),
+                                        vocabulary_notes_preview=ctx.vocabulary_notes[:80],
+                                        campaign_id=ctx.campaign_id,
+                                    )
+                                else:
+                                    log.warning(
+                                        "query_brain_colloquial_empty_result",
+                                        campaign_id=ctx.campaign_id,
+                                        note="Gemini returned empty colloquial translations.",
+                                    )
+                            else:
+                                log.warning(
+                                    "query_brain_colloquial_unexpected_type",
+                                    result_type=str(type(_colloquial_result)),
+                                    campaign_id=ctx.campaign_id,
+                                )
+                        except Exception as _colloquial_exc:
+                            # Non-fatal — colloquial translation is additive.
+                            # Original queries still work without it.
+                            log.warning(
+                                "query_brain_colloquial_translation_failed",
+                                error=str(_colloquial_exc),
+                                campaign_id=ctx.campaign_id,
+                                note="Colloquial translation Gemini call failed. "
+                                     "Continuing with professional queries only.",
+                            )
+
         except Exception as exc:
             log.warning("query_brain_gemini_failed", error=str(exc))
 
@@ -936,8 +1042,14 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
         _rlhf_blacklist += " " + " ".join(f"-site:{d}" for d in ctx.neg_domains[:10] if d)
         log.info("neg_rlhf_sites_injected", count=len(ctx.neg_domains[:10]))
     if ctx.neg_title_frags:
-        _rlhf_blacklist += " " + " ".join(f'-intitle:"{t}"' for t in ctx.neg_title_frags[:5] if t)
-        log.info("neg_rlhf_titles_injected", count=len(ctx.neg_title_frags[:5]))
+        # V26.0: Length guard — skip entries > 80 chars (outreach templates, not real page titles)
+        _valid_title_frags = [t for t in ctx.neg_title_frags[:5] if t and len(t) <= 80]
+        _skipped_title_frags = len(ctx.neg_title_frags[:5]) - len(_valid_title_frags)
+        if _skipped_title_frags > 0:
+            log.warning("neg_rlhf_titles_oversized_skipped", skipped=_skipped_title_frags)
+        if _valid_title_frags:
+            _rlhf_blacklist += " " + " ".join(f'-intitle:"{t}"' for t in _valid_title_frags)
+            log.info("neg_rlhf_titles_injected", count=len(_valid_title_frags))
 
     _shield_blacklist = ""  # Neg shield domains (tenant-level)
     try:
@@ -950,7 +1062,14 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
         if shield_domains:
             _shield_blacklist += " " + " ".join(f"-site:{d}" for d in shield_domains[:15] if d)
         if shield_entities:
-            _shield_blacklist += " " + " ".join(f'-intitle:"{e}"' for e in shield_entities[:10] if e)
+            # V26.0: Length guard — skip entities > 80 chars (prevents outreach
+            # message templates from being injected as -intitle: exclusions)
+            _valid_entities = [e for e in shield_entities[:10] if e and len(e) <= 80]
+            _skipped_entities = len(shield_entities[:10]) - len(_valid_entities)
+            if _skipped_entities > 0:
+                log.warning("neg_shield_entities_oversized_skipped", skipped=_skipped_entities)
+            if _valid_entities:
+                _shield_blacklist += " " + " ".join(f'-intitle:"{e}"' for e in _valid_entities)
         if shield_domains or shield_entities:
             log.info("neg_shield_injected",
                      domains=len(shield_domains), entities=len(shield_entities))
@@ -962,8 +1081,62 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
     if _pre_exclusions:
         _persona_blacklist = " " + " ".join(_pre_exclusions)
 
+    # ── V26 Strategy-aware blacklist filtering (Task 2.3) ──────────────────
+    # Certain intelligence strategies NEED review/social platforms as sources.
+    # Remove conflicting exclusions from _DEFAULT_BLACKLIST based on strategy.
+    _effective_default_blacklist = _DEFAULT_BLACKLIST
+    _strategy_upper = ctx.strategy.upper()
+
+    if _strategy_upper == "PLATFORM_MINING":
+        # Review/aggregator platforms are intelligence SOURCES, not noise
+        _effective_default_blacklist = _effective_default_blacklist.replace(
+            "-site:g2.com", ""
+        ).replace(
+            "-site:capterra.com", ""
+        ).replace(
+            "-site:yelp.com", ""
+        )
+        log.info("blacklist_strategy_override",
+                 strategy=ctx.strategy,
+                 note="PLATFORM_MINING: Kept g2, capterra, yelp as intelligence sources.")
+
+    elif _strategy_upper == "COMPETITOR_TOUCHPOINT":
+        # Review platforms are where competitor reviewers (= leads) post
+        _effective_default_blacklist = _effective_default_blacklist.replace(
+            "-site:g2.com", ""
+        ).replace(
+            "-site:capterra.com", ""
+        ).replace(
+            "-site:yelp.com", ""
+        )
+        log.info("blacklist_strategy_override",
+                 strategy=ctx.strategy,
+                 note="COMPETITOR_TOUCHPOINT: Kept review platforms for reviewer discovery.")
+
+    elif _strategy_upper == "PROFESSIONAL_NETWORK":
+        # LinkedIn is the PRIMARY intelligence surface
+        _effective_default_blacklist = _effective_default_blacklist.replace(
+            "-site:linkedin.com", ""
+        )
+        log.info("blacklist_strategy_override",
+                 strategy=ctx.strategy,
+                 note="PROFESSIONAL_NETWORK: Removed LinkedIn exclusion — primary surface.")
+
+    elif _strategy_upper == "EVENT_TRIGGER_MINING":
+        # Minimal blacklist — only user's own domain matters
+        # Strip almost all default exclusions; downstream neg_shield and RLHF
+        # exclusions (which are campaign-specific) are still applied.
+        _effective_default_blacklist = ""
+        log.info("blacklist_strategy_override",
+                 strategy=ctx.strategy,
+                 note="EVENT_TRIGGER_MINING: Minimal blacklist — only RLHF/shield exclusions active.")
+
+    # Clean up any double spaces from replacement
+    import re as _bl_clean_re
+    _effective_default_blacklist = _bl_clean_re.sub(r'\s{2,}', ' ', _effective_default_blacklist).strip()
+
     # Build: RLHF (most specific) → shield → persona → static (least specific)
-    blacklist = (_rlhf_blacklist + _shield_blacklist + _persona_blacklist + " " + _DEFAULT_BLACKLIST).strip()
+    blacklist = (_rlhf_blacklist + _shield_blacklist + _persona_blacklist + " " + _effective_default_blacklist).strip()
 
     # V25.5.0 Phase 2D: Domain count cap (replaces char-based cap).
     # The old 450-char cap was brittle: 10 RLHF domains with long names could

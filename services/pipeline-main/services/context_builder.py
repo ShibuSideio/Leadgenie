@@ -158,6 +158,15 @@ def build_enriched_context(campaign: dict) -> str:
     if _vector:
         _add("BUYER TYPE", _vector, max_chars=50)
 
+    # Layer 9: Intelligence Strategy — Vocabulary Notes
+    # V26 Multi-Strategy OSINT Engine: vocabulary_notes describes how the ICP
+    # actually speaks (colloquial language, slang, everyday terms). Passed
+    # through to query_brain for colloquial query translation.
+    _intel_strategy = campaign.get("intelligence_strategy") or {}
+    _vocab_notes = _clean(_intel_strategy.get("vocabulary_notes", "")) if isinstance(_intel_strategy, dict) else ""
+    if _vocab_notes:
+        _add("AUDIENCE VOCABULARY", _vocab_notes, max_chars=500)
+
     # Fallback: guarantee non-empty output
     if not parts:
         _fallback = (
@@ -184,5 +193,6 @@ def build_enriched_context(campaign: dict) -> str:
         has_keywords=bool(_keywords),
         has_hook=bool(_hook),
         has_geo=bool(_geo_str),
+        has_vocabulary_notes=bool(_vocab_notes),
     )
     return result
