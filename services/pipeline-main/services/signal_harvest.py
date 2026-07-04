@@ -709,13 +709,17 @@ def _write_to_firestore(
                 queued += 1
                 continue
 
+            _pain_summary = str(score.get("pain_summary", "") or "")
+            _buyer_quote = str(score.get("buyer_language_quote", "") or "")
+            _contact_point = str(score.get("contact_point", "") or "")
+
             lead_doc = {
                 "url":              signal.url,
                 "status":           "new",
                 "score":            8,
                 "normalized_score": 80,
-                "pain_point":       score.get("pain_summary", ""),
-                "intent_signal":    score.get("buyer_language_quote", ""),
+                "pain_point":       _pain_summary,
+                "intent_signal":    _buyer_quote,
                 "decision_maker":   {"name": _reviewer_name},
                 "company_name":     _company_name_value,
                 "source":           "signal_harvest_review",
@@ -725,7 +729,7 @@ def _write_to_firestore(
                 "matched_campaigns": [{"campaign_id": campaign_id, "raw_score": 8}],
                 "contact_endpoints": [{"platform": "google_maps", "uri": signal.url}],
                 "dm":               _dm_value,
-                "icebreaker_angle": score.get("pain_summary", ""),
+                "icebreaker_angle": _pain_summary,
                 "score_reasoning":  (
                     f"HIGH-tier Google Review on competitor "
                     f"'{signal.metadata.get('place_name', '')}'. "
@@ -733,7 +737,7 @@ def _write_to_firestore(
                 ),
                 "evidence_chain":   [{
                     "signal_type": "REVIEW_SIGNAL",
-                    "evidence":    score.get("buyer_language_quote", ""),
+                    "evidence":    _buyer_quote,
                     "confidence":  0.85,
                 }],
                 "confidence_level": "HIGH",
@@ -766,8 +770,8 @@ def _write_to_firestore(
                     "signal_harvest_direct_lead_created",
                     campaign_id=campaign_id,
                     lead_id=lead_id,
-                    place_name=signal.metadata.get("place_name", "")[:80],
-                    reviewer=signal.author[:60],
+                    place_name=str(signal.metadata.get("place_name", ""))[:80],
+                    reviewer=str(signal.author or "")[:60],
                 )
             except AlreadyExists:
                 # RACE-06 FIX: Release lock on AlreadyExists path.
@@ -795,6 +799,9 @@ def _write_to_firestore(
                     lead_id=lead_id,
                     error=str(exc),
                 )
+                # FALLBACK: Queue URL through normal dispatch instead of losing it
+                harvest_urls.append(signal.url)
+                queued += 1
             # HIGH-tier reviews bypass the queue — do NOT append to harvest_urls
             continue
 
