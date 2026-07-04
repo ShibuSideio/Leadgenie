@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v26.0.0'; // V26.0.0: Multi-strategy OSINT intelligence engine
+const CACHE_NAME = 'sideio-v26.0.3'; // V26.0.3: Hybrid strategy + skip lead fix
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=26.0.2',
-     '/styles.css?v=26.0.2',
+     '/app.js?v=26.0.3',
+     '/styles.css?v=26.0.3',
      '/manifest.json'
  ];
 

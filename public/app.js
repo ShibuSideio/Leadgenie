@@ -1317,6 +1317,7 @@ window.viewLeadTimeline = function(eventsJson) {
 
 // FE-12: Double-click / concurrent-call protection guard
 let _apiMutationInFlight = false;
+let _apiMutationTimer = null;
 
 async function performApiMutation(url, method, payload) {
     if (_apiMutationInFlight) {
@@ -1326,6 +1327,14 @@ async function performApiMutation(url, method, payload) {
     const user = auth.currentUser;
     if (!user) return false;
     _apiMutationInFlight = true;
+    // V26.0.3: Safety timeout — auto-reset after 10s in case fetch hangs
+    // or an unhandled rejection leaves the flag stuck forever.
+    _apiMutationTimer = setTimeout(() => {
+        if (_apiMutationInFlight) {
+            console.warn('[performApiMutation] Safety timeout — resetting stale lock');
+            _apiMutationInFlight = false;
+        }
+    }, 10000);
     try {
         // iOS Safari fix: force=true guarantees a fresh token even when the
         // Safari background throttling has invalidated the in-memory cached token.
@@ -1339,6 +1348,7 @@ async function performApiMutation(url, method, payload) {
         if (!response.ok) throw new Error('API Execution Failed');
         return true;
     } finally {
+        clearTimeout(_apiMutationTimer);
         _apiMutationInFlight = false;
     }
 }
@@ -1395,15 +1405,14 @@ window.openRejectionModal = function(docId) {
 };
 
 window.submitRejection = async function(reason) {
-    const VALID = ['wrong_topic', 'wrong_geography', 'news_article', 'too_old', 'cant_contact', 'competitor', 'other'];
+    const VALID = ['not_b2b', 'wrong_industry', 'too_small', 'competitor', 'author', 'bad_data'];
     if (!VALID.includes(reason)) return;
     const docId = document.getElementById('rejection-lead-id').value;
     if (!docId) return;
     closeModal('rejection-modal');
-    const labels = { wrong_topic: 'Wrong Topic', wrong_geography: 'Wrong Geography',
-                     news_article: 'News Article', too_old: 'Too Old',
-                     cant_contact: "Can't Contact", competitor: 'Competitor',
-                     other: 'Other' };
+    const labels = { not_b2b: 'Not B2B', wrong_industry: 'Wrong Industry',
+                     too_small: 'Too Small', competitor: 'Competitor',
+                     author: 'Author / Non-Prospect', bad_data: 'Bad Data' };
     try {
         const user = firebase.auth().currentUser;
         if (!user) return;
@@ -1414,7 +1423,8 @@ window.submitRejection = async function(reason) {
             body:    JSON.stringify({ status: 'rejected', rejection_reason: reason })
         });
         if (resp.ok) {
-            showToast(`Lead rejected: ${labels[reason]}. AI is learning.`, 'success');
+            showToast(`Lead rejected: ${labels[reason] || reason}. AI is learning.`, 'success');
+            loadDashboard();
         } else {
             showToast('Lead removed. API sync failed — will retry.', 'info');
         }
