@@ -1,6 +1,6 @@
 # =============================================================================
-# cloudbuild.yaml — LeadGenie (Sideio) V25.2.2 Enterprise Build Pipeline
-# Deploy trigger: 2026-07-03 | V25.2.2 — Inbound Radar hardening + dependency standardisation
+# cloudbuild.yaml — LeadGenie (Sideio) V25.4.1 Enterprise Build Pipeline
+# Deploy trigger: 2026-07-04 | V25.4.1 — Direct-to-production (preview steps removed)
 #
 # Changes from V23.5.2 (2026-04-30):
 #
@@ -44,13 +44,12 @@
 
 # Architecture:
 #   Phase 0a: Frontend JS syntax gate
-#   Phase 0b: Python V23 smoke test gate (NEW — blocks build on any failure)
+#   Phase 0b: Python V23 smoke test gate (blocks build on any failure)
 #   Phase 1:  All 8 Docker images built IN PARALLEL (waitFor: ['gate-passed'])
 #   Phase 2:  All 8 images pushed IN PARALLEL (waitFor: respective build id)
 #   Phase 3:  Cloud Run Services deployed (parallel where independent)
-#   Phase 3b': orchestrator v23-preview --no-traffic (NEW)
 #   Phase 4:  Cloud Run Jobs (autonomous-engine, shadow-learner)
-#   Phase 5:  Cloud Scheduler — 3 V23 jobs only (pipeline-sweep, ai-reflection, ontology-decay)
+#   Phase 5:  Cloud Scheduler — 4 jobs (pipeline-sweep, ai-reflection, ontology-decay, inbound-radar)
 #   Phase 6:  Firebase (starts immediately after gate-passed)
 #
 # Key production rules applied:
@@ -378,42 +377,7 @@ steps:
       --quiet
   secretEnv: ['INTERNAL_CRON_SECRET']
 
-# =============================================================================
-# PHASE 3b': V23 PREVIEW DEPLOY — NO TRAFFIC
-# Deploys main_v23.py as a tagged preview revision isolated from production.
-# Zero traffic is routed to it. CEO performs UAT against the tagged URL.
-# Switch production traffic manually after UAT passes:
-#   gcloud run services update orchestrator --update-env-vars GUNICORN_MAIN=main_v23:app --to-latest
-#
-# The GUNICORN_MAIN env var is NOT set here (constraint from QA mandate).
-# It is set only after manual GO decision following UAT.
-# =============================================================================
 
-- id: 'deploy-orchestrator-v23-preview'
-  waitFor: ['deploy-orchestrator']
-  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
-  entrypoint: bash
-  args:
-  - '-c'
-  - |
-    set -eo pipefail
-    echo "[V23-PREVIEW] Deploying v23 preview revision (no traffic)..."
-    gcloud run deploy orchestrator \
-      --image=gcr.io/$PROJECT_ID/lead-orchestrator:$COMMIT_SHA \
-      --region=asia-south1 \
-      --platform=managed \
-      --no-traffic \
-      --tag=v23-preview \
-      --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com \
-      --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,GUNICORN_MAIN=main_v23:app \
-      --quiet
-    PREVIEW_URL=$(gcloud run services describe orchestrator \
-      --region=asia-south1 --project=$PROJECT_ID \
-      --format='value(status.traffic[].url)' 2>/dev/null | grep v23-preview || echo 'See Cloud Console')
-    echo "[V23-PREVIEW] Preview URL: $$PREVIEW_URL"
-    echo "[V23-PREVIEW] Run UAT, then execute:"
-    echo "  gcloud run services update orchestrator --update-env-vars GUNICORN_MAIN=main_v23:app --to-latest"
-    echo "[V23-PREVIEW] Deploy commit: $COMMIT_SHA"
 
 # =============================================================================
 # CRITICAL: Cloud Tasks IAM — ONE-TIME MANUAL GRANT REQUIRED
@@ -458,38 +422,7 @@ steps:
   - --update-env-vars=PROJECT_ID=$PROJECT_ID,LOCATION=asia-south1,CB_WINDOW_MINUTES=15,PIPELINE_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,PIPELINE_MAIN_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL
   - --quiet
 
-# =============================================================================
-# PHASE 3b'': V23 PREVIEW DEPLOY — lead-pipeline-main (NO TRAFFIC)
-# Deploys the V23 modular pipeline using main_v23:app (already the Dockerfile CMD).
-# Tagged v23-preview so UAT Cloud Tasks can be routed to exact revision URL.
-# Traffic shift: gcloud run services update-traffic lead-pipeline-main --to-tags=v23-preview=100
-# =============================================================================
 
-- id: 'deploy-pipeline-main-v23-preview'
-  waitFor: ['deploy-pipeline-main']
-  name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
-  entrypoint: bash
-  args:
-  - '-c'
-  - |
-    set -eo pipefail
-    echo "[V23-PREVIEW] Deploying pipeline-main v23-preview revision (no traffic)..."
-    gcloud run deploy lead-pipeline-main \
-      --image=gcr.io/$PROJECT_ID/lead-pipeline-main:$COMMIT_SHA \
-      --region=asia-south1 \
-      --platform=managed \
-      --no-traffic \
-      --tag=v23-preview \
-      --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com \
-      --update-env-vars=PROJECT_ID=$PROJECT_ID,LOCATION=asia-south1,CB_WINDOW_MINUTES=15,PIPELINE_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,PIPELINE_MAIN_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app \
-      --quiet
-    PREVIEW_URL=$(gcloud run services describe lead-pipeline-main \
-      --region=asia-south1 --project=$PROJECT_ID \
-      --format='value(status.traffic[].url)' 2>/dev/null | grep v23-preview || echo 'check Cloud Console')
-    echo "[V23-PREVIEW] lead-pipeline-main preview tagged. URL: $$PREVIEW_URL"
-    echo "[V23-PREVIEW] After UAT gates pass, run:"
-    echo "  gcloud run services update-traffic lead-pipeline-main --to-tags=v23-preview=100 --region=asia-south1"
-    echo "[V23-PREVIEW] Commit: $COMMIT_SHA"
 
 - id: 'deploy-scraper-heavy'
   waitFor: ['push-scraper-heavy']
