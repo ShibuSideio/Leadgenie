@@ -1,4 +1,4 @@
-# Orchestrator -- Exact-pinned (V25.2.1 2026-07-03) | python:3.11-slim
+# Orchestrator -- Exact-pinned (V26.0.1 2026-07-04) | python:3.11-slim
 # Pin ALL direct deps to ==exact to eliminate pip resolver backtracking.
 Flask==3.0.3
 flask-cors==4.0.1

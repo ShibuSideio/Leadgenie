@@ -1,18 +1,25 @@
-# LeadGenie (Sideio) — Platform Architecture V25.6.0
+# LeadGenie (Sideio) — Platform Architecture V26.0.1
 **Technical Specification Document**
-*Last Updated: 2026-07-04 | Version: V25.6.0 — 87-Issue Failure Remediation + Lead Quality Gates*
+*Last Updated: 2026-07-04 | Version: V26.0.1 — Multi-Strategy OSINT Intelligence Engine*
 
 ---
 
 ## 1. SYSTEM OVERVIEW
 
-LeadGenie is a fully automated, multi-tenant lead generation SaaS platform. It discovers, scores, and delivers hyper-personalised outreach messages for paying tenants — autonomously, 24/7, without manual input.
+LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS platform. It discovers, scores, and delivers hyper-personalised outreach messages for paying tenants — autonomously, 24/7, without manual input. V26 introduced a **multi-strategy intelligence engine** that classifies campaigns into intelligence strategies at creation time and routes them through strategy-specific query generation, source selection, and entity extraction pipelines.
 
 **Core loop:**
 1. Cloud Scheduler cron hits the Orchestrator every 5 minutes
 2. Orchestrator validates quota, checks drip cadence, enqueues a Cloud Task per active campaign
-3. Pipeline-Main runs: query generation → Serper search → pre-filter → scrape → score → write to Firestore
+3. Pipeline-Main runs: **strategy classification → query generation → multi-source routing → scrape → score → entity extraction → write to Firestore**
 4. The PWA frontend listens via `onSnapshot` and renders leads in real-time
+
+**Intelligence Strategies (V26.0):**
+- `PLATFORM_MINING` — Extract leads from competitor directories, aggregator platforms, review sites
+- `COLLOQUIAL_DISCOVERY` — Search in the buyer's own language (e.g., "my AC keeps leaking" instead of "HVAC maintenance")
+- `COMPETITOR_TOUCHPOINT` — Mine competitor reviews for dissatisfied customers
+- `PROFESSIONAL_NETWORK` — Target professional networks, job boards, conference speakers
+- `EVENT_TRIGGER` — Monitor hiring signals, funding events, technology adoptions
 
 **Supported business archetypes (sourcing vectors):**
 - `B2B` — business-to-business; corporate buyer signals
@@ -41,9 +48,29 @@ LeadGenie is a fully automated, multi-tenant lead generation SaaS platform. It d
 │   ├── /pipeline-main               # Cloud Run: AI Extraction Engine (Cartographer)
 │   │   ├── api/routers/             # dispatch.py, produce.py
 │   │   ├── core/constants.py        # CONSUMER_ARCHETYPES, D2C_ARCHETYPES, B2B2C_ARCHETYPES
-│   │   ├── services/                # query_brain.py, serper_service.py, neg_shield.py,
-│   │   │                            # prism_pipeline.py, gemini_service.py, telemetry.py
-│   │   │                            # context_builder.py (V24.6.1 — enriched ICP context)
+│   │   ├── services/                # Core intelligence services:
+│   │   │   ├── query_brain.py       #   AI query generation + strategy-aware colloquial translation
+│   │   │   ├── source_router.py     #   V26: Multi-source OSINT router (10 signal source plugins)
+│   │   │   ├── signal_sources/      #   V26: Pluggable signal source modules:
+│   │   │   │   ├── base.py          #     Abstract base class for all signal sources
+│   │   │   │   ├── serper_discovery.py  # Google Search via Serper API
+│   │   │   │   ├── reddit.py        #     Reddit thread monitoring
+│   │   │   │   ├── hackernews.py    #     HackerNews signal extraction
+│   │   │   │   ├── google_reviews.py #    Google Reviews competitor mining
+│   │   │   │   ├── consumer_forum.py #    Consumer forum monitoring
+│   │   │   │   ├── classified_listings.py # Classified ad monitoring
+│   │   │   │   ├── job_posts.py     #     Job board signal extraction
+│   │   │   │   ├── rss_feed.py      #     RSS/Atom feed monitoring
+│   │   │   │   └── youtube.py       #     YouTube video/comment extraction
+│   │   │   ├── intelligence_mesh.py #   V26: Cross-source dedup + merge
+│   │   │   ├── signal_harvest.py    #     Signal harvesting engine
+│   │   │   ├── signal_cluster_analyst.py # Signal clustering and analysis
+│   │   │   ├── serper_service.py    #     Serper API client
+│   │   │   ├── neg_shield.py        #     Negative signal shield (BQ)
+│   │   │   ├── prism_pipeline.py    #     Headless browser scraping
+│   │   │   ├── gemini_service.py    #     Gemini AI service wrapper
+│   │   │   ├── context_builder.py   #     Enriched ICP context builder
+│   │   │   └── telemetry.py         #     Pipeline telemetry
 │   │   └── requirements.txt
 │   ├── /scraper-heavy               # Cloud Run: Playwright headless browser
 │   ├── /digital-twin-engine         # Cloud Run: Website analyser + market trend cache
@@ -79,7 +106,7 @@ LeadGenie is a fully automated, multi-tenant lead generation SaaS platform. It d
 **GCP Project ID:** `sideio-leads-v16`
 **Firebase Project:** `lead-sniper-prod`
 **Cloud Tasks Queue:** `lead-pipeline-queue` (region: asia-south1)
-**Vertex AI / Gemini:** `gemini-2.5-flash` via `google-genai` SDK
+**Vertex AI / Gemini:** `gemini-2.5-flash` via `google-genai` SDK (2-tier fallback: primary model → `gemini-2.0-flash`)
 
 ### Environment Variables
 
@@ -182,6 +209,12 @@ Distributed credit counters (bypass Firestore write contention).
   "location": "Austin, TX",
   "gl": "us",
   "sourcing_vector": "B2B",
+  "intelligence_strategy": {
+    "primary": "COLLOQUIAL_DISCOVERY",
+    "vocabulary_notes": "Buyers say 'our office is dirty' not 'facility management services'",
+    "mining_targets": ["yelp.com", "google.com/maps"],
+    "confidence": 0.85
+  },
   "persona_id": "<firestore_persona_doc_id>",
   "persona_bio": "Denormalised bio from linked Persona Vault entry.",
   "persona_keywords": "keyword1, keyword2",
@@ -202,6 +235,11 @@ Distributed credit counters (bypass Firestore write contention).
 
 **Notes:**
 - `sourcing_vector`: one of `B2B`, `B2C`, `B2B2C`, `D2C` — drives query generation, Serper temporal window, and Gemini prompt branching
+- `intelligence_strategy` (V26.0): AI-classified strategy object set at campaign creation. Sub-fields:
+  - `primary`: one of `PLATFORM_MINING`, `COLLOQUIAL_DISCOVERY`, `COMPETITOR_TOUCHPOINT`, `PROFESSIONAL_NETWORK`, `EVENT_TRIGGER`
+  - `vocabulary_notes`: how the ICP speaks — fed to Gemini for colloquial query translation
+  - `mining_targets`: auto-derived platform URLs for PLATFORM_MINING/COMPETITOR_TOUCHPOINT
+  - `confidence`: classification confidence (0.0–1.0)
 - `unprocessed_queue`: array of Serper result objects awaiting Gemini profiling; capped at 200 (backpressure at depth 150)
 - `next_drip_due`: updated on every produce run (V24.4 fix — was only set on first fill)
 - `keywords`: stored as comma-separated string, parsed to array in pipeline
@@ -251,7 +289,8 @@ Core atomic lead document. Document ID is a deterministic SHA-256 hash.
   "email": "hr@techcorp.com",
   "phone": "3125550199",
   "linkedin": "https://linkedin.com/in/...",
-  "contact_endpoints": ["hr@techcorp.com", "+13125550199"],
+  "contact_endpoints": [{"type": "email", "value": "hr@techcorp.com"}, {"type": "phone", "value": "+13125550199"}],
+  "matched_campaigns": ["camp_uuid_789"],
   "crm_delivery_status": "delivered",
   "interactions": [
     { "action": "status_ignored", "date": "<SERVER_TIMESTAMP>" }
@@ -860,7 +899,7 @@ log.warning("lead_lock_delete_failed",
 
 ---
 
-## 16. DEPENDENCY CONSTRAINTS (V25.6.0)
+## 16. DEPENDENCY CONSTRAINTS (V26.0.1)
 
 | Library | Version | Constraints |
 |---|---|---|
@@ -872,7 +911,7 @@ log.warning("lead_lock_delete_failed",
 | `PyJWT` | `2.10.1` | Orchestrator only. Used by `social_redirect.py` for JWT HS256 token verification. |
 
 > [!NOTE]
-> No new pip dependencies were introduced in V25.6.0. All fixes use existing imports.
+> No new pip dependencies were introduced in V26.0.1. All V26 features use existing imports.
 
 ---
 
@@ -890,6 +929,10 @@ log.warning("lead_lock_delete_failed",
 10. **Consumer archetypes:** Defined once in `pipeline-main/core/constants.py`. Import from there — never duplicate.
 11. **No silent failures:** All `except: pass` is prohibited. Every exception must be logged with enough context to debug without reproduction.
 12. **PII before BQ:** Always apply `_scrub_pii()` before writing lead text to BigQuery N-gram tables.
+13. **Intelligence strategy immutable post-creation:** `intelligence_strategy.primary` is classified at campaign creation by Gemini and must not be changed after creation. The entire pipeline (query_brain, source_router, dispatch entity extraction) branches on this value.
+14. **Entity extraction thread safety:** `_ENTITY_DOMAIN_COUNTS` in `dispatch.py` is a module-level dict guarded by `_ENTITY_DOMAIN_LOCK`. All read-modify-write operations MUST hold the lock.
+15. **Contact endpoints schema:** Entity-extracted leads must use `list[dict]` format: `[{"type": "email", "value": "..."}]`. Never flat strings.
+16. **Strategy-aware blacklist:** PLATFORM_MINING strategy preserves review/directory sites (g2, capterra, yelp) in blacklist — these are intelligence sources, not noise.
 
 ---
 
@@ -953,19 +996,87 @@ Multi-dimensional Lead Quality Score computed per signal:
 
 ---
 
-## 20. VERSION HISTORY (RECENT)
+## 20. V26.0 MULTI-STRATEGY OSINT ENGINE
+
+### 20.1 Strategy Classification (V26.0)
+At campaign creation, Gemini classifies the ICP into one of 5 intelligence strategies. The classification is stored as `campaign.intelligence_strategy.primary` and drives the entire pipeline:
+
+| Strategy | Description | Query Generation | Source Priority | Entity Extraction |
+|---|---|---|---|---|
+| `PLATFORM_MINING` | Extract from competitor directories/aggregators | `site:` queries targeting mining_targets | Serper Discovery, Google Reviews | ✅ Full entity extraction |
+| `COLLOQUIAL_DISCOVERY` | Search in buyer's own language | Gemini translates ICP to colloquial queries | Reddit, HackerNews, Consumer Forums | ❌ Standard scoring |
+| `COMPETITOR_TOUCHPOINT` | Mine competitor reviews for dissatisfied customers | `site:` queries on review platforms | Google Reviews (6h cooldown), Reddit | ✅ Full entity extraction |
+| `PROFESSIONAL_NETWORK` | Target professional networks and events | LinkedIn/conference dork queries | Job Posts, RSS Feeds | ❌ Standard scoring |
+| `EVENT_TRIGGER` | Monitor hiring, funding, technology changes | Event/signal-specific dorks | Job Posts, RSS Feeds, HackerNews | ❌ Standard scoring |
+
+### 20.2 Source Router Architecture (V26.0)
+**Location:** `pipeline-main/services/source_router.py`
+
+The Source Router is the multi-source OSINT orchestrator. It manages 10 pluggable signal source modules (`signal_sources/`) and routes queries based on intelligence strategy:
+
+```
+source_router.execute_multi_source_pipeline(campaign, queries)
+  ├── Determine active sources from strategy + sourcing_vector
+  ├── Apply source-specific cooldowns (e.g., GoogleReviews: 6h for COMPETITOR_TOUCHPOINT)
+  ├── Execute sources in parallel via ThreadPoolExecutor(max_workers=5)
+  ├── Merge results via intelligence_mesh.py (cross-source dedup)
+  └── Return unified signal list for scoring
+```
+
+**Signal Source Plugins** (`signal_sources/`):
+
+| Plugin | Source | Cooldown | Entity Extraction |
+|---|---|---|---|
+| `serper_discovery.py` | Google Search via Serper API | Standard (drip) | ❌ |
+| `reddit.py` | Reddit threads | 30 min | ❌ |
+| `hackernews.py` | HN posts/comments | 30 min | ❌ |
+| `google_reviews.py` | Google Business Reviews | 6h (COMPETITOR_TOUCHPOINT) / 24h (default) | ✅ |
+| `consumer_forum.py` | Consumer forums (Quora, etc.) | 30 min | ❌ |
+| `classified_listings.py` | Classified ads (Craigslist, etc.) | 1h | ❌ |
+| `job_posts.py` | Job boards (Indeed, etc.) | 2h | ❌ |
+| `rss_feed.py` | RSS/Atom feeds | 30 min | ❌ |
+| `youtube.py` | YouTube videos/comments | 1h | ❌ |
+
+### 20.3 Entity Extraction Engine (V26.0)
+**Location:** `pipeline-main/api/routers/dispatch.py` (lines 1654+)
+
+For `PLATFORM_MINING` and `COMPETITOR_TOUCHPOINT` strategies, a single aggregator page (e.g., a Yelp directory listing) can yield multiple leads. The entity extraction engine:
+
+1. Receives scraped text from an aggregator page
+2. Calls `call_gemini_2_5()` with `expect_json=True` and a structured `response_schema`
+3. Extracts individual entities (businesses/people) with contact info
+4. Applies per-domain rate limiting (max 5 entities per domain per batch) via `_ENTITY_DOMAIN_COUNTS` + `_ENTITY_DOMAIN_LOCK`
+5. Writes each entity as a separate lead with `matched_campaigns` and `contact_endpoints` in `list[dict]` format
+
+### 20.4 Colloquial Translation (V26.0)
+**Location:** `pipeline-main/services/query_brain.py` (line 884+)
+
+When `vocabulary_notes` is present in the campaign's `intelligence_strategy`, the Gemini prompt includes explicit instructions to translate professional terminology into buyer language. Example:
+- Professional: "HVAC maintenance services near Austin TX"
+- Colloquial: "my AC keeps leaking Austin" / "air conditioner broken who to call"
+
+This is the core differentiator — no other tool searches in the buyer's own language.
+
+### 20.5 Strategy-Aware Blacklist Filtering (V26.0)
+**Location:** `pipeline-main/services/query_brain.py` (line 1084+)
+
+The default blacklist (`_DEFAULT_BLACKLIST`) includes review/directory sites like `g2.com`, `capterra.com`, `yelp.com`. For `PLATFORM_MINING` strategy, these are **intelligence sources**, not noise. V26 conditionally preserves them:
+- `PLATFORM_MINING` → keeps g2, capterra, yelp, trustpilot in queries
+- `COMPETITOR_TOUCHPOINT` → keeps review sites in queries
+- All other strategies → standard blacklist applies
+
+Post-generation, a regex filter strips any `-site:` exclusions that conflict with the strategy's mining targets (V26.0.1 fix).
+
+---
+
+## 21. VERSION HISTORY (RECENT)
 
 | Version | Date | Key Changes |
 |---|---|---|
-| **V25.6.0** | **2026-07-04** | **87-issue failure remediation across 23 files. P0: Orchestrator `--no-allow-unauthenticated`, agents.py auth, harvest sweep credit fix, shadow_tracker deprecated (delegates to helpers.py), Gemini `_safe_extract()` crash guard, timeline XSS. P1-FIN: transactional signal-to-lead credits, wallet `max(total_consumed, consumed+shards)` in me.py + l0_admin.py, credit leak refund. P1-BIZ: double neg-signal dedup, persona cache path, review lead actual scores, dm/contact type fix, context builder threshold 10→3, historical AND→OR. P1-XSS: 11 innerHTML escapes. P2: model fallback chain, staleness filter in harvest, LQS frontend badge, rejection reasons synced, thread locks, silent failure logging. P3: import guards, sweep lock fail-closed, ontology limit, WhatsApp build removal, version bump to V25.5.1.** |
-| V25.5.1 | 2026-07-04 | LQS multi-dimensional scoring, calibrated Gemini prompt, adaptive learning (source_stats, accepted_patterns, 7-reason rejection), score distribution telemetry. |
-| V25.5.0 | 2026-07-04 | Lead quality gates: 36 blocked subreddits, 15 megathread patterns, 38 content farms, topic coherence gate, staleness filter, buyer language injection, query exhaustion/refresh. |
-| V25.2.3 | 2026-07-03 | Build failure RCA: reverted google-cloud-storage to 2.19.0, cloudbuild.yaml INTERNAL_CRON_SECRET $$ escape. |
-| V25.2.2 | 2026-07-03 | Inbound Radar Hardening + Dependency Standardisation. |
-| V25.2.1 | 2026-07-03 | Audit fix batch: PyJWT, social_redirect, credit settlement, 18 missing lead fields, BQ DDL parameterised. |
-| V24.6.1 | 2026-07-02 | Universal context builder: all 15+ campaign fields feed query generation and pre-filter. |
-| V24.6.0 | 2026-07-02 | B2B temporal filter, page-type score cap, INTERNAL_CRON_SECRET env fix, BQ sourcing_vector column. |
-| V24.5.0–V24.5.7 | 2026-07-01 | RLHF yield-weight, expanded rejection, CDN filter, TLD gate, FAQ sanitizer, forum dedup, lead feed fixes. |
-| V24.4.0 | 2026-07-01 | Queue backpressure, enrichment_pending, credit settlement on score-drop, CRM retry. |
-| V24.3.0 | 2026-07-01 | D2C/B2B2C prompt branches, consumer freshness, vector-isolated neg shield. |
-| V24.2.0 | 2026-07-01 | OIDC validation, mandatory cron secret, PII scrubbing, WhatsApp feature flag. |
+| **V26.0.1** | **2026-07-04** | **E2E audit fixes: `threading.Lock` for `_ENTITY_DOMAIN_COUNTS` race condition, `call_gemini_2_5` signature fix (`expect_json`/`response_schema`/`system_instruction`), `contact_endpoints` schema `list[dict]`, `matched_campaigns`/`dm` fields on entity leads, `source_router.py` `raw_arch` hoisting, `query_brain.py` post-generation `-site:` strip, `_escapeHTML` on strategy badge title, cache bust v=26.0.0.** |
+| **V26.0.0** | **2026-07-04** | **Multi-Strategy OSINT Intelligence Engine: 5 intelligence strategies (PLATFORM_MINING, COLLOQUIAL_DISCOVERY, COMPETITOR_TOUCHPOINT, PROFESSIONAL_NETWORK, EVENT_TRIGGER), source_router.py (10 signal source plugins), entity extraction engine, colloquial translation, strategy-aware blacklist filtering, intelligence_strategy campaign schema, UI strategy badge.** |
+| V25.6.0 | 2026-07-04 | 87-issue failure remediation across 23 files. P0: Orchestrator auth, Gemini crash guard, timeline XSS. P1: transactional credits, wallet formula, neg-signal dedup, LQS badge. |
+| V25.5.0–V25.5.1 | 2026-07-04 | Lead quality gates + LQS multi-dimensional scoring + adaptive learning. |
+| V25.2.1–V25.2.3 | 2026-07-03 | Build failure RCA, Inbound Radar hardening, dependency standardisation, PyJWT, BQ DDL. |
+| V24.6.0–V24.6.1 | 2026-07-02 | Universal context builder, B2B temporal filter, page-type score cap, BQ sourcing_vector column. |
+| V24.2.0–V24.5.7 | 2026-07-01 | OIDC validation, cron secret, PII scrubbing, consumer archetypes, RLHF yield-weight, CDN filter, queue backpressure, CRM retry. |

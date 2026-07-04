@@ -1,6 +1,6 @@
 # =============================================================================
-# cloudbuild.yaml — LeadGenie (Sideio) V25.6.0 Enterprise Build Pipeline
-# Deploy trigger: 2026-07-04 | V25.6.0 — 87-issue failure remediation (auth, financial, XSS, quality)
+# cloudbuild.yaml — LeadGenie (Sideio) V26.0.1 Enterprise Build Pipeline
+# Deploy trigger: 2026-07-04 | V26.0.1 — Multi-Strategy OSINT Engine + E2E Audit Fixes
 #
 # Changes from V23.5.2 (2026-04-30):
 #
