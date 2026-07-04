@@ -735,6 +735,7 @@ def produce():
             fresh_count=len(fresh_urls),
             note="No fresh URLs fit within 200-URL cap.",
         )
+        return jsonify({"status": "skipped_no_fresh", "queue_depth": _queue_depth}), 200
     else:
         queued_count = len(_capped_fresh)  # Update queued_count to reflect actual appended
 
