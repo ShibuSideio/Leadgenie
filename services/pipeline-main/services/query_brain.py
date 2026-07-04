@@ -693,7 +693,8 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
             "targeting niche community domains (e.g., site:reddit.com, site:quora.com). "
             "Do NOT use inurl:, intitle:, or filetype: — Google deprioritizes these, causing 0-result returns. "
             "Use aggressive negative payloads (-directory -listicle -\"top 10\"). "
-            "Never produce queries that would return listicle pages, review aggregators, or paid directories.\n\n"
+            "Never produce queries that would return listicle pages or paid directories. "
+            "Review platforms (yelp, g2, capterra, trustpilot) are ALLOWED — they contain leads.\n\n"
             "BUYER INTENT VS SELLER OFFERINGS:\n"
             "You are looking for buyer paint points and competitor complaints. "
             "Do NOT generate search queries that match pages offering or advertising lead generation/outreach services. "
@@ -1056,8 +1057,12 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
         if _skipped_title_frags > 0:
             log.warning("neg_rlhf_titles_oversized_skipped", skipped=_skipped_title_frags)
         if _valid_title_frags:
-            _rlhf_blacklist += " " + " ".join(f'-intitle:"{t}"' for t in _valid_title_frags)
-            log.info("neg_rlhf_titles_injected", count=len(_valid_title_frags))
+            # V26.0.3: DROPPED -intitle: operators entirely.
+            # Google deprioritizes and often ignores intitle: operators, causing
+            # 0-result returns. They consumed ~40% of query budget for zero
+            # filtering benefit. Entity names are now excluded only via RLHF
+            # feedback (domain-level -site: exclusions that actually work).
+            pass
 
     _shield_blacklist = ""  # Neg shield domains (tenant-level)
     try:
@@ -1077,7 +1082,10 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
             if _skipped_entities > 0:
                 log.warning("neg_shield_entities_oversized_skipped", skipped=_skipped_entities)
             if _valid_entities:
-                _shield_blacklist += " " + " ".join(f'-intitle:"{e}"' for e in _valid_entities)
+                # V26.0.3: DROPPED -intitle: operators — Google ignores them
+                # and they consumed ~40% of query budget. Entity exclusions are
+                # handled at the domain level (-site:) or filtered downstream.
+                pass
         if shield_domains or shield_entities:
             log.info("neg_shield_injected",
                      domains=len(shield_domains), entities=len(shield_entities))
@@ -1118,12 +1126,10 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
     # Build: RLHF (most specific) → shield → persona → static (least specific)
     blacklist = (_rlhf_blacklist + _shield_blacklist + _persona_blacklist + " " + _effective_default_blacklist).strip()
 
-    # V25.5.0 Phase 2D: Domain count cap (replaces char-based cap).
-    # The old 450-char cap was brittle: 10 RLHF domains with long names could
-    # exhaust the budget and trim ALL static defaults. A 15-domain count cap
-    # ensures a predictable, fair allocation of blacklist slots across tiers.
-    # Non-site exclusions (-intitle:"", -"exact", -word) are always kept.
-    _MAX_BLACKLIST_DOMAINS = 15
+    # V26.0.3: Reduced from 15 to 8. Google has a ~32-word operator limit.
+    # With 15 -site: domains + 10 -intitle: + base exclusions, most queries
+    # exceeded the limit and Google silently ignored the overflow.
+    _MAX_BLACKLIST_DOMAINS = 8
     import re as _bl_re
     # Split on operator boundaries: each token is a complete exclusion unit
     # e.g. -site:foo.com | -intitle:"long phrase here" | -"exact match" | -word
@@ -1133,6 +1139,10 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
     for _t in _bl_tokens:
         if _t.startswith("-site:"):
             _site_tokens.append(_t)
+        elif _t.startswith("-intitle:"):
+            # V26.0.3: Drop -intitle: operators entirely — Google ignores them
+            # and they consume ~40% of query character budget for zero benefit.
+            continue
         else:
             _non_site_tokens.append(_t)
     if len(_site_tokens) > _MAX_BLACKLIST_DOMAINS:
