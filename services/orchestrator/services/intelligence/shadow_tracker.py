@@ -37,7 +37,6 @@ from collections import Counter
 from typing import Optional
 
 from core.logging import get_logger
-from core.helpers import _async_shadow_track as _helpers_async_shadow_track  # type: ignore[import]
 
 log = get_logger(__name__)
 
@@ -242,7 +241,7 @@ def async_shadow_track(
     """
     log.warning("DEPRECATED: Use core.helpers._async_shadow_track instead")
     try:
-        # Delegate to the canonical implementation in core.helpers
+        from core.helpers import _async_shadow_track as _helpers_async_shadow_track  # noqa: E402 — lazy to avoid smoke-test import chain
         _helpers_async_shadow_track(persona_category, pain_point, tenant_id)
     except Exception as exc:
         log.warning("shadow_tracker_thread_spawn_failed", error=str(exc))
