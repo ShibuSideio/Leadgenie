@@ -442,6 +442,39 @@ def produce():
         clean_location = location if location and location.lower() != "all" else ""
         search_query   = kw
 
+        # F2 (V25.6.1): Query quality gate — reject known garbage patterns
+        # before they consume Serper credits. query_brain occasionally generates
+        # queries that echo back social URLs, N/A literals, or numbered list
+        # fragments from scraped content (e.g. "quora.com 1. Oman Reality user").
+        _q_lower = search_query.lower().strip()
+        _GARBAGE_PATTERNS = (
+            "n/a", "none", "null", "undefined", "unknown",
+            "1. ", "2. ", "3. ",  # numbered list fragments from scraped content
+        )
+        _ECHO_DOMAINS = (
+            "quora.com", "reddit.com", "facebook.com", "youtube.com",
+            "linkedin.com", "twitter.com", "x.com", "instagram.com",
+        )
+        _is_garbage = (
+            len(_q_lower) < 10
+            or _q_lower in _GARBAGE_PATTERNS
+            or any(_q_lower.startswith(p) for p in _GARBAGE_PATTERNS)
+            # Detect echo queries: "quora.com <scraped title>" or
+            # "\"quora.com\" <snippet>" that just re-search the source platform
+            or any(
+                _q_lower.startswith(f'"{d}"') or _q_lower.startswith(d)
+                for d in _ECHO_DOMAINS
+            )
+        )
+        if _is_garbage:
+            log.info(
+                "produce_query_quality_gate",
+                query=search_query[:80],
+                campaign_id=campaign_id,
+                note="Garbage query blocked before Serper call — saves 1 credit.",
+            )
+            continue
+
         # V25.3.0: Split Serper strategy by sourcing vector.
         # B2B niche queries (boolean dorks with buyer-language phrases) return
         # 0 results on geo-restricted Google indexes (gl=in, gl=ae, etc.).

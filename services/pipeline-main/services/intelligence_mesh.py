@@ -170,6 +170,36 @@ def enrich_signals(
     total enrichment failure.  Callers can check:
         ``getattr(result, 'enrichment_failed', False)``
     """
+    # F4 (V25.6.1): Guard against non-domain strings ("N/A", empty, localhost).
+    # These produce 4 wasted Serper queries each.
+    if not domain or domain.lower() in ("n/a", "none", "null", "localhost", "unknown"):
+        log.info("mesh_skip_non_domain", domain=domain,
+                 note="Non-domain string blocked — saves 4 Serper credits.")
+        return []
+
+    # F1 (V25.6.1): Guard against social/shared platform domains.
+    # Enriching quora.com's own funding/hiring/G2 reviews is meaningless —
+    # the lead is a *post on* quora.com, not quora.com the company.
+    _MESH_SKIP_DOMAINS = frozenset({
+        # Social platforms
+        "reddit.com", "facebook.com", "instagram.com", "youtube.com",
+        "linkedin.com", "quora.com", "twitter.com", "x.com", "medium.com",
+        "tiktok.com", "pinterest.com", "tumblr.com", "snapchat.com",
+        # Community / forums
+        "stackexchange.com", "stackoverflow.com", "news.ycombinator.com",
+        "community.hubspot.com", "community.g2.com", "indiehackers.com",
+        # Classifieds / directories
+        "yelp.com", "yellowpages.com", "trustpilot.com", "glassdoor.com",
+        "indeed.com", "craigslist.org", "gumtree.com",
+        # Wiki / education
+        "wikipedia.org", "fandom.com", "archive.org",
+    })
+    _cleaned = domain.lower().replace("www.", "")
+    if any(_cleaned.endswith(s) for s in _MESH_SKIP_DOMAINS):
+        log.info("mesh_skip_social_domain", domain=domain,
+                 note="Social/shared platform domain blocked — saves 4 Serper credits.")
+        return []
+
     all_signals: list[dict] = []
     _provider_failure_count = 0
 
