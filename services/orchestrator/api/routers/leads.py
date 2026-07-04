@@ -31,26 +31,67 @@ log = get_logger("orchestrator.v23.leads")
 
 # V24.5 (L8-4): Sync with neg_signal.NEG_SIGNAL_REASONS — all five reasons now
 # trigger both the ontology penalty AND the BQ Negative_Signals insert.
+# Phase 4C: Extended with granular rejection reasons.
 NEG_SIGNAL_REASONS = frozenset({
     "competitor",
     "author",
     "wrong_industry",
     "not_icp",
     "low_quality",
+    "wrong_topic",
+    "wrong_geography",
+    "news_article",
+    "too_old",
+    "cant_contact",
+    "other",
+})
+
+# Phase 4C: Granular rejection reasons accepted from the UI.
+VALID_REJECTION_REASONS = frozenset({
+    "wrong_topic",
+    "wrong_geography",
+    "news_article",
+    "too_old",
+    "cant_contact",
+    "competitor",
+    "other",
 })
 
 _LEAD_UPDATE_ALLOWED = {"status", "is_in_crm", "crm_status", "rejection_reason", "deal_value", "follow_up_date", "notes", "crm_notes", "updatedAt"}
 
 REJECTION_PENALTY_MAP: dict[str, float] = {
-    "not_b2b":        -0.25,
-    "bad_data":       -0.20,
-    "wrong_industry": -0.15,
-    "too_small":      -0.05,
-    "competitor":      0.00,
-    "author":          0.00,
-    "not_icp":        -0.10,  # V24.5 (L8-4)
-    "low_quality":    -0.10,  # V24.5 (L8-4)
+    "not_b2b":          -0.25,
+    "bad_data":         -0.20,
+    "wrong_industry":   -0.15,
+    "too_small":        -0.05,
+    "competitor":        0.00,
+    "author":            0.00,
+    "not_icp":          -0.10,  # V24.5 (L8-4)
+    "low_quality":      -0.10,  # V24.5 (L8-4)
+    # Phase 4C: Granular rejection reasons
+    "wrong_topic":      -0.10,
+    "wrong_geography":  -0.10,
+    "news_article":     -0.05,
+    "too_old":          -0.05,
+    "cant_contact":      0.00,
+    "other":             0.00,
 }
+
+
+def _extract_root_domain(url: str) -> str:
+    """Extract the root domain from a URL (e.g. 'https://blog.example.com/p' -> 'example.com')."""
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse
+        hostname = urlparse(url).hostname or ""
+        parts = hostname.lower().split(".")
+        # Return last two parts for standard domains, handle edge cases
+        if len(parts) >= 2:
+            return ".".join(parts[-2:])
+        return hostname
+    except Exception:
+        return ""
 
 
 # =============================================================================
@@ -306,9 +347,79 @@ def update_lead(uid, tenant_id, user_role, doc_id):
         except Exception as ns_e:
             log.warning("neg_signal_hook_failed", error=str(ns_e))
 
+    # ── Phase 4C: Rejection Reason Logging ─────────────────────────────────────
+    # If status is rejected/ignored and no rejection_reason was provided, default
+    # to "unspecified". Log granular rejection reasons for analytics.
+    if status in ("rejected", "ignored"):
+        _rej_reason = rejection_reason or "unspecified"
+        _rej_campaign = lead_dict.get("campaign_id", "")
+        log.info("lead_rejection_reason",
+                 reason=_rej_reason,
+                 campaign_id=_rej_campaign,
+                 lead_id=doc_id)
+
+    # ── Negative Signal BQ insert (expanded for 4C) ───────────────────────────
+    # Phase 4C: Write rejection_reason alongside existing negative signal data.
+    # For rejected leads with a granular reason, always insert the BQ signal
+    # regardless of whether the reason is in the legacy NEG_SIGNAL_REASONS set.
+    if status in ("rejected", "ignored") and rejection_reason and rejection_reason in VALID_REJECTION_REASONS:
+        _4c_reason = rejection_reason
+        try:
+            entity_name = (
+                lead_dict.get("company_name") or lead_dict.get("dm") or lead_dict.get("name") or ""
+            ).strip()
+            raw_url     = lead_dict.get("source_url") or lead_dict.get("url") or ""
+            root_domain = parse_base_path(raw_url).split("/")[0]  # domain-only
+            if root_domain or entity_name:
+                _async_neg_signal_insert(
+                    entity_name=entity_name, root_domain=root_domain,
+                    rejection_reason=_4c_reason, tenant_id=tenant_id,
+                )
+        except Exception as _4c_err:
+            log.warning("neg_signal_4c_hook_failed", error=str(_4c_err))
+
     # ── BQ RLHF telemetry enqueue ─────────────────────────────────────────────
     bq_status = data.get("status") or data.get("crm_status") or "updated"
     _enqueue_bq_telemetry_task(tenant_id, lead_dict, bq_status)
+
+    # ── Phase 4A: Per-Source Accept Rate Tracking ─────────────────────────────
+    # Write accepted/rejected counters to the campaign's source_stats subcollection
+    # keyed by the lead's source_type.
+    if status in ("converted", "ignored", "rejected"):
+        _source = lead_dict.get("source_type", "unknown")
+        _4a_campaign = lead_dict.get("campaign_id", "")
+        if _4a_campaign:
+            _action = "approve" if status == "converted" else "reject"
+            try:
+                _source_stats_ref = _db().collection("campaigns").document(_4a_campaign) \
+                                         .collection("source_stats").document(_source)
+                if _action == "approve":
+                    _source_stats_ref.set({"accepted": firestore.Increment(1)}, merge=True)
+                else:
+                    _source_stats_ref.set({"rejected": firestore.Increment(1)}, merge=True)
+            except Exception:
+                pass
+            log.info("lead_source_stat_recorded",
+                     source=_source, action=_action, campaign_id=_4a_campaign)
+
+    # ── Phase 4B: Accepted Lead Pattern Mining ────────────────────────────────
+    # When a lead is accepted (converted), store URL domain, source type, and
+    # score in the campaign's accepted_patterns subcollection for downstream
+    # pattern mining.
+    if status == "converted":
+        _4b_campaign = lead_dict.get("campaign_id", "")
+        if _4b_campaign:
+            try:
+                _pattern = {
+                    "url_domain":   _extract_root_domain(lead_dict.get("url", "")),
+                    "source_type":  lead_dict.get("source_type", "unknown"),
+                    "score":        lead_dict.get("score", 0),
+                    "accepted_at":  firestore.SERVER_TIMESTAMP,
+                }
+                _db().collection("campaigns").document(_4b_campaign) \
+                     .collection("accepted_patterns").add(_pattern)
+            except Exception as _4b_err:
+                log.warning("accepted_pattern_mining_failed", error=str(_4b_err))
 
     # ── Headless CRM egress webhook (converted) ───────────────────────────────
     if status == "converted":

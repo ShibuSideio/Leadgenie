@@ -914,7 +914,7 @@ def dispatch():
                 # never-settled accounting gaps. /finalize already does this; now
                 # the primary dispatch path matches that behaviour.
                 _settle_credit(tenant_id, "failure", lead_id=lead_id)
-                return {"url": url, "status": "score_drop"}
+                return {"url": url, "status": "score_drop", "score": score}
 
             # ── STEP 4: Consolidate lead details and save into root leads collection ──
             # V24.4 (L4-5): Medium-tier URLs with snippet-only text (< 300 chars)
@@ -993,7 +993,7 @@ def dispatch():
                     "score": score,
                     "updatedAt": firestore.SERVER_TIMESTAMP,
                 })
-                return {"url": url, "status": "enrichment_pending_all_unknown"}
+                return {"url": url, "status": "enrichment_pending_all_unknown", "score": score}
 
             log.info("TRACE-10: Writing qualified lead to Firestore.",
                      url=url[:80], score=score, campaign_id=campaign_id)
@@ -1049,6 +1049,9 @@ def dispatch():
                 "cluster_summary":              "",
                 "source_diversity":             0,
                 "cluster_label":                "",
+                # Phase 3D / Phase 4A: source_type from snippet_map enables
+                # downstream routing (signal_harvest, organic, etc.)
+                "source_type":                  _snippet_meta.get("source", "organic"),
             }
             doc_ref.set(lead_payload, merge=True)
             _settle_credit(tenant_id, "success", lead_id=lead_id)
@@ -1211,6 +1214,83 @@ def dispatch():
     log.info("dispatch_batch_complete", campaign_id=campaign_id,
              processed=len(all_results), scrape_success=scrape_success,
              scrape_failed=scrape_failed)
+
+    # ── Phase 3D: Score Distribution Monitoring ──────────────────────────────
+    # Collect all scores from results that went through the scoring gate
+    # (success, score_drop, enrichment_pending_all_unknown all carry a score).
+    _all_scores = [
+        r["score"] for r in all_results if "score" in r
+    ]
+    # Also scan futures results that weren't appended to all_results
+    # (score_drop results are NOT in all_results — they were not "success").
+    # Re-scan completed futures to capture score_drop results.
+    for _fut_done in futures:
+        try:
+            _fr = _fut_done.result(timeout=0)
+            if "score" in _fr and _fr not in all_results:
+                _all_scores.append(_fr["score"])
+        except Exception:
+            pass  # Already handled above; skip
+
+    _total_scored = len(_all_scores)
+    if _total_scored > 0:
+        _count_9_10 = sum(1 for s in _all_scores if s >= 9)
+        _count_7_8  = sum(1 for s in _all_scores if 7 <= s <= 8)
+        _count_5_6  = sum(1 for s in _all_scores if 5 <= s <= 6)
+        _count_3_4  = sum(1 for s in _all_scores if 3 <= s <= 4)
+        _count_1_2  = sum(1 for s in _all_scores if 1 <= s <= 2)
+        _avg_score  = sum(_all_scores) / _total_scored
+        _leads_created = scrape_success
+        _leads_dropped = _total_scored - _leads_created
+
+        log.info(
+            "dispatch_score_distribution",
+            campaign_id=campaign_id,
+            total_scored=_total_scored,
+            score_9_10=_count_9_10,
+            score_7_8=_count_7_8,
+            score_5_6=_count_5_6,
+            score_3_4=_count_3_4,
+            score_1_2=_count_1_2,
+            avg_score=round(_avg_score, 2),
+            leads_created=_leads_created,
+            leads_dropped=_leads_dropped,
+        )
+
+        # Unhealthy distribution warnings
+        _high_pct = (_count_9_10 + _count_7_8) / _total_scored
+        if _high_pct > 0.60:
+            log.warning(
+                "dispatch_score_inflation",
+                campaign_id=campaign_id,
+                total_scored=_total_scored,
+                pct_8_plus=round(_high_pct * 100, 1),
+                avg_score=round(_avg_score, 2),
+                note=">60% of scores are 8+. Scoring model may be uncalibrated.",
+            )
+
+        _low_pct = sum(1 for s in _all_scores if s < 5) / _total_scored
+        if _low_pct > 0.80:
+            log.warning(
+                "dispatch_score_deflation",
+                campaign_id=campaign_id,
+                total_scored=_total_scored,
+                pct_below_5=round(_low_pct * 100, 1),
+                avg_score=round(_avg_score, 2),
+                note=">80% of scores are below 5. Scoring model may be too strict.",
+            )
+
+        if _leads_created == 0 and _total_scored >= 5:
+            log.warning(
+                "dispatch_zero_conversion",
+                campaign_id=campaign_id,
+                total_scored=_total_scored,
+                avg_score=round(_avg_score, 2),
+                leads_created=0,
+                leads_dropped=_leads_dropped,
+                note="0 leads created from 5+ scored URLs. Funnel is broken.",
+            )
+
     return jsonify({
         "processed_leads": len(all_results),
         "scrape_success":  scrape_success,

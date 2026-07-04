@@ -372,6 +372,7 @@ def produce():
             persona_category=_persona_cat,
             targeting_signals=_targeting_signals,
             campaign_id=campaign_id,
+            force_query_refresh=bool(campaign.get("_force_query_refresh")),
         )
     except Exception as exc:
         log.critical(

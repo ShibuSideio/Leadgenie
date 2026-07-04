@@ -17,6 +17,7 @@ V23 changes:
 from __future__ import annotations
 
 import concurrent.futures
+import datetime
 from typing import Optional
 
 from core.logging import get_logger   # type: ignore[import]
@@ -265,6 +266,7 @@ def generate_smart_query(
     persona_category: Optional[str] = None,
     targeting_signals: Optional[list] = None,
     campaign_id: Optional[str] = None,
+    force_query_refresh: bool = False,
 ) -> list[str]:
     """Generate Serper query strings via statistical router or Gemini fallback.
 
@@ -277,6 +279,9 @@ def generate_smart_query(
         targeting_signals:  List of Persona targeting signal strings.  Any
                             entry starting with "NOT " (case-insensitive) is
                             parsed into a Serper exclusion operator.
+        force_query_refresh: When True (set by produce.py exhaustion detector),
+                            injects a diversification mandate into the Gemini
+                            prompt to force completely new query angles.
 
     Returns:
         List of ready-to-use Serper query strings (may be empty on error).
@@ -351,6 +356,12 @@ def generate_smart_query(
             from google.cloud.firestore_v1.base_query import FieldFilter as _FF2  # noqa: PLC0415
             import concurrent.futures as _cf
 
+            # V25.5.0 Phase 2D: 30-day TTL for RLHF-rejected domains.
+            # Rejected domains older than 30 days are expired to prevent
+            # permanent blacklist slot consumption by stale signals.
+            _blacklist_ttl_days = 30
+            _ttl_cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=_blacklist_ttl_days)
+
             def _fetch_rejections():
                 _db  = get_db()
                 q_rej = _db.collection("leads").where(filter=_FF2("tenant_id", "==", ctx.tenant_id))
@@ -360,12 +371,35 @@ def generate_smart_query(
                 docs_rej  = list(q_rej.stream())
                 _domains:      list[str] = []
                 _title_frags:  list[str] = []
+                _ttl_expired_count = 0
+                _ttl_no_ts_count = 0
                 JUNK_TITLE_PATTERNS = [
                     "jobs", "careers", "hiring", "directory", "listing",
                     "aggregator", "yellow pages", "just dial",
                 ]
                 for d in docs_rej:
                     dd = d.to_dict() or {}
+
+                    # V25.5.0 Phase 2D: TTL filter — skip entries rejected > 30 days ago.
+                    _rejected_at = dd.get("rejected_at") or dd.get("updatedAt")
+                    if _rejected_at is not None:
+                        try:
+                            # Firestore returns datetime objects; ensure tz-aware comparison.
+                            if hasattr(_rejected_at, 'tzinfo') and _rejected_at.tzinfo is None:
+                                _rejected_at = _rejected_at.replace(tzinfo=datetime.timezone.utc)
+                            if _rejected_at < _ttl_cutoff:
+                                _ttl_expired_count += 1
+                                continue  # expired — skip this entry
+                        except (TypeError, AttributeError):
+                            # Non-datetime value — fail-open, keep the entry
+                            _ttl_no_ts_count += 1
+                    else:
+                        # No timestamp field at all — fail-open, keep the entry
+                        _ttl_no_ts_count += 1
+                        log.debug("neg_shield_no_timestamp",
+                                  doc_id=d.id,
+                                  note="Rejected lead has no rejected_at/updatedAt — included (fail-open).")
+
                     domain = (
                         dd.get("target_domain")
                         or dd.get("domain")
@@ -377,11 +411,28 @@ def generate_smart_query(
                     for pattern in JUNK_TITLE_PATTERNS:
                         if pattern in title and pattern not in _title_frags:
                             _title_frags.append(pattern)
-                return _domains, _title_frags
+                return _domains, _title_frags, _ttl_expired_count, _ttl_no_ts_count
 
             with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
                 _fut = _pool.submit(_fetch_rejections)
-                ctx.neg_domains, ctx.neg_title_frags = _fut.result(timeout=2.0)
+                _rej_result = _fut.result(timeout=2.0)
+                ctx.neg_domains = _rej_result[0]
+                ctx.neg_title_frags = _rej_result[1]
+                _ttl_expired = _rej_result[2]
+                _ttl_no_ts = _rej_result[3]
+
+            # V25.5.0 Phase 2D: Log TTL filtering results.
+            _total_rej_entries = len(ctx.neg_domains) + len(ctx.neg_title_frags) + _ttl_expired
+            if _ttl_expired > 0 or _ttl_no_ts > 0:
+                log.info(
+                    "neg_shield_ttl_applied",
+                    total_entries=_total_rej_entries,
+                    expired_entries=_ttl_expired,
+                    active_entries=len(ctx.neg_domains) + len(ctx.neg_title_frags),
+                    no_timestamp_entries=_ttl_no_ts,
+                    ttl_days=_blacklist_ttl_days,
+                    campaign_id=ctx.campaign_id,
+                )
 
             if ctx.neg_domains or ctx.neg_title_frags:
                 log.info(
@@ -527,6 +578,18 @@ def generate_smart_query(
         _is_d2c   = (ctx.sourcing_vector or "") in _D2C_ARCHETYPES
         _is_b2b2c = (ctx.sourcing_vector or "") in _B2B2C_ARCHETYPES
 
+        # V25.5.0 Phase 4D: Query Refresh on Exhaustion — inject diversification mandate.
+        _query_refresh_instruction = ""
+        if force_query_refresh:
+            _query_refresh_instruction = (
+                "\n\nIMPORTANT: Previous queries have been exhausted and returned zero new results "
+                "for 3+ cycles. Generate COMPLETELY NEW query angles. Do NOT repeat previous patterns. "
+                "Try different keyword combinations, different platforms, different buyer personas.\n"
+            )
+            log.info("query_brain_forced_refresh",
+                     campaign_id=ctx.campaign_id,
+                     note="Exhaustion detector triggered — injecting diversification mandate.")
+
         if _is_consumer_vector:
             # ── CONSUMER PROMPT (V24.1.1 — Differentiated from Standard) ───
             unified_prompt = f"""You are the Sideio Query Brain, operating as an elite OSINT investigator for CONSUMER ({vector_label}) campaigns. Your goal is to find raw, unpolished web footprints of individual consumers or local businesses experiencing specific pain points.
@@ -558,7 +621,7 @@ Generate exactly 3 short natural-language queries (MAX 12 WORDS each) that a fru
 Rule: Write like a real person venting, not a researcher. Examples: "worst [product] customer service experience", "[brand] keeps ignoring my complaint", "anyone else having [specific problem]".
 Rule: No jargon. No corporate language. No "How do I" question starters.
 
-Return ONLY the JSON object. No explanation, no markdown."""
+Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruction}"""
         else:
             # ── STANDARD PROMPT (V24.1.1 — B2B Buyer Friction Focus) ────────
             unified_prompt = f"""You are the Sideio Query Brain, operating as an elite OSINT investigator. Your goal is to find raw, hidden, unpolished web footprints of people or businesses experiencing specific pain points.
@@ -592,7 +655,7 @@ Rule: Write like a real person venting, not a marketing blog. Examples: "[tool] 
 Rule: BANNED openings — these match SEO articles, not buyers: "How do B2B companies", "How do I", "What is the best way", "What are the biggest challenges", "How can we", "Tips for".
 Rule: No jargon. No corporate language. Think: what would a frustrated person with this problem actually type?
 
-Return ONLY the JSON object. No explanation, no markdown."""
+Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruction}"""
 
         # System instruction — OSINT / Anti-SEO compliance guard (V23.6)
         _system_instruction = (
@@ -863,7 +926,7 @@ Return ONLY the JSON object. No explanation, no markdown."""
         )
 
     # V24.5 (L1-5): Blacklist priority rebuild — most specific (RLHF-learned) first,
-    # static defaults last. The 350-char cap trims from the tail, so trimming now
+    # static defaults last. The domain count cap trims from the tail, so trimming
     # removes static defaults before removing RLHF-learned campaign-specific signals.
     _rlhf_blacklist = ""  # RLHF-learned exclusions (highest priority)
     if ctx.neg_domains:
@@ -899,33 +962,32 @@ Return ONLY the JSON object. No explanation, no markdown."""
     # Build: RLHF (most specific) → shield → persona → static (least specific)
     blacklist = (_rlhf_blacklist + _shield_blacklist + _persona_blacklist + " " + _DEFAULT_BLACKLIST).strip()
 
-    # V25.2.3: Cap blacklist length to prevent query explosion.
-    # BUG FIX: Previous cap used whitespace `.split()` which broke multi-word
-    # -intitle:"..." exclusions into individual words. Each word passed the cap
-    # check individually, so a single 80-char -intitle: phrase was never trimmed.
-    # FIX: Use regex to split on exclusion operator boundaries so multi-word
-    # phrases are treated as atomic units.
-    # Also reduced cap from 350→250 chars. Evidence (2026-07-03): 350-char
-    # blacklists combined with tbs=qdr:2y and gl=in produce 0 Google results
-    # for every Brand Narrative and Kerala Education campaign query.
-    _MAX_BLACKLIST_LEN = 450
-    if len(blacklist) > _MAX_BLACKLIST_LEN:
-        import re as _bl_re
-        _original_len = len(blacklist)
-        # Split on operator boundaries: each token is a complete exclusion unit
-        # e.g. -site:foo.com | -intitle:"long phrase here" | -"exact match" | -word
-        _bl_tokens = _bl_re.findall(r'-(?:site:\S+|intitle:"[^"]*"|"[^"]*"|\S+)', blacklist)
-        _capped = []
-        _running = 0
-        for _t in _bl_tokens:
-            if _running + len(_t) + 1 > _MAX_BLACKLIST_LEN:
-                break
-            _capped.append(_t)
-            _running += len(_t) + 1
-        blacklist = " ".join(_capped)
+    # V25.5.0 Phase 2D: Domain count cap (replaces char-based cap).
+    # The old 450-char cap was brittle: 10 RLHF domains with long names could
+    # exhaust the budget and trim ALL static defaults. A 15-domain count cap
+    # ensures a predictable, fair allocation of blacklist slots across tiers.
+    # Non-site exclusions (-intitle:"", -"exact", -word) are always kept.
+    _MAX_BLACKLIST_DOMAINS = 15
+    import re as _bl_re
+    # Split on operator boundaries: each token is a complete exclusion unit
+    # e.g. -site:foo.com | -intitle:"long phrase here" | -"exact match" | -word
+    _bl_tokens = _bl_re.findall(r'-(?:site:\S+|intitle:"[^"]*"|"[^"]*"|\S+)', blacklist)
+    _site_tokens = []
+    _non_site_tokens = []
+    for _t in _bl_tokens:
+        if _t.startswith("-site:"):
+            _site_tokens.append(_t)
+        else:
+            _non_site_tokens.append(_t)
+    if len(_site_tokens) > _MAX_BLACKLIST_DOMAINS:
+        _original_site_count = len(_site_tokens)
+        _site_tokens = _site_tokens[:_MAX_BLACKLIST_DOMAINS]
         log.info("blacklist_length_capped",
-                 original=_original_len, capped=len(blacklist),
-                 tokens_kept=len(_capped), tokens_total=len(_bl_tokens))
+                 original_domains=_original_site_count,
+                 capped_domains=len(_site_tokens),
+                 non_site_kept=len(_non_site_tokens),
+                 max_domains=_MAX_BLACKLIST_DOMAINS)
+    blacklist = " ".join(_site_tokens + _non_site_tokens)
 
 
     if not ctx.has_local_history:

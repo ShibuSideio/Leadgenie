@@ -317,7 +317,12 @@ def harvest_signals(
         future_to_signal = {
             pool.submit(
                 inline_score_signal,
-                signal.combined_text(max_chars=6000),
+                # 3C: Reddit content cap — use first 1500 chars for reddit.com
+                # URLs to focus Gemini scoring on the OP primary post instead
+                # of deep comment chains (comment #347 is noise, not intent).
+                signal.combined_text(
+                    max_chars=1500 if "reddit.com" in signal.url else 6000
+                ),
                 icp_context,
                 signal.url,
                 signal.source_type,
@@ -614,6 +619,104 @@ def _prism_enrich_batch(thin_signals: list[SignalItem]) -> list[SignalItem]:
 
 
 # ---------------------------------------------------------------------------
+# LQS — Lead Quality Score (multi-dimensional composite)  [Phase 3A]
+# ---------------------------------------------------------------------------
+
+# Reachability weights by source_type.  Social platforms score lower because
+# DMing a random Reddit commenter has lower success than contacting a Google
+# reviewer who left their name on a public review.
+_REACHABILITY_MAP: dict[str, float] = {
+    "google_review": 0.8,
+    "classified":    0.7,
+    "serper":        0.6,
+    "rss":           0.5,
+    "reddit":        0.4,
+}
+
+
+def _compute_lqs(signal: SignalItem, score: dict) -> dict:
+    """Compute Lead Quality Score — multi-dimensional composite.
+
+    Dimensions:
+    - topic_coherence (25%): From Gemini's topic_coherence field (0.0-1.0)
+    - intent_strength (25%): Derived from raw_score (normalize 1-10 → 0.0-1.0)
+    - freshness (20%): Based on signal age (newer = higher)
+    - reachability (15%): Based on source_type (social = lower, direct = higher)
+    - dm_confidence (15%): Based on whether a real person name was extracted
+
+    Returns:
+        Dict with ``lqs_score`` (float 0.0-1.0) and individual dimension
+        values keyed as ``lqs_<dimension>``.
+    """
+    # --- topic_coherence ---
+    coherence = float(score.get("topic_coherence", 0.5))
+    coherence = max(0.0, min(1.0, coherence))
+
+    # --- intent_strength ---
+    raw = score.get("raw_score", 5)
+    try:
+        raw = float(raw)
+    except (TypeError, ValueError):
+        raw = 5.0
+    intent = min(raw, 10.0) / 10.0
+
+    # --- freshness ---
+    freshness = 0.7  # default when no date available
+    _sig_date = signal.metadata.get("date") or signal.metadata.get("published_at")
+    if _sig_date:
+        try:
+            if isinstance(_sig_date, str):
+                # ISO-8601 parse (handles most formats)
+                _parsed_dt = datetime.datetime.fromisoformat(
+                    _sig_date.replace("Z", "+00:00")
+                )
+            elif isinstance(_sig_date, datetime.datetime):
+                _parsed_dt = _sig_date
+            else:
+                _parsed_dt = None
+
+            if _parsed_dt is not None:
+                _now = datetime.datetime.now(datetime.timezone.utc)
+                if _parsed_dt.tzinfo is None:
+                    _parsed_dt = _parsed_dt.replace(tzinfo=datetime.timezone.utc)
+                _age_days = (_now - _parsed_dt).total_seconds() / 86400.0
+                # Decay: 1.0 at 0 days, 0.0 at 90+ days, linear
+                freshness = max(0.0, min(1.0, 1.0 - (_age_days / 90.0)))
+        except (ValueError, TypeError, OverflowError):
+            pass  # keep default 0.7
+
+    # --- reachability ---
+    reachability = _REACHABILITY_MAP.get(signal.source_type, 0.5)
+
+    # --- dm_confidence ---
+    _dm_field = (
+        score.get("dm", "") or score.get("decision_maker", "") or ""
+    )
+    if isinstance(_dm_field, dict):
+        _dm_field = _dm_field.get("name", "")
+    _dm_field = str(_dm_field).strip()
+    dm_conf = 0.8 if (_dm_field and _dm_field.lower() != "unknown") else 0.3
+
+    # --- composite ---
+    final = (
+        coherence    * 0.25
+        + intent     * 0.25
+        + freshness  * 0.20
+        + reachability * 0.15
+        + dm_conf    * 0.15
+    )
+
+    return {
+        "lqs_score":            round(final, 4),
+        "lqs_topic_coherence":  round(coherence, 4),
+        "lqs_intent":           round(intent, 4),
+        "lqs_freshness":        round(freshness, 4),
+        "lqs_reachability":     round(reachability, 4),
+        "lqs_dm_confidence":    round(dm_conf, 4),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Firestore write
 # ---------------------------------------------------------------------------
 
@@ -656,6 +759,9 @@ def _write_to_firestore(
 
         now_ts = datetime.datetime.utcnow()
 
+        # 3A: Compute LQS composite score before writing
+        lqs = _compute_lqs(signal, score)
+
         # ---- scraped_cache document ----
         # Dispatch reads text from scraped_cache.text to run pre_filter_gemini.
         # By writing full signal content here, the pre_filter runs on real content
@@ -686,6 +792,8 @@ def _write_to_firestore(
             "harvest_archetype_match":   score.get("archetype_match", ""),
             "harvest_geo_match":         score.get("geo_match", False),
             "signal_metadata":           signal.metadata,
+            # 3A: LQS composite dimensions
+            **lqs,
         }
         batch.set(cache_ref, cache_doc, merge=True)
         batch_count += 1
@@ -783,6 +891,8 @@ def _write_to_firestore(
                     "confidence":  0.85,
                 }],
                 "confidence_level": "HIGH",
+                # 3A: LQS composite dimensions on direct leads
+                **lqs,
                 "createdAt":        firestore.SERVER_TIMESTAMP,
                 "updatedAt":        firestore.SERVER_TIMESTAMP,
             }
