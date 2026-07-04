@@ -1038,7 +1038,7 @@ function renderCampaignsTable(campaigns, activeCount) {
         };
         const _strat = (camp.intelligence_strategy || {}).primary || '';
         const _stratInfo = _stratMap[_strat] || { icon: '\u2014', label: 'Legacy', color: '#6b7280' };
-        const stratBadge = `<span style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid ${_stratInfo.color};color:${_stratInfo.color};white-space:nowrap;margin-left:6px;" title="${_strat || 'No strategy classified'}">${_stratInfo.icon} ${_stratInfo.label}</span>`;
+        const stratBadge = `<span style="font-size:0.7rem;padding:2px 6px;border-radius:4px;border:1px solid ${_stratInfo.color};color:${_stratInfo.color};white-space:nowrap;margin-left:6px;" title="${_escapeHTML(_strat) || 'No strategy classified'}">${_stratInfo.icon} ${_stratInfo.label}</span>`;
 
         tableRows += `
             <tr style="border-bottom:1px solid var(--glass-border);">

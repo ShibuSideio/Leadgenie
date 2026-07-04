@@ -1662,6 +1662,7 @@ def _maybe_notify_whatsapp(tenant_id: str, url: str, lead_id: str,
 
 _ENTITY_DOMAIN_COUNTS: dict[str, int] = {}  # Reset each dispatch batch
 _ENTITY_DOMAIN_MAX = 5
+_ENTITY_DOMAIN_LOCK = __import__('threading').Lock()  # V26.0.1: Thread safety for TPE
 
 _ENTITY_EXTRACTION_SCHEMA = {
     "type": "OBJECT",
@@ -1740,18 +1741,18 @@ def _extract_entities_from_dom(
 
     Non-fatal: returns empty list on any failure.
     """
-    log = get_logger()
 
-    # Per-domain rate limit
+    # Per-domain rate limit (thread-safe for ThreadPoolExecutor)
     from urllib.parse import urlparse as _urlparse
     _domain = _urlparse(source_url).netloc.lower() if source_url else ""
-    _domain_count = _ENTITY_DOMAIN_COUNTS.get(_domain, 0)
-    if _domain_count >= _ENTITY_DOMAIN_MAX:
-        log.info("entity_extraction_domain_rate_limited",
-                 domain=_domain, count=_domain_count, max=_ENTITY_DOMAIN_MAX,
-                 note="Skipping entity extraction to avoid platform rate-limiting.")
-        return []
-    _ENTITY_DOMAIN_COUNTS[_domain] = _domain_count + 1
+    with _ENTITY_DOMAIN_LOCK:
+        _domain_count = _ENTITY_DOMAIN_COUNTS.get(_domain, 0)
+        if _domain_count >= _ENTITY_DOMAIN_MAX:
+            log.info("entity_extraction_domain_rate_limited",
+                     domain=_domain, count=_domain_count, max=_ENTITY_DOMAIN_MAX,
+                     note="Skipping entity extraction to avoid platform rate-limiting.")
+            return []
+        _ENTITY_DOMAIN_COUNTS[_domain] = _domain_count + 1
 
     # Guard against very short text
     if len(text.strip()) < 200:
@@ -1801,12 +1802,9 @@ def _extract_entities_from_dom(
             "- Maximum 15 entities per page\n"
         )
 
-        from vertexai.generative_models import GenerationConfig  # type: ignore[import]
-
         result = call_gemini_2_5(
             prompt,
-            schema=_ENTITY_EXTRACTION_SCHEMA,
-            temperature=0.1,
+            response_schema=_ENTITY_EXTRACTION_SCHEMA,
         )
 
         if not result or not isinstance(result, dict):
@@ -1837,6 +1835,15 @@ def _extract_entities_from_dom(
                 continue
 
             entity_lead_id = f"{lead_id}_entity_{idx}"
+            # V26.0.1: Build contact_endpoints in standard list[dict] format
+            _entity_contacts = []
+            _entity_email = (entity.get("email") or "").strip()
+            _entity_phone = (entity.get("phone") or "").strip()
+            if _entity_email:
+                _entity_contacts.append({"platform": "email", "uri": _entity_email})
+            if _entity_phone:
+                _entity_contacts.append({"platform": "phone", "uri": _entity_phone})
+
             entity_payload = {
                 "id":                   entity_lead_id,
                 "source_url":           entity.get("profile_url") or source_url,
@@ -1845,15 +1852,15 @@ def _extract_entities_from_dom(
                 "origin_engine":        "entity_extractor",
                 "score":                min(entity.get("relevance_score", 50), 100) // 10,
                 "normalized_score":     min(entity.get("relevance_score", 50), 100),
+                "matched_campaign_ids": [campaign_id],
+                "matched_campaigns":    [campaign_id],
                 "company_name":         entity.get("company") or entity_name,
                 "decision_maker_name":  entity_name,
                 "decision_maker_title": entity.get("role_or_title", "Unknown"),
                 "pain_point":           entity.get("extraction_note", ""),
+                "dm":                   "",
                 "intent_signal":        f"Extracted from {page_type} page: {source_url[:60]}",
-                "contact_endpoints":    [
-                    ep for ep in [entity.get("email"), entity.get("phone")]
-                    if ep and ep.strip()
-                ],
+                "contact_endpoints":    _entity_contacts,
                 "signal_source_type":   "platform_entity",
                 "signal_platform":      _domain,
                 "source_type":          "platform_entity",

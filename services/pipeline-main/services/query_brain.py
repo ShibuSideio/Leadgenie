@@ -1329,5 +1329,39 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
     # V25.4.0 Phase 2B: Inject buyer-language variants before syntax cleaning.
     smart_queries = _inject_buyer_language(smart_queries)
 
+    # ── V26.0.1: Post-generation strategy-aware -site: strip ──────────────
+    # The PLATFORM_MINING/COMPETITOR_TOUCHPOINT/PROFESSIONAL_NETWORK strategies
+    # need certain platforms to remain unsuppressed. Gemini may inject -site:
+    # exclusions into its generated dorks. Strip them here as a last-mile fix.
+    _strategy_keep_sites: list[str] = []
+    if _strategy_upper in ("PLATFORM_MINING", "COMPETITOR_TOUCHPOINT"):
+        _strategy_keep_sites = ["g2.com", "capterra.com", "yelp.com",
+                                "trustpilot.com", "glassdoor.com"]
+    elif _strategy_upper == "PROFESSIONAL_NETWORK":
+        _strategy_keep_sites = ["linkedin.com"]
+
+    if _strategy_keep_sites and smart_queries:
+        import re as _site_strip_re
+        _strip_patterns = [
+            _site_strip_re.compile(r'\s*-site:' + _site_strip_re.escape(domain) + r'\b', _site_strip_re.IGNORECASE)
+            for domain in _strategy_keep_sites
+        ]
+        _stripped_count = 0
+        _cleaned_queries = []
+        for q in smart_queries:
+            _original = q
+            for pat in _strip_patterns:
+                q = pat.sub('', q)
+            if q != _original:
+                _stripped_count += 1
+            _cleaned_queries.append(q.strip())
+        smart_queries = _cleaned_queries
+        if _stripped_count:
+            log.info("blacklist_strategy_post_strip",
+                     strategy=ctx.strategy,
+                     queries_affected=_stripped_count,
+                     kept_sites=_strategy_keep_sites,
+                     note="Stripped strategy-conflicting -site: exclusions from Gemini-generated dorks.")
+
     return [_clean_query_syntax(q) for q in smart_queries]
 

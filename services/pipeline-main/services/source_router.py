@@ -540,9 +540,9 @@ IMPORTANT:
         #    Gemini derives competitor names from ICP; Serper Maps + Reviews
         #    fetch buyer-language reviews. Works for B2B service firms too.
         #    V25.2.1: Once-daily cooldown gate — _reviews_due is set above.
+        raw_arch = config.get("_archetype", "B2B")  # Hoist for YouTube logging
         if self._serper_key and _reviews_due:
             icp_context = config.get("_icp_context", "")
-            raw_arch    = config.get("_archetype", "B2B")
             sources.append(GoogleReviewSource(
                 icp_context    = icp_context,
                 geo            = geo,
