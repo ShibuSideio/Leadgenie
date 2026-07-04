@@ -1,6 +1,6 @@
 # =============================================================================
-# cloudbuild.yaml — LeadGenie (Sideio) V25.4.1 Enterprise Build Pipeline
-# Deploy trigger: 2026-07-04 | V25.4.1 — Direct-to-production (preview steps removed)
+# cloudbuild.yaml — LeadGenie (Sideio) V25.6.0 Enterprise Build Pipeline
+# Deploy trigger: 2026-07-04 | V25.6.0 — 87-issue failure remediation (auth, financial, XSS, quality)
 #
 # Changes from V23.5.2 (2026-04-30):
 #

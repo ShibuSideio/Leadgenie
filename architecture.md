@@ -1,6 +1,6 @@
-# LeadGenie (Sideio) — Platform Architecture V25.2.3
+# LeadGenie (Sideio) — Platform Architecture V25.6.0
 **Technical Specification Document**
-*Last Updated: 2026-07-03 | Version: V25.2.3 — Dependency Conflict Resolution + Cloud Build Hardening*
+*Last Updated: 2026-07-04 | Version: V25.6.0 — 87-Issue Failure Remediation + Lead Quality Gates*
 
 ---
 
@@ -66,12 +66,12 @@ LeadGenie is a fully automated, multi-tenant lead generation SaaS platform. It d
 
 | Service | Cloud Run Name | Auth | Memory | Region |
 |---|---|---|---|---|
-| Orchestrator | `orchestrator` | `--allow-unauthenticated` | 512 Mi | asia-south1 |
-| Pipeline Main | `lead-pipeline-main` | `--no-allow-unauthenticated` | 1 Gi | asia-south1 |
+| Orchestrator | `orchestrator` | `--no-allow-unauthenticated` (V25.6.0) | 512 Mi | asia-south1 |
+| Pipeline Main | `lead-pipeline-main` | `--no-allow-unauthenticated` | 512 Mi | asia-south1 |
 | Scraper Heavy | `scraper-heavy` | `--no-allow-unauthenticated` | 2 Gi | asia-south1 |
-| Digital Twin Engine | `digital-twin-engine` | `--no-allow-unauthenticated` | 512 Mi | asia-south1 |
+| Digital Twin Engine | `digital-twin-engine` | `--no-allow-unauthenticated` (V25.6.0) | 512 Mi | asia-south1 |
 | Shadow Learner Aggregator | `shadow-learner-aggregator` | `--no-allow-unauthenticated` | 256 Mi | asia-south1 |
-| WhatsApp Webhook | `whatsapp-webhook` | `--allow-unauthenticated` | 128 Mi | asia-south1 |
+| WhatsApp Webhook | `whatsapp-webhook` | DISABLED (build/deploy removed V25.6.0) | 128 Mi | asia-south1 |
 | Email Summary | `email-summary` | `--no-allow-unauthenticated` | 128 Mi | asia-south1 |
 | **Autonomous Engine** | **`autonomous-engine`** | **Cloud Run Job (no HTTP)** | **512 Mi** | **asia-south1** |
 | Frontend | Firebase Hosting | Public CDN | — | Global |
@@ -134,6 +134,7 @@ Primary tenant anchor. Document ID = Firebase Auth UID.
   "wallet": {
     "allocated_credits": 20000,
     "consumed_credits": 314,
+    "total_consumed": 320,
     "reserved_credits": 2
   },
   "preferences_weights": {
@@ -157,7 +158,8 @@ Primary tenant anchor. Document ID = Firebase Auth UID.
 - `approval_status`: `"pending"` blocks all pipeline execution; set to `"approved"` by L0 admin
 - `visitor_signals_enabled` (V24.5): opt-out flag for Inbound Radar; returns 204 immediately if false
 - `wallet.reserved_credits`: in-flight credits held during pipeline execution; settled on completion
-- `wallet.consumed_credits`: base counter only. True total = `consumed_credits + SUM(wallet_shards/0-9)`
+- `wallet.total_consumed` (V25.6.0): authoritative consumed counter, written atomically by `_atomic_settle_txn`. True balance = `allocated_credits − max(total_consumed, consumed_credits + SUM(wallet_shards/0-9)) − reserved_credits`
+- `wallet.consumed_credits`: legacy base counter. Kept for backward compatibility. The `max()` formula ensures neither path underreports consumption
 
 ### 4.2 `users/{tenant_id}/wallet_shards/{0-9}` Sub-Collection
 Distributed credit counters (bypass Firestore write contention).
@@ -351,7 +353,13 @@ Internal cron endpoints (`/api/internal/cron/*`) verify Google OIDC tokens:
 `INTERNAL_CRON_SECRET` env var is now required:
 - If unset → `503 Service not configured` returned on all inbound sentiment trigger requests
 - If set but mismatched → `401 unauthorized`
-- Cloud Tasks queue header (`X-CloudTasks-QueueName`) is accepted as an alternative auth path
+- Cloud Tasks queue header (`X-CloudTasks-QueueName`) is accepted as a supplementary signal after OIDC passes (V25.6.0 — was previously a bypass that allowed spoofing)
+
+### 5.6 Gemini Model Fallback (V25.6.0)
+All Gemini calls now use a 2-tier model chain. If the primary model (`GEMINI_MODEL` env var) returns `NotFound` or `ResourceExhausted`, the call retries once with `gemini-2.0-flash` as fallback. This prevents total pipeline stall on model deprecation or quota exhaustion.
+
+### 5.7 Agents Router Auth (V25.6.0)
+The `agents.py` router was the only orchestrator router that bypassed `@require_auth` middleware, using manual `_get_uid()` extraction with no `is_active`, `approval_status`, or `role` checks. V25.6.0 added `@require_auth` to all 5 agent routes and replaced per-request `fs.Client()` with the singleton `get_db()` to prevent gRPC connection leaks.
 
 ### 5.3 PII Scrubbing Before BigQuery (L8-2, GDPR)
 `_scrub_pii()` is applied to all `pain_point` + `dm` text before N-gram extraction and BQ write:
@@ -852,7 +860,7 @@ log.warning("lead_lock_delete_failed",
 
 ---
 
-## 16. DEPENDENCY CONSTRAINTS (V25.2.3)
+## 16. DEPENDENCY CONSTRAINTS (V25.6.0)
 
 | Library | Version | Constraints |
 |---|---|---|
@@ -861,6 +869,10 @@ log.warning("lead_lock_delete_failed",
 | `vertexai` | `1.71.1` | Pinned for stability. Do not upgrade without full RCA on `gemini_service.py` compatibility. |
 | `Flask` | `3.0.3` | Standardized baseline across all services. |
 | `tenacity` | `9.1.4` | Standardized retry logic. |
+| `PyJWT` | `2.10.1` | Orchestrator only. Used by `social_redirect.py` for JWT HS256 token verification. |
+
+> [!NOTE]
+> No new pip dependencies were introduced in V25.6.0. All fixes use existing imports.
 
 ---
 
@@ -881,42 +893,79 @@ log.warning("lead_lock_delete_failed",
 
 ---
 
-## 17. KNOWN OPEN ISSUES
+## 18. KNOWN OPEN ISSUES
 
-These are structural issues identified in the V24.5.x and V24.6.x post-RCA audit.
+These are structural issues identified across V24–V25 audit cycles.
 
 | # | Severity | Component | Issue | Status |
 |---|---|---|---|---|
-| I-1 | ✅ Resolved | `neg_shield.py` | `Negative_Signals` BQ table missing `sourcing_vector` column → `neg_shield_fetch_failed` every cycle | Fixed 2026-07-02: `bq update` added column; query now resolves |
-| I-2 | 🟠 High | `serper_service.py` | BQ audit telemetry schema mismatch → `serper_audit_broker_non_200` on every call | Open — audit table schema needs investigation |
-| I-3 | 🟡 Medium | `dispatch.py` | Velocity gate Firestore composite index missing → `velocity_gate_disabled_firestore_error` | Open — all Medium-tier URLs auto-approved |
-| I-4 | ✅ Resolved | `orchestrator` | `INTERNAL_CRON_SECRET` env var not set → Inbound Radar returns 503 | Fixed 2026-07-02: env var set on revision `orchestrator-00403-jey`, traffic migrated |
+| I-1 | ✅ Resolved | `neg_shield.py` | `Negative_Signals` BQ table missing `sourcing_vector` column | Fixed 2026-07-02 |
+| I-2 | 🟠 High | `serper_service.py` | BQ audit telemetry schema mismatch → `serper_audit_broker_non_200` | Open — audit table schema needs investigation |
+| I-3 | 🟡 Medium | `dispatch.py` | Velocity gate Firestore composite index missing | Open — all Medium-tier URLs auto-approved |
+| I-4 | ✅ Resolved | `orchestrator` | `INTERNAL_CRON_SECRET` env var not set | Fixed 2026-07-02 |
 | I-5 | 🟡 Medium | `dispatch.py` | `enrichment_pending` leads not counted in velocity gate | Open |
-| I-6 | 🟡 Medium | All campaigns | Pre-filter context starvation — campaigns without persona sent 5-word bio to Gemini | Fixed V24.6.1: `context_builder.py` aggregates all 15+ fields |
-| I-7 | 🟡 Medium | `serper_service.py` | B2B had no temporal filter (all-time) — 2022 conference pages competed with 2026 buyer posts | Fixed V24.6.0: B2B now uses `tbs=qdr:y` (past year) |
-| I-8 | 🟡 Medium | `dispatch.py` | No page-type score cap — conference/govt pages scored 9-10/10 | Fixed V24.6.0: structural regex cap applied before score gate |
+| I-6 | ✅ Resolved | All campaigns | Pre-filter context starvation | Fixed V24.6.1: `context_builder.py` |
+| I-7 | ✅ Resolved | `serper_service.py` | B2B had no temporal filter | Fixed V24.6.0: `tbs=qdr:y` |
+| I-8 | ✅ Resolved | `dispatch.py` | No page-type score cap | Fixed V24.6.0: structural regex cap |
+| I-9 | ✅ Resolved | `orchestrator` | `--allow-unauthenticated` exposed all internal endpoints | Fixed V25.6.0: `--no-allow-unauthenticated` |
+| I-10 | ✅ Resolved | `agents.py` | No auth middleware — suspended users could CRUD agents | Fixed V25.6.0: `@require_auth` |
+| I-11 | ✅ Resolved | `internal.py` | Harvest sweep dead — `remaining_credits` field nonexistent | Fixed V25.6.0: correct credit formula |
+| I-12 | ✅ Resolved | `leads.py` | Signal-to-lead credit non-transactional race condition | Fixed V25.6.0: `@transactional` wrapper |
+| I-13 | ✅ Resolved | `me.py`, `l0_admin.py` | Wallet display ignored `total_consumed` | Fixed V25.6.0: `max()` formula |
+| I-14 | ✅ Resolved | `gemini_service.py` | `response.text` crash on empty candidates | Fixed V25.6.0: `_safe_extract()` guard |
+| I-15 | ✅ Resolved | `personas.py` | Cache invalidation queried wrong collection | Fixed V25.6.0: tenant-scoped subcollection |
+| I-16 | ✅ Resolved | `app.js` | 11 XSS injection points (campaign names, keywords, geo, timeline) | Fixed V25.6.0: `_escapeHTML()` |
 
 **Diagnostic shortcut for operators:** Filter Cloud Run logs for `context_builder_assembled sections=<N>`. Any campaign with `sections < 3` is a thin-context campaign that may produce poor leads — prompt customer to fill in bio, pain_point, or link a persona.
 
+---
+
+## 19. V25.5.x–V25.6.0 QUALITY GATE ARCHITECTURE
+
+V25.5.x introduced a 4-phase lead quality system. V25.6.0 fixed the remaining infrastructure issues.
+
+### 19.1 Noise Gates (V25.5.0)
+- **36 blocked subreddits** (news, politics, memes) filtered at Serper level
+- **15 megathread regex patterns** prevent deep-thread noise
+- **38 blocked content farm domains** (listicles, directories)
+- **Topic coherence gate**: Gemini Flash checks campaign–signal relevance before scoring
+- **Staleness filter**: B2C=14d, B2B=60d age threshold on signal metadata (V25.6.0: also applied in signal_harvest pathway)
+
+### 19.2 Query Precision (V25.5.0)
+- **Subreddit-targeted queries** per archetype
+- **Buyer language injection** into search queries
+- **Query exhaustion/refresh** when sources return stale content
+- **30-day blacklist TTL**, 15-domain count cap
+
+### 19.3 LQS Scoring (V25.5.1)
+Multi-dimensional Lead Quality Score computed per signal:
+- Topic coherence, buyer intent, freshness, reachability, DM confidence
+- Calibrated Gemini prompt with $ anchoring
+- Reddit 1500-char primary-post cap
+- Score distribution telemetry
+- **Frontend LQS badge** (V25.6.0): green ≥70%, amber 40–70%, red <40%
+
+### 19.4 Adaptive Learning (V25.5.1)
+- Per-source accept rate tracking (`source_stats` subcollection)
+- Pattern mining from accepted leads (`accepted_patterns`)
+- 7-reason rejection granularity (V25.6.0: synced to frontend)
+- `force_query_refresh` flag on exhaustion detection
 
 ---
 
-## 17. VERSION HISTORY (RECENT)
+## 20. VERSION HISTORY (RECENT)
 
 | Version | Date | Key Changes |
 |---|---|---|
-| **V25.2.3** | **2026-07-03** | **Build failure RCA fix: (1) Reverted google-cloud-storage to 2.19.0 for pipeline-main and digital-twin-engine to resolve vertexai 1.71.1 conflict. (2) cloudbuild.yaml fix: escaped INTERNAL_CRON_SECRET with $$ to prevent invalid substitution error. (3) cloudbuild.yaml smoke-test step updated to storage==2.19.0.** |
+| **V25.6.0** | **2026-07-04** | **87-issue failure remediation across 23 files. P0: Orchestrator `--no-allow-unauthenticated`, agents.py auth, harvest sweep credit fix, shadow_tracker deprecated (delegates to helpers.py), Gemini `_safe_extract()` crash guard, timeline XSS. P1-FIN: transactional signal-to-lead credits, wallet `max(total_consumed, consumed+shards)` in me.py + l0_admin.py, credit leak refund. P1-BIZ: double neg-signal dedup, persona cache path, review lead actual scores, dm/contact type fix, context builder threshold 10→3, historical AND→OR. P1-XSS: 11 innerHTML escapes. P2: model fallback chain, staleness filter in harvest, LQS frontend badge, rejection reasons synced, thread locks, silent failure logging. P3: import guards, sweep lock fail-closed, ontology limit, WhatsApp build removal, version bump to V25.5.1.** |
+| V25.5.1 | 2026-07-04 | LQS multi-dimensional scoring, calibrated Gemini prompt, adaptive learning (source_stats, accepted_patterns, 7-reason rejection), score distribution telemetry. |
+| V25.5.0 | 2026-07-04 | Lead quality gates: 36 blocked subreddits, 15 megathread patterns, 38 content farms, topic coherence gate, staleness filter, buyer language injection, query exhaustion/refresh. |
+| V25.2.3 | 2026-07-03 | Build failure RCA: reverted google-cloud-storage to 2.19.0, cloudbuild.yaml INTERNAL_CRON_SECRET $$ escape. |
 | V25.2.2 | 2026-07-03 | Inbound Radar Hardening + Dependency Standardisation. |
-| **V25.2.1** | **2026-07-03** | **Audit fix batch: PyJWT added to orchestrator requirements; social_redirect.py mint_social_token implemented; credit settlement (_settle_credit) added to cluster analyst; 18 missing lead fields populated in cluster analyst for UI parity; BQ DDL parameterised for env-agnostic deploy; inbound_sentiment_job persona_id gate replaced with bio fallback.** |
-| **V24.6.1** | **2026-07-02** | **Universal context builder (`context_builder.py`): all 15+ campaign fields (effective_bio, pain_point, target_angle_hook, unfair_advantage, persona_targeting_signals, geo_hierarchy) now feed query generation and pre-filter. Handles all user types from lazy (name+location only) to power user (all fields filled). Single source of truth used by both produce.py and dispatch.py.** |
-| **V24.6.0** | **2026-07-02** | **B2B temporal filter: `tbs=qdr:y` added (was all-time — 2022 conference pages competed with 2026 buyer posts). Page-type structural score cap: conference≤3, govt≤2, academic≤3 — prevents Gemini 10/10 on non-buyer pages. Env fix: INTERNAL_CRON_SECRET set on orchestrator revision 00403-jey, Inbound Radar now live. BQ fix: Negative_Signals `sourcing_vector` column added, neg_shield_fetch_failed resolved.** |
-| V24.5.0 | 2026-07-01 | RLHF yield-weight quality signal, expanded rejection vocabulary, visitor signal opt-out, analytics vertical filter, serper telemetry fixes |
-| V24.4.0 | 2026-07-01 | Queue backpressure, enrichment_pending stub, credit settlement on score-drop, CRM webhook Cloud Task retry, lead sort/filter |
-| V24.3.0 | 2026-07-01 | D2C/B2B2C prompt branches, `tbs=qdr:m` consumer freshness, vector-isolated neg shield, B2C intent template fallback, core/constants.py shared module |
-| V24.2.0 | 2026-07-01 | OIDC audience validation, mandatory INTERNAL_CRON_SECRET, PII scrubbing, WhatsApp feature flag, normalized_score, all except:pass replaced |
-| V24.1.25 | 2026-06-30 | Gemini model swap to gemini-2.5-flash |
-| V24.5.7 | 2026-07-01 | CDN subdomain pre-queue filter; pre-PRISM TLD gate (.org/.edu/.gov/.blog/.dev); B2B FAQ-opener post-generation sanitizer in query_brain |
-| V24.5.6 | 2026-07-01 | GET /api/leads double-multiply score bug fixed (min_score×10 removed); status='new' filter added to leads feed (zombie stubs no longer shown) |
-| V24.5.5 | 2026-07-01 | B2B forum dedup collapse fixed — reddit.com, quora.com, stackexchange.com, stackoverflow.com, HN, vendor community boards added to shared_platforms for URL-path dedup |
-| V24.5.4 | 2026-07-01 | Gemini pre-filter B2B Buyer Forum Exception — marketing-domain URLs with active practitioner complaint signals now classified High (was wrongly Low = zero leads) |
-| V24.5.3 | 2026-07-01 | TASK 3 Anti-FAQ Mandate; .blog/.dev/.page/.app TLD blocking; query_brain specificity hardening |
+| V25.2.1 | 2026-07-03 | Audit fix batch: PyJWT, social_redirect, credit settlement, 18 missing lead fields, BQ DDL parameterised. |
+| V24.6.1 | 2026-07-02 | Universal context builder: all 15+ campaign fields feed query generation and pre-filter. |
+| V24.6.0 | 2026-07-02 | B2B temporal filter, page-type score cap, INTERNAL_CRON_SECRET env fix, BQ sourcing_vector column. |
+| V24.5.0–V24.5.7 | 2026-07-01 | RLHF yield-weight, expanded rejection, CDN filter, TLD gate, FAQ sanitizer, forum dedup, lead feed fixes. |
+| V24.4.0 | 2026-07-01 | Queue backpressure, enrichment_pending, credit settlement on score-drop, CRM retry. |
+| V24.3.0 | 2026-07-01 | D2C/B2B2C prompt branches, consumer freshness, vector-isolated neg shield. |
+| V24.2.0 | 2026-07-01 | OIDC validation, mandatory cron secret, PII scrubbing, WhatsApp feature flag. |
