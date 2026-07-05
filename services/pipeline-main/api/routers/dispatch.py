@@ -927,9 +927,12 @@ def dispatch():
                 (r"/(research|paper|abstract|thesis|dissertation|preprint)/",       3, "academic_content"),
                 (r"/(sol3|ssrn|arxiv|researchgate|pubmed)/",                        2, "academic_repo"),
                 # Press release / news wire
-                (r"/(press[-_]release|press[-_]room|newsroom|media[-_]centre)/",    4, "press_release"),
-                # Job boards (hiring page ≠ buyer page)
-                (r"/(jobs|careers|vacancies|join[-_]us)/",                          4, "job_board"),
+                # V26.0.4: Raised from 4 to 7 — press releases about rebranding,
+                # expansion, funding are high-value B2B event triggers.
+                (r"/(press[-_]release|press[-_]room|newsroom|media[-_]centre)/",    7, "press_release"),
+                # Job boards (hiring page — for B2B, hiring = company investing = buying signal)
+                # V26.0.4: Raised from 4 to 6 — "hiring Brand Manager" = branding budget.
+                (r"/(jobs|careers|vacancies|join[-_]us)/",                          6, "job_board"),
             ]
             for _pattern, _cap, _label in _PAGE_TYPE_RULES:
                 if _re_pt.search(_pattern, _url_lower):

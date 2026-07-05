@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v26.0.4'; // V26.0.4: Smart pipeline — vocab seeds, domain resolution, Serper fallback
+const CACHE_NAME = 'sideio-v26.0.4.1'; // V26.0.4.1: B2B regression fixes — unblock LinkedIn, news sources, score caps
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=26.0.4',
-     '/styles.css?v=26.0.4',
+     '/app.js?v=26.0.4.1',
+     '/styles.css?v=26.0.4.1',
      '/manifest.json'
  ];
 

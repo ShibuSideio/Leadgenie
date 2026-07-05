@@ -390,10 +390,12 @@ def generate_smart_query(
             from google.cloud.firestore_v1.base_query import FieldFilter as _FF2  # noqa: PLC0415
             import concurrent.futures as _cf
 
-            # V25.5.0 Phase 2D: 30-day TTL for RLHF-rejected domains.
-            # Rejected domains older than 30 days are expired to prevent
-            # permanent blacklist slot consumption by stale signals.
-            _blacklist_ttl_days = 30
+            # V25.5.0 Phase 2D: RLHF-rejected domain TTL.
+            # V26.0.4: Reduced from 30 to 7 days — 30-day TTL was too aggressive.
+            # A single noise rejection blocked an entire domain for a month,
+            # starving good platforms (medium.com, industry forums) of a second
+            # chance. 7 days provides noise suppression without permanent starvation.
+            _blacklist_ttl_days = 7
             _ttl_cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=_blacklist_ttl_days)
 
             def _fetch_rejections():

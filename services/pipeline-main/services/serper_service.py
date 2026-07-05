@@ -159,7 +159,11 @@ _ENTERPRISE_DOMAINS = [
     # domains always produce snippets with "sign in" / "log in" / "create account".
     # They are never scrapeable leads. Block at domain level to fail-fast and
     # avoid wasting the snippet noise-check cycle on known-bad results.
-    "linkedin.com",    # B2B posts require login to view
+    # V26.0.4: REMOVED linkedin.com — LinkedIn snippets from Serper contain
+    # enough context for Gemini scoring (company names, titles, activity) even
+    # without full page scrape. Same reasoning as Quora un-block in V25.2.3.
+    # B2B campaigns lost their #1 lead source when this was blocked in V24.6.3.
+    # "linkedin.com",    # UNBLOCKED V26.0.4 — B2B regression fix
     # V25.2.3: Removed quora.com — query_brain generates site:quora.com queries,
     # so blocking results here creates a produce-then-discard loop that burns
     # Serper credits with zero yield. Quora snippets from Serper contain enough
@@ -231,7 +235,10 @@ _CDN_SUBDOMAIN_PREFIXES = (
     # Academic repository subdomains
     "papers.", "repository.", "eprints.", "dspace.",
     "lirias.", "preprint.", "preprints.", "scholar.",
-    "research.", "publications.", "pub.",
+    # V26.0.4: REMOVED "research." — too broad, catches legitimate company pages
+    # like research.google.com, research.facebook.com. Academic repos are already
+    # blocked by _ENTERPRISE_DOMAINS (ssrn, researchgate, semanticscholar).
+    "publications.", "pub.",
 )
 
 
@@ -317,9 +324,19 @@ def filter_serper_noise(serper_results: list) -> list:
             _rejected_megathread += 1
             continue
         # V25.7.4 Phase 1A Layer 3: Content farm / news domain blocking.
+        # V26.0.4: B2B exception — business news sources (Bloomberg, BusinessInsider,
+        # Reuters, CNBC, LiveMint) contain event-trigger leads for B2B campaigns
+        # (funding rounds, expansions, rebranding, M&A). Allow these through —
+        # Gemini scoring will handle relevance.
         if link_domain in _CONTENT_FARM_DOMAINS:
-            _rejected_content_farm += 1
-            continue
+            _B2B_NEWS_EXCEPTIONS = {
+                "bloomberg.com", "businessinsider.com", "insider.com",
+                "reuters.com", "cnbc.com", "livemint.com",
+                "washingtonpost.com", "nytimes.com",
+            }
+            if link_domain not in _B2B_NEWS_EXCEPTIONS:
+                _rejected_content_farm += 1
+                continue
         clean.append(r)
     # V24.6.3: emit summary only when results were rejected — avoids log spam on clean batches
     total_in = len(serper_results)
@@ -375,7 +392,11 @@ def sanitize_query(query: str) -> str:
         return query
 
 
-    forbidden = ["linkedin", "facebook", "twitter", "instagram", "reddit", "quora", "youtube", "x.com"]
+    # V26.0.4: B2B exception — LinkedIn and Facebook are primary B2B lead sources.
+    # On free tier, strip consumer-only social platforms but preserve B2B-critical ones.
+    # LinkedIn company pages, posts, articles — all contain B2B buyer signals.
+    # Facebook business pages — contain SMB buyer signals.
+    forbidden = ["twitter", "instagram", "reddit", "quora", "youtube", "x.com"]
 
     # Matches quoted strings (possibly with prefix like -site: or -intitle:) or parentheses or words
     token_re = re.compile(r'([^\s()"]*"[^"]*"|[()]|[^\s()"]+)')
