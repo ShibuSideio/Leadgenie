@@ -924,20 +924,27 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
                     _all_queries_for_translation = ctx.symptom_dorks + ctx.intents
                     if _all_queries_for_translation:
                         _colloquial_prompt = (
-                            "You are a vocabulary translator for search queries. "
-                            "You are given professional/jargon queries and must rewrite them "
-                            "in the EXACT vocabulary of this audience:\n\n"
+                            "You are a search query optimizer. "
+                            "You are given professional/jargon search queries and must rewrite them "
+                            "as SHORT KEYWORD PHRASES that this audience would type into Google:\n\n"
                             f"Audience: {_vocab_context}\n\n"
-                            "Rewrite each query below so it sounds like this audience would "
-                            "ACTUALLY type it into Google or post on a forum. Remove all "
-                            "industry jargon. Use everyday language.\n\n"
+                            "CRITICAL RULES:\n"
+                            "1. Output 3-6 word KEYWORD PHRASES, NOT full sentences.\n"
+                            "2. NEVER output questions (no 'why', 'how', 'what', 'is it', '?').\n"
+                            "3. NEVER output full sentences with subjects and verbs.\n"
+                            "4. Use the exact slang/colloquial words this audience uses.\n"
+                            "5. Remove ALL industry jargon. Use everyday language.\n\n"
+                            "GOOD examples: 'cheap property Muscat', 'NEET low score MBBS abroad', "
+                            "'Google Ads too expensive small business'\n"
+                            "BAD examples: 'Why are property agents in Oman so unreliable?', "
+                            "'Finding verified property in Muscat is impossible.'\n\n"
                             "Queries to translate:\n"
                         )
                         for _idx, _q in enumerate(_all_queries_for_translation, 1):
                             _colloquial_prompt += f"{_idx}. {_q}\n"
                         _colloquial_prompt += (
-                            "\nReturn the same number of queries, rewritten in colloquial "
-                            "language. Return ONLY a JSON array of strings. No explanation."
+                            "\nReturn the same number of queries as SHORT keyword phrases. "
+                            "Return ONLY a JSON array of strings. No explanation."
                         )
 
                         _COLLOQUIAL_SCHEMA = {
@@ -1292,17 +1299,24 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
             #   "How do I find trustworthy education consultants in India?"
             # Wrapping 15+ word sentences in quotes guarantees 0 Serper results
             # because no webpage contains that exact sentence. Short phrases
-            # (≤ 10 words) benefit from quoting (precision). Long sentences
+            # (≤ 6 words) benefit from quoting (precision). Longer phrases
             # benefit from unquoted natural-language matching (recall).
+            # V26.0.4.2: Reduced from 10 to 6. Colloquial translations produce
+            # 5-8 word everyday phrases like "Google Ads too expensive Kerala".
+            # At the old 10-word threshold, these got exact-match quoted and
+            # returned 0 results (nobody types that exact phrase). 6 words is
+            # the sweet spot: "villa Muscat verified" (3) = quote for precision,
+            # "reliable property agent Muscat reviews" (5) = quote OK,
+            # "Google ads are eating my profits Kerala" (7) = DON'T quote.
             _word_count = len(tq.split())
-            if _word_count <= 10:
+            if _word_count <= 6:
                 _tq_expr = f'"{tq}"'
             else:
                 _tq_expr = tq
                 log.info("query_brain_long_intent_unquoted",
                          words=_word_count, intent=tq[:80],
                          campaign_id=ctx.campaign_id,
-                         note="Intent > 10 words — running as natural-language query "
+                         note="Intent > 6 words — running as natural-language query "
                               "instead of exact-match to preserve Serper recall.")
             _bl = _deconflict_blacklist(f'{_tq_expr}{historical_str}', blacklist)
             smart_queries.append(f'{_tq_expr}{historical_str} {_bl}')

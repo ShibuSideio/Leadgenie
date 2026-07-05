@@ -524,14 +524,25 @@ def produce():
                 tenant_id=tenant_id,
                 sourcing_vector=sourcing_vector,
             )
-            if not raw_results and gl:
+            # V26.0.4.2: Only retry globally if the query is a structured dork
+            # (contains site: operators, OR booleans, or quoted phrases).
+            # Natural-language colloquial queries ("cheap property Muscat")
+            # return 0 results on BOTH geo and global indexes — retrying
+            # globally just burns a second Serper credit for nothing.
+            # This was the primary source of 2x credit inflation.
+            _is_structured_query = (
+                "site:" in search_query
+                or " OR " in search_query
+                or search_query.count('"') >= 2
+            )
+            if not raw_results and gl and _is_structured_query:
                 log.info(
                     "produce_geo_fallback",
                     query=search_query[:80],
                     original_gl=gl,
                     sourcing_vector=sourcing_vector,
                     note="Consumer geo-restricted call returned 0 results. "
-                         "Retrying on global index.",
+                         "Retrying on global index (structured query only).",
                     campaign_id=campaign_id,
                 )
                 raw_results = search_serper(
@@ -541,6 +552,16 @@ def produce():
                     campaign_id=campaign_id,
                     tenant_id=tenant_id,
                     sourcing_vector=sourcing_vector,
+                )
+            elif not raw_results and gl and not _is_structured_query:
+                log.info(
+                    "produce_geo_fallback_skipped",
+                    query=search_query[:80],
+                    original_gl=gl,
+                    sourcing_vector=sourcing_vector,
+                    note="Natural-language query returned 0 on geo — skipping "
+                         "global retry to save 1 Serper credit.",
+                    campaign_id=campaign_id,
                 )
         else:
             # B2B: global-only (geo terms already in query text from query_brain).

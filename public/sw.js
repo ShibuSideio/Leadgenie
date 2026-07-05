@@ -1,8 +1,8 @@
-const CACHE_NAME = 'sideio-v26.0.4.2'; // V26.0.4.2: Skip entity extraction on social URLs (LinkedIn, Reddit, etc.)
+const CACHE_NAME = 'sideio-v26.0.4.3'; // V26.0.4.3: Fix Serper credit inflation (colloquial queries + geo fallback)
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=26.0.4.2',
+     '/app.js?v=26.0.4.3',
      '/styles.css?v=26.0.4.1',
      '/manifest.json'
  ];
