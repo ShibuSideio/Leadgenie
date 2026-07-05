@@ -8,6 +8,16 @@ export_legacy_data.py
 *.db
 *.sqlite3
 
+# One-off patch/migration scripts
+patch_*.py
+patch_*.js
+patch_*.ps1
+apply_*.py
+rewrite_*.py
+update_arch.py
+task_*.py
+load_test/
+
 # Env
 .env
 .venv
