@@ -1283,18 +1283,26 @@ def t_serper_query_sanitization():
     sanitize_query = mod.sanitize_query
 
     # Test cases: (input, expected_output)
+    # V26.0.4.1: LinkedIn and Facebook are NO LONGER stripped (B2B regression fix R2).
+    # Only twitter, instagram, reddit, quora, youtube, x.com are still stripped.
     cases = [
-        ('site:linkedin.com/in "digital marketer" "London"', '"digital marketer" "London"'),
-        ('"software engineer" AND "python" -site:linkedin.com -site:facebook.com', '"software engineer" AND "python"'),
-        ('("software engineer" OR "developer") -site:linkedin.com', '("software engineer" OR "developer")'),
-        ('("hiring" OR "careers") -site:linkedin.com/jobs', '("hiring" OR "careers")'),
-        ('facebook.com marketing leads', 'marketing leads'),
+        # V26.0.4.1: LinkedIn preserved — B2B lead source
+        ('site:linkedin.com/in "digital marketer" "London"', 'site:linkedin.com/in "digital marketer" "London"'),
+        ('"software engineer" AND "python" -site:linkedin.com -site:facebook.com', '"software engineer" AND "python" -site:linkedin.com -site:facebook.com'),
+        ('("software engineer" OR "developer") -site:linkedin.com', '("software engineer" OR "developer") -site:linkedin.com'),
+        ('("hiring" OR "careers") -site:linkedin.com/jobs', '("hiring" OR "careers") -site:linkedin.com/jobs'),
+        # V26.0.4.1: Facebook preserved — SMB lead source
+        ('facebook.com marketing leads', 'facebook.com marketing leads'),
+        # Reddit still stripped
         ('leads -site:reddit.com/r/marketing', 'leads'),
-        ('("google" OR "linkedin") AND "leads"', '("google") AND "leads"'),
-        ('("linkedin" OR "facebook" OR "twitter")', ''),
-        ('("linkedin" OR "facebook" OR "software developer") AND "london"', '("software developer") AND "london"'),
-        ('-intitle:"linkedin" AND -intitle:"facebook" AND "software engineer"', '"software engineer"'),
-        ('("london" AND -intitle:"linkedin recruiter")', '("london")'),
+        # LinkedIn preserved, but other social still stripped
+        ('("google" OR "linkedin") AND "leads"', '("google" OR "linkedin") AND "leads"'),
+        # All-social tokens: LinkedIn/Facebook kept, twitter stripped → only linkedin/facebook remain
+        ('("linkedin" OR "facebook" OR "twitter")', '("linkedin" OR "facebook")'),
+        ('("linkedin" OR "facebook" OR "software developer") AND "london"', '("linkedin" OR "facebook" OR "software developer") AND "london"'),
+        # intitle with linkedin preserved
+        ('-intitle:"linkedin" AND -intitle:"facebook" AND "software engineer"', '-intitle:"linkedin" AND -intitle:"facebook" AND "software engineer"'),
+        ('("london" AND -intitle:"linkedin recruiter")', '("london" AND -intitle:"linkedin recruiter")'),
     ]
 
     for q_in, q_out in cases:
