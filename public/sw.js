@@ -1,8 +1,8 @@
-const CACHE_NAME = 'sideio-v26.0.4.1'; // V26.0.4.1: B2B regression fixes — unblock LinkedIn, news sources, score caps
+const CACHE_NAME = 'sideio-v26.0.4.2'; // V26.0.4.2: Skip entity extraction on social URLs (LinkedIn, Reddit, etc.)
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=26.0.4.1',
+     '/app.js?v=26.0.4.2',
      '/styles.css?v=26.0.4.1',
      '/manifest.json'
  ];

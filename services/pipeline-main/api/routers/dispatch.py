@@ -754,7 +754,18 @@ def dispatch():
             _strategy_wants_extraction = _primary_strategy in (
                 "PLATFORM_MINING", "COMPETITOR_TOUCHPOINT"
             )
-            _should_extract = (_strategy_wants_extraction or _is_aggregator_url) and text
+            # V26.0.4.2: Social media URLs are NOT entity extraction targets.
+            # LinkedIn posts, Reddit threads, Facebook pages etc. mention company
+            # names casually — they are NOT structured directory/listing pages.
+            # Entity extraction on social snippets produces garbage leads (just
+            # names + the social post URL, no enrichment).  Social URLs should
+            # flow through the normal Gemini scoring path instead.
+            _is_social_url = is_social or is_shared
+            _should_extract = (
+                (_strategy_wants_extraction or _is_aggregator_url)
+                and text
+                and not _is_social_url
+            )
 
             if _should_extract:
                 _extraction_trigger = (
