@@ -1,6 +1,6 @@
-# LeadGenie (Sideio) — Platform Architecture V26.0.1
+# LeadGenie (Sideio) — Platform Architecture V26.0.4
 **Technical Specification Document**
-*Last Updated: 2026-07-04 | Version: V26.0.1 — Multi-Strategy OSINT Intelligence Engine*
+*Last Updated: 2026-07-05 | Version: V26.0.4.1 — Smart Pipeline + B2B Regression Fixes*
 
 ---
 
@@ -566,9 +566,15 @@ response = httpx.post("https://google.serper.dev/search", headers={"X-API-KEY": 
 
 Post-flight noise filter (`filter_serper_noise`) removes:
 1. **Enterprise/aggregator domains** (`ibm.com`, `amazon.com`, `g2.com`, `capterra.com`, `zoominfo.com`)
+   - V26.0.4.1: `linkedin.com` **UNBLOCKED** — snippets contain enough B2B context for Gemini scoring (same reasoning as Quora un-block in V25.2.3)
 2. **Noise URL paths** (`/legal`, `/pricing`, `/docs`, `/login`, `/author/`)
 3. **Bot/auth page snippets** (`"sign in"`, `"access denied"`, `"forgot password"`)
-4. **CDN/asset subdomains** (V24.5.7): `assets.*`, `cdn.*`, `static.*`, `img.*`, `images.*`, `media.*`, `s3.*`, `storage.*`, `files.*`, `dl.*`, `download.*`, `content.*` — these are asset delivery nodes, not business pages. Blocked before queue entry to save 3-5 credits per URL.
+4. **CDN/asset subdomains** (V24.5.7): `assets.*`, `cdn.*`, `static.*`, `img.*`, `images.*`, `media.*`, `s3.*`, `storage.*`, `files.*`, `dl.*`, `download.*`, `content.*`
+   - V26.0.4.1: `research.*` **REMOVED** — too broad, catches legitimate company pages (research.google.com)
+5. **Content farm domains** (V25.7.4): 38 news/listicle domains
+   - V26.0.4.1: **B2B news exception** — `bloomberg.com`, `businessinsider.com`, `reuters.com`, `cnbc.com`, `livemint.com`, `washingtonpost.com`, `nytimes.com` pass through for event-trigger leads
+6. **Reddit news subreddits** (V25.7.4): 36 non-business subreddits blocked
+7. **Megathread patterns** (V25.7.4): 15 aggregation title patterns
 
 **Queue backpressure (V24.4):** If `unprocessed_queue` depth > 150, produce skips Serper fetch entirely (`200 skipped_queue_full`). Prevents `[:200]` trimming from discarding fresh signals when the consumer hasn't caught up.
 
@@ -606,10 +612,10 @@ Lock-delete failures are logged at `ERROR` (V24.2 — was silent `except: pass`)
 | Conference / event | `/conference/`, `/summit/`, `/program/proposals` | 3 |
 | Government portal | `.gov`, `.mil`, `.govt.`, `/ministry/`, `/department/` | 2 |
 | Academic repo | `/sol3/`, `/ssrn/`, `/arxiv/`, `/research/paper/` | 2–3 |
-| Press release | `/press-release/`, `/newsroom/` | 4 |
-| Job board | `/jobs/`, `/careers/`, `/vacancies/` | 4 |
+| Press release | `/press-release/`, `/newsroom/` | **7** (V26.0.4.1: raised from 4 — B2B event triggers) |
+| Job board | `/jobs/`, `/careers/`, `/vacancies/` | **6** (V26.0.4.1: raised from 4 — hiring = buying signal) |
 
-Even if Gemini gives a conference page 10/10 (keyword match), the cap reduces it to 3, which is below the score gate threshold of 6–7. Prevents `postgresconf.org/conferences/SV2022/...` from scoring 10/10 (confirmed production bug, fixed V24.6.0).
+Even if Gemini gives a conference page 10/10 (keyword match), the cap reduces it to 3, which is below the score gate threshold of 6–7. Press releases and job boards are now capped higher because for B2B they represent legitimate buying signals (rebranding announcements, hiring Brand Managers = branding budget).
 
 ### Step 9: Three-Tier Scraping Strategy
 
@@ -978,7 +984,7 @@ V25.5.x introduced a 4-phase lead quality system. V25.6.0 fixed the remaining in
 - **Subreddit-targeted queries** per archetype
 - **Buyer language injection** into search queries
 - **Query exhaustion/refresh** when sources return stale content
-- **30-day blacklist TTL**, 15-domain count cap
+- **7-day blacklist TTL** (V26.0.4.1: reduced from 30 — prevents month-long starvation from a single noise rejection), 8-domain count cap (V26.0.3: reduced from 15)
 
 ### 19.3 LQS Scoring (V25.5.1)
 Multi-dimensional Lead Quality Score computed per signal:
@@ -1067,14 +1073,44 @@ The default blacklist (`_DEFAULT_BLACKLIST`) includes review/directory sites lik
 
 Post-generation, a regex filter strips any `-site:` exclusions that conflict with the strategy's mining targets (V26.0.1 fix).
 
+### 20.6 Smart Pipeline Enhancements (V26.0.4)
+
+**Vocabulary Notes as Query Seeds:** `vocabulary_notes` from `intelligence_strategy` are now injected into the Gemini query generation prompt alongside user keywords. Previously only used for colloquial translation, they now augment thin keyword lists (e.g., campaign name "Oman Realty" → seeds include "property, apartment, villa, buy, rent, Muscat").
+
+**Thin Bio Enrichment:** Detects generic bios like `"Product/Service: Oman Realty"` and augments them with `vocabulary_notes` before passing to Gemini. This enriched bio flows into the Gemini prompt's "Target Pain Point / Bio" field.
+
+**Platform Domain Resolution:** `platform_targets` from `intelligence_strategy` (e.g., "Property Finder Oman") are resolved to searchable domains (e.g., `propertyfinder.com`) via `_PLATFORM_DOMAIN_MAP` (22 brand→domain mappings). Enables proper `site:` queries for platform mining.
+
+**Dynamic Subreddit Selection:** Fallback subreddit lists are now 3-layer: industry-specific (real estate, education, marketing) + geo-specific (Oman, India, UAE) + archetype base. Capped at 8 subreddits.
+
+**Reddit RSS → Serper Fallback:** When Reddit RSS feeds return 0 items (blocked by Cloud Run IP), the system falls back to Serper `site:reddit.com/r/{subreddit}` queries. Budget-controlled at max 6 queries (2 subreddits × 3 terms).
+
+**Colloquial Translation Fix:** Fixed `TypeError` crash caused by unsupported `temperature=0.4` kwarg in `call_gemini_2_5()`. Colloquial translation now fires correctly.
+
+### 20.7 B2B Regression Fixes (V26.0.4.1)
+
+Git history analysis identified 7 regressions introduced between V23 (April, B2B working) and V26 (current):
+
+| # | Regression | Fix |
+|---|---|---|
+| R1 | LinkedIn blocked at `_ENTERPRISE_DOMAINS` (V24.6.3) | **Unblocked** — snippets sufficient for scoring |
+| R2 | Serper sanitizer stripped LinkedIn/Facebook `site:` operators | **Removed** from forbidden list |
+| R4 | Content farm filter blocked Bloomberg, Reuters, CNBC | **B2B news exception** added |
+| R5 | Page-type score cap: press=4, jobs=4 (threshold=7) | **Raised**: press=7, jobs=6 |
+| R6 | CDN prefix `research.*` too broad | **Removed** — academic repos already blocked |
+| R7 | RLHF blacklist 30-day TTL too aggressive | **Reduced** to 7 days |
+
 ---
 
 ## 21. VERSION HISTORY (RECENT)
 
 | Version | Date | Key Changes |
 |---|---|---|
-| **V26.0.1** | **2026-07-04** | **E2E audit fixes: `threading.Lock` for `_ENTITY_DOMAIN_COUNTS` race condition, `call_gemini_2_5` signature fix (`expect_json`/`response_schema`/`system_instruction`), `contact_endpoints` schema `list[dict]`, `matched_campaigns`/`dm` fields on entity leads, `source_router.py` `raw_arch` hoisting, `query_brain.py` post-generation `-site:` strip, `_escapeHTML` on strategy badge title, cache bust v=26.0.0.** |
-| **V26.0.0** | **2026-07-04** | **Multi-Strategy OSINT Intelligence Engine: 5 intelligence strategies (PLATFORM_MINING, COLLOQUIAL_DISCOVERY, COMPETITOR_TOUCHPOINT, PROFESSIONAL_NETWORK, EVENT_TRIGGER), source_router.py (10 signal source plugins), entity extraction engine, colloquial translation, strategy-aware blacklist filtering, intelligence_strategy campaign schema, UI strategy badge.** |
+| **V26.0.4.1** | **2026-07-05** | **B2B regression fixes: unblock LinkedIn from `_ENTERPRISE_DOMAINS`, remove LinkedIn/Facebook from Serper sanitizer `forbidden` list, B2B news exception in content farm filter (Bloomberg, Reuters, CNBC pass through), raise page-type score caps (press: 4→7, jobs: 4→6), remove `research.*` CDN prefix, reduce RLHF blacklist TTL 30→7 days.** |
+| **V26.0.4** | **2026-07-05** | **Smart pipeline: vocabulary_notes as Gemini query seeds, thin bio enrichment with vocab, platform domain resolution (22 brand→domain mappings), dynamic industry/geo subreddit selection, Reddit RSS→Serper fallback, fix colloquial translation crash (unsupported temperature kwarg).** |
+| V26.0.3 | 2026-07-04 | Hybrid strategy engine: prioritize never exclude, drop -intitle: operators, cap -site: at 8, unblock review sites. |
+| V26.0.1 | 2026-07-04 | E2E audit fixes: threading.Lock race condition, call_gemini_2_5 signature fix, entity leads fields, source_router hoisting, post-generation -site: strip. |
+| V26.0.0 | 2026-07-04 | Multi-Strategy OSINT Intelligence Engine: 5 intelligence strategies, source_router.py (10 signal source plugins), entity extraction engine, colloquial translation, intelligence_strategy campaign schema. |
 | V25.6.0 | 2026-07-04 | 87-issue failure remediation across 23 files. P0: Orchestrator auth, Gemini crash guard, timeline XSS. P1: transactional credits, wallet formula, neg-signal dedup, LQS badge. |
 | V25.5.0–V25.5.1 | 2026-07-04 | Lead quality gates + LQS multi-dimensional scoring + adaptive learning. |
 | V25.2.1–V25.2.3 | 2026-07-03 | Build failure RCA, Inbound Radar hardening, dependency standardisation, PyJWT, BQ DDL. |
