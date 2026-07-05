@@ -55,6 +55,47 @@ from services.signal_sources.youtube import YouTubeSource                       
 log = get_logger("pipeline.source_router")
 
 # ---------------------------------------------------------------------------
+# V26.0.4 — Platform brand-to-domain resolution
+# ---------------------------------------------------------------------------
+
+_PLATFORM_DOMAIN_MAP = {
+    "property finder": "propertyfinder.com", "bayut": "bayut.com",
+    "dubizzle": "dubizzle.com", "olx": "olx.com",
+    "zillow": "zillow.com", "realtor": "realtor.com",
+    "rightmove": "rightmove.co.uk", "99acres": "99acres.com",
+    "magicbricks": "magicbricks.com", "housing": "housing.com",
+    "g2": "g2.com", "capterra": "capterra.com",
+    "trustpilot": "trustpilot.com", "yelp": "yelp.com",
+    "glassdoor": "glassdoor.com", "mouthshut": "mouthshut.com",
+    "justdial": "justdial.com", "indiamart": "indiamart.com",
+    "sulekha": "sulekha.com", "linkedin": "linkedin.com",
+    "craigslist": "craigslist.org", "gumtree": "gumtree.com",
+}
+
+
+def _resolve_platform_domains(platform_targets: list) -> list:
+    """Resolve brand names to domains. V26.0.4."""
+    resolved = []
+    for target in (platform_targets or []):
+        if not target or not isinstance(target, str):
+            continue
+        t = target.strip()
+        if '.' in t and ' ' not in t:
+            resolved.append(t)
+            continue
+        t_lower = t.lower()
+        matched = False
+        for brand, domain in _PLATFORM_DOMAIN_MAP.items():
+            if brand in t_lower:
+                resolved.append(domain)
+                matched = True
+                break
+        if not matched:
+            resolved.append(t)  # Keep as category term
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Gemini output schema for routing configuration
 # ---------------------------------------------------------------------------
 
@@ -603,8 +644,15 @@ IMPORTANT:
                 if "classified_listings" not in _existing_types:
                     _platform_targets = _campaign_strat.get("platform_targets", [])
                     if _platform_targets:
+                        _resolved_targets = _resolve_platform_domains(_platform_targets[:5])
+                        log.info(
+                            "source_router_platform_domain_resolution",
+                            raw=_platform_targets[:5],
+                            resolved=_resolved_targets,
+                            note="Brand names resolved to domains via _PLATFORM_DOMAIN_MAP.",
+                        )
                         sources.insert(0, ClassifiedListingSource(
-                            categories=_platform_targets[:5],
+                            categories=_resolved_targets,
                             geo=geo,
                             platform_types=["classified", "property", "expat"],
                             max_age_days=14,
@@ -713,15 +761,65 @@ IMPORTANT:
 
         is_consumer = "B2C" in norm_arch or "D2C" in norm_arch
 
-        # Archetype → generic subreddit fallback set
+        # V26.0.4: Dynamic subreddit selection — industry + geo aware.
+        # Inspect campaign bio/keywords for industry signals, then geo_hierarchy
+        # for country-specific subreddits.
+        _bio = (campaign.get("bio", "") or "").lower()
+        _kws = (campaign.get("keywords", "") or "").lower()
+        _campaign_text = _bio + " " + _kws
+        _geo_hierarchy = campaign.get("geo_hierarchy") or {}
+        _country = (
+            _geo_hierarchy.get("country", "") or geo or ""
+        ).strip().lower()
+
+        # --- Industry detection ---
+        _industry_subs: list[str] = []
+        if any(t in _campaign_text for t in ("real estate", "property", "villa", "apartment", "rent", "landlord")):
+            _industry_subs = ["realestate", "RealEstateInvesting", "FirstTimeHomeBuyer"]
+        elif any(t in _campaign_text for t in ("education", "university", "school", "college", "tutor", "course")):
+            _industry_subs = ["education", "college", "careerguidance"]
+        elif any(t in _campaign_text for t in ("marketing", "brand", "agency", "advertising", "digital marketing")):
+            _industry_subs = ["marketing", "Entrepreneur", "smallbusiness"]
+
+        # --- Geo-specific subreddits ---
+        _geo_subs: list[str] = []
+        if "oman" in _country:
+            _geo_subs = ["Oman", "expats"]
+        elif "india" in _country:
+            _geo_subs = ["india", "Indian_Academia"]
+        elif "uae" in _country or "dubai" in _country or "emirates" in _country:
+            _geo_subs = ["dubai", "expats"]
+        elif "saudi" in _country:
+            _geo_subs = ["saudiarabia", "expats"]
+
+        # --- Archetype base subreddits (used when no industry match) ---
         if "B2C" in norm_arch:
-            subreddits = ["expats", "personalfinance", "travel", "LifeAdvice", "moving"]
+            _base_subs = ["expats", "personalfinance", "travel", "LifeAdvice", "moving"]
         elif "D2C" in norm_arch:
-            subreddits = ["Entrepreneur", "ecommerce", "smallbusiness", "BuyItForLife", "frugal"]
+            _base_subs = ["Entrepreneur", "ecommerce", "smallbusiness", "BuyItForLife", "frugal"]
         elif "B2B2C" in norm_arch:
-            subreddits = ["startups", "Entrepreneur", "sales", "smallbusiness"]
+            _base_subs = ["startups", "Entrepreneur", "sales", "smallbusiness"]
         else:  # B2B default
-            subreddits = ["marketing", "startups", "Entrepreneur", "SaaS", "sales"]
+            _base_subs = ["marketing", "startups", "Entrepreneur", "SaaS", "sales"]
+
+        # Merge: industry-specific first, then geo subs, then base (deduped)
+        _seen_subs: set[str] = set()
+        subreddits: list[str] = []
+        for s in (_industry_subs + _geo_subs + _base_subs):
+            s_lower = s.lower()
+            if s_lower not in _seen_subs:
+                _seen_subs.add(s_lower)
+                subreddits.append(s)
+        subreddits = subreddits[:8]  # Cap at 8 to avoid RSS overload
+
+        log.info(
+            "source_router_fallback_dynamic_subreddits",
+            archetype=norm_arch,
+            industry_subs=_industry_subs,
+            geo_subs=_geo_subs,
+            final_subs=subreddits,
+            country=_country or "global",
+        )
 
         if subreddits and search_terms:
             sources.append(RedditSource(

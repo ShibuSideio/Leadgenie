@@ -1,9 +1,9 @@
-const CACHE_NAME = 'sideio-v26.0.3'; // V26.0.3: Hybrid strategy + skip lead fix
+const CACHE_NAME = 'sideio-v26.0.4'; // V26.0.4: Smart pipeline — vocab seeds, domain resolution, Serper fallback
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=26.0.3',
-     '/styles.css?v=26.0.3',
+     '/app.js?v=26.0.4',
+     '/styles.css?v=26.0.4',
      '/manifest.json'
  ];
 

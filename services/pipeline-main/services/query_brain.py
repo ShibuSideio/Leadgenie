@@ -310,6 +310,15 @@ def generate_smart_query(
         if isinstance(_intel_strategy, dict) else "COLLOQUIAL_DISCOVERY"
     )
 
+    # V26.0.4: Detect generic/thin bio and augment with vocabulary_notes
+    _BIO_JUNK_PREFIXES = ("Product/Service:", "product/service:", "N/A", "n/a")
+    if bio and any(bio.strip().startswith(p) for p in _BIO_JUNK_PREFIXES):
+        if vocabulary_notes:
+            log.info("query_brain_bio_thin_using_vocab",
+                     original_bio=bio[:60],
+                     vocab_preview=vocabulary_notes[:80])
+            bio = f"{bio}. Buyer vocabulary: {vocabulary_notes}"
+
     # Instantiate the campaign scoped context to ensure absolute data boundary isolation.
     ctx = CampaignQueryContext(
         campaign_id=campaign_id,
@@ -588,6 +597,21 @@ def generate_smart_query(
     # ── Step 3b: GEMINI FALLBACK ───────────────────────────────────────────────
     if _router_mode == "GEMINI_FALLBACK":
         kw_str       = ", ".join(ctx.target_audience) if ctx.target_audience else ""
+        # V26.0.4: Augment keyword seeds with vocabulary_notes (AI-generated
+        # buyer language). vocabulary_notes contains the ICP's actual search
+        # terms, which are far better seeds than user-typed campaign names.
+        _vocab = (ctx.vocabulary_notes or "").strip()
+        if _vocab and len(kw_str) < 200:
+            _vocab_terms = [t.strip() for t in _vocab.split(",") if t.strip()]
+            if _vocab_terms:
+                _existing = set(t.strip().lower() for t in kw_str.split(",") if t.strip())
+                _new_terms = [t for t in _vocab_terms if t.lower() not in _existing]
+                if _new_terms:
+                    kw_str = kw_str + ", " + ", ".join(_new_terms[:8]) if kw_str else ", ".join(_new_terms[:8])
+                    log.info("query_brain_vocab_seeds_injected",
+                             original_kw_count=len(ctx.target_audience),
+                             vocab_terms_added=len(_new_terms[:8]),
+                             kw_str_preview=kw_str[:100])
         vector_label = ctx.sourcing_vector or "B2B"
         history_ctx  = json.dumps(ctx.pain_points) if ctx.pain_points else "[]"
 
@@ -924,7 +948,6 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
                                 _colloquial_prompt,
                                 expect_json=True,
                                 response_schema=_COLLOQUIAL_SCHEMA,
-                                temperature=0.4,
                             )
                             if isinstance(_colloquial_result, list) and _colloquial_result:
                                 _colloquial_queries = [
@@ -968,6 +991,7 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
                             log.warning(
                                 "query_brain_colloquial_translation_failed",
                                 error=str(_colloquial_exc),
+                                exc_type=type(_colloquial_exc).__name__,
                                 campaign_id=ctx.campaign_id,
                                 note="Colloquial translation Gemini call failed. "
                                      "Continuing with professional queries only.",

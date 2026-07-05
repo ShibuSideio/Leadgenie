@@ -163,6 +163,68 @@ class RedditSource(BaseSignalSource):
             subreddits=len(self._subreddits),
             signals_found=len(signals),
         )
+
+        # V26.0.4: Serper fallback — fires ONLY when RSS returns 0 items.
+        # Queries site:reddit.com/r/{subreddit} {term} via Google Search.
+        # Limited to 3 terms × 2 subreddits (max 6 queries) to control
+        # Serper credit spend.
+        if not signals and self._subreddits and self._search_terms:
+            try:
+                from services.serper_service import search_serper  # type: ignore[import]
+
+                _fallback_subs = self._subreddits[:2]
+                _fallback_terms = self._search_terms[:3]
+                log.info(
+                    "reddit_serper_fallback_triggered",
+                    subreddits=_fallback_subs,
+                    terms=_fallback_terms,
+                    note="All RSS feeds returned 0 items. Falling back to Serper.",
+                )
+                _serper_seen: set[str] = set()
+                for sub in _fallback_subs:
+                    for term in _fallback_terms:
+                        _query = f"site:reddit.com/r/{sub} {term}"
+                        try:
+                            _results = search_serper(_query)
+                            for r in (_results or []):
+                                _link = r.get("link", "")
+                                _title = r.get("title", "") or ""
+                                _snippet = r.get("snippet", "") or ""
+                                if not _link or _link in _serper_seen:
+                                    continue
+                                _serper_seen.add(_link)
+                                signals.append(SignalItem(
+                                    url=_link,
+                                    text=f"{_title}\n\n{_snippet}".strip(),
+                                    title=_title,
+                                    author="",
+                                    source_type=self.source_type,
+                                    fetched_at=self._now_iso(),
+                                    metadata={
+                                        "access_path": "serper_fallback",
+                                        "is_thin_content": True,
+                                        "search_query": _query,
+                                        "serper_snippet": _snippet,
+                                        "serper_title": _title,
+                                    },
+                                ))
+                        except Exception as _q_err:
+                            log.warning(
+                                "reddit_serper_fallback_query_failed",
+                                query=_query[:100],
+                                error=str(_q_err),
+                            )
+                log.info(
+                    "reddit_serper_fallback_complete",
+                    signals_found=len(signals),
+                )
+            except Exception as _fb_err:
+                log.warning(
+                    "reddit_serper_fallback_failed",
+                    error=str(_fb_err),
+                    note="Serper fallback is non-fatal. Returning 0 Reddit signals.",
+                )
+
         return signals[: self._max_per_source]
 
     # ------------------------------------------------------------------
