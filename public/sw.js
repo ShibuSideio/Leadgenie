@@ -1,8 +1,8 @@
-const CACHE_NAME = 'sideio-v26.0.4.4'; // V26.0.4.4: Fix B2B template leakage into consumer + maps placeholder
+const CACHE_NAME = 'sideio-v26.0.4.5'; // V26.0.4.5: Fix geo-fallback blacklist bypass + sentence scrubber for all campaigns
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=26.0.4.4',
+     '/app.js?v=26.0.4.5',
      '/styles.css?v=26.0.4.1',
      '/manifest.json'
  ];

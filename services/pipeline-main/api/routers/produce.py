@@ -524,16 +524,21 @@ def produce():
                 tenant_id=tenant_id,
                 sourcing_vector=sourcing_vector,
             )
-            # V26.0.4.2: Only retry globally if the query is a structured dork
-            # (contains site: operators, OR booleans, or quoted phrases).
+            # V26.0.4.4: Only retry globally if the query is a structured dork
+            # (contains POSITIVE site: operators, OR booleans, or quoted phrases).
             # Natural-language colloquial queries ("cheap property Muscat")
             # return 0 results on BOTH geo and global indexes — retrying
             # globally just burns a second Serper credit for nothing.
-            # This was the primary source of 2x credit inflation.
+            # V26.0.4.5 FIX: Must extract the QUERY BODY only (before the
+            # blacklist). The blacklist contains "-site:", -"login", -"our
+            # services" etc. — their quote chars and site: operators were
+            # making EVERY query look "structured", defeating the guard.
+            import re as _re_produce
+            _query_body = _re_produce.split(r'\s+-(?:site:|wiki\b|jobs\b|careers\b|investors\b|directory\b|listicle\b|")', search_query, maxsplit=1)[0].strip()
             _is_structured_query = (
-                "site:" in search_query
-                or " OR " in search_query
-                or search_query.count('"') >= 2
+                "site:" in _query_body        # positive site: operator
+                or " OR " in _query_body      # boolean operator
+                or _query_body.count('"') >= 2  # quoted phrase in query body
             )
             if not raw_results and gl and _is_structured_query:
                 log.info(

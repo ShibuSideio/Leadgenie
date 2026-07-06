@@ -1275,7 +1275,11 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
     # These match every SEO/marketing agency blog post and return zero buyers.
     # The Gemini pre-filter then classifies the results as Low confidence, so
     # these queries burn 1 credit for 0 leads. Drop them before Serper is called.
-    if not _is_consumer and ctx.intents:
+    # V26.0.4.5: Extended to ALL campaign types. Consumer campaigns also
+    # generate sentences ("Confused by Oman property investment regulations.",
+    # "Why is Oman real estate so hard to trust?") that waste credits.
+    if ctx.intents:
+        import re as _re_faq
         _FAQ_OPENERS = (
             "how do you ", "how do we ", "how do i ", "how to ",
             "what are good ", "what are the best ", "what is the best ",
@@ -1283,27 +1287,46 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
             "tips for ", "how can we ", "how can i ", "how can you ",
             "why do ", "why does ", "why is ",
             "best practices ", "guide to ", "introduction to ",
+            # V26.0.4.5: Additional sentence patterns for consumer campaigns
+            "confused by ", "frustrated with ", "tired of ",
+            "is it worth ", "is there a ", "is there any ",
+            "anyone else ", "does anyone know ",
         )
-        _b2b_clean_intents = []
+        # V26.0.4.5: Detect sentence patterns — ends with ?, period after 4+ words,
+        # or contains comma-separated clauses. These are full sentences, not keyword
+        # phrases, and return 0 results when exact-match quoted.
+        _SENTENCE_PATTERN = _re_faq.compile(
+            r'(?:'
+            r'\?$'                         # ends with question mark
+            r'|,\s+\w+\??$'               # trailing clause with comma ("problem, anyone?")
+            r'|^[A-Z][a-z]+\s+(?:is|are|was|were|do|does|did|can|could|should|would|will)\s'  # Sentence starts with "Subject verb..."
+            r')',
+        )
+        _clean_intents = []
         for tq in ctx.intents:
             tq_lower = tq.lower().lstrip('"\'')
-            if any(tq_lower.startswith(opener) for opener in _FAQ_OPENERS):
+            _is_faq = any(tq_lower.startswith(opener) for opener in _FAQ_OPENERS)
+            _is_sentence = bool(_SENTENCE_PATTERN.search(tq))
+            if _is_faq or _is_sentence:
                 log.warning(
-                    "query_brain_faq_opener_scrubbed",
+                    "query_brain_faq_sentence_scrubbed",
                     intent=tq[:100],
                     campaign_id=ctx.campaign_id,
-                    note="FAQ-opener detected post-generation. Dropping to avoid SEO-article Serper results.",
+                    is_consumer=_is_consumer,
+                    reason="faq_opener" if _is_faq else "sentence_pattern",
+                    note="FAQ/sentence detected post-generation. Dropping to avoid "
+                         "SEO-article results and exact-match quote failures.",
                 )
             else:
-                _b2b_clean_intents.append(tq)
-        if _b2b_clean_intents:
-            ctx.intents = _b2b_clean_intents
+                _clean_intents.append(tq)
+        if _clean_intents:
+            ctx.intents = _clean_intents
         elif ctx.intents:
-            # All intents were FAQ — keep the best one (least-FAQ) to avoid zero queries
+            # All intents were FAQ/sentences — keep one as last resort
             log.warning(
-                "query_brain_all_b2b_intents_faq",
+                "query_brain_all_intents_faq",
                 campaign_id=ctx.campaign_id,
-                note="ALL translated_queries were FAQ openers. Keeping 1 as last resort.",
+                note="ALL translated_queries were FAQ/sentences. Keeping 1 as last resort.",
             )
             ctx.intents = ctx.intents[:1]
 

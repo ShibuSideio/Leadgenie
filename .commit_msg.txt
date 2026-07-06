@@ -1,0 +1,22 @@
+fix(serper): V26.0.4.5 fix geo-fallback blacklist bypass + universal sentence scrubber
+
+Two critical fixes found from live Oman Realty campaign test:
+
+1. GEO-FALLBACK BLACKLIST BYPASS (produce.py):
+   The V26.0.4.3 guard checked quote count to detect structured queries.
+   But the BLACKLIST portion contains quoted exclusions like -"login",
+   -"our services" etc. Every query had 10+ quotes in the blacklist,
+   making ALL queries look structured. Guard never skipped the fallback,
+   so 2x credit burn persisted.
+   FIX: Extract query body before exclusion operators and check only
+   that for structure.
+
+2. UNIVERSAL SENTENCE SCRUBBER (query_brain.py):
+   FAQ/sentence scrubber only ran for B2B campaigns. Consumer campaigns
+   generated full sentences like "Why is Oman real estate so hard to trust?"
+   and "Confused by Oman property investment regulations." which get
+   exact-match quoted and return 0 results.
+   FIX: Extended to ALL campaign types. Added sentence pattern detector
+   for question marks, comma clauses, and Subject-verb patterns.
+
+Cache bust: v26.0.4.5
