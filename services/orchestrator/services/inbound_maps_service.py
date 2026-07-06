@@ -36,7 +36,20 @@ class InboundMapsService:
         self.persona = persona
         self.campaign = campaign
         self.competitors = [str(c) for c in (persona.get("competitors") or [])[:3]]
-        self.industry = str(persona.get("industry") or "B2B software")
+        # V26.0.4.3: Derive industry from campaign bio/focus instead of
+        # hardcoded "B2B software". The old default caused every campaign
+        # without persona.industry to search "B2B software near me" on
+        # Google Maps — 3 credits/call for irrelevant results.
+        self.industry = str(
+            persona.get("industry")
+            or campaign.get("campaign_focus")
+            or campaign.get("effective_bio")
+            or campaign.get("bio")
+            or ""
+        ).strip()
+        # Strip the common "Product/Service: " prefix from bio-derived values
+        if self.industry.lower().startswith("product/service:"):
+            self.industry = self.industry[len("Product/Service:"):].strip()
         self.icp_desc = str(
             persona.get("icp_description")
             or persona.get("persona_description")
@@ -49,9 +62,19 @@ class InboundMapsService:
         for comp in self.competitors:
             if comp and comp.lower() != "legacy tool":
                 queries.append(comp)
-        # If no competitors are defined, fallback to searching for general local categories
-        if not queries:
+        # V26.0.4.3: Only fall back to industry search if we have a
+        # meaningful industry string. An empty/generic industry produces
+        # garbage Maps queries ("near me", "B2B software near me") that
+        # waste 3 Serper credits each.
+        if not queries and self.industry and len(self.industry) >= 3:
             queries.append(f"{self.industry} near me")
+        elif not queries:
+            log.info(
+                "inbound_maps_no_queries",
+                campaign_id=self.campaign.get("campaign_id", ""),
+                note="No competitors and no meaningful industry — "
+                     "skipping Maps search to save credits.",
+            )
         return queries
 
     def _search_maps(self, query: str) -> list[dict]:
