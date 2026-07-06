@@ -260,6 +260,123 @@ def _inject_buyer_language(queries: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# V26.0.5: Strategy 1 — Platform Mining query generator
+# ---------------------------------------------------------------------------
+
+_PLATFORM_MINING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "platform_queries": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of site: inclusion queries targeting competitor platforms.",
+        },
+    },
+    "required": ["platform_queries"],
+}
+
+
+def _generate_platform_mining_queries(
+    ctx: "CampaignQueryContext",
+    bio: str,
+    kw_str: str,
+    vector_label: str,
+    blacklist: str,
+) -> list[str]:
+    """Generate site:-inclusion queries for competitor listing platforms.
+
+    For B2C campaigns (real estate, education, health, e-commerce), the real
+    leads — agents, brokers, consultants, sellers — are listed ON competitor
+    platforms (Dubizzle, PropertyFinder, Savills, Practo, Sulekha, etc.).
+
+    Pain-discovery queries miss these entirely because agent profile pages
+    don't contain pain language. Platform mining queries surface the actual
+    entities with contact details.
+
+    Returns:
+        List of ready-to-use Serper queries with site: operators.
+        Empty list on Gemini failure (non-fatal).
+    """
+    from services.gemini_service import call_gemini_2_5  # type: ignore[import]
+
+    prompt = (
+        f"You are a competitive intelligence analyst for lead generation.\n\n"
+        f"TASK: Identify 3-5 competitor listing/directory/aggregator websites where\n"
+        f"real individual leads (agents, brokers, consultants, sellers, practitioners)\n"
+        f"for this business vertical are publicly listed with their profiles.\n\n"
+        f"CAMPAIGN BIO:\n{bio[:500]}\n\n"
+        f"KEYWORDS: {kw_str[:300]}\n"
+        f"VERTICAL: {vector_label}\n\n"
+        f"For each platform, generate a Google search query using site: operator\n"
+        f"that would find individual profiles (with names, contact info, listings).\n\n"
+        f"EXAMPLES:\n"
+        f"  Real Estate: site:dubizzle.com.om agent Muscat villa\n"
+        f"  Real Estate: site:propertyfinder.com agent profile Oman\n"
+        f"  Real Estate: site:bayut.com broker listings\n"
+        f"  Education: site:shiksha.com consultant profile\n"
+        f"  Health: site:practo.com doctor clinic\n"
+        f"  Services: site:sulekha.com provider profile\n"
+        f"  Services: site:justdial.com business contact\n\n"
+        f"RULES:\n"
+        f"- Use ONLY real, known listing platforms for this vertical and geography.\n"
+        f"- Each query must have exactly ONE site: operator.\n"
+        f"- Include entity terms: agent, broker, consultant, profile, contact, listings.\n"
+        f"- Include geographic terms from the campaign context.\n"
+        f"- Do NOT use quotes around the entire query.\n"
+        f"- Do NOT include negative operators (no -site:, no -wiki, etc.).\n"
+        f"- Do NOT include the client's own domain.\n"
+        f"- Return ONLY the JSON object.\n"
+    )
+
+    try:
+        result = call_gemini_2_5(
+            prompt,
+            expect_json=True,
+            response_schema=_PLATFORM_MINING_SCHEMA,
+        )
+        if not isinstance(result, dict):
+            log.warning(
+                "platform_mining_bad_response",
+                response_type=type(result).__name__,
+                campaign_id=ctx.campaign_id,
+            )
+            return []
+
+        raw_queries = [
+            q.strip() for q in result.get("platform_queries", [])
+            if isinstance(q, str) and q.strip() and "site:" in q.lower()
+        ]
+
+        # Validate: must contain site: operator, must be reasonable length
+        validated: list[str] = []
+        for q in raw_queries[:5]:
+            if len(q) < 10 or len(q) > 200:
+                continue
+            # Don't append the full blacklist to platform mining queries —
+            # these target specific platforms and the blacklist would conflict
+            # with the positive site: operator. Only append minimal spam guards.
+            _minimal_bl = "-wiki -jobs -careers"
+            validated.append(f"{q} {_minimal_bl}")
+
+        log.info(
+            "platform_mining_queries_generated",
+            campaign_id=ctx.campaign_id,
+            raw_count=len(raw_queries),
+            validated_count=len(validated),
+        )
+        return validated
+
+    except Exception as exc:
+        log.warning(
+            "platform_mining_generation_failed",
+            campaign_id=ctx.campaign_id,
+            error=str(exc),
+            note="Non-fatal — pain-discovery queries will still run.",
+        )
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Main function
 # ---------------------------------------------------------------------------
 
@@ -1408,6 +1525,35 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
             continue
         _bl = _deconflict_blacklist(sd, blacklist)
         smart_queries.append(f"{sd} {_bl}")
+
+    # ── V26.0.5: Strategy 1 — Platform Mining query injection ─────────────
+    # For B2C consumer campaigns, the leads ARE on the competitor platforms
+    # (agent profiles, property listings, directory pages). Pain-discovery
+    # queries alone miss these entirely. This injects site: inclusion queries
+    # targeting competitor listing platforms where real entities (agents,
+    # brokers, sellers with names/emails/phones) are listed.
+    #
+    # From brainstorm:
+    #   site:dubizzle.com.om "agent" "villa" "Muscat" "contact"
+    #   site:propertyfinder.om agent profile
+    #   site:dreoman.com agent
+    #
+    # These queries get NO time filter (qdr:m) at the Serper level because
+    # agent profiles and listings are evergreen pages.
+    if _is_consumer:
+        _platform_mining_queries = _generate_platform_mining_queries(
+            ctx, bio, kw_str, vector_label, blacklist,
+        )
+        if _platform_mining_queries:
+            smart_queries.extend(_platform_mining_queries)
+            log.info(
+                "query_brain_platform_mining_injected",
+                campaign_id=ctx.campaign_id,
+                count=len(_platform_mining_queries),
+                queries=[q[:80] for q in _platform_mining_queries[:3]],
+                note="Strategy 1 (Platform Mining) queries added for "
+                     "competitor platform lead discovery.",
+            )
 
     # V25.4.0 Phase 2B: Inject buyer-language variants before syntax cleaning.
     smart_queries = _inject_buyer_language(smart_queries)

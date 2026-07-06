@@ -1,8 +1,8 @@
-const CACHE_NAME = 'sideio-v26.0.4.5'; // V26.0.4.5: Fix geo-fallback blacklist bypass + sentence scrubber for all campaigns
+const CACHE_NAME = 'sideio-v26.0.5'; // V26.0.5: Platform Mining + Smart Time Filter — B2C leads from competitor platforms
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',
-     '/app.js?v=26.0.4.5',
+     '/app.js?v=26.0.5',
      '/styles.css?v=26.0.4.1',
      '/manifest.json'
  ];

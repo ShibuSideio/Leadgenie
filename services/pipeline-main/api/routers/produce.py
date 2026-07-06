@@ -39,7 +39,10 @@ from middleware.oidc import require_tasks_oidc  # type: ignore[import]
 # include a `date` field (ISO-8601 or relative like "2 months ago") that we can
 # parse. For non-Reddit forums, we check snippet text for date indicators.
 
-_STALE_DAYS_B2C = 14    # B2C: 2 weeks — forum posts older than this are cold leads
+_STALE_DAYS_B2C = 90    # V26.0.5: 90 days (was 14). Agent profiles, property listings,
+                        # and competitor directory pages are valid leads for months.
+                        # The old 14-day window + qdr:m at Serper level was double-filtering,
+                        # killing evergreen pages like dreoman.com/agent/mohammed.
 _STALE_DAYS_B2B = 60    # B2B: 2 months — business discussions stay relevant longer
 
 

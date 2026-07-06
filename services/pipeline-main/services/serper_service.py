@@ -739,17 +739,36 @@ def search_serper(
     if gl:
         payload_dict["gl"] = gl
 
-    # V24.3 (L3-1): Use qdr:m (past month) instead of qdr:y (past year) for
-    # consumer campaigns. Dialog-cue dorks like "pm me" or "still available"
-    # target ACTIVE purchase discussions. A 1-year window retrieves stale
-    # conversations where the deal is long closed. The month window prevents
-    # Serper from returning abandoned Reddit threads and closed listings.
-    if sourcing_vector and _is_consumer_archetype(sourcing_vector):
-        payload_dict["tbs"] = "qdr:m"
+    # V26.0.5: Smart time filter based on query structure.
+    # Platform Mining queries (positive site: operators like site:dubizzle.com.om)
+    # target EVERGREEN pages — agent profiles, property listings, competitor
+    # directories. These pages exist for years and don't get re-indexed monthly.
+    # The old qdr:m (past month) filter made them invisible to the pipeline,
+    # which is why dreoman.com/agent/mohammed (a real lead) was never found.
+    #
+    # Decision matrix:
+    #   site: dork query (platform mining)  → NO time filter (evergreen)
+    #   B2C non-site query                  → qdr:6m (6 months, was 1 month)
+    #   B2B                                 → qdr:2y (2 years)
+    import re as _re_tbs
+    _query_body_tbs = _re_tbs.split(
+        r'\s+-(?:site:|wiki\b|jobs\b|")', query, maxsplit=1
+    )[0].strip()
+    _has_positive_site = bool(_re_tbs.search(r'(?<!\-)site:', _query_body_tbs))
+
+    if _has_positive_site:
+        # Platform mining — no time restriction. Agent profiles, listing
+        # pages, competitor directories are valid leads regardless of age.
+        pass  # Don't set tbs at all
+    elif sourcing_vector and _is_consumer_archetype(sourcing_vector):
+        # B2C non-platform queries: 6-month window (was 1 month).
+        # Dialog-cue dorks ("pm me", "still available") benefit from recency,
+        # but 30 days was too aggressive — killed keyword phrase results.
+        # The _is_stale_content filter at produce level (14 days) handles
+        # stale forum posts as a separate safety net.
+        payload_dict["tbs"] = "qdr:6m"
     else:
         # B2B temporal freshness: 2-year window.
-        # Prevents stale conference/event pages (2019-2022) from entering pipeline.
-        # The 2y window is user-validated (2026-07-03).
         payload_dict["tbs"] = "qdr:2y"
 
     payload = json.dumps(payload_dict)
