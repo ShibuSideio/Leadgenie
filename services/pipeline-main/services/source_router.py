@@ -36,12 +36,14 @@ All routing parameters are derived from the campaign ICP — never hardcoded.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
 from core.logging import get_logger                                           # type: ignore[import]
 from services.gemini_service import call_gemini_2_5                           # type: ignore[import]
 from services.signal_sources.base import BaseSignalSource                     # type: ignore[import]
+from shared.intelligence_profile import build_intelligence_strategy_plan       # type: ignore[import]
 from services.signal_sources.reddit import RedditSource                           # type: ignore[import]
 from services.signal_sources.hackernews import HackerNewsSource                   # type: ignore[import]
 from services.signal_sources.rss_feed import RssFeedSource                        # type: ignore[import]
@@ -51,6 +53,7 @@ from services.signal_sources.classified_listings import ClassifiedListingSource 
 from services.signal_sources.consumer_forum import ConsumerForumSource            # type: ignore[import]
 from services.signal_sources.google_reviews import GoogleReviewSource             # type: ignore[import]
 from services.signal_sources.youtube import YouTubeSource                         # type: ignore[import]
+from services.budget_guard import BudgetGuard                                    # type: ignore[import]
 
 log = get_logger("pipeline.source_router")
 
@@ -229,6 +232,10 @@ class SourceRouter:
 
     def __init__(self, serper_api_key: str = "") -> None:
         self._serper_key = serper_api_key
+        self._budget_guard = BudgetGuard(
+            daily_limit=int(os.environ.get("SERPER_DAILY_LIMIT", "0")),
+            state_path=os.environ.get("SERPER_BUDGET_STATE_PATH", ""),
+        )
 
     def route(
         self,
@@ -570,12 +577,21 @@ IMPORTANT:
         #    For B2B: queries target professional forums and industry sites
         discovery_queries = [q for q in config.get("serper_discovery_queries", []) if q]
         if discovery_queries and self._serper_key:
-            sources.append(SerperDiscoverySource(
-                discovery_queries = discovery_queries,
-                serper_api_key    = self._serper_key,
-                num_results       = 10,
-                geo_code          = "",  # Queries already contain geo-specificity
-            ))
+            if self._budget_guard.daily_limit > 0 and not self._budget_guard.can_spend(1):
+                log.info(
+                    "source_router_serper_budget_blocked",
+                    reason="daily_budget_exhausted",
+                    remaining=self._budget_guard.remaining(),
+                )
+            else:
+                if self._budget_guard.daily_limit > 0:
+                    self._budget_guard.record_spend(1)
+                sources.append(SerperDiscoverySource(
+                    discovery_queries = discovery_queries,
+                    serper_api_key    = self._serper_key,
+                    num_results       = 10,
+                    geo_code          = "",  # Queries already contain geo-specificity
+                ))
 
         # 8. Google Reviews (all archetypes — competitor review mining)
         #    Gemini derives competitor names from ICP; Serper Maps + Reviews
@@ -584,13 +600,22 @@ IMPORTANT:
         raw_arch = config.get("_archetype", "B2B")  # Hoist for YouTube logging
         if self._serper_key and _reviews_due:
             icp_context = config.get("_icp_context", "")
-            sources.append(GoogleReviewSource(
-                icp_context    = icp_context,
-                geo            = geo,
-                archetype      = raw_arch,
-                serper_api_key = self._serper_key,
-                max_age_days   = 60,
-            ))
+            if self._budget_guard.daily_limit > 0 and not self._budget_guard.can_spend(1):
+                log.info(
+                    "source_router_google_reviews_budget_blocked",
+                    reason="daily_budget_exhausted",
+                    remaining=self._budget_guard.remaining(),
+                )
+            else:
+                if self._budget_guard.daily_limit > 0:
+                    self._budget_guard.record_spend(1)
+                sources.append(GoogleReviewSource(
+                    icp_context    = icp_context,
+                    geo            = geo,
+                    archetype      = raw_arch,
+                    serper_api_key = self._serper_key,
+                    max_age_days   = 60,
+                ))
 
         # 9. YouTube (B2C and D2C only — video discovery for consumer ICPs)
         #    B2C/D2C buyers research purchases on YouTube before converting.
@@ -621,6 +646,9 @@ IMPORTANT:
             _campaign_strat.get("primary", "")
             if isinstance(_campaign_strat, dict) else ""
         ).upper().strip()
+        _plan = build_intelligence_strategy_plan(_campaign) if isinstance(_campaign, dict) else None
+        if not _strat_primary and _plan:
+            _strat_primary = (_plan.get("primary_strategy", "") or "").upper().strip()
 
         # ── V26.0.3 HYBRID: Strategy PRIORITIZES sources, never REMOVES them ──
         # All sources stay active. Strategy determines which run first (get more
@@ -712,6 +740,28 @@ IMPORTANT:
                      source_count=len(sources),
                      source_order=[s.source_type for s in sources],
                      note="All sources active — strategy sets priority order only.")
+
+        if _plan:
+            _plan_order = [p for p in _plan.get("source_priorities", []) if p]
+            if _plan_order:
+                def _reorder_by_plan(src_list, plan_order):
+                    planned = [s for s in src_list if s.source_type in plan_order]
+                    remaining = [s for s in src_list if s.source_type not in plan_order]
+                    ordered = []
+                    for item in plan_order:
+                        for src in planned:
+                            if src.source_type == item:
+                                ordered.append(src)
+                                break
+                    ordered.extend(remaining)
+                    return ordered
+
+                sources = _reorder_by_plan(sources, _plan_order)
+                log.info(
+                    "source_router_strategy_plan_applied",
+                    strategy=_strat_primary or _plan.get("primary_strategy", ""),
+                    source_order=[s.source_type for s in sources],
+                )
 
         return sources
 

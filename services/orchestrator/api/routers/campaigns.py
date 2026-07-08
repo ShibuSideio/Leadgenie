@@ -344,6 +344,14 @@ def create_campaign(uid, tenant_id, user_role):
     # Determines HOW to find leads (PLATFORM_MINING, COLLOQUIAL_DISCOVERY, etc.)
     # Auto-derives competitor platforms, vocabulary notes, event types from ICP.
     _strategy_bio = data.get("effective_bio") or data.get("bio") or ""
+    _heuristic_profile = infer_campaign_intelligence_profile(
+        effective_bio=data.get("effective_bio") or data.get("bio") or "",
+        keywords=data.get("keywords", ""),
+        location=data.get("location", ""),
+        campaign_name=data.get("name", ""),
+        pain_point=data.get("pain_point", ""),
+        sourcing_vector=data.get("sourcing_vector", vector if 'vector' in dir() else ""),
+    )
     if _strategy_bio and _strategy_bio != "CHILD_CAMPAIGN_OVERRIDE":
         _strategy_bio_final = _strategy_bio
     elif _strategy_bio == "CHILD_CAMPAIGN_OVERRIDE":
@@ -365,6 +373,16 @@ def create_campaign(uid, tenant_id, user_role):
                 sourcing_vector=data.get("sourcing_vector", vector if 'vector' in dir() else "B2B"),
                 location=data.get("location", ""),
             )
+            _intel_strategy.setdefault("platform_targets", _heuristic_profile.get("platform_targets", []))
+            _intel_strategy.setdefault("competitor_names", _heuristic_profile.get("competitor_names", []))
+            _intel_strategy.setdefault("event_types", _heuristic_profile.get("event_types", []))
+            _intel_strategy.setdefault("vocabulary_notes", _heuristic_profile.get("vocabulary_notes", ""))
+            _intel_strategy.setdefault("decision_maker_titles", _heuristic_profile.get("decision_maker_titles", []))
+            _intel_strategy.setdefault("inferred_from", _heuristic_profile.get("inferred_from", "gemini"))
+            if not _intel_strategy.get("primary"):
+                _intel_strategy["primary"] = _heuristic_profile.get("primary_strategy", "COLLOQUIAL_DISCOVERY")
+            if not _intel_strategy.get("secondary"):
+                _intel_strategy["secondary"] = _heuristic_profile.get("secondary_strategy", "NONE")
             doc_ref.update({"intelligence_strategy": _intel_strategy})
             log.info(
                 "intelligence_strategy_classified",

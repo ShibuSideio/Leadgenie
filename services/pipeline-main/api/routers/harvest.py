@@ -142,6 +142,7 @@ def harvest():
                 archetype   = campaign.get("sourcing_vector", "B2B"),
                 geo         = campaign.get("location", ""),
                 db          = _db(),
+                campaign    = campaign,
             )
             log.info("harvest_cluster_analysis_done", campaign_id=campaign_id, **cluster_result)
             metrics["cluster_result"] = cluster_result

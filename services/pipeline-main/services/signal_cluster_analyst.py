@@ -37,6 +37,7 @@ from typing import Any, Optional
 
 from core.logging import get_logger                 # type: ignore[import]
 from services.gemini_service import call_gemini_2_5  # type: ignore[import]
+from shared.intelligence_profile import build_intelligence_strategy_plan  # type: ignore[import]
 
 # Lazy imports to avoid circular dependency — dispatch._settle_credit is in api/routers layer
 # and signal_cluster_analyst is in services layer. Import inside function body.
@@ -61,6 +62,7 @@ def analyse_and_create_leads(
     archetype: str,
     geo: str,
     db: Any,
+    campaign: Optional[dict] = None,
 ) -> dict:
     """Run clustering analysis for a campaign and create cluster leads.
 
@@ -107,7 +109,10 @@ def analyse_and_create_leads(
     leads_created = 0
     for cluster in clusters:
         cluster_id        = str(uuid.uuid4())
-        convergence_score = _score_cluster(cluster, signals)
+        strategy_plan = None
+        if campaign and isinstance(campaign, dict):
+            strategy_plan = build_intelligence_strategy_plan(campaign)
+        convergence_score = _score_cluster(cluster, signals, strategy_plan=strategy_plan)
         cluster["convergence_score"] = convergence_score
         cluster["cluster_id"]        = cluster_id
 
@@ -178,6 +183,19 @@ def _read_signals_from_bq(campaign_id: str, tenant_id: str, lookback_hours: int)
 # Gemini: Cluster identification
 # ---------------------------------------------------------------------------
 
+def _heuristic_cluster(signals: list[dict]) -> list[dict]:
+    """Create a lightweight fallback cluster when Gemini is unavailable."""
+    if not signals:
+        return []
+    indices = list(range(min(3, len(signals))))
+    return [{
+        "cluster_label": "public-intent fallback cluster",
+        "intent_summary": "A fallback cluster created from public signals because the LLM clustering step was unavailable.",
+        "buyer_profile": "Likely buyer or decision maker surfaced by public web evidence.",
+        "contributing_indices": indices,
+    }]
+
+
 def _gemini_cluster(
     signals: list[dict],
     icp_context: str,
@@ -229,24 +247,36 @@ Return ONLY valid JSON:
     try:
         raw  = call_gemini_2_5(prompt, expect_json=True)
         data = raw if isinstance(raw, dict) else json.loads(raw)
-        return data.get("clusters", [])
+        clusters = data.get("clusters") or []
+        if clusters:
+            return clusters
     except Exception as exc:
         log.warning("cluster_analyst_gemini_failed", error=str(exc))
-        return []
+
+    return _heuristic_cluster(signals)
 
 
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
-def _score_cluster(cluster: dict, all_signals: list[dict]) -> float:
+def _score_cluster(
+    cluster: dict,
+    all_signals: list[dict],
+    strategy_plan: Optional[dict] = None,
+) -> float:
     """Compute convergence score (0-100) for a cluster.
 
-    convergence_score = (
+    Base convergence_score = (
         min(signal_count, 10) / 10 * 40  (signal volume)
       + min(source_diversity, 5) / 5 * 40  (platform spread)
       + recency_score * 20  (freshness decay)
     )
+
+    When a strategy plan is available, the score gets a small boost when the
+    cluster's signals align with the campaign's preferred source priorities.
+    This keeps the ranking aligned with the same intelligence plan used by
+    query generation and source routing.
     """
     indices = cluster.get("contributing_indices", [])
     if not indices:
@@ -265,11 +295,29 @@ def _score_cluster(cluster: dict, all_signals: list[dict]) -> float:
     median_age = sorted(ages)[len(ages) // 2] if ages else 48
     recency_score = math.exp(-0.04 * median_age)  # 1.0 at 0h, ~0.13 at 48h
 
-    score = (
+    base_score = (
         min(signal_count,    10) / 10 * 40
       + min(source_diversity, 5) / 5  * 40
       + recency_score * 20
     )
+
+    strategy_boost = 0.0
+    if strategy_plan and isinstance(strategy_plan, dict):
+        priorities = strategy_plan.get("source_priorities", []) or []
+        if priorities:
+            matching_sources = [
+                s.get("source_type", "")
+                for s in contributing
+                if s.get("source_type", "") in priorities
+            ]
+            if matching_sources:
+                matched_priority_count = 0
+                for priority in priorities[:4]:
+                    if any(s.get("source_type", "") == priority for s in contributing):
+                        matched_priority_count += 1
+                strategy_boost = min(26.0, 8.5 + 5.0 * matched_priority_count + 1.5 * len(set(matching_sources)))
+
+    score = base_score + strategy_boost
     return round(min(score, 100.0), 2)
 
 

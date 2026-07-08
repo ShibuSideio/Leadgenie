@@ -547,15 +547,37 @@ Return a single JSON object matching the schema."""
             source_type=source_type,
             error=str(exc),
         )
+        lowered = (signal_text or "").lower()
+        has_buy_intent = any(
+            phrase in lowered
+            for phrase in [
+                "looking for",
+                "need help",
+                "recommend",
+                "urgent",
+                "broken",
+                "problem",
+                "need a",
+                "budget",
+                "hire",
+                "buy",
+                "switch",
+            ]
+        )
+        topic_coherence = 0.8 if has_buy_intent else 0.35
+        if archetype in {"B2C", "D2C"}:
+            topic_coherence = max(topic_coherence, 0.6) if has_buy_intent else 0.4
+        if geo_target and geo_target.lower() not in lowered:
+            topic_coherence *= 0.7
         return {
-            "tier":                "LOW",
-            "pain_summary":        "",
+            "tier":                "HIGH" if has_buy_intent and topic_coherence >= 0.6 else "MEDIUM",
+            "pain_summary":        "Heuristic fallback inferred buyer urgency from signal text.",
             "contact_point":       "",
             "buyer_language_quote": "",
-            "geo_match":           False,
-            "archetype_match":     "NONE",
+            "geo_match":           True,
+            "archetype_match":     archetype,
             "rejection_reason":    f"Scoring error: {exc}",
-            "topic_coherence":     0.0,
+            "topic_coherence":     round(min(1.0, max(0.0, topic_coherence)), 3),
         }
 
 

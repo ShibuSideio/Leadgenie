@@ -23,6 +23,7 @@ from typing import Optional
 from core.logging import get_logger   # type: ignore[import]
 from core.clients import get_db, get_bq_client  # type: ignore[import]
 from core.config import PROJECT_ID  # type: ignore[import]
+from shared.intelligence_profile import build_intelligence_strategy_plan  # type: ignore[import]
 
 log = get_logger("pipeline.query_brain")
 
@@ -282,6 +283,7 @@ def _generate_platform_mining_queries(
     kw_str: str,
     vector_label: str,
     blacklist: str,
+    strategy_plan: Optional[dict] = None,
 ) -> list[str]:
     """Generate site:-inclusion queries for competitor listing platforms.
 
@@ -364,7 +366,8 @@ def _generate_platform_mining_queries(
             raw_count=len(raw_queries),
             validated_count=len(validated),
         )
-        return validated
+        if validated:
+            return validated
 
     except Exception as exc:
         log.warning(
@@ -373,7 +376,31 @@ def _generate_platform_mining_queries(
             error=str(exc),
             note="Non-fatal — pain-discovery queries will still run.",
         )
-        return []
+
+    # Fallback: use the shared strategy plan to build deterministic platform
+    # queries when Gemini doesn't produce usable site: queries.
+    if strategy_plan:
+        platform_targets = [p for p in strategy_plan.get("platform_targets", []) if p][:4]
+        geo_terms = [g for g in strategy_plan.get("geo_terms", []) if g][:3]
+        fallback_queries: list[str] = []
+        for target in platform_targets:
+            domain = target.strip().lower()
+            if domain.startswith("http"):
+                from urllib.parse import urlparse
+                domain = urlparse(domain).netloc
+            entity_terms = ["agent", "broker", "profile", "contact"]
+            if "property" in domain or "realestate" in domain or "bayut" in domain or "dubizzle" in domain:
+                entity_terms = ["agent", "broker", "listing", "contact"]
+            elif "g2" in domain or "capterra" in domain or "trustpilot" in domain:
+                entity_terms = ["review", "profile", "contact"]
+            base = f"site:{domain} {' '.join(entity_terms[:2])}"
+            if geo_terms:
+                base = f"{base} {' '.join(geo_terms)}"
+            fallback_queries.append(f"{base} -wiki -jobs -careers")
+        if fallback_queries:
+            return fallback_queries[:4]
+
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +453,27 @@ def generate_smart_query(
         _intel_strategy.get("primary", "COLLOQUIAL_DISCOVERY")
         if isinstance(_intel_strategy, dict) else "COLLOQUIAL_DISCOVERY"
     )
+    _strategy_plan = None
+    if isinstance(_intel_strategy, dict) and _intel_strategy.get("primary"):
+        _strategy_plan = build_intelligence_strategy_plan({
+            "effective_bio": bio,
+            "keywords": ", ".join(user_keywords),
+            "location": "",
+            "name": "",
+            "pain_point": "",
+            "sourcing_vector": sourcing_vector or "",
+        })
+    else:
+        _strategy_plan = build_intelligence_strategy_plan({
+            "effective_bio": bio,
+            "keywords": ", ".join(user_keywords),
+            "location": "",
+            "name": "",
+            "pain_point": "",
+            "sourcing_vector": sourcing_vector or "",
+        })
+        if _strategy_plan.get("primary_strategy"):
+            _primary_strategy = _strategy_plan.get("primary_strategy", _primary_strategy)
 
     # V26.0.4: Detect generic/thin bio and augment with vocabulary_notes
     _BIO_JUNK_PREFIXES = ("Product/Service:", "product/service:", "N/A", "n/a")
@@ -1542,7 +1590,7 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
     # agent profiles and listings are evergreen pages.
     if _is_consumer:
         _platform_mining_queries = _generate_platform_mining_queries(
-            ctx, bio, kw_str, vector_label, blacklist,
+            ctx, bio, kw_str, vector_label, blacklist, strategy_plan=_strategy_plan,
         )
         if _platform_mining_queries:
             smart_queries.extend(_platform_mining_queries)

@@ -181,6 +181,88 @@ SIGNAL_MODES: dict[int, dict] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# V26.0.6: B2C Consumer Signal Modes
+# For B2C/D2C campaigns (real estate, education, health, services),
+# the B2B SaaS templates above are completely wrong:
+#   - r/sales, r/startups → zero consumer content
+#   - G2, Trustpilot → software review platforms
+#   - "legacy tool", "software suggestion" → SaaS language
+#
+# These consumer modes use:
+#   - Geo-relevant subreddits (r/expats, r/oman, r/dubai, etc.)
+#   - Consumer review platforms (Google Reviews, mouthshut, etc.)
+#   - Platform mining queries (competitor listing sites)
+#   - Consumer-appropriate pain language
+# ---------------------------------------------------------------------------
+B2C_SIGNAL_MODES: dict[int, dict] = {
+    0: {
+        "name": "consumer_active_intent",
+        "templates": [
+            'site:reddit' + '.com OR site:quora' + '.com "{pain_keyword}" "{geo}" "looking for" OR "recommend" OR "anyone know"',
+            '"{pain_keyword}" "{geo}" "review" OR "experience" OR "recommendation"',
+            '"{pain_keyword}" "{geo}" agent OR broker OR consultant "contact" OR "email" OR "phone"',
+            '"{pain_keyword}" "{geo}" "where to find" OR "how to choose" OR "trustworthy"',
+        ],
+    },
+    1: {
+        "name": "consumer_pain_expression",
+        "templates": [
+            'site:reddit' + '.com OR site:quora' + '.com "{pain_keyword}" "{geo}" "scam" OR "fraud" OR "fake" OR "overpriced"',
+            '"{pain_keyword}" "{geo}" "complaint" OR "bad experience" OR "avoid" OR "warning"',
+            '"{pain_keyword}" "{geo}" "hidden fees" OR "trust issue" OR "not reliable"',
+            'site:reddit' + '.com OR site:quora' + '.com "{geo}" "{pain_keyword}" "help" OR "advice needed" OR "frustrated"',
+        ],
+    },
+    2: {
+        "name": "consumer_competitor_review",
+        "templates": [
+            '"{competitor}" "{geo}" "review" OR "experience" OR "complaint"',
+            '"{competitor}" "{pain_keyword}" "bad" OR "terrible" OR "avoid" OR "scam"',
+            'site:mouthshut' + '.com OR site:consumercomplaints' + '.in "{competitor}" "{pain_keyword}"',
+            '"{competitor}" "{geo}" "alternative" OR "better than" OR "switch from"',
+        ],
+    },
+    3: {
+        "name": "consumer_platform_mining",
+        "templates": [
+            # These are generic patterns — the _inject_platform_mining_queries()
+            # method adds Gemini-identified specific platform queries on top.
+            '"{pain_keyword}" "{geo}" agent OR broker profile "email" OR "contact" OR "phone"',
+            '"{pain_keyword}" "{geo}" directory OR listing "verified" OR "licensed"',
+            '"{pain_keyword}" "{geo}" consultant OR expert OR specialist profile',
+            '"{pain_keyword}" "{geo}" "view profile" OR "contact agent" OR "send inquiry"',
+        ],
+    },
+    4: {
+        "name": "consumer_review_mining",
+        "templates": [
+            '"{pain_keyword}" "{geo}" reviews OR testimonials OR feedback',
+            '"{competitor}" reviews "not worth" OR "disappointed" OR "misleading"',
+            '"{pain_keyword}" "{geo}" "honest review" OR "real experience" OR "my experience"',
+            'site:reddit' + '.com OR site:quora' + '.com "{pain_keyword}" "{geo}" "is it worth" OR "should I"',
+        ],
+    },
+    5: {
+        "name": "consumer_social_signals",
+        "templates": [
+            'site:reddit' + '.com "{pain_keyword}" "{geo}" "anyone" OR "has anyone" OR "thoughts on"',
+            '"{pain_keyword}" "{geo}" forum OR community "advice" OR "tips" OR "suggestion"',
+            '"{pain_keyword}" "{geo}" "buying guide" OR "checklist" OR "things to know"',
+            '"{pain_keyword}" "{geo}" blog OR article "personal experience" OR "my journey"',
+        ],
+    },
+    6: {
+        "name": "consumer_entity_discovery",
+        "templates": [
+            '"{pain_keyword}" "{geo}" "top agents" OR "best brokers" OR "recommended" -"top 10" -listicle',
+            '"{pain_keyword}" "{geo}" "licensed" OR "certified" OR "RERA" OR "registered"',
+            '"{pain_keyword}" "{geo}" new listing OR "just listed" OR "available now"',
+            '"{pain_keyword}" "{geo}" "contact us" OR "get in touch" OR "free consultation"',
+        ],
+    },
+}
+
 # Appended to EVERY query — strips known garbage before results hit Gemini
 GLOBAL_NEGATIVE = (
     ' -directory -listicle -"top 10" -"best" -wiki -jobs -careers -support -"login" '

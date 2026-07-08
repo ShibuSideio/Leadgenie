@@ -50,6 +50,7 @@ from services.serper_service import (  # type: ignore[import]
     extract_root_domain, SOCIAL_DOMAINS, deep_context_serper_dork,
 )
 from services.gemini_service import pre_filter_gemini, final_score_and_dm  # type: ignore[import]
+from services.lead_confidence import calculate_lead_confidence  # type: ignore[import]
 from services.prism_pipeline import PrismPipeline                           # type: ignore[import]
 from services.query_brain import _is_consumer_archetype  # type: ignore[import]
 from services.intelligence_mesh import enrich_signals  # type: ignore[import]  # V24.0
@@ -978,24 +979,27 @@ def dispatch():
                 _snippet_meta.get("source") == "signal_harvest"
                 or _snippet_meta.get("harvest_tier") in ("HIGH", "MEDIUM")
             )
-            if is_harvest_lead:
-                accept_threshold = 5   # Pre-qualified by inline scoring
-            elif _is_thin_bio:
-                accept_threshold = 4   # V25.3.1: Vague bio — Gemini can't score > 5
-            elif is_thin_payload:
-                accept_threshold = 6
-            else:
-                accept_threshold = 7
+            confidence_bundle = calculate_lead_confidence(
+                evaluation=evaluation,
+                text=text,
+                url=url,
+                source_tier=url_to_tier.get(url, "High"),
+                is_harvest_lead=is_harvest_lead,
+                is_thin_payload=is_thin_payload,
+                is_thin_bio=_is_thin_bio,
+                campaign=campaign,
+            )
 
             log.info("dispatch_score_gate_eval",
-                     url=url[:80], score=score, threshold=accept_threshold,
-                     text_chars=len(text), thin=is_thin_payload,
+                     url=url[:80], score=score, threshold=confidence_bundle["confidence_threshold"],
+                     confidence=confidence_bundle["confidence_score"], text_chars=len(text), thin=is_thin_payload,
                      shadow_thin=_is_shadow_thin, harvest_lead=is_harvest_lead,
                      prism_mode=prism_mode)
 
-            if score < accept_threshold:
+            if not confidence_bundle["promotion"]:
                 log.info("dispatch_score_gate_drop", url=url[:80],
-                         score=score, threshold=accept_threshold)
+                         score=score, threshold=confidence_bundle["confidence_threshold"],
+                         confidence=confidence_bundle["confidence_score"])
                 doc_ref.delete()
                 try:
                     _db().collection("global_lead_locks").document(lock_entity).delete()
@@ -1008,7 +1012,7 @@ def dispatch():
                 # never-settled accounting gaps. /finalize already does this; now
                 # the primary dispatch path matches that behaviour.
                 _settle_credit(tenant_id, "failure", lead_id=lead_id)
-                return {"url": url, "status": "score_drop", "score": score}
+                return {"url": url, "status": "score_drop", "score": score, "confidence": confidence_bundle["confidence_score"]}
 
             # ── STEP 4: Consolidate lead details and save into root leads collection ──
             # V24.4 (L4-5): Medium-tier URLs with snippet-only text (< 300 chars)
