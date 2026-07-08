@@ -1,18 +1,26 @@
-# LeadGenie (Sideio) — Platform Architecture V26.0.4
+# LeadGenie (Sideio) — Platform Architecture V26.1.0
 **Technical Specification Document**
-*Last Updated: 2026-07-05 | Version: V26.0.4.1 — Smart Pipeline + B2B Regression Fixes*
+*Last Updated: 2026-07-08 | Version: V26.1.0 — Shared Intelligence + Confidence Qualification*
 
 ---
 
 ## 1. SYSTEM OVERVIEW
 
-LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS platform. It discovers, scores, and delivers hyper-personalised outreach messages for paying tenants — autonomously, 24/7, without manual input. V26 introduced a **multi-strategy intelligence engine** that classifies campaigns into intelligence strategies at creation time and routes them through strategy-specific query generation, source selection, and entity extraction pipelines.
+LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS platform. It discovers, scores, and delivers hyper-personalised outreach messages for paying tenants — autonomously, 24/7, without manual input. V26.1 introduced a **shared deterministic intelligence layer** that infers an execution strategy from sparse campaign input, routes discovery with budget awareness, and promotes leads through an explainable confidence gate rather than a single brittle score threshold.
 
 **Core loop:**
 1. Cloud Scheduler cron hits the Orchestrator every 5 minutes
 2. Orchestrator validates quota, checks drip cadence, enqueues a Cloud Task per active campaign
-3. Pipeline-Main runs: **strategy classification → query generation → multi-source routing → scrape → score → entity extraction → write to Firestore**
+3. Pipeline-Main runs: **intelligence-profile inference → strategy-aware query generation → budget-aware source routing → scrape → score → confidence qualification → entity extraction → write to Firestore**
 4. The PWA frontend listens via `onSnapshot` and renders leads in real-time
+
+### Latest implementation updates (V26.1.0)
+- A shared heuristic planner now infers a campaign intelligence profile from sparse user input so the backend can make stronger decisions with minimal manual effort.
+- Source routing uses that inferred strategy plan and a daily budget guard to avoid wasting expensive Serper spend on weak or low-evidence campaigns.
+- Query generation now uses deterministic fallback logic and strategy-specific phrasing so the pipeline remains robust even when Gemini is unavailable.
+- Lead promotion is now gated by a deterministic confidence score combining evidence strength, buyer intent, urgency, geography, and source trust.
+- The pipeline also includes fallback heuristics for clustering and scoring so important signals are not dropped when LLM calls fail.
+- This architecture note is being maintained locally in the workspace for later production deployment review; live-test findings will be appended after the production run.
 
 **Intelligence Strategies (V26.0):**
 - `PLATFORM_MINING` — Extract leads from competitor directories, aggregator platforms, review sites
@@ -40,6 +48,8 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 │   ├── sw.js                        # Service Worker (cache bust on deploy)
 │   └── manifest.json                # PWA manifest
 ├── /services
+│   ├── /shared                      # Shared backend heuristics and campaign strategy planning
+│   │   └── intelligence_profile.py # Deterministic profile inference and execution plan building
 │   ├── /orchestrator                # Cloud Run: REST API Gateway + Cron Dispatcher
 │   │   ├── api/routers/             # Modular Flask blueprints (campaigns, leads, settings…)
 │   │   ├── services/intelligence/   # shadow_tracker.py, neg_signal.py
@@ -65,6 +75,8 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 │   │   │   ├── intelligence_mesh.py #   V26: Cross-source dedup + merge
 │   │   │   ├── signal_harvest.py    #     Signal harvesting engine
 │   │   │   ├── signal_cluster_analyst.py # Signal clustering and analysis
+│   │   │   ├── budget_guard.py      #     Daily cost guard for costly discovery actions
+│   │   │   ├── lead_confidence.py   #     Deterministic promotion confidence scoring
 │   │   │   ├── serper_service.py    #     Serper API client
 │   │   │   ├── neg_shield.py        #     Negative signal shield (BQ)
 │   │   │   ├── prism_pipeline.py    #     Headless browser scraping
@@ -125,6 +137,8 @@ INTERNAL_CRON_SECRET=<secret>        # MANDATORY — 503 returned if unset
 # Pipeline-Main extras
 SCRAPER_HEAVY_URL=https://scraper-heavy-<hash>.a.run.app/scrape
 PIPELINE_BASE_URL=https://lead-pipeline-main-<hash>.a.run.app
+SERPER_DAILY_LIMIT=0                # 0 disables the budget guard
+SERPER_BUDGET_STATE_PATH=/tmp/serper_budget.json
 
 # Autonomous Engine
 DAILY_GEMINI_BUDGET=1000
@@ -243,6 +257,7 @@ Distributed credit counters (bypass Firestore write contention).
 - `unprocessed_queue`: array of Serper result objects awaiting Gemini profiling; capped at 200 (backpressure at depth 150)
 - `next_drip_due`: updated on every produce run (V24.4 fix — was only set on first fill)
 - `keywords`: stored as comma-separated string, parsed to array in pipeline
+- `V26.1.0`: the backend now infers a lightweight intelligence profile from sparse campaign input and uses it to drive routing and query decisions even when the user provides minimal details
 - `effective_bio`: AI-generated enriched product description. Priority Layer 1 in `context_builder.py`
 - `pain_point`: accumulates real buyer language from approved leads over time. Fed back into query generation by `context_builder.py` Layer 3 — the system compounds in intelligence with each approval
 - `target_angle_hook`, `unfair_advantage`, `persona_targeting_signals`: ALL consumed by `context_builder.py` (V24.6.1). Previously unused in pipeline.

@@ -551,6 +551,7 @@ def cron_sweep():
     # After 144 sweeps (12h), the container's FD limit (~1024) is breached and
     # create_task() fails with OSError: Too many open files.
     from core.clients import get_tasks_client as _get_tasks_client
+from core.produce_gate import should_dispatch_produce
     tasks_client = _get_tasks_client()
     queue_path   = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
 
@@ -673,49 +674,12 @@ def cron_sweep():
 
         # ── Producer (24h interval) ──────────────────────────────────────────
         PRODUCE_INTERVAL_H = 24
-        next_produce_due   = campaign_data.get("next_produce_due")
-        produce_due        = True
-
-        # next_produce_due may be:
-        #   (a) a Firestore DatetimeWithNanoseconds  → hasattr(.timestamp) = True
-        #   (b) an ISO-8601 string "2026-..."        → written by our finally: block
-        #   (c) None                                 → field missing, treat as overdue
-        if next_produce_due:
-            ndd_dt = None
-            if hasattr(next_produce_due, "timestamp"):
-                # Firestore native datetime
-                ndd_dt = next_produce_due
-                if hasattr(ndd_dt, "tzinfo") and ndd_dt.tzinfo is None:
-                    ndd_dt = ndd_dt.replace(tzinfo=datetime.timezone.utc)
-            elif isinstance(next_produce_due, str):
-                # ISO-8601 string written by our finally: block
-                try:
-                    ndd_dt = datetime.datetime.fromisoformat(next_produce_due)
-                    if ndd_dt.tzinfo is None:
-                        ndd_dt = ndd_dt.replace(tzinfo=datetime.timezone.utc)
-                except Exception as _parse_err:
-                    log.warning("BYPASS_PRODUCE_TIMESTAMP_UNPARSEABLE",
-                                campaign_id=campaign_id,
-                                next_produce_due=str(next_produce_due),
-                                error=str(_parse_err),
-                                action="Treating as overdue — produce_due=True")
-            if ndd_dt is not None:
-                try:
-                    if ndd_dt > now_utc:
-                        produce_due = False
-                        log.info("BYPASS_PRODUCE_NOT_YET_DUE",
-                                 campaign_id=campaign_id,
-                                 next_produce_due=str(next_produce_due),
-                                 now_utc=now_utc.isoformat(),
-                                 hours_remaining=round((ndd_dt - now_utc).total_seconds() / 3600, 2))
-                except Exception as _cmp_err:
-                    log.warning("BYPASS_PRODUCE_TIMESTAMP_CMP_FAILED",
-                                campaign_id=campaign_id, error=str(_cmp_err),
-                                action="Treating as overdue")
+        produce_due, gate_reason = should_dispatch_produce(campaign_data, now_utc)
 
         log.info("sweep_produce_gate_result",
                  campaign_id=campaign_id, produce_due=produce_due,
-                 next_produce_due=str(next_produce_due))
+                 gate_reason=gate_reason,
+                 next_produce_due=str(campaign_data.get("next_produce_due")))
 
         if produce_due:
             _produce_ok = False  # tracks whether create_task() succeeded
