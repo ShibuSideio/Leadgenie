@@ -551,7 +551,7 @@ def cron_sweep():
     # After 144 sweeps (12h), the container's FD limit (~1024) is breached and
     # create_task() fails with OSError: Too many open files.
     from core.clients import get_tasks_client as _get_tasks_client
-from core.produce_gate import should_dispatch_produce
+    from core.produce_gate import should_dispatch_produce
     tasks_client = _get_tasks_client()
     queue_path   = tasks_client.queue_path(PROJECT_ID, LOCATION, QUEUE)
 
