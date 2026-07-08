@@ -220,11 +220,13 @@ steps:
   args:
   - build
   - --no-cache
+  - -f
+  - services/pipeline-main/Dockerfile
   - -t
   - gcr.io/$PROJECT_ID/lead-pipeline-main:$COMMIT_SHA
   - -t
   - gcr.io/$PROJECT_ID/lead-pipeline-main:latest
-  - ./services/pipeline-main
+  - .
 
 - id: 'build-scraper-heavy'
   waitFor: ['gate-passed']
