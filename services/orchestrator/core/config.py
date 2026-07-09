@@ -18,7 +18,7 @@ from cryptography.fernet import Fernet
 # ---------------------------------------------------------------------------
 # GCP Project
 # ---------------------------------------------------------------------------
-PROJECT_ID: str = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+PROJECT_ID: str = os.environ["PROJECT_ID"]  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
 LOCATION: str = os.environ.get("LOCATION", "asia-south1")
 
 # ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ ORCHESTRATOR_SA_EMAIL: str = os.environ.get("ORCHESTRATOR_SA_EMAIL", "")
 # Application limits
 # ---------------------------------------------------------------------------
 MAX_CHILD_CAMPAIGNS: int = int(os.environ.get("MAX_CHILD_CAMPAIGNS", "5"))
-VELOCITY_THRESHOLD: int = int(os.environ.get("VELOCITY_THRESHOLD", "10"))
+VELOCITY_THRESHOLD: int = int(os.environ["VELOCITY_THRESHOLD"])  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
 OPS_CACHE_TTL: int = 300  # seconds — L0 telemetry TTLCache
 
 # ---------------------------------------------------------------------------
@@ -122,3 +122,8 @@ class _LazyModule(_sys.modules[__name__].__class__):
 
 
 _sys.modules[__name__].__class__ = _LazyModule
+```
+```tool
+TOOL_NAME: run_terminal_command
+BEGIN_ARG: command
+"Select-String -Path 'services/orchestrator/core/config.py' -Pattern 'PROJECT_ID: str = os\.environ\["PROJECT_ID"\]' | Select-Object -First 1"

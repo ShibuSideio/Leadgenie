@@ -90,7 +90,7 @@ def get_bq_client() -> bigquery.Client:
     Returns:
         :class:`google.cloud.bigquery.Client`
     """
-    project = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+    project = os.environ["PROJECT_ID"]  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
     return bigquery.Client(project=project, location="asia-south1")
 
 

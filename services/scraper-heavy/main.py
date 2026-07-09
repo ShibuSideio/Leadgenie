@@ -34,7 +34,7 @@ def get_secret(secret_id: str) -> str:
     """
     if secret_id in _SECRET_CACHE:
         return _SECRET_CACHE[secret_id]
-    project_id = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+    project_id = os.environ["PROJECT_ID"]  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
     try:
         name     = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
         response = _SM_CLIENT.access_secret_version(request={"name": name})
@@ -237,7 +237,7 @@ def scrape():
     }
 
     try:
-        project  = os.environ.get("PROJECT_ID",  "sideio-leads-v16")
+        project  = os.environ["PROJECT_ID"]  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
         location = os.environ.get("LOCATION",    "asia-south1")
         queue    = os.environ.get("QUEUE",        "lead-pipeline-queue")
         parent   = _TASKS_CLIENT.queue_path(project, location, queue)    # reuse singleton

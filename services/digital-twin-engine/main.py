@@ -57,7 +57,7 @@ CORS(app,
 # BOOT INITIALISATION
 # =============================================================================
 
-PROJECT_ID = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+PROJECT_ID = os.environ["PROJECT_ID"]  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
 LOCATION   = os.environ.get("LOCATION", "us-central1")       # Vertex is us-central1
 
 # Vertex AI — must init before any GenerativeModel call

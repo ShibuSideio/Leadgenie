@@ -11,7 +11,7 @@ from vertexai.generative_models import GenerativeModel
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-project_id = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+project_id = os.environ["PROJECT_ID"]  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
 
 _db_instance = None
 def _db():

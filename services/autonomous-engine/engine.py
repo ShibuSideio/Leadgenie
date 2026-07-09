@@ -27,7 +27,7 @@ from ingestors import JobBoardIngestor, FundingIngestor
 
 log = logging.getLogger(__name__)
 
-PROJECT_ID  = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+PROJECT_ID  = os.environ["PROJECT_ID"]  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
 GEMINI_MODEL = "gemini-2.5-flash"
 
 # Postmortem Fix #3: vertexai.init() was previously called at module scope
