@@ -20,7 +20,7 @@ from google.cloud import firestore
 logging.basicConfig(level=logging.INFO, format="[SHADOW-LEARNER] %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
-PROJECT_ID  = os.environ.get("PROJECT_ID",  "sideio-leads-v16")
+PROJECT_ID  = os.environ["PROJECT_ID"]  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
 BQ_DATASET  = os.environ.get("BQ_DATASET",  "swarm_analytics")
 BQ_TABLE    = os.environ.get("BQ_TABLE",    "rlhf_events")
 WINDOW_HOURS = int(os.environ.get("WINDOW_HOURS", "12"))

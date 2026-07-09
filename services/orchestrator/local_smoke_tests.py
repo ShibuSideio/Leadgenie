@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, patch
 _SMOKE_FERNET_KEY = "uNqG8Jc-44SjK22N8B5-2GksnE5F_88_V5wQZ02j1A0="  # test-only, not production
 if not os.environ.get("ENCRYPTION_KEY"):
     os.environ["ENCRYPTION_KEY"] = _SMOKE_FERNET_KEY
-if not os.environ.get("PROJECT_ID"):
+if not os.environ["PROJECT_ID"]:  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
     os.environ["PROJECT_ID"] = "sideio-leads-v16"
 if not os.environ.get("LOCATION"):
     os.environ["LOCATION"] = "asia-south1"

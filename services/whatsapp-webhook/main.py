@@ -46,7 +46,7 @@ def _sm():
         _sm_instance = secretmanager.SecretManagerServiceClient()
     return _sm_instance
 
-project_id = os.environ.get("PROJECT_ID", "sideio-leads-v16")
+project_id = os.environ["PROJECT_ID"]  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSET
 VERIFY_TOKEN_NAME = f"projects/{project_id}/secrets/whatsapp_webhook_token/versions/latest"
 # P0-5/P0-7 fix: Use dedicated App Secret for HMAC, NOT the verify token
 APP_SECRET_NAME = f"projects/{project_id}/secrets/whatsapp_app_secret/versions/latest"
