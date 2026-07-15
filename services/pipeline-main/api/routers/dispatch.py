@@ -535,6 +535,8 @@ def dispatch():
     # BUG-3 FIX: Replace deprecated positional where() with FieldFilter.
     # Positional where() is deprecated in google-cloud-firestore >= 2.13.
     velocity_threshold = VELOCITY_THRESHOLD
+    _velocity_gate_mode = "normal"
+    _degraded_medium_selected = 0
     try:
         cutoff_24h = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
         recent_new_count = (
@@ -556,19 +558,41 @@ def dispatch():
         recent_count = recent_new_count + recent_enrichment_pending_count
     except Exception as _vel_err:
         # Enterprise quality-safe fallback: on velocity gate read failure, block
-        # Medium-tier promotion for this batch instead of fail-open.
+        # broad fail-open. We still allow a tiny bounded sample to prevent
+        # complete conversion collapse while preserving quality.
         log.warning("velocity_gate_disabled_firestore_error",
                     error=str(_vel_err),
-                    note="Medium URLs blocked for this batch due to gate read failure.")
+                    note="Entering degraded gate mode with bounded medium sampling.")
         recent_count = velocity_threshold
+        _velocity_gate_mode = "degraded_firestore_error"
 
     allow_medium  = recent_count < velocity_threshold
-    approved_urls = high_urls + (medium_urls if allow_medium else [])
+    if allow_medium:
+        approved_urls = high_urls + medium_urls
+    elif _velocity_gate_mode == "degraded_firestore_error" and medium_urls:
+        _VELOCITY_DEGRADED_MEDIUM_CAP = max(
+            1,
+            min(10, int(os.environ.get("VELOCITY_DEGRADED_MEDIUM_CAP", "3"))),
+        )
+        _degraded_medium = medium_urls[:_VELOCITY_DEGRADED_MEDIUM_CAP]
+        _degraded_medium_selected = len(_degraded_medium)
+        approved_urls = high_urls + _degraded_medium
+        log.warning(
+            "velocity_gate_degraded_medium_sample",
+            campaign_id=campaign_id,
+            selected=_degraded_medium_selected,
+            available_medium=len(medium_urls),
+            cap=_VELOCITY_DEGRADED_MEDIUM_CAP,
+            note="Firestore read error fallback: allowing bounded medium sample.",
+        )
+    else:
+        approved_urls = high_urls
     url_to_tier   = {u: "High" for u in high_urls}
     url_to_tier.update({u: "Medium" for u in medium_urls})
     log.info("TRACE-7: Gate complete.",
              high=len(high_urls), medium=len(medium_urls),
-             approved=len(approved_urls), gate_rejected=len(batch_urls)-len(approved_urls))
+             approved=len(approved_urls), gate_rejected=len(batch_urls)-len(approved_urls),
+             gate_mode=_velocity_gate_mode, degraded_medium_selected=_degraded_medium_selected)
 
     # ── TRACE-8: PRISM Processing Loop (parallel, per-URL 25s timeout) ─────────
     # BUG-1 + BUG-4 FIX: Run each URL concurrently via ThreadPoolExecutor.
@@ -582,7 +606,13 @@ def dispatch():
              url_count=len(approved_urls))
     all_results    = []
     scrape_success = scrape_failed = 0
+    status_counts: dict[str, int] = {}
     _ENTITY_DOMAIN_COUNTS.clear()  # V26.0: Reset per-domain rate limiter per batch
+
+    def _inc_status(status: str) -> None:
+        if not status:
+            return
+        status_counts[status] = status_counts.get(status, 0) + 1
 
     def _process_single_url(url: str) -> dict:
         """Process one URL through lock → dedup → PRISM → Gemini → Firestore.
@@ -1256,6 +1286,7 @@ def dispatch():
             try:
                 result = fut.result(timeout=_URL_TIMEOUT_S)
                 status = result.get("status", "unknown")
+                _inc_status(status)
                 if status == "success":
                     scrape_success += 1
                     all_results.append(result)
@@ -1289,10 +1320,12 @@ def dispatch():
                 except Exception as _settle_err:
                     log.warning("settle_credit_on_url_timeout_failed",
                                 url=url[:80], error=str(_settle_err))
+                _inc_status("failed_url_timeout")
                 scrape_failed += 1
             except Exception as fut_err:
                 log.error("dispatch_future_crash", url=url[:80], error=str(fut_err),
                           exc_info=True)
+                _inc_status("failed_future_crash")
                 scrape_failed += 1
 
         # V25.3.1: Mark remaining unprocessed URLs' stubs as failed after batch timeout
@@ -1321,10 +1354,24 @@ def dispatch():
             except Exception as _settle_err:
                 log.warning("settle_credit_on_batch_timeout_failed",
                             url=_remaining_url[:80], error=str(_settle_err))
+            _inc_status("failed_batch_timeout_remaining")
 
     log.info("dispatch_batch_complete", campaign_id=campaign_id,
              processed=len(all_results), scrape_success=scrape_success,
              scrape_failed=scrape_failed)
+    log.info(
+        "dispatch_funnel_stage_counts",
+        campaign_id=campaign_id,
+        batch_urls=len(batch_urls),
+        prefilter_bypass=len(bypass_urls),
+        prefilter_high=len(high_urls),
+        prefilter_medium=len(medium_urls),
+        approved_urls=len(approved_urls),
+        gate_rejected=max(0, len(batch_urls) - len(approved_urls)),
+        gate_mode=_velocity_gate_mode,
+        degraded_medium_selected=_degraded_medium_selected,
+        **status_counts,
+    )
 
     # ── Phase 3D: Score Distribution Monitoring ──────────────────────────────
     # Collect all scores from results that went through the scoring gate
@@ -1406,6 +1453,15 @@ def dispatch():
         "processed_leads": len(all_results),
         "scrape_success":  scrape_success,
         "scrape_failed":   scrape_failed,
+        "funnel": {
+            "batch_urls": len(batch_urls),
+            "prefilter_high": len(high_urls),
+            "prefilter_medium": len(medium_urls),
+            "approved_urls": len(approved_urls),
+            "gate_mode": _velocity_gate_mode,
+            "degraded_medium_selected": _degraded_medium_selected,
+            "status_counts": status_counts,
+        },
     }), 200
 
 
