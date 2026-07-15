@@ -693,6 +693,7 @@ def search_serper(
     query: str,
     location: Optional[str] = None,
     gl: Optional[str] = None,
+    hl: Optional[str] = None,
     *,
     campaign_id: str = "",
     tenant_id: str = "",
@@ -710,6 +711,7 @@ def search_serper(
         query:           Full search query string (may include site: operators).
         location:        Serper ``location`` field (optional, e.g. ``"India"``).
         gl:              Serper ``gl`` field / ISO country code (optional).
+        hl:              Serper ``hl`` field / language code (optional).
         campaign_id:     Campaign context for BQ audit telemetry (optional).
         tenant_id:       Tenant context for BQ audit telemetry (optional).
         sourcing_vector: Campaign sourcing vector label (optional).
@@ -738,6 +740,21 @@ def search_serper(
         payload_dict["location"] = location
     if gl:
         payload_dict["gl"] = gl
+    if hl:
+        payload_dict["hl"] = hl
+    elif gl:
+        _HL_BY_GL = {
+            "in": "en",
+            "ae": "en",
+            "om": "en",
+            "sa": "en",
+            "us": "en",
+            "uk": "en",
+            "de": "de",
+            "fr": "fr",
+            "es": "es",
+        }
+        payload_dict["hl"] = _HL_BY_GL.get(str(gl).lower(), "en")
 
     # V26.0.5: Smart time filter based on query structure.
     # Platform Mining queries (positive site: operators like site:dubizzle.com.om)

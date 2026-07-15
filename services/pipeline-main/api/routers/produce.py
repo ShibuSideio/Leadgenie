@@ -85,6 +85,7 @@ def _is_stale_content(result: dict, is_consumer: bool) -> bool:
     return False  # Unparseable — fail-open
 from services.query_brain import generate_smart_query  # type: ignore[import]
 from services.query_brain import _is_consumer_archetype  # type: ignore[import]
+from services.query_governance import govern_query_portfolio  # type: ignore[import]
 from services.serper_service import (  # type: ignore[import]
     search_serper,
     filter_serper_noise,
@@ -537,6 +538,35 @@ def produce():
             note="Case-insensitive dedup removed duplicate queries before Serper loop.",
         )
     smart_keywords = _deduped_keywords
+    _governed = govern_query_portfolio(
+        smart_keywords,
+        campaign=campaign,
+        sourcing_vector=sourcing_vector,
+        location=location,
+    )
+    smart_keywords = _governed.get("queries", []) or []
+    _govern_stats = _governed.get("stats", {}) or {}
+    log.info(
+        "produce_query_governance_applied",
+        campaign_id=campaign_id,
+        **_govern_stats,
+    )
+    if not smart_keywords:
+        log.warning(
+            "produce_query_governance_empty",
+            campaign_id=campaign_id,
+            note="Governance removed/trimmed all candidate queries. Triggering harvest fallback.",
+        )
+        harvest_metrics = _run_signal_harvest_pathway(campaign)
+        return jsonify({
+            "status": "produced",
+            "fetched": 0,
+            "deduplicated": 0,
+            "queued": 0,
+            "queue_depth": len(campaign.get("unprocessed_queue", [])),
+            "warning": "No governed queries available.",
+            "harvest": harvest_metrics,
+        }), 200
 
     for kw in smart_keywords:
         clean_location = location if location and location.lower() != "all" else ""
@@ -606,19 +636,15 @@ def produce():
             # making EVERY query look "structured", defeating the guard.
             import re as _re_produce
             _query_body = _re_produce.split(r'\s+-(?:site:|wiki\b|jobs\b|careers\b|investors\b|directory\b|listicle\b|")', search_query, maxsplit=1)[0].strip()
-            _is_structured_query = (
-                "site:" in _query_body        # positive site: operator
-                or " OR " in _query_body      # boolean operator
-                or _query_body.count('"') >= 2  # quoted phrase in query body
-            )
-            if not raw_results and gl and _is_structured_query:
+            _is_platform_query = bool(_re_produce.search(r'(?<!\-)site:', _query_body))
+            if not raw_results and gl and _is_platform_query:
                 log.info(
                     "produce_geo_fallback",
                     query=search_query[:80],
                     original_gl=gl,
                     sourcing_vector=sourcing_vector,
-                    note="Consumer geo-restricted call returned 0 results. "
-                         "Retrying on global index (structured query only).",
+                    note="Consumer geo-restricted platform query returned 0 results. "
+                         "Retrying once on global index.",
                     campaign_id=campaign_id,
                 )
                 raw_results = search_serper(
@@ -629,14 +655,14 @@ def produce():
                     tenant_id=tenant_id,
                     sourcing_vector=sourcing_vector,
                 )
-            elif not raw_results and gl and not _is_structured_query:
+            elif not raw_results and gl and not _is_platform_query:
                 log.info(
                     "produce_geo_fallback_skipped",
                     query=search_query[:80],
                     original_gl=gl,
                     sourcing_vector=sourcing_vector,
-                    note="Natural-language query returned 0 on geo — skipping "
-                         "global retry to save 1 Serper credit.",
+                    note="Non-platform query returned 0 on geo — skipping global retry "
+                         "to avoid duplicate credit burn.",
                     campaign_id=campaign_id,
                 )
         else:
