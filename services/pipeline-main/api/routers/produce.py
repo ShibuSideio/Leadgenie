@@ -20,6 +20,7 @@ Auth:
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from datetime import datetime, timezone, timedelta
 
@@ -85,7 +86,12 @@ def _is_stale_content(result: dict, is_consumer: bool) -> bool:
     return False  # Unparseable — fail-open
 from services.query_brain import generate_smart_query  # type: ignore[import]
 from services.query_brain import _is_consumer_archetype  # type: ignore[import]
-from services.query_governance import govern_query_portfolio  # type: ignore[import]
+from services.query_governance import (  # type: ignore[import]
+    govern_query_portfolio,
+    filter_queries_against_memory,
+    build_exhaustion_escalation_queries,
+    query_signature,
+)
 from services.serper_service import (  # type: ignore[import]
     search_serper,
     filter_serper_noise,
@@ -126,6 +132,29 @@ _SYSTEM_JUNK_PATTERNS: frozenset[str] = frozenset({
     "test_keyword",
     "sample_data",
 })
+
+
+def _is_recent_for_dedup(raw_created_at: object, cutoff: datetime) -> bool:
+    if raw_created_at is None:
+        return True
+    if isinstance(raw_created_at, datetime):
+        value = raw_created_at if raw_created_at.tzinfo else raw_created_at.replace(tzinfo=timezone.utc)
+        return value >= cutoff
+    if isinstance(raw_created_at, str):
+        text = raw_created_at.strip()
+        if not text:
+            return True
+        try:
+            if text.endswith("Z"):
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            else:
+                parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed >= cutoff
+        except ValueError:
+            return True
+    return True
 
 
 @bp.route("/produce", methods=["POST"])
@@ -400,6 +429,34 @@ def produce():
 
     log.info("TRACE-8: generate_smart_query() complete.",
              smart_keyword_count=len(smart_keywords))
+    _query_memory_cap = 80
+    _prior_query_memory = campaign.get("_query_novelty_memory_signatures") or []
+    _prior_query_memory = [str(sig).strip() for sig in _prior_query_memory if str(sig).strip()]
+    _executed_query_signatures: list[str] = []
+
+    def _persist_query_memory() -> None:
+        if not _executed_query_signatures:
+            return
+        merged: list[str] = []
+        seen: set[str] = set()
+        for sig in _executed_query_signatures + _prior_query_memory:
+            if not sig or sig in seen:
+                continue
+            seen.add(sig)
+            merged.append(sig)
+            if len(merged) >= _query_memory_cap:
+                break
+        try:
+            campaign_ref.update({
+                "_query_novelty_memory_signatures": merged,
+                "_query_novelty_memory_updated_at": firestore.SERVER_TIMESTAMP,
+            })
+        except Exception as _memory_exc:
+            log.warning(
+                "produce_query_memory_update_failed",
+                campaign_id=campaign_id,
+                error=str(_memory_exc),
+            )
 
     def _run_signal_harvest_pathway(campaign_snapshot: dict) -> dict:
         """Run multi-source signal harvest with a bounded wait for metrics."""
@@ -551,6 +608,35 @@ def produce():
         campaign_id=campaign_id,
         **_govern_stats,
     )
+    _escalation_level = int(campaign.get("_query_exhaustion_escalation_level") or 0)
+    if _escalation_level > 0:
+        _escalation_queries = build_exhaustion_escalation_queries(
+            campaign=campaign,
+            location=location,
+            level=_escalation_level,
+        )
+        if _escalation_queries:
+            smart_keywords = _escalation_queries + smart_keywords
+            log.info(
+                "produce_query_exhaustion_escalation_applied",
+                campaign_id=campaign_id,
+                escalation_level=_escalation_level,
+                injected=len(_escalation_queries),
+            )
+
+    _memory_filtered = filter_queries_against_memory(
+        smart_keywords,
+        prior_signatures=_prior_query_memory,
+        keep_minimum=2,
+    )
+    smart_keywords = _memory_filtered.get("queries", []) or []
+    if int(_memory_filtered.get("dropped") or 0) > 0:
+        log.info(
+            "produce_query_memory_filter_applied",
+            campaign_id=campaign_id,
+            dropped=int(_memory_filtered.get("dropped") or 0),
+            kept=int(_memory_filtered.get("kept") or 0),
+        )
     if not smart_keywords:
         log.warning(
             "produce_query_governance_empty",
@@ -604,6 +690,8 @@ def produce():
                 note="Garbage query blocked before Serper call — saves 1 credit.",
             )
             continue
+
+        _executed_query_signatures.append(query_signature(search_query))
 
         # V25.3.0: Split Serper strategy by sourcing vector.
         # B2B niche queries (boolean dorks with buyer-language phrases) return
@@ -775,10 +863,12 @@ def produce():
         known_docs = list(
             get_db().collection("leads")
             .where(filter=FieldFilter("tenant_id", "==", tenant_id))
-            .select(["url"])
+            .select(["url", "createdAt"])
             .limit(_DEDUP_SCAN_LIMIT)
             .stream()
         )
+        _dedup_recrawl_days = max(1, min(120, int(os.environ.get("DEDUP_RECRAWL_DAYS", "30"))))
+        _dedup_cutoff = datetime.now(timezone.utc) - timedelta(days=_dedup_recrawl_days)
         if len(known_docs) == _DEDUP_SCAN_LIMIT:
             log.warning("produce_dedup_scan_cap_hit",
                         tenant_id=tenant_id,
@@ -786,8 +876,12 @@ def produce():
                         note="Dedup scan capped. Tenant may have >500 leads. "
                              "Implement cursor pagination (SF-005) to prevent re-scrape.")
         for doc in known_docs:
-            u = (doc.to_dict() or {}).get("url", "")
+            lead_data = doc.to_dict() or {}
+            u = lead_data.get("url", "")
+            _created_at = lead_data.get("createdAt")
             if u:
+                if not _is_recent_for_dedup(_created_at, _dedup_cutoff):
+                    continue
                 d_domain = extract_root_domain(u)
                 d_is_social = any(
                     d_domain.endswith(s)
@@ -852,11 +946,19 @@ def produce():
     # query_brain to generate fresh query angles next cycle.
     # ------------------------------------------------------------------
     _exhaustion_counter_field = "_query_exhaustion_consecutive_zeros"
+    _exhaustion_level_field = "_query_exhaustion_escalation_level"
     if queued_count == 0:
         _prev_zeros = campaign.get(_exhaustion_counter_field, 0)
         _new_zeros = _prev_zeros + 1
+        _prev_level = int(campaign.get(_exhaustion_level_field) or 0)
+        _next_level = _prev_level
+        _update_payload: dict[str, object] = {_exhaustion_counter_field: _new_zeros}
+        if _new_zeros >= 2:
+            _next_level = min(_prev_level + 1, 3)
+            _update_payload[_exhaustion_level_field] = _next_level
+            _update_payload["_force_query_refresh"] = True
         try:
-            campaign_ref.update({_exhaustion_counter_field: _new_zeros})
+            campaign_ref.update(_update_payload)
         except Exception:
             pass  # non-fatal metadata
         if _new_zeros >= 3:
@@ -867,17 +969,19 @@ def produce():
                 note="Market may be saturated or queries are stale. "
                      "query_brain should generate fresh query angles.",
             )
-            # Set a flag that query_brain reads on the next cycle
-            try:
-                campaign_ref.update({"_force_query_refresh": True})
-            except Exception:
-                pass
+            log.warning(
+                "produce_query_exhaustion_escalation",
+                campaign_id=campaign_id,
+                consecutive_zero_cycles=_new_zeros,
+                escalation_level=_next_level,
+            )
     else:
         # Reset counter on successful produce
-        if campaign.get(_exhaustion_counter_field, 0) > 0:
+        if campaign.get(_exhaustion_counter_field, 0) > 0 or int(campaign.get(_exhaustion_level_field) or 0) > 0:
             try:
                 campaign_ref.update({
                     _exhaustion_counter_field: 0,
+                    _exhaustion_level_field: 0,
                     "_force_query_refresh": firestore.DELETE_FIELD,
                 })
             except Exception:
@@ -895,6 +999,7 @@ def produce():
     # would cause the 200-URL cap to silently discard fresh signals.
     _queue_depth = len(current_queue) if current_queue else 0
     if _queue_depth > 150:
+        _persist_query_memory()
         log.info(
             "produce_skipped_queue_full",
             campaign_id=campaign_id,
@@ -913,6 +1018,7 @@ def produce():
     _capped_fresh = fresh_urls[:_remaining_capacity] if fresh_urls else []
 
     if not _capped_fresh:
+        _persist_query_memory()
         log.info(
             "produce_no_fresh_after_cap",
             campaign_id=campaign_id,
@@ -967,6 +1073,7 @@ def produce():
         )
         return jsonify({"error": "Queue write failed", "details": str(exc)}), 500
 
+    _persist_query_memory()
     combined_queue = current_queue + _capped_fresh  # For response metrics only
 
     # ------------------------------------------------------------------

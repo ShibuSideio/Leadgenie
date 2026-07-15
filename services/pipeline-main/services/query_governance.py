@@ -1,6 +1,7 @@
 """Query governance layer for production-safe Serper query portfolios."""
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -41,6 +42,21 @@ _REVIEW_HINTS = ("trustpilot.com", "g2.com", "capterra.com", "yelp.com", "google
 
 def _normalize_space(value: str) -> str:
     return re.sub(r"\s{2,}", " ", (value or "").strip())
+
+
+def _dedupe_preserve(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        value = _normalize_space(item)
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
 
 
 def _main_location_token(location: str) -> str:
@@ -244,3 +260,85 @@ def govern_query_portfolio(
             "sourcing_vector": (sourcing_vector or "").upper().strip() or "UNKNOWN",
         },
     }
+
+
+def query_signature(query: str) -> str:
+    normalized = _normalize_space(query).lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def filter_queries_against_memory(
+    candidate_queries: list[str],
+    prior_signatures: list[str],
+    keep_minimum: int = 2,
+) -> dict[str, Any]:
+    prior = {str(sig).strip() for sig in (prior_signatures or []) if str(sig).strip()}
+    kept: list[str] = []
+    dropped = 0
+    for query in candidate_queries or []:
+        sig = query_signature(query)
+        if sig in prior:
+            dropped += 1
+            continue
+        kept.append(query)
+    if not kept and candidate_queries:
+        kept = list(candidate_queries[:max(1, keep_minimum)])
+    return {
+        "queries": kept,
+        "dropped": dropped,
+        "kept": len(kept),
+    }
+
+
+def build_exhaustion_escalation_queries(
+    campaign: dict[str, Any],
+    location: str,
+    level: int,
+) -> list[str]:
+    if level <= 0:
+        return []
+
+    strategy = campaign.get("intelligence_strategy") or {}
+    primary = str(strategy.get("primary") or "").upper().strip()
+    location_token = _main_location_token(location)
+    location_phrase = f' "{location_token}"' if location_token else ""
+    keywords_raw = (campaign.get("persona_keywords") or campaign.get("keywords") or "").strip()
+    keyword_hint = ""
+    if keywords_raw:
+        keyword_hint = keywords_raw.split(",")[0].strip().strip('"')
+    keyword_phrase = f' "{keyword_hint}"' if keyword_hint else ""
+
+    templates: list[str] = []
+    if primary == "PLATFORM_MINING":
+        templates.extend(_build_platform_templates(campaign, needed=4, location_token=location_token))
+        templates.extend(
+            [
+                _normalize_space(f'site:google.com/maps ("agent" OR "broker"){location_phrase}{keyword_phrase}'),
+                _normalize_space(f'site:facebook.com ("property agent" OR "real estate broker"){location_phrase}{keyword_phrase}'),
+            ]
+        )
+    else:
+        templates.extend(
+            [
+                _normalize_space(f'site:reddit.com/r/smallbusiness ("need help" OR "recommend"){location_phrase}{keyword_phrase}'),
+                _normalize_space(f'site:quora.com ("looking for" OR "alternatives"){location_phrase}{keyword_phrase}'),
+                _normalize_space(f'site:trustpilot.com ("review" OR "experience"){location_phrase}{keyword_phrase}'),
+            ]
+        )
+
+    if level >= 2:
+        templates.extend(
+            [
+                _normalize_space(f'site:linkedin.com/posts ("evaluating" OR "looking for"){location_phrase}{keyword_phrase}'),
+                _normalize_space(f'site:youtube.com ("review" OR "comparison"){location_phrase}{keyword_phrase}'),
+            ]
+        )
+    if level >= 3:
+        templates.extend(
+            [
+                _normalize_space(f'site:news.google.com ("announced" OR "expansion"){location_phrase}{keyword_phrase}'),
+                _normalize_space(f'site:indiamart.com ("supplier" OR "vendor"){location_phrase}{keyword_phrase}'),
+            ]
+        )
+
+    return _dedupe_preserve([q for q in templates if q])[:8]
