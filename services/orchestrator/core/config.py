@@ -122,8 +122,3 @@ class _LazyModule(_sys.modules[__name__].__class__):
 
 
 _sys.modules[__name__].__class__ = _LazyModule
-```
-```tool
-TOOL_NAME: run_terminal_command
-BEGIN_ARG: command
-"Select-String -Path 'services/orchestrator/core/config.py' -Pattern 'PROJECT_ID: str = os\.environ\["PROJECT_ID"\]' | Select-Object -First 1"

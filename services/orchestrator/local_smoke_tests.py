@@ -33,6 +33,8 @@ if not os.environ["PROJECT_ID"]:  # ENTERPRISE: NO FALLBACKS - FAIL FAST IF UNSE
     os.environ["PROJECT_ID"] = "sideio-leads-v16"
 if not os.environ.get("LOCATION"):
     os.environ["LOCATION"] = "asia-south1"
+if not os.environ.get("VELOCITY_THRESHOLD"):
+    os.environ["VELOCITY_THRESHOLD"] = "10"
 
 # ── sys.path bootstrap ────────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1478,4 +1480,3 @@ else:
 
 print(f"{BOLD}{'='*65}{RESET}\n")
 sys.exit(0 if verdict else 1)
-

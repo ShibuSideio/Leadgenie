@@ -18,7 +18,18 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime
+import os
+import sys
 from typing import Optional
+
+# Make this module importable both in the normal service runtime and when the
+# smoke gate loads it directly from file via importlib.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SERVICE_ROOT = os.path.dirname(_HERE)
+_MONOREPO_SERVICES_ROOT = os.path.dirname(_SERVICE_ROOT)
+for _path in (_SERVICE_ROOT, _MONOREPO_SERVICES_ROOT):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from core.logging import get_logger   # type: ignore[import]
 from core.clients import get_db, get_bq_client  # type: ignore[import]
