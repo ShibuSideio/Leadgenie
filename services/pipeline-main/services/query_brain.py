@@ -418,6 +418,9 @@ def generate_smart_query(
     force_query_refresh: bool = False,
     vocabulary_notes: str = "",
     intelligence_strategy: Optional[dict] = None,
+    campaign_name: str = "",
+    location: str = "",
+    pain_point: str = "",
 ) -> list[str]:
     """Generate Serper query strings via statistical router or Gemini fallback.
 
@@ -439,6 +442,9 @@ def generate_smart_query(
         intelligence_strategy: V26 — Full intelligence_strategy dict from the
                             campaign document. Used for strategy-aware blacklist
                             filtering.
+        campaign_name:      Campaign name for strategy-plan context.
+        location:           Campaign location for geo-aware planning.
+        pain_point:         Campaign pain point for strategy inference.
 
     Returns:
         List of ready-to-use Serper query strings (may be empty on error).
@@ -458,18 +464,18 @@ def generate_smart_query(
         _strategy_plan = build_intelligence_strategy_plan({
             "effective_bio": bio,
             "keywords": ", ".join(user_keywords),
-            "location": "",
-            "name": "",
-            "pain_point": "",
+            "location": location or "",
+            "name": campaign_name or "",
+            "pain_point": pain_point or "",
             "sourcing_vector": sourcing_vector or "",
         })
     else:
         _strategy_plan = build_intelligence_strategy_plan({
             "effective_bio": bio,
             "keywords": ", ".join(user_keywords),
-            "location": "",
-            "name": "",
-            "pain_point": "",
+            "location": location or "",
+            "name": campaign_name or "",
+            "pain_point": pain_point or "",
             "sourcing_vector": sourcing_vector or "",
         })
         if _strategy_plan.get("primary_strategy"):
@@ -1644,4 +1650,3 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
                      note="Stripped strategy-conflicting -site: exclusions from Gemini-generated dorks.")
 
     return [_clean_query_syntax(q) for q in smart_queries]
-

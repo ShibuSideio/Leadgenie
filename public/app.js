@@ -1116,6 +1116,7 @@ async function loadLeads() {
                 snapshot.forEach(doc => {
                     let data = doc.data();
                     data.id = doc.id;
+                    if ((data.status || 'new') !== 'new') return;
                     rawLeadsCache.push(data);
                     _leadsMap.set(doc.id, data);  // O(1) lookup for observer
                     // V23.9: Raw data shape logger — traces ALL leads for Radar debugging
@@ -1208,7 +1209,7 @@ function renderLeads() {
     const baseData = (CURRENT_FEED_MODE === 'inbound') ? inboundCache : outboundCache;
 
     const filteredLeads = baseData.filter(lead => {
-        if (!['new', 'contacted', 'converted', 'queued', 'processing', 'failed'].includes(lead.status || 'new')) return false;
+        if ((lead.status || 'new') !== 'new') return false;
         if (currentCampaignFilter !== 'all') {
             const matched = Array.isArray(lead.matched_campaigns)
                 ? lead.matched_campaigns.includes(currentCampaignFilter)

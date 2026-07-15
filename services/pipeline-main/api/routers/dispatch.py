@@ -511,12 +511,15 @@ def dispatch():
                 fut    = pool.submit(pre_filter_gemini, synthetic_snippets, bio, location)
                 tiered = fut.result(timeout=30)
         except Exception as _pf_err:
-            log.warning("pre_filter_timeout_all_urls_approved",
+            _PREFILTER_DEGRADED_HIGH_CAP = 6
+            _degraded_high = filter_urls[:_PREFILTER_DEGRADED_HIGH_CAP]
+            log.warning("pre_filter_timeout_degraded_mode",
                         error=str(_pf_err),
                         url_count=len(filter_urls),
-                        note="V24.4 (L4-1): Pre-filter gate failed; ALL URLs treated as High-tier. "
-                             "Velocity gate bypassed for this batch. Monitor for quality degradation.")
-            tiered = {"High": filter_urls, "Medium": [], "Low": []}
+                        high_cap=_PREFILTER_DEGRADED_HIGH_CAP,
+                        high_selected=len(_degraded_high),
+                        note="Pre-filter failed; entering degraded quality mode with bounded High-tier pass-through.")
+            tiered = {"High": _degraded_high, "Medium": [], "Low": []}
     else:
         tiered = {"High": [], "Medium": [], "Low": []}
 
@@ -533,21 +536,31 @@ def dispatch():
     # Positional where() is deprecated in google-cloud-firestore >= 2.13.
     velocity_threshold = VELOCITY_THRESHOLD
     try:
-        cutoff_24h   = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
-        recent_count = (
+        cutoff_24h = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
+        recent_new_count = (
             _db().collection("leads")
             .where(filter=FieldFilter("tenant_id", "==", tenant_id))
             .where(filter=FieldFilter("status",    "==", "new"))
             .where(filter=FieldFilter("createdAt", ">=", cutoff_24h))
             .count().get()[0][0].value
         )
+        # Include enrichment backlog in velocity pressure so medium-tier intake
+        # is throttled when operators are already behind on completion quality.
+        recent_enrichment_pending_count = (
+            _db().collection("leads")
+            .where(filter=FieldFilter("tenant_id", "==", tenant_id))
+            .where(filter=FieldFilter("status", "==", "enrichment_pending"))
+            .where(filter=FieldFilter("createdAt", ">=", cutoff_24h))
+            .count().get()[0][0].value
+        )
+        recent_count = recent_new_count + recent_enrichment_pending_count
     except Exception as _vel_err:
-        # V24.4 (L4-2): Velocity gate disabled due to Firestore query failure.
-        # All Medium URLs will pass regardless of actual volume.
+        # Enterprise quality-safe fallback: on velocity gate read failure, block
+        # Medium-tier promotion for this batch instead of fail-open.
         log.warning("velocity_gate_disabled_firestore_error",
                     error=str(_vel_err),
-                    note="Medium URLs will pass without volume check. Monitor lead quality.")
-        recent_count = 0
+                    note="Medium URLs blocked for this batch due to gate read failure.")
+        recent_count = velocity_threshold
 
     allow_medium  = recent_count < velocity_threshold
     approved_urls = high_urls + (medium_urls if allow_medium else [])

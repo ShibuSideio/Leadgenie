@@ -315,7 +315,14 @@ def _score_cluster(
                 for priority in priorities[:4]:
                     if any(s.get("source_type", "") == priority for s in contributing):
                         matched_priority_count += 1
-                strategy_boost = min(26.0, 8.5 + 5.0 * matched_priority_count + 1.5 * len(set(matching_sources)))
+                # Strengthen strategy alignment influence so clusters sourced
+                # from campaign-priority channels rank clearly above generic ones.
+                strategy_boost = min(
+                    42.0,
+                    14.0
+                    + 10.0 * matched_priority_count
+                    + 4.0 * len(set(matching_sources)),
+                )
 
     score = base_score + strategy_boost
     return round(min(score, 100.0), 2)

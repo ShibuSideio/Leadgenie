@@ -384,6 +384,9 @@ def produce():
             force_query_refresh=bool(campaign.get("_force_query_refresh")),
             vocabulary_notes=_vocab_notes,
             intelligence_strategy=_intel_strategy if _intel_strategy else None,
+            campaign_name=(campaign.get("name") or ""),
+            location=location,
+            pain_point=(campaign.get("pain_point") or ""),
         )
     except Exception as exc:
         log.critical(
@@ -396,6 +399,69 @@ def produce():
 
     log.info("TRACE-8: generate_smart_query() complete.",
              smart_keyword_count=len(smart_keywords))
+
+    def _run_signal_harvest_pathway(campaign_snapshot: dict) -> dict:
+        """Run multi-source signal harvest with a bounded wait for metrics."""
+        import os as _os
+        import threading as _threading
+
+        harvest_metrics: dict = {}
+        _harvest_enabled = _os.environ.get("HARVEST_ENABLED", "true").lower() != "false"
+        if not _harvest_enabled:
+            return harvest_metrics
+
+        _serper_key_for_harvest = ""
+        try:
+            from core.clients import get_serper_key  # type: ignore[import]
+            _serper_key_for_harvest = get_serper_key() or ""
+        except Exception:
+            pass  # SerperDiscoverySource will be skipped without a key
+
+        _campaign_with_id = {
+            **campaign_snapshot,
+            "id": campaign_id,
+            "tenant_id": tenant_id,
+        }
+        harvest_result_holder: list[dict] = []
+
+        def _run_harvest() -> None:
+            try:
+                from services.signal_harvest import harvest_signals  # type: ignore[import]
+                result = harvest_signals(
+                    campaign=_campaign_with_id,
+                    db=get_db(),
+                    serper_api_key=_serper_key_for_harvest,
+                )
+                harvest_result_holder.append(result)
+            except Exception as _h_exc:
+                log.warning(
+                    "signal_harvest_thread_failed",
+                    campaign_id=campaign_id,
+                    error=str(_h_exc),
+                )
+
+        harvest_thread = _threading.Thread(target=_run_harvest, daemon=True)
+        harvest_thread.start()
+        # 5-minute wall-clock budget: Google Reviews (5 competitors × 10 reviews
+        # each) + PRISM enrichment + Gemini inline scoring can exceed 3 minutes.
+        # 300s accommodates worst-case Serper + Gemini latency chains.
+        harvest_thread.join(timeout=300)
+
+        if harvest_result_holder:
+            harvest_metrics = harvest_result_holder[0]
+            log.info(
+                "signal_harvest_pathway_complete",
+                campaign_id=campaign_id,
+                **harvest_metrics,
+            )
+        elif harvest_thread.is_alive():
+            log.warning(
+                "signal_harvest_thread_timeout",
+                campaign_id=campaign_id,
+                note="Harvest exceeded 300s wait budget. Continuing without harvest metrics for this response.",
+            )
+
+        return harvest_metrics
 
     # ------------------------------------------------------------------
     # FIX (2026-06-21): Post-generation query sanitizer.
@@ -418,10 +484,11 @@ def produce():
         )
 
     if not smart_keywords:
+        harvest_metrics = _run_signal_harvest_pathway(campaign)
         log.warning(
             "produce_all_queries_sanitized_empty",
             campaign_id=campaign_id,
-            note="All generated queries were system junk. Nothing to search.",
+            note="All generated queries were system junk. Running signal_harvest fallback.",
         )
         return jsonify({
             "status": "produced",
@@ -430,6 +497,7 @@ def produce():
             "queued": 0,
             "queue_depth": len(campaign.get("unprocessed_queue", [])),
             "warning": "All queries sanitized as system junk.",
+            "harvest": harvest_metrics,
         }), 200
 
     # Telemetry: bill the expected Serper calls
@@ -877,74 +945,9 @@ def produce():
 
     # ------------------------------------------------------------------
     # V25.1.0: Signal Harvest — multi-source intent discovery pathway.
-    #
-    # Runs AFTER the Serper queue write so it cannot block the primary
-    # produce flow. Uses a daemon thread with a 180s wall-clock budget.
-    # The harvest writes directly to scraped_cache and unprocessed_queue
-    # (same collections as the Serper pathway) — dispatch processes both
-    # without any changes.
-    #
-    # Harvest is skipped when:
-    #   - Queue is already saturated (handled above by backpressure gate)
-    #   - HARVEST_ENABLED env var is "false" (opt-out for debugging)
+    # Runs after Serper queue write so it cannot block query production.
     # ------------------------------------------------------------------
-    import os as _os
-    import threading as _threading
-
-    harvest_metrics: dict = {}
-    _harvest_enabled = _os.environ.get("HARVEST_ENABLED", "true").lower() != "false"
-
-    if _harvest_enabled:
-        # Extract Serper key for signal_harvest's SerperDiscoverySource
-        # (same key already used by the Serper pathway above)
-        _serper_key_for_harvest = ""
-        try:
-            from core.clients import get_serper_key  # type: ignore[import]
-            _serper_key_for_harvest = get_serper_key() or ""
-        except Exception:
-            pass  # SerperDiscoverySource will be skipped without a key
-
-        # Add campaign id to dict for signal_harvest (it's read from dict)
-        _campaign_with_id = {**campaign, "id": campaign_id, "tenant_id": tenant_id}
-
-        harvest_result_holder: list[dict] = []
-
-        def _run_harvest() -> None:
-            try:
-                from services.signal_harvest import harvest_signals  # type: ignore[import]
-                result = harvest_signals(
-                    campaign      = _campaign_with_id,
-                    db            = get_db(),
-                    serper_api_key= _serper_key_for_harvest,
-                )
-                harvest_result_holder.append(result)
-            except Exception as _h_exc:
-                log.warning(
-                    "signal_harvest_thread_failed",
-                    campaign_id=campaign_id,
-                    error=str(_h_exc),
-                )
-
-        harvest_thread = _threading.Thread(target=_run_harvest, daemon=True)
-        harvest_thread.start()
-        # 5-minute wall-clock budget: Google Reviews (5 competitors × 10 reviews
-        # each) + PRISM enrichment + Gemini inline scoring can exceed 3 minutes.
-        # 300s accommodates worst-case Serper + Gemini latency chains.
-        harvest_thread.join(timeout=300)
-
-        if harvest_result_holder:
-            harvest_metrics = harvest_result_holder[0]
-            log.info(
-                "signal_harvest_pathway_complete",
-                campaign_id=campaign_id,
-                **harvest_metrics,
-            )
-        elif harvest_thread.is_alive():
-            log.warning(
-                "signal_harvest_thread_timeout",
-                campaign_id=campaign_id,
-                note="Harvest thread exceeded 300s budget. Results discarded.",
-            )
+    harvest_metrics = _run_signal_harvest_pathway(campaign)
 
     log.info("TRACE-DONE: produce() complete.",
              campaign_id=campaign_id, queue_depth=len(_capped_fresh))

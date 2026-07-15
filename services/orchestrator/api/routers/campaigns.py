@@ -55,7 +55,31 @@ log = get_logger("orchestrator.v23.campaigns")
 
 MAX_CHILD_CAMPAIGNS = int(os.environ.get("MAX_CHILD_CAMPAIGNS", 5))
 
-_CAMPAIGN_UPDATE_ALLOWED = {"name", "bio", "keywords", "status", "gl", "location", "persona_id", "drip_interval_minutes", "geo_hierarchy", "updatedAt", "sourcing_vector", "next_produce_due"}
+_CAMPAIGN_UPDATE_ALLOWED = {
+    "name",
+    "bio",
+    "keywords",
+    "status",
+    "gl",
+    "location",
+    "persona_id",
+    "drip_interval_minutes",
+    "geo_hierarchy",
+    "updatedAt",
+    "sourcing_vector",
+    "next_produce_due",
+    # Rich campaign context fields used by context_builder/query_brain
+    "campaign_focus",
+    "pain_point",
+    "target_angle_hook",
+    "target_angle_adv",
+    "unfair_advantage",
+    "effective_bio",
+    "persona_bio",
+    "persona_keywords",
+    "persona_name",
+    "persona_targeting_signals",
+}
 
 # ---------------------------------------------------------------------------
 # FIX (2026-06-21): Campaign field sanitizer — server-side write boundary.
@@ -502,6 +526,21 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
     existing_data = doc_data.to_dict() or {}
     _keywords_changed = "keywords" in data and data.get("keywords") != existing_data.get("keywords")
     _bio_changed = "bio" in data and data.get("bio") != existing_data.get("bio")
+    _context_fields = (
+        "campaign_focus",
+        "pain_point",
+        "target_angle_hook",
+        "target_angle_adv",
+        "unfair_advantage",
+        "effective_bio",
+        "location",
+        "persona_keywords",
+        "persona_bio",
+    )
+    _context_changed = any(
+        f in data and data.get(f) != existing_data.get(f)
+        for f in _context_fields
+    )
 
     if "bio" in data and data["bio"]:
         weights = get_vector_weights()
@@ -525,7 +564,7 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
     data.pop("strategy_override", None)  # Strip client-side override — backend is authoritative
 
     _needs_reclassify = (
-        _keywords_changed or _bio_changed
+        _keywords_changed or _bio_changed or _context_changed
         or not existing_data.get("intelligence_strategy", {}).get("primary")
     )
     if _needs_reclassify:
@@ -553,7 +592,13 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
                 log.info("intelligence_strategy_auto_reclassified",
                          campaign_id=doc_id,
                          primary=_new_strategy.get("primary"),
-                         trigger="bio_keywords_changed" if (_keywords_changed or _bio_changed) else "legacy_upgrade")
+                         trigger=(
+                             "context_changed"
+                             if _context_changed
+                             else "bio_keywords_changed"
+                             if (_keywords_changed or _bio_changed)
+                             else "legacy_upgrade"
+                         ))
             except Exception as _strat_err:
                 log.warning("intelligence_strategy_reclassify_failed",
                             campaign_id=doc_id, error=str(_strat_err))
