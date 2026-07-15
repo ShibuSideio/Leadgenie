@@ -63,6 +63,9 @@ def build_enriched_context(campaign: dict) -> str:
 
     parts: list[str] = []
     seen_content: set[str] = set()
+    _system_enrichment = campaign.get("system_enrichment", {})
+    if not isinstance(_system_enrichment, dict):
+        _system_enrichment = {}
 
     def _add(label: str, value: str, max_chars: int = 600) -> bool:
         value = _clean(value)
@@ -97,7 +100,10 @@ def build_enriched_context(campaign: dict) -> str:
     # keywords = rich market pain context authored at campaign creation
     # persona_keywords = ICP-specific keyword signals
     _keywords         = _clean(campaign.get("keywords", ""))
-    _persona_keywords = _clean(campaign.get("persona_keywords", ""))
+    _persona_keywords = _clean(
+        campaign.get("persona_keywords", "")
+        or _system_enrichment.get("derived_persona_keywords", "")
+    )
     _add("MARKET CONTEXT", _keywords, max_chars=600)
     _add("ICP KEYWORDS", _persona_keywords, max_chars=300)
 
@@ -119,14 +125,20 @@ def build_enriched_context(campaign: dict) -> str:
     # target_angle_hook = what message resonates with the buyer
     # unfair_advantage  = the seller s differentiator
     # Both tell Gemini WHAT KIND OF BUYER this campaign attracts
-    _hook = _clean(campaign.get("target_angle_hook", ""))
+    _hook = _clean(
+        campaign.get("target_angle_hook", "")
+        or _system_enrichment.get("derived_target_angle_hook", "")
+    )
     _adv  = _clean(campaign.get("target_angle_adv", ""))
-    _ua   = _clean(campaign.get("unfair_advantage", ""))
+    _ua   = _clean(
+        campaign.get("unfair_advantage", "")
+        or _system_enrichment.get("derived_unfair_advantage", "")
+    )
     _add("BUYER HOOK", _hook, max_chars=300)
     _add("COMPETITIVE ADVANTAGE", _ua or _adv, max_chars=300)
 
     # Layer 6: Targeting Signals (positive intent signals only)
-    _targeting = campaign.get("persona_targeting_signals") or []
+    _targeting = campaign.get("persona_targeting_signals") or _system_enrichment.get("derived_targeting_signals") or []
     if isinstance(_targeting, list):
         _positive = [
             s for s in _targeting
@@ -136,7 +148,7 @@ def build_enriched_context(campaign: dict) -> str:
             _add("INTENT SIGNALS", ", ".join(_positive), max_chars=300)
 
     # Layer 7: Geographic Context
-    _location = _clean(campaign.get("location", ""))
+    _location = _clean(campaign.get("location", "") or _system_enrichment.get("normalized_location", ""))
     _geo      = campaign.get("geo_hierarchy", {})
     _country  = _clean(_geo.get("country", "")) if isinstance(_geo, dict) else ""
     _region   = _clean(_geo.get("region",  "")) if isinstance(_geo, dict) else ""

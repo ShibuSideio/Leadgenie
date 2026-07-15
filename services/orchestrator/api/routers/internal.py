@@ -12,6 +12,7 @@ Routes:
   POST /api/internal/credits/settle
   POST /api/internal/cron/sweep            (Serper produce fan-out, every 24h)
   POST /api/internal/cron/harvest-sweep   (Signal harvest fan-out, every 4h — V25.2.0)
+  POST /api/internal/campaign-enrichment-run
   POST /api/internal/cron/reflection
   POST /api/internal/cron/ontology-decay
   POST /api/telemetry/conversion_feedback
@@ -1543,3 +1544,45 @@ def trigger_inbound_sentiment():
     t.start()
     log.info("inbound_sentiment_trigger_accepted")
     return jsonify({"status": "accepted", "message": "Inbound sentiment job started"}), 202
+
+
+# =============================================================================
+# POST /api/internal/campaign-enrichment-run
+# Backfill and refresh enrichment for active campaigns in a daemon thread.
+# =============================================================================
+@bp.route("/api/internal/campaign-enrichment-run", methods=["POST"])
+def trigger_campaign_enrichment_run():
+    import os as _os
+    import threading
+
+    internal_secret = _os.environ.get("INTERNAL_CRON_SECRET", "")
+    provided_secret = request.headers.get("X-Internal-Secret", "")
+    cloud_tasks_hdr = request.headers.get("X-CloudTasks-QueueName", "")
+
+    if not internal_secret:
+        log.error(
+            "campaign_enrichment_trigger_secret_not_configured",
+            note="INTERNAL_CRON_SECRET env var is not set. Backfill trigger disabled.",
+        )
+        return jsonify({"error": "Service not configured — contact administrator"}), 503
+
+    if provided_secret != internal_secret and not cloud_tasks_hdr:
+        log.warning(
+            "campaign_enrichment_trigger_unauthorized",
+            has_queue_header=bool(cloud_tasks_hdr),
+            has_secret=bool(provided_secret),
+        )
+        return jsonify({"error": "unauthorized"}), 401
+
+    def _run():
+        try:
+            from jobs.campaign_enrichment_job import run  # type: ignore[import]
+            result = run()
+            log.info("campaign_enrichment_job_finished", **result)
+        except Exception as exc:
+            log.error("campaign_enrichment_job_error", error=str(exc))
+
+    t = threading.Thread(target=_run, daemon=True, name="campaign-enrichment-job")
+    t.start()
+    log.info("campaign_enrichment_trigger_accepted")
+    return jsonify({"status": "accepted", "message": "Campaign enrichment job started"}), 202

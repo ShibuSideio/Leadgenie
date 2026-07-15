@@ -25,6 +25,8 @@ from core.clients import get_db, get_tasks_client  # type: ignore[import]
 from core.config import PROJECT_ID, LOCATION, QUEUE, PIPELINE_URL  # type: ignore[import]
 from core.auth import require_auth  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
+from shared.campaign_enrichment import derive_campaign_enrichment  # type: ignore[import]
+from shared.intelligence_profile import infer_campaign_intelligence_profile  # type: ignore[import]
 from core.helpers import (  # type: ignore[import]
     check_quota,
     get_service_account_email,
@@ -79,6 +81,8 @@ _CAMPAIGN_UPDATE_ALLOWED = {
     "persona_keywords",
     "persona_name",
     "persona_targeting_signals",
+    "intelligence_strategy",
+    "system_enrichment",
 }
 
 # ---------------------------------------------------------------------------
@@ -223,7 +227,11 @@ def create_campaign(uid, tenant_id, user_role):
         return jsonify({"error": err_msg}), status_code
 
     data = request.json or {}
+    data.pop("intelligence_strategy", None)
+    data.pop("system_enrichment", None)
     data.pop("tenant_id", None)
+    data.pop("intelligence_strategy", None)
+    data.pop("system_enrichment", None)
 
     name = (data.get("name") or "").strip()
     if not name or len(name) > 200:
@@ -387,6 +395,7 @@ def create_campaign(uid, tenant_id, user_role):
     else:
         _strategy_bio_final = ""
 
+    _intel_strategy = {}
     if _strategy_bio_final:
         try:
             _intel_strategy = classify_intelligence_strategy(
@@ -419,6 +428,27 @@ def create_campaign(uid, tenant_id, user_role):
         except Exception as _strat_exc:
             log.warning("intelligence_strategy_classification_failed",
                         campaign_id=doc_ref.id, error=str(_strat_exc))
+
+    _enrichment_payload = dict(data)
+    _enrichment_payload["id"] = doc_ref.id
+    if "vector" in locals():
+        _enrichment_payload["sourcing_vector"] = vector
+    if _intel_strategy:
+        _enrichment_payload["intelligence_strategy"] = _intel_strategy
+    try:
+        _enrichment_updates = derive_campaign_enrichment(_enrichment_payload)
+        if _enrichment_updates:
+            doc_ref.update(_enrichment_updates)
+            data.update({k: v for k, v in _enrichment_updates.items() if k != "system_enrichment"})
+            log.info(
+                "campaign_auto_enriched",
+                campaign_id=doc_ref.id,
+                has_persona_keywords=bool(_enrichment_updates.get("persona_keywords")),
+                has_targeting_signals=bool(_enrichment_updates.get("persona_targeting_signals")),
+                normalized_location=_enrichment_updates.get("location", ""),
+            )
+    except Exception as _enrich_exc:
+        log.warning("campaign_auto_enrichment_failed", campaign_id=doc_ref.id, error=str(_enrich_exc))
 
     # Zero-wait timestamps
     now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -588,7 +618,7 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
                     sourcing_vector=_reclass_sv,
                     location=_reclass_loc,
                 )
-                doc_ref.update({"intelligence_strategy": _new_strategy})
+                data["intelligence_strategy"] = _new_strategy
                 log.info("intelligence_strategy_auto_reclassified",
                          campaign_id=doc_id,
                          primary=_new_strategy.get("primary"),
@@ -602,6 +632,22 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
             except Exception as _strat_err:
                 log.warning("intelligence_strategy_reclassify_failed",
                             campaign_id=doc_id, error=str(_strat_err))
+
+    _enrichment_snapshot = dict(existing_data)
+    _enrichment_snapshot.update(data)
+    try:
+        _enrichment_updates = derive_campaign_enrichment(_enrichment_snapshot)
+        if _enrichment_updates:
+            data.update(_enrichment_updates)
+            log.info(
+                "campaign_auto_reenriched",
+                campaign_id=doc_id,
+                has_persona_keywords=bool(_enrichment_updates.get("persona_keywords")),
+                has_targeting_signals=bool(_enrichment_updates.get("persona_targeting_signals")),
+                normalized_location=_enrichment_updates.get("location", ""),
+            )
+    except Exception as _enrich_err:
+        log.warning("campaign_auto_reenrichment_failed", campaign_id=doc_id, error=str(_enrich_err))
 
     data = {k: v for k, v in data.items() if k in _CAMPAIGN_UPDATE_ALLOWED}
 
