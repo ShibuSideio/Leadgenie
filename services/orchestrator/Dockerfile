@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-COPY requirements.txt .
+WORKDIR /app/services/orchestrator
+COPY services/orchestrator/requirements.txt ./requirements.txt
 
 # --prefer-binary: always use pre-built wheels, never compile from source.
 # --only-binary=grpcio,grpcio-status,protobuf: hard block on C++ source builds
@@ -15,7 +15,8 @@ RUN pip install --no-cache-dir \
 # CACHEBUST: increment to force a clean layer rebuild and guarantee
 # the container picks up the latest source tree (no stale main.py).
 ARG CACHEBUST=2
-COPY . .
+COPY services/orchestrator /app/services/orchestrator
+COPY services/shared /app/services/shared
 
 # Explicit V23 entrypoint — gunicorn must load main_v23:app, never main:app.
 CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "8", "--timeout", "0", "main_v23:app"]

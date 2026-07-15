@@ -208,11 +208,13 @@ steps:
   args:
   - build
   - --no-cache
+  - -f
+  - services/orchestrator/Dockerfile
   - -t
   - gcr.io/$PROJECT_ID/lead-orchestrator:$COMMIT_SHA
   - -t
   - gcr.io/$PROJECT_ID/lead-orchestrator:latest
-  - ./services/orchestrator
+  - .
 
 - id: 'build-pipeline-main'
   waitFor: ['gate-passed']
@@ -377,7 +379,7 @@ steps:
       --timeout=300 \
       --no-allow-unauthenticated \
       --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com \
-      --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,ORCHESTRATOR_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,SCHEDULER_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,INTERNAL_CRON_SECRET=$$INTERNAL_CRON_SECRET \
+      --update-env-vars=PROJECT_ID=$PROJECT_ID,QUEUE=lead-pipeline-queue,LOCATION=asia-south1,VELOCITY_THRESHOLD=10,PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,ORCHESTRATOR_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,SCHEDULER_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,INTERNAL_CRON_SECRET=$$INTERNAL_CRON_SECRET \
       --quiet
   secretEnv: ['INTERNAL_CRON_SECRET']
 
@@ -831,4 +833,3 @@ availableSecrets:
     env: 'FIREBASE_SA_KEY'
   - versionName: projects/lead-sniper-prod/secrets/INTERNAL_CRON_SECRET/versions/latest
     env: 'INTERNAL_CRON_SECRET'
-
