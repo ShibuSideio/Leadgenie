@@ -844,6 +844,7 @@ def produce():
                     "tech_stack": [],
                     "emails":     [],
                     "phones":     [],
+                    "cached_at":  firestore.SERVER_TIMESTAMP,
                 }, merge=True)
             except Exception as exc:
                 log.warning("snippet_persist_failed", url=surl, error=str(exc))
@@ -863,7 +864,7 @@ def produce():
         known_docs = list(
             get_db().collection("leads")
             .where(filter=FieldFilter("tenant_id", "==", tenant_id))
-            .select(["url", "createdAt"])
+            .select(["url", "createdAt", "status"])
             .limit(_DEDUP_SCAN_LIMIT)
             .stream()
         )
@@ -879,8 +880,18 @@ def produce():
             lead_data = doc.to_dict() or {}
             u = lead_data.get("url", "")
             _created_at = lead_data.get("createdAt")
+            _status = str(lead_data.get("status") or "").strip().lower()
             if u:
                 if not _is_recent_for_dedup(_created_at, _dedup_cutoff):
+                    continue
+                if _status in {
+                    "scored_out",
+                    "rlhf_filtered",
+                    "failed",
+                    "failed_scrape",
+                    "failed_eval",
+                    "failed_vertex_timeout",
+                }:
                     continue
                 d_domain = extract_root_domain(u)
                 d_is_social = any(

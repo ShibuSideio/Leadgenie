@@ -19,6 +19,7 @@ def calculate_lead_confidence(
     is_thin_payload: bool = False,
     is_thin_bio: bool = False,
     campaign: Optional[Dict[str, Any]] = None,
+    threshold_adjustment: float = 0.0,
 ) -> Dict[str, Any]:
     """Return a deterministic confidence bundle and promotion decision."""
     eval_data = evaluation or {}
@@ -89,6 +90,7 @@ def calculate_lead_confidence(
     if is_thin_bio:
         threshold = 64.0
 
+    threshold = max(45.0, min(78.0, threshold + float(threshold_adjustment or 0.0)))
     promotion = confidence_score >= threshold
     return {
         "confidence_score": confidence_score,
@@ -107,4 +109,5 @@ def calculate_lead_confidence(
         "is_harvest_lead": is_harvest_lead,
         "is_thin_payload": is_thin_payload,
         "is_thin_bio": is_thin_bio,
+        "threshold_adjustment": round(float(threshold_adjustment or 0.0), 2),
     }

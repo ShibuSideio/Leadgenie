@@ -50,3 +50,24 @@ def test_confidence_gate_blocks_weak_signals():
         is_thin_payload=True,
     )
     assert bundle["promotion"] is False
+
+
+def test_confidence_threshold_adjustment_relaxes_gate_in_recovery():
+    lead_confidence = _load_module("services.lead_confidence", "services/lead_confidence.py")
+    baseline = lead_confidence.calculate_lead_confidence(
+        evaluation={"score": 6, "tier": "MEDIUM", "topic_coherence": 0.62, "pain_summary": "Need better pipeline"},
+        text="Need help improving lead flow and recommendations for tools",
+        url="https://forum.example.com/thread",
+        source_tier="Medium",
+        is_harvest_lead=False,
+        threshold_adjustment=0.0,
+    )
+    relaxed = lead_confidence.calculate_lead_confidence(
+        evaluation={"score": 6, "tier": "MEDIUM", "topic_coherence": 0.62, "pain_summary": "Need better pipeline"},
+        text="Need help improving lead flow and recommendations for tools",
+        url="https://forum.example.com/thread",
+        source_tier="Medium",
+        is_harvest_lead=False,
+        threshold_adjustment=-8.0,
+    )
+    assert relaxed["confidence_threshold"] < baseline["confidence_threshold"]

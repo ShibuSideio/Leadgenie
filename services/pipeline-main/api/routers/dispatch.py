@@ -51,6 +51,7 @@ from services.serper_service import (  # type: ignore[import]
 )
 from services.gemini_service import pre_filter_gemini, final_score_and_dm  # type: ignore[import]
 from services.lead_confidence import calculate_lead_confidence  # type: ignore[import]
+from services.adaptive_policy import build_dispatch_policy  # type: ignore[import]
 from services.prism_pipeline import PrismPipeline                           # type: ignore[import]
 from services.query_brain import _is_consumer_archetype  # type: ignore[import]
 from services.intelligence_mesh import enrich_signals  # type: ignore[import]  # V24.0
@@ -93,6 +94,19 @@ def _is_generic_email(email: str) -> bool:
         "rentals", "general", "accounts", "feedback", "service", "services",
     }
     return prefix in generics
+
+
+def _is_cache_record_fresh(cache_doc: dict, max_age_hours: int) -> bool:
+    if not cache_doc:
+        return False
+    raw_ts = cache_doc.get("cached_at") or cache_doc.get("updatedAt") or cache_doc.get("createdAt")
+    if raw_ts is None:
+        return True
+    if not isinstance(raw_ts, datetime.datetime):
+        return True
+    ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=datetime.timezone.utc)
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=max_age_hours)
+    return ts >= cutoff
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +403,7 @@ def dispatch():
     BATCH_SIZE = 10
     batch_urls = current_queue[:BATCH_SIZE]
     remaining  = current_queue[BATCH_SIZE:]
+    queue_depth = len(current_queue)
 
     # BUG-2 FIX: Atomic transactional queue pop — prevents double-dispatch race.
     # A bare .update({"unprocessed_queue": remaining}) is NOT atomic. If two
@@ -437,6 +452,7 @@ def dispatch():
         "community.hubspot.com", "community.g2.com",
         "forum.growthackers.com", "indiehackers.com",
     }
+    _snippet_cache_ttl_hours = max(6, min(240, int(os.environ.get("SNIPPET_CACHE_TTL_HOURS", "72"))))
     for batch_url in batch_urls:
         b_domain  = extract_root_domain(batch_url)
         is_social = any(b_domain.endswith(s) for s in SOCIAL_SET)
@@ -459,7 +475,7 @@ def dispatch():
             if cdoc.exists:
                 cdata = cdoc.to_dict()
                 txt = cdata.get("text", "")
-                if txt:
+                if txt and _is_cache_record_fresh(cdata, _snippet_cache_ttl_hours):
                     # V25.3.0: Carry harvest metadata so the score gate can
                     # recognise pre-qualified signal_harvest leads and lower
                     # the accept_threshold accordingly.
@@ -537,24 +553,26 @@ def dispatch():
     velocity_threshold = VELOCITY_THRESHOLD
     _velocity_gate_mode = "normal"
     _degraded_medium_selected = 0
+    recent_new_count = 0
+    recent_enrichment_pending_count = 0
     try:
         cutoff_24h = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
-        recent_new_count = (
+        recent_new_count = int((
             _db().collection("leads")
             .where(filter=FieldFilter("tenant_id", "==", tenant_id))
             .where(filter=FieldFilter("status",    "==", "new"))
             .where(filter=FieldFilter("createdAt", ">=", cutoff_24h))
             .count().get()[0][0].value
-        )
+        ) or 0)
         # Include enrichment backlog in velocity pressure so medium-tier intake
         # is throttled when operators are already behind on completion quality.
-        recent_enrichment_pending_count = (
+        recent_enrichment_pending_count = int((
             _db().collection("leads")
             .where(filter=FieldFilter("tenant_id", "==", tenant_id))
             .where(filter=FieldFilter("status", "==", "enrichment_pending"))
             .where(filter=FieldFilter("createdAt", ">=", cutoff_24h))
             .count().get()[0][0].value
-        )
+        ) or 0)
         recent_count = recent_new_count + recent_enrichment_pending_count
     except Exception as _vel_err:
         # Enterprise quality-safe fallback: on velocity gate read failure, block
@@ -566,14 +584,21 @@ def dispatch():
         recent_count = velocity_threshold
         _velocity_gate_mode = "degraded_firestore_error"
 
+    policy = build_dispatch_policy(
+        campaign=campaign,
+        sourcing_vector=sourcing_vector,
+        queue_depth=queue_depth,
+        recent_new_count=recent_new_count,
+        recent_enrichment_pending_count=recent_enrichment_pending_count,
+        velocity_threshold=velocity_threshold,
+        gate_read_failed=(_velocity_gate_mode == "degraded_firestore_error"),
+    )
+
     allow_medium  = recent_count < velocity_threshold
     if allow_medium:
-        approved_urls = high_urls + medium_urls
+        approved_urls = high_urls + medium_urls[: int(policy.get("medium_budget") or len(medium_urls))]
     elif _velocity_gate_mode == "degraded_firestore_error" and medium_urls:
-        _VELOCITY_DEGRADED_MEDIUM_CAP = max(
-            1,
-            min(10, int(os.environ.get("VELOCITY_DEGRADED_MEDIUM_CAP", "3"))),
-        )
+        _VELOCITY_DEGRADED_MEDIUM_CAP = max(1, min(10, int(policy.get("degraded_medium_budget") or 3)))
         _degraded_medium = medium_urls[:_VELOCITY_DEGRADED_MEDIUM_CAP]
         _degraded_medium_selected = len(_degraded_medium)
         approved_urls = high_urls + _degraded_medium
@@ -585,6 +610,12 @@ def dispatch():
             cap=_VELOCITY_DEGRADED_MEDIUM_CAP,
             note="Firestore read error fallback: allowing bounded medium sample.",
         )
+    elif policy.get("mode") == "recovery" and medium_urls:
+        _recovery_budget = max(1, min(10, int(policy.get("degraded_medium_budget") or 2)))
+        _degraded_medium = medium_urls[:_recovery_budget]
+        _degraded_medium_selected = len(_degraded_medium)
+        approved_urls = high_urls + _degraded_medium
+        _velocity_gate_mode = "recovery_override"
     else:
         approved_urls = high_urls
     url_to_tier   = {u: "High" for u in high_urls}
@@ -592,7 +623,9 @@ def dispatch():
     log.info("TRACE-7: Gate complete.",
              high=len(high_urls), medium=len(medium_urls),
              approved=len(approved_urls), gate_rejected=len(batch_urls)-len(approved_urls),
-             gate_mode=_velocity_gate_mode, degraded_medium_selected=_degraded_medium_selected)
+             gate_mode=_velocity_gate_mode, degraded_medium_selected=_degraded_medium_selected,
+             policy_mode=policy.get("mode"), policy_version=policy.get("policy_version"),
+             policy_threshold_adjustment=policy.get("threshold_adjustment"))
 
     # ── TRACE-8: PRISM Processing Loop (parallel, per-URL 25s timeout) ─────────
     # BUG-1 + BUG-4 FIX: Run each URL concurrently via ThreadPoolExecutor.
@@ -738,7 +771,9 @@ def dispatch():
                 try:
                     cache_snap = _db().collection("scraped_cache").document(lead_id).get()
                     if cache_snap.exists:
-                        text = cache_snap.to_dict().get("text", "")
+                        cache_data = cache_snap.to_dict() or {}
+                        if _is_cache_record_fresh(cache_data, _snippet_cache_ttl_hours):
+                            text = cache_data.get("text", "")
                 except Exception as cache_err:
                     log.warning("dispatch_snippet_fetch_failed", lead_id=lead_id, error=str(cache_err))
 
@@ -1031,19 +1066,30 @@ def dispatch():
                 is_thin_payload=is_thin_payload,
                 is_thin_bio=_is_thin_bio,
                 campaign=campaign,
+                threshold_adjustment=float(policy.get("threshold_adjustment") or 0.0),
             )
 
             log.info("dispatch_score_gate_eval",
                      url=url[:80], score=score, threshold=confidence_bundle["confidence_threshold"],
                      confidence=confidence_bundle["confidence_score"], text_chars=len(text), thin=is_thin_payload,
                      shadow_thin=_is_shadow_thin, harvest_lead=is_harvest_lead,
-                     prism_mode=prism_mode)
+                     prism_mode=prism_mode, policy_mode=policy.get("mode"),
+                     threshold_adjustment=confidence_bundle.get("threshold_adjustment", 0.0))
 
             if not confidence_bundle["promotion"]:
                 log.info("dispatch_score_gate_drop", url=url[:80],
                          score=score, threshold=confidence_bundle["confidence_threshold"],
                          confidence=confidence_bundle["confidence_score"])
-                doc_ref.delete()
+                doc_ref.update({
+                    "status": "scored_out",
+                    "score": score,
+                    "confidence_score": confidence_bundle["confidence_score"],
+                    "confidence_threshold": confidence_bundle["confidence_threshold"],
+                    "threshold_adjustment": confidence_bundle.get("threshold_adjustment", 0.0),
+                    "score_drop_reason": confidence_bundle.get("reason", "weak-evidence fallback"),
+                    "policy_mode": policy.get("mode"),
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                })
                 try:
                     _db().collection("global_lead_locks").document(lock_entity).delete()
                 except Exception as _lock_del_err:
@@ -1370,6 +1416,9 @@ def dispatch():
         gate_rejected=max(0, len(batch_urls) - len(approved_urls)),
         gate_mode=_velocity_gate_mode,
         degraded_medium_selected=_degraded_medium_selected,
+        policy_mode=policy.get("mode"),
+        policy_version=policy.get("policy_version"),
+        policy_threshold_adjustment=policy.get("threshold_adjustment"),
         **status_counts,
     )
 
@@ -1460,6 +1509,9 @@ def dispatch():
             "approved_urls": len(approved_urls),
             "gate_mode": _velocity_gate_mode,
             "degraded_medium_selected": _degraded_medium_selected,
+            "policy_mode": policy.get("mode"),
+            "policy_version": policy.get("policy_version"),
+            "policy_threshold_adjustment": policy.get("threshold_adjustment"),
             "status_counts": status_counts,
         },
     }), 200
