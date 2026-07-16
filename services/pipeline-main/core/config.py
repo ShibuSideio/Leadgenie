@@ -40,6 +40,16 @@ GCS_FIREHOSE_BUCKET: str = os.environ.get(
 CB_WINDOW_MINUTES: int = int(os.environ.get("CB_WINDOW_MINUTES", "15"))
 VELOCITY_THRESHOLD: int = int(os.environ.get("VELOCITY_THRESHOLD", "10"))
 
+# Per-campaign soft quota for Medium-tier intake (24h window).
+# Tenant-wide VELOCITY_THRESHOLD remains the hard cap for Medium admission.
+# Set MEDIUM_CAMPAIGN_QUOTA_24H=0 to disable the soft quota (tenant-only).
+MEDIUM_CAMPAIGN_QUOTA_24H: int = max(
+    0, int(os.environ.get("MEDIUM_CAMPAIGN_QUOTA_24H", "12"))
+)
+MEDIUM_CAMPAIGN_QUOTA_ENABLED: bool = os.environ.get(
+    "MEDIUM_CAMPAIGN_QUOTA_ENABLED", "true"
+).lower() in ("1", "true", "yes")
+
 # ---------------------------------------------------------------------------
 # Hybrid Starter Motor defaults
 # ---------------------------------------------------------------------------

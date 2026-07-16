@@ -318,6 +318,397 @@ def _url_matches_any(url: str, signatures: tuple[str, ...] | set[str]) -> bool:
     return bool(lowered) and any(sig in lowered for sig in signatures)
 
 
+# ---------------------------------------------------------------------------
+# V26.6.0 — Domain / strategy / vector context for scoring & pre-filter
+# ---------------------------------------------------------------------------
+
+_CONSUMER_VECTORS = frozenset({"B2C", "D2C", "B2B2C"})
+_PLATFORM_STRATEGIES = frozenset({"PLATFORM_MINING", "COMPETITOR_TOUCHPOINT"})
+_MEANINGFUL_UNKNOWN = frozenset({"", "unknown", "none", "n/a", "null", "undefined"})
+
+
+def _normalize_sourcing_vector(raw: Any) -> str:
+    value = str(raw or "").strip().upper()
+    return value if value else "B2B"
+
+
+def _normalize_primary_strategy(raw: Any) -> str:
+    if isinstance(raw, dict):
+        raw = raw.get("primary") or raw.get("primary_strategy") or ""
+    value = str(raw or "").strip().upper()
+    return value or "COLLOQUIAL_DISCOVERY"
+
+
+def _domain_family_from_profile(domain_profile: dict[str, Any] | None) -> str:
+    if not isinstance(domain_profile, dict):
+        return ""
+    return str(domain_profile.get("domain_family") or "").strip().lower()
+
+
+def _is_meaningful_field(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and text.lower() not in _MEANINGFUL_UNKNOWN
+
+
+def _extract_primary_strategy(
+    primary_strategy: Any = None,
+    campaign: dict[str, Any] | None = None,
+) -> str:
+    if primary_strategy:
+        return _normalize_primary_strategy(primary_strategy)
+    if isinstance(campaign, dict):
+        intel = campaign.get("intelligence_strategy") or {}
+        if isinstance(intel, dict) and intel.get("primary"):
+            return _normalize_primary_strategy(intel.get("primary"))
+    return "COLLOQUIAL_DISCOVERY"
+
+
+def _campaign_context_block(
+    *,
+    domain_profile: dict[str, Any] | None = None,
+    sourcing_vector: str = "",
+    primary_strategy: str = "",
+    enriched_context: str = "",
+    max_enriched_chars: int = 1200,
+) -> str:
+    """Compact labeled context header shared by scorer and pre-filter prompts."""
+    profile = domain_profile if isinstance(domain_profile, dict) else {}
+    family = str(profile.get("domain_family") or "").strip() or "unknown"
+    conf = str(profile.get("profile_confidence") or "").strip() or "unknown"
+    liquidity = str(profile.get("liquidity_level") or "").strip()
+    if not liquidity and profile.get("low_liquidity_market"):
+        liquidity = "low"
+    liquidity = liquidity or "unknown"
+    bias = profile.get("strictness_bias")
+    vector = _normalize_sourcing_vector(sourcing_vector)
+    strategy = _normalize_primary_strategy(primary_strategy)
+    thin = bool(profile.get("thin_campaign"))
+
+    lines = [
+        "# CAMPAIGN RUNTIME CONTEXT",
+        f"sourcing_vector: {vector}",
+        f"primary_strategy: {strategy}",
+        f"domain_family: {family}",
+        f"profile_confidence: {conf}",
+        f"liquidity_level: {liquidity}",
+        f"thin_campaign: {thin}",
+    ]
+    if bias is not None:
+        try:
+            lines.append(f"strictness_bias: {float(bias):.3f}")
+        except (TypeError, ValueError):
+            pass
+
+    enriched = str(enriched_context or "").strip()
+    if enriched:
+        if len(enriched) > max_enriched_chars:
+            enriched = enriched[:max_enriched_chars] + "\n... [truncated]"
+        lines.append("enriched_icp_context:")
+        lines.append(enriched)
+
+    return "\n".join(lines)
+
+
+def _scoring_intent_rules(sourcing_vector: str, primary_strategy: str, domain_family: str) -> str:
+    """Branch GENERIC B2B / fit rules by vector + strategy (keeps seller exclusion)."""
+    vector = _normalize_sourcing_vector(sourcing_vector)
+    strategy = _normalize_primary_strategy(primary_strategy)
+    family = (domain_family or "").strip().lower()
+    is_consumer = vector in _CONSUMER_VECTORS
+
+    # Always-on competitor exclusion (narrow — outbound lead-gen tools only).
+    seller = (
+        "SELLER EXCLUSION RULE: If the target sells B2B lead generation, cold email "
+        "marketing, B2B contact databases/data scraping, or outbound sales-agency "
+        "services as their core product, score 0 (or <4). Do NOT exclude legitimate "
+        "ICP businesses that merely market their own product/service."
+    )
+
+    if strategy == "PLATFORM_MINING":
+        return (
+            f"{seller}\n\n"
+            "PLATFORM_MINING FIT RULE (overrides generic B2B service-page penalties):\n"
+            "This campaign mines listing/directory/aggregator platforms for ICP entities "
+            "(agents, brokers, clinics, vendors, local businesses). Public profile pages, "
+            "active listings, and directory entries WITH identity/contact footprint are "
+            "VALID leads even without explicit buyer pain language. Score 6–9 when the "
+            "entity matches the ICP and geo; score ≤3 only for spam, wrong geo, or "
+            "direct competitors selling the same service as the campaign owner.\n"
+            "Do NOT apply the old 'public services page = GENERAL_FIT ≤3' penalty to "
+            "listing profiles under PLATFORM_MINING."
+        )
+
+    if strategy == "COMPETITOR_TOUCHPOINT":
+        return (
+            f"{seller}\n\n"
+            "COMPETITOR_TOUCHPOINT FIT RULE:\n"
+            "Reviewers and commenters expressing experience with a competitor are leads. "
+            "Prioritise reviewer intent and use-case over polished company homepage fit. "
+            "A detailed review that reveals ICP match can score 6–9 even without hiring signals."
+        )
+
+    if is_consumer:
+        return (
+            f"{seller}\n\n"
+            f"CONSUMER FIT RULE ({vector}):\n"
+            "Targets are individuals or local service providers, not enterprise buyers. "
+            "Valid high scores include: active listing/profile pages, local business sites "
+            "matching the ICP, community posts with purchase/need language, and review "
+            "threads with real buyer context. Do NOT require B2B hiring intent or SaaS "
+            "pain jargon. A relevant local agent/clinic/shop page can score 5–8 on ICP+geo "
+            "fit alone. Still score ≤3 for listicles, pure SEO guides, wrong geography, "
+            "or vendors selling the same service as the campaign owner."
+        )
+
+    # B2B default — softened: allow strong ICP company footprint matches.
+    domain_note = ""
+    if family in {"marketing_agency", "professional_services", "saas"}:
+        domain_note = (
+            f"\nDOMAIN NOTE ({family}): Prefer practitioner pain, agency/client friction, "
+            "or tool-switch signals over generic corporate brochure pages."
+        )
+    elif family in {"real_estate", "manufacturing", "healthcare", "construction"}:
+        domain_note = (
+            f"\nDOMAIN NOTE ({family}): Local operators and facility pages matching ICP "
+            "may score medium when geo+role align; still prioritise active intent."
+        )
+
+    return (
+        f"{seller}\n\n"
+        "B2B INTENT FIT RULE:\n"
+        "Pure brochure pages that only list standard services with no pain, hiring, "
+        "or change signal should score ≤3 (GENERAL_FIT). HOWEVER: if the page clearly "
+        "matches the campaign ICP (role, industry, stack, or operational footprint) and "
+        "shows a usable contact surface, you MAY score 4–6 as a qualified ICP company "
+        "target — do not zero out every service website. Score 7+ only with explicit "
+        "intent (hiring for relevant roles, public complaints, competitor churn, "
+        "active project language, or strong multi-signal evidence)."
+        f"{domain_note}"
+    )
+
+
+def _domain_scoring_guidance(domain_family: str, primary_strategy: str) -> str:
+    """Lightweight per-family scoring hints (compact — avoids prompt bloat)."""
+    family = (domain_family or "").strip().lower()
+    strategy = _normalize_primary_strategy(primary_strategy)
+    hints: dict[str, str] = {
+        "real_estate": (
+            "REAL ESTATE: Prefer agents/brokers with listings or contact pages; "
+            "local property portals; buyer/renter complaint threads. Listicles of "
+            "'top agencies' without an entity stay Low."
+        ),
+        "saas": (
+            "SAAS: Prefer tool-switch, pricing-pain, integration-break, and "
+            "alternatives threads. Ignore pure product marketing blogs."
+        ),
+        "marketing_agency": (
+            "MARKETING / BRAND: Prefer practitioners venting about messaging, "
+            "attribution, agency churn, or inconsistent brand narrative — not "
+            "'how to improve your brand' guides."
+        ),
+        "professional_services": (
+            "PROFESSIONAL SERVICES: Prefer firms showing growth friction, hiring, "
+            "or operational pain matching the ICP specialty."
+        ),
+        "manufacturing": (
+            "MANUFACTURING: Prefer suppliers/plants with RFQ, capacity, or equipment "
+            "signals; IndiaMART/ThomasNet-style profiles can be valid."
+        ),
+        "healthcare": (
+            "HEALTHCARE: Prefer clinics/practitioners with service+geo match; "
+            "patient complaint threads only when they reveal buyer context."
+        ),
+        "education": (
+            "EDUCATION: Prefer consultants/institutions with clear program+geo; "
+            "student complaint threads with decision intent."
+        ),
+        "ecommerce": (
+            "ECOMMERCE: Prefer operators discussing ops/fulfillment/ads pain or "
+            "storefronts matching ICP; ignore affiliate listicles."
+        ),
+        "finance": (
+            "FINANCE: Be strict on compliance noise; prefer clear commercial intent "
+            "and avoid government/regulatory brochure pages."
+        ),
+    }
+    body = hints.get(family)
+    if not body and strategy == "PLATFORM_MINING":
+        body = (
+            "PLATFORM MINING (general): Entity identity + contact + geo match beats "
+            "abstract pain language on listing pages."
+        )
+    if not body:
+        return ""
+    return f"\n# DOMAIN-SPECIFIC SCORING GUIDANCE\n{body}\n"
+
+
+def _prefilter_strategy_guidance(primary_strategy: str) -> str:
+    strategy = _normalize_primary_strategy(primary_strategy)
+    if strategy == "PLATFORM_MINING":
+        return (
+            "\n# STRATEGY OVERRIDE — PLATFORM_MINING\n"
+            "Directories, classified portals, review aggregators, and listing/profile pages "
+            "are PRIMARY sources, not noise. Default relevant listing/profile pages to Medium; "
+            "High when snippet shows ICP entity + geo or clear contact/listing intent. "
+            "Still Low for SEO listicles, wrong geography, or pure vendor homepages selling "
+            "the same service as USER BIO.\n"
+        )
+    if strategy == "COMPETITOR_TOUCHPOINT":
+        return (
+            "\n# STRATEGY OVERRIDE — COMPETITOR_TOUCHPOINT\n"
+            "Review and engagement pages are valuable. Reviewer/commenter context → Medium/High. "
+            "Do not Low solely because the host is G2/Capterra/Trustpilot/Yelp.\n"
+        )
+    if strategy == "EVENT_TRIGGER_MINING":
+        return (
+            "\n# STRATEGY OVERRIDE — EVENT_TRIGGER_MINING\n"
+            "News/press about funding, expansion, rebranding, or hiring can be Medium/High "
+            "when the company matches the ICP. Pure mega-publishers with no company entity stay Low.\n"
+        )
+    return ""
+
+
+def _prefilter_step4_consumer(sourcing_vector: str) -> str:
+    """STEP 4 only when the campaign is actually consumer-facing."""
+    if _normalize_sourcing_vector(sourcing_vector) not in _CONSUMER_VECTORS:
+        return ""
+    return (
+        "\n# STEP 4 — CONSUMER CONTEXT-AWARE INFERENCE "
+        f"({_normalize_sourcing_vector(sourcing_vector)})\n"
+        "Snippet fields may include 'Query: <triggering search query>'. Use that context "
+        "to reverse-engineer thread state. Dialog dorks (\"pm me\", \"still available\") "
+        "plus forum/social replies indicating purchase intent → High/Medium. Do not "
+        "auto-Low forum/social snippets when query context shows active consumer discussion.\n"
+    )
+
+
+def _prefilter_few_shot_guidance(domain_family: str, sourcing_vector: str) -> str:
+    """Compact High/Low anchors by domain (replaces marketing-only examples)."""
+    family = (domain_family or "").strip().lower()
+    vector = _normalize_sourcing_vector(sourcing_vector)
+    is_consumer = vector in _CONSUMER_VECTORS
+
+    if family == "real_estate" or (is_consumer and family in {"", "general_services", "hospitality"}):
+        return (
+            "\n# CALIBRATION EXAMPLES (REAL ESTATE / LOCAL SERVICES)\n"
+            "HIGH: agent profile with listings in target city; forum post "
+            "\"agent ghosted me on Muscat villa deposit\".\n"
+            "MEDIUM: property portal search results page for target geo; local brokerage about page.\n"
+            "LOW: \"Top 10 real estate agencies in 2024\" listicle; national news with no entity.\n"
+        )
+    if family in {"marketing_agency", "saas", "professional_services"}:
+        return (
+            "\n# CALIBRATION EXAMPLES (B2B SERVICES / SAAS / MARKETING)\n"
+            "HIGH: practitioner post \"3 brand agencies and still no consistent messaging\"; "
+            "\"attribution broken since iOS update\".\n"
+            "MEDIUM: job post implying capability gap; news about company rebrand struggles.\n"
+            "LOW: \"5 ways to improve your brand narrative\"; HubSpot vs Marketo comparison article.\n"
+        )
+    if family == "manufacturing":
+        return (
+            "\n# CALIBRATION EXAMPLES (MANUFACTURING)\n"
+            "HIGH: RFQ/supplier profile matching ICP equipment; plant manager complaint thread.\n"
+            "MEDIUM: IndiaMART/ThomasNet company listing with geo+category match.\n"
+            "LOW: generic \"best CNC machines 2024\" listicle.\n"
+        )
+    if family == "healthcare":
+        return (
+            "\n# CALIBRATION EXAMPLES (HEALTHCARE)\n"
+            "HIGH: clinic profile in target geo with services matching ICP; patient thread with care-seeking intent.\n"
+            "MEDIUM: directory listing for relevant specialty + city.\n"
+            "LOW: wellness listicle; government health brochure.\n"
+        )
+    # Default mixed anchors (backward-compatible flavour)
+    return (
+        "\n# CALIBRATION EXAMPLES (GENERAL)\n"
+        "HIGH: raw forum/community complaint matching USER BIO; identifiable local business with intent.\n"
+        "MEDIUM: ambiguous but industry+location relevant page; hiring signal implying gap.\n"
+        "LOW: SEO listicles, Top-N posts, how-to guides, wrong geography, pure competitor sales pages.\n"
+    )
+
+
+def _apply_strategy_to_prefilter_mode(
+    mode: dict[str, Any] | None,
+    domain_profile: dict[str, Any] | None,
+    primary_strategy: str,
+) -> dict[str, Any] | None:
+    """Ensure PLATFORM_MINING / COMPETITOR_TOUCHPOINT enable directory softening."""
+    strategy = _normalize_primary_strategy(primary_strategy)
+    if strategy not in _PLATFORM_STRATEGIES:
+        return mode
+
+    profile = domain_profile if isinstance(domain_profile, dict) else {}
+    family = _domain_family_from_profile(profile) or "general_services"
+    base = dict(mode) if isinstance(mode, dict) else {
+        "active": False,
+        "domain_family": family,
+        "liquidity_level": profile.get("liquidity_level"),
+        "low_liquidity": bool(profile.get("low_liquidity_market")),
+        "platform_tolerant": True,
+        "strictness_bias": profile.get("strictness_bias"),
+        "soften_directories": False,
+        "permissive_ambiguous": False,
+        "preferred_sources": list(profile.get("preferred_sources") or []),
+        "profile_confidence": profile.get("profile_confidence"),
+        "thin_campaign": bool(profile.get("thin_campaign")),
+    }
+    base["active"] = True
+    base["soften_directories"] = True
+    base["platform_tolerant"] = True
+    base["strategy_directory_softening"] = True
+    base["primary_strategy"] = strategy
+    # Mild permissive ambiguous for platform mining in low-liquidity markets.
+    if base.get("low_liquidity") or str(base.get("liquidity_level") or "").lower() == "low":
+        base["permissive_ambiguous"] = True
+    return base
+
+
+def _build_campaign_scoring_card(
+    campaign: dict[str, Any],
+    *,
+    enriched_context: str = "",
+) -> dict[str, Any]:
+    """Structured campaign card for final_score_and_dm (richer than bio+keywords)."""
+
+    def _resolve_bio(c: dict) -> str:
+        if c.get("persona_id") and c.get("persona_bio"):
+            return str(c.get("persona_bio") or "")
+        raw = c.get("bio", "")
+        if raw == "CHILD_CAMPAIGN_OVERRIDE":
+            return str(
+                c.get("effective_bio") or c.get("campaign_focus") or c.get("pain_point") or ""
+            )
+        return str(raw or "")
+
+    c = campaign if isinstance(campaign, dict) else {}
+    card: dict[str, Any] = {
+        "campaign_id": c.get("id", c.get("name")),
+        "bio": _resolve_bio(c),
+        "keywords": c.get("persona_keywords") or c.get("keywords", "") or "",
+    }
+    if _is_meaningful_field(c.get("pain_point")):
+        card["pain_point"] = str(c.get("pain_point")).strip()[:400]
+    hook = c.get("target_angle_hook") or ""
+    if not hook and isinstance(c.get("system_enrichment"), dict):
+        hook = c["system_enrichment"].get("derived_target_angle_hook") or ""
+    if _is_meaningful_field(hook):
+        card["target_angle_hook"] = str(hook).strip()[:300]
+    ua = c.get("unfair_advantage") or c.get("target_angle_adv") or ""
+    if not ua and isinstance(c.get("system_enrichment"), dict):
+        ua = c["system_enrichment"].get("derived_unfair_advantage") or ""
+    if _is_meaningful_field(ua):
+        card["unfair_advantage"] = str(ua).strip()[:300]
+    if _is_meaningful_field(c.get("sourcing_vector")):
+        card["sourcing_vector"] = str(c.get("sourcing_vector")).strip()
+    if _is_meaningful_field(c.get("effective_bio")) and c.get("effective_bio") != card.get("bio"):
+        card["effective_bio"] = str(c.get("effective_bio")).strip()[:500]
+    # Prefer per-campaign enriched context if already on the dict; else shared.
+    local_enriched = str(c.get("_enriched_context") or enriched_context or "").strip()
+    if local_enriched:
+        card["enriched_icp_context"] = local_enriched[:800]
+    return card
+
+
 def is_prefilter_domain_softening_active(
     domain_profile: dict[str, Any] | None,
 ) -> bool:
@@ -428,8 +819,12 @@ def _resolve_prefilter_domain_mode(
     }
 
 
-def _domain_prefilter_guidance(mode: dict[str, Any]) -> str:
-    """Extra prompt section — adjusts strictness only; keeps core categories."""
+def _domain_prefilter_guidance(mode: dict[str, Any] | None) -> str:
+    """Extra prompt section — adjusts strictness only; keeps core categories.
+
+    When mode is inactive, returns empty (header/context is injected separately so
+    domain_family is still visible even without softening).
+    """
     if not mode or not mode.get("active"):
         return ""
 
@@ -449,7 +844,7 @@ def _domain_prefilter_guidance(mode: dict[str, Any]) -> str:
     ]
     if mode.get("soften_directories"):
         parts.extend([
-            "DIRECTORY / REVIEW / AGGREGATOR SOFTENING (this domain relies on platform mining):",
+            "DIRECTORY / REVIEW / AGGREGATOR SOFTENING (this domain/strategy relies on platform mining):",
             "Do NOT auto-classify directories (Yelp, JustDial, IndiaMART, Clutch), review sites",
             "(G2, Capterra, Trustpilot, Google reviews), classified portals (Bayut, Property Finder,",
             "Dubizzle, OLX), or aggregator profile/listing pages as Low solely because they are",
@@ -521,65 +916,97 @@ def pre_filter_gemini(
     bio: str,
     location_target: str,
     domain_profile: dict[str, Any] | None = None,
+    sourcing_vector: str | None = None,
+    primary_strategy: str | None = None,
 ) -> dict:
     """Gemini tiering gate: classify Serper snippet URLs as High/Medium/Low.
 
     Args:
-        snippets:        List of dicts with ``url``, ``title``, ``snippet`` keys.
-        bio:             User's business bio (context for scoring).
-        location_target: Geo target string.
-        domain_profile:  Optional ``system_domain_profile`` (domain-v2). When
-            absent/empty, behaviour is identical to the pre-domain gate.
-            When present, directory/review/aggregator strictness is softened
-            for platform-tolerant verticals and low-liquidity markets.
+        snippets:          List of dicts with ``url``, ``title``, ``snippet`` keys.
+        bio:               User's business bio (context for scoring).
+        location_target:   Geo target string.
+        domain_profile:    Optional ``system_domain_profile`` (domain-v2).
+        sourcing_vector:   Optional B2B/B2C/D2C/B2B2C — gates consumer STEP 4.
+        primary_strategy:  Optional intelligence_strategy primary (e.g. PLATFORM_MINING).
 
     Returns:
         ``{"High": [url, ...], "Medium": [url, ...]}`` — Low results dropped.
         Returns ``{"High": [], "Medium": []}`` on any failure.
+
+    Backward compatible: callers omitting vector/strategy keep legacy behaviour
+    plus optional domain softening when profile is present.
     """
     if not snippets:
         return {"High": [], "Medium": []}
 
+    vector = _normalize_sourcing_vector(sourcing_vector)
+    strategy = _normalize_primary_strategy(primary_strategy)
+    family = _domain_family_from_profile(domain_profile)
+
     mode = _resolve_prefilter_domain_mode(domain_profile)
+    mode = _apply_strategy_to_prefilter_mode(mode, domain_profile, strategy)
+
+    # Always surface domain/strategy/vector when known (even if softening inactive).
+    context_header = _campaign_context_block(
+        domain_profile=domain_profile if isinstance(domain_profile, dict) else None,
+        sourcing_vector=vector,
+        primary_strategy=strategy,
+        enriched_context="",  # bio already carries enriched ICP for pre-filter
+        max_enriched_chars=0,
+    )
+    strategy_guidance = _prefilter_strategy_guidance(strategy)
+    step4 = _prefilter_step4_consumer(vector)
+    few_shot = _prefilter_few_shot_guidance(family, vector)
     domain_guidance = _domain_prefilter_guidance(mode) if mode else ""
+
+    # Directory default line: only auto-Low directories when strategy is NOT platform-like
+    # and domain softening is off.
+    directories_are_low = not (
+        mode and mode.get("active") and mode.get("soften_directories")
+    ) and strategy not in _PLATFORM_STRATEGIES
+    low_directory_clause = (
+        "directories (Yelp, G2, etc.), "
+        if directories_are_low
+        else "irrelevant pure-spam directories with no ICP entity, "
+    )
 
     prompt = f"""CONFIDENCE TIERING GATE: Evaluate each URL snippet as an investigative OSINT engine against the user's business context.
 USER BIO: '{bio}'
 TARGET LOCATION: '{location_target}'
-
+{context_header}
+{strategy_guidance}
 # STEP 1 — OSINT SCORING MATRIX
 Evaluate the snippets purely on RAW INTENT and SYMPTOMS, ignoring corporate polish.
 
-High Confidence: Raw, unpolished footprints. This includes niche forum complaints, municipal PDFs, unoptimized local business pages, or direct expressions of pain/need that match the USER BIO. "Ugly" is good if the intent is strong. Also includes community posts, Reddit threads, Slack/Discord exports, LinkedIn comments — where a PRACTITIONER is actively venting a problem they are experiencing RIGHT NOW.
+High Confidence: Raw, unpolished footprints. This includes niche forum complaints, municipal PDFs, unoptimized local business pages, or direct expressions of pain/need that match the USER BIO. "Ugly" is good if the intent is strong. Also includes community posts, Reddit threads, Slack/Discord exports, LinkedIn comments — where a PRACTITIONER is actively venting a problem they are experiencing RIGHT NOW. Listing/profile pages that match ICP+geo under PLATFORM_MINING also qualify as High when entity identity is clear.
 
-Medium Confidence: Ambiguous intent, but highly relevant industry or location. Includes: news articles about company challenges, job posts implying a capability gap, product reviews expressing frustration.
+Medium Confidence: Ambiguous intent, but highly relevant industry or location. Includes: news articles about company challenges, job posts implying a capability gap, product reviews expressing frustration, and (when strategy/domain allows) relevant directory or aggregator profile pages.
 
-Low Confidence: SEO-optimised listicles, "Top 10" posts, how-to guides, directories (Yelp, G2, etc.), generic educational articles, or clear competitors/vendors SELLING the same service as in the USER BIO.
+Low Confidence: SEO-optimised listicles, "Top 10" posts, how-to guides, {low_directory_clause}generic educational articles, or clear competitors/vendors SELLING the same service as in the USER BIO.
 
 # STEP 2 — UNIVERSAL RULES
 SOCIAL PLATFORM RULE: Evaluate the SPECIFIC POST intent, not the platform's general purpose.
 GEO RULE: Wrong region → Low.
 COMPETITOR RULE: If the snippet belongs to a vendor SELLING the same service as the USER BIO, classify it as Low.
-
-# STEP 3 — CRITICAL: B2B BUYER FORUM EXCEPTION (V24.5.3)
-MARKETING BLOG vs BUYER FORUM: Do NOT classify as Low merely because a URL domain is marketing-related.
-A practitioner COMPLAINING about a marketing problem is a HIGH-CONFIDENCE BUYER, not a blog.
-These are HIGH regardless of domain:
-- "We've been through 3 brand agencies and still can't get consistent messaging" (Reddit/forum)
-- "Our attribution data has been completely wrong since the iOS update" (LinkedIn comment/community)
-- "Fed up with our marketing automation — the lead scoring is broken" (forum post)
-- "We tried HubSpot and Marketo and neither solved our ROI tracking problem" (community)
-These speakers are experiencing pain with budget to solve it.
-
-These are LOW (look similar but are NOT buyer signals):
-- "5 ways to improve your brand narrative in 2024" (listicle — no buyer present)
-- "How to fix attribution tracking" (how-to guide — educational, not a buyer complaint)
-- "Marketing automation compared: HubSpot vs Marketo" (vendor comparison article)
-
-# STEP 4 — CONTEXT-AWARE INFERENCE (B2C/D2C)
-For B2C or D2C campaigns, the snippet field may contain text prepended with 'Query: <the triggering search query>'. Use the triggering query context to reverse-engineer the thread state. If the query contains dialog dorks (like "pm me" or "still available"), analyze whether the snippet contains replies suggesting active consumer/buyer intent. Do not automatically classify forum posts or social media snippets as Low if the query context indicates an active B2C/D2C discussion thread.
-{domain_guidance}
+{few_shot}
+# STEP 3 — BUYER FORUM EXCEPTION
+Do NOT classify as Low merely because a URL domain is marketing- or community-related.
+A practitioner COMPLAINING about a problem matching USER BIO is HIGH-confidence, not a blog.
+Still Low: pure how-to guides, vendor comparisons, and Top-N listicles with no buyer present.
+{step4}{domain_guidance}
 Snippets: {json.dumps(snippets)}"""
+
+    log.info(
+        "pre_filter_context_applied",
+        domain_family=family or (mode or {}).get("domain_family"),
+        sourcing_vector=vector,
+        primary_strategy=strategy,
+        domain_adjustment_active=bool(mode and mode.get("active")),
+        soften_directories=bool(mode and mode.get("soften_directories")),
+        strategy_directory_softening=bool(mode and mode.get("strategy_directory_softening")),
+        consumer_step4=bool(step4),
+        url_count=len(snippets),
+    )
 
     if mode and mode.get("active"):
         log.info(
@@ -592,8 +1019,10 @@ Snippets: {json.dumps(snippets)}"""
             permissive_ambiguous=bool(mode.get("permissive_ambiguous")),
             strictness_bias=mode.get("strictness_bias"),
             preferred_sources=mode.get("preferred_sources"),
+            primary_strategy=strategy,
+            strategy_directory_softening=bool(mode.get("strategy_directory_softening")),
             url_count=len(snippets),
-            note="Domain profile softened pre-filter strictness for directories/reviews/aggregators "
+            note="Domain/strategy softened pre-filter strictness for directories/reviews/aggregators "
                  "and/or low-liquidity ambiguous pages. Core rejection categories unchanged.",
         )
 
@@ -607,7 +1036,8 @@ Snippets: {json.dumps(snippets)}"""
             "pre_filter_gemini_failed_local_fallback",
             error=str(exc),
             url_count=len(snippets),
-            domain_family=(mode or {}).get("domain_family"),
+            domain_family=(mode or {}).get("domain_family") or family,
+            primary_strategy=strategy,
             soften_directories=bool((mode or {}).get("soften_directories")),
             action="Running local heuristic fallback filter to drop obvious noise.",
         )
@@ -636,6 +1066,7 @@ Snippets: {json.dumps(snippets)}"""
             log.info(
                 "pre_filter_domain_fallback_directory_kept",
                 domain_family=mode.get("domain_family"),
+                primary_strategy=strategy,
                 kept_medium=len(fallback_medium),
                 kept_high=len(fallback_high),
                 note="Fallback kept domain-valuable directory/review URLs as Medium.",
@@ -652,9 +1083,7 @@ Snippets: {json.dumps(snippets)}"""
             output[tier].append(url)
 
     # Deterministic safety net: if Gemini still auto-Low'd (or omitted)
-    # platform surfaces that this domain values, promote them to Medium.
-    # Scans all input snippets not already in High/Medium so rescue works
-    # even when Gemini drops Low rows from the JSON response.
+    # platform surfaces that this domain/strategy values, promote them to Medium.
     rescued = 0
     if mode and mode.get("active") and mode.get("soften_directories"):
         rescued = _rescue_directory_urls_to_medium(snippets, output, mode)
@@ -662,6 +1091,7 @@ Snippets: {json.dumps(snippets)}"""
             log.info(
                 "pre_filter_domain_directory_rescue",
                 domain_family=mode.get("domain_family"),
+                primary_strategy=strategy,
                 rescued_to_medium=rescued,
                 high=len(output["High"]),
                 medium=len(output["Medium"]),
@@ -672,7 +1102,9 @@ Snippets: {json.dumps(snippets)}"""
         "pre_filter_complete",
         high=len(output["High"]),
         medium=len(output["Medium"]),
-        domain_family=(mode or {}).get("domain_family"),
+        domain_family=(mode or {}).get("domain_family") or family or None,
+        primary_strategy=strategy,
+        sourcing_vector=vector,
         domain_adjustment_active=bool(mode and mode.get("active")),
         directory_rescued=rescued,
     )
@@ -1008,35 +1440,87 @@ def final_score_and_dm(
     tech_stack: list,
     historical_dms: Optional[list] = None,
     source_url: Optional[str] = None,
+    domain_profile: Optional[dict[str, Any]] = None,
+    sourcing_vector: Optional[str] = None,
+    primary_strategy: Optional[str] = None,
+    enriched_context: Optional[str] = None,
+    campaign: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Score a lead against all active campaigns and draft an outreach message.
 
     Args:
-        text:             DOM text / snippet text of the lead page.
-        active_campaigns: List of campaign dicts with ``id``, ``bio``, ``keywords``.
-        context_payload:  Contextual enrichment string (GMB, social, hiring).
-        tech_stack:       List of detected tech stack strings.
-        historical_dms:   Past successful DM strings (RLHF feedback loop).
-        source_url:       Original source URL (used for social platform detection).
+        text:              DOM text / snippet text of the lead page.
+        active_campaigns:  List of campaign dicts with ``id``, ``bio``, ``keywords``.
+        context_payload:   Contextual enrichment string (GMB, social, hiring).
+        tech_stack:        List of detected tech stack strings.
+        historical_dms:    Past successful DM strings (RLHF feedback loop).
+        source_url:        Original source URL (used for social platform detection).
+        domain_profile:    Optional ``system_domain_profile`` for domain-aware scoring.
+        sourcing_vector:   Optional B2B/B2C/D2C/B2B2C (falls back to campaign).
+        primary_strategy:  Optional intelligence strategy primary name.
+        enriched_context:  Optional ``build_enriched_context`` output for the primary campaign.
+        campaign:          Optional primary campaign dict (fills missing context fields).
 
     Returns:
         Dict with ``score``, ``dm``, ``pain_point``, ``matched_campaign_ids``, etc.
+        Also includes ``scoring_context`` metadata for observability.
 
     Raises:
         ValueError: On LLM parse failure.
+
+    Backward compatible: omitting domain/strategy/vector kwargs preserves prior
+    call signatures; rules then default to B2B + COLLOQUIAL_DISCOVERY.
     """
+    primary_campaign = campaign if isinstance(campaign, dict) else None
+    if primary_campaign is None and active_campaigns:
+        first = active_campaigns[0]
+        if isinstance(first, dict):
+            primary_campaign = first
+
+    # Resolve context with graceful fallbacks (never require new kwargs).
+    profile = domain_profile if isinstance(domain_profile, dict) else None
+    if profile is None and primary_campaign:
+        cached = primary_campaign.get("system_domain_profile")
+        if isinstance(cached, dict) and cached.get("domain_family"):
+            profile = cached
+
+    vector = _normalize_sourcing_vector(
+        sourcing_vector
+        or (primary_campaign.get("sourcing_vector") if primary_campaign else None)
+    )
+    strategy = _extract_primary_strategy(primary_strategy, primary_campaign)
+    family = _domain_family_from_profile(profile)
+
+    enriched = str(enriched_context or "").strip()
+    if not enriched and primary_campaign:
+        # Prefer pre-built enriched context; otherwise assemble key fields only
+        # (avoid importing context_builder here to keep this module lightweight).
+        parts = []
+        for label, key in (
+            ("PRODUCT/SERVICE", "effective_bio"),
+            ("BUYER PAIN", "pain_point"),
+            ("BUYER HOOK", "target_angle_hook"),
+            ("COMPETITIVE ADVANTAGE", "unfair_advantage"),
+        ):
+            val = primary_campaign.get(key)
+            if _is_meaningful_field(val):
+                parts.append(f"{label}: {str(val).strip()[:400]}")
+        if not parts and _is_meaningful_field(primary_campaign.get("bio")):
+            parts.append(f"PRODUCT/SERVICE: {str(primary_campaign.get('bio')).strip()[:400]}")
+        enriched = "\n".join(parts)
+
     social_domains_check = [
         "reddit.com", "quora.com", "facebook.com",
         "linkedin.com", "instagram.com",
     ]
     is_social = source_url and any(d in source_url.lower() for d in social_domains_check)
-    platform  = "other"
+    platform = "other"
     if source_url:
         for kw, name in [
-            ("reddit.com",    "reddit"),
-            ("quora.com",     "other"),
-            ("facebook.com",  "facebook"),
-            ("linkedin.com",  "linkedin"),
+            ("reddit.com", "reddit"),
+            ("quora.com", "other"),
+            ("facebook.com", "facebook"),
+            ("linkedin.com", "linkedin"),
             ("instagram.com", "instagram"),
         ]:
             if kw in source_url:
@@ -1052,33 +1536,59 @@ def final_score_and_dm(
             "Do NOT return empty contact_endpoints if a profile link is present."
         )
 
-    def _resolve_bio(c: dict) -> str:
-        if c.get("persona_id") and c.get("persona_bio"):
-            return c["persona_bio"]
-        raw = c.get("bio", "")
-        if raw == "CHILD_CAMPAIGN_OVERRIDE":
-            return (
-                c.get("effective_bio") or c.get("campaign_focus") or c.get("pain_point") or ""
-            )
-        return raw
+    campaign_cards = [
+        _build_campaign_scoring_card(
+            c if isinstance(c, dict) else {},
+            enriched_context=enriched if i == 0 else "",
+        )
+        for i, c in enumerate(active_campaigns or [])
+    ]
+    campaigns_str = json.dumps(campaign_cards, indent=2)
 
-    campaigns_str = json.dumps([{
-        "campaign_id": c.get("id", c.get("name")),
-        "bio":         _resolve_bio(c),
-        "keywords":    c.get("persona_keywords") or c.get("keywords", ""),
-    } for c in active_campaigns], indent=2)
+    context_header = _campaign_context_block(
+        domain_profile=profile,
+        sourcing_vector=vector,
+        primary_strategy=strategy,
+        enriched_context=enriched,
+        max_enriched_chars=1200,
+    )
+    intent_rules = _scoring_intent_rules(vector, strategy, family)
+    domain_guidance = _domain_scoring_guidance(family, strategy)
+
+    scoring_meta = {
+        "domain_family": family or None,
+        "profile_confidence": (profile or {}).get("profile_confidence") if profile else None,
+        "liquidity_level": (profile or {}).get("liquidity_level") if profile else None,
+        "sourcing_vector": vector,
+        "primary_strategy": strategy,
+        "has_enriched_context": bool(enriched),
+        "intent_rules_mode": (
+            "platform_mining" if strategy == "PLATFORM_MINING"
+            else "competitor_touchpoint" if strategy == "COMPETITOR_TOUCHPOINT"
+            else "consumer" if vector in _CONSUMER_VECTORS
+            else "b2b_default"
+        ),
+    }
+    log.info(
+        "final_score_context_applied",
+        source_url=(source_url or "")[:80],
+        is_social=bool(is_social),
+        platform=platform,
+        campaign_count=len(campaign_cards),
+        **scoring_meta,
+    )
 
     prompt = f"""You are a Dynamic Intent Analyzer evaluating a lead against multiple campaigns.
 SOURCE TYPE: {'SOCIAL/FORUM POST' if is_social else 'COMPANY WEBSITE/FORMAL PAGE'}
 PLATFORM: {platform.upper()}
-
+{context_header}
+{domain_guidance}
 # STEP 1 — CROSS-POLLINATION EVALUATION MATRIX
 Evaluate the text DOM against EACH campaign below. Score 1-10. Return only campaigns where score >= 4.
+Use each campaign's bio, keywords, pain_point, target_angle_hook, unfair_advantage, and enriched_icp_context when present.
 {campaigns_str}
 
-SELLER EXCLUSION RULE: If the target company sells or advertises B2B lead generation, cold email marketing, B2B databases/data scraping, or outbound agency/sales services themselves, they are a competitor. You MUST score them 0 (or <4) for any campaign, excluding them.
-
-GENERIC B2B RULE: Simply presenting standard services publicly (e.g. software development, IT services, consulting, agency work) does not indicate active buying intent. Grade them strictly as GENERAL_FIT with a score <= 3 (which will exclude them), unless there is a specific active intent signal (e.g., job postings for SDRs/sales, or active complaints).
+{intent_rules}
 
 # STEP 2 — OUTREACH COPILOT DRAFT
 Identify the campaign with the HIGHEST match score.
@@ -1096,7 +1606,7 @@ For each piece of evidence you used to score this lead, create an evidence_chain
 - evidence: the exact quote or fact from the text (max 100 chars)
 - confidence: 0.0-1.0 how confident you are this signal is real
 Also provide:
-- score_reasoning: 1-2 sentences explaining WHY this lead scored the way it did
+- score_reasoning: 1-2 sentences explaining WHY this lead scored the way it did (mention domain/strategy fit if relevant)
 - confidence_level: HIGH (multiple converging signals), MEDIUM (clear single signal), SPECULATIVE (weak/indirect signals)
 
 CONTEXTUAL DORKING DATA:
@@ -1116,8 +1626,9 @@ DETECTED TECH STACK:
         "You are a Dynamic Intent Analyzer and OSINT Lead Profiler. "
         "\n\nCRITICAL RULE — CONTEXTUAL DISCOVERY: "
         "You are evaluating leads that were likely found via raw web footprints "
-        "(PDFs, forums, unoptimized sites). Score purely on the intensity of the "
-        "pain point or operational signal."
+        "(PDFs, forums, unoptimized sites, listing portals). Score using the campaign's "
+        "sourcing_vector, primary_strategy, and domain_family context — not a single "
+        "generic B2B rubric."
         "\n\nOUTREACH RULE: "
         "Draft the DM to sound like a natural, serendipitous discovery. "
         "Acknowledge the specific context of where/how you found them without "
@@ -1136,6 +1647,13 @@ DETECTED TECH STACK:
 
         matched = data.get("matched_campaigns", [])
         if not matched:
+            log.info(
+                "final_score_no_matched_campaigns",
+                source_url=(source_url or "")[:80],
+                confidence_level=data.get("confidence_level"),
+                score_reasoning=(data.get("score_reasoning") or "")[:160],
+                **scoring_meta,
+            )
             return {
                 "score": 0, "matched_campaign_ids": [], "trend_mapped": False,
                 "highest_campaign_id": "Unknown",
@@ -1143,51 +1661,65 @@ DETECTED TECH STACK:
                 "hiring_intent_found": data.get("hiring_intent_found", "No"),
                 "tech_stack_found": data.get("tech_stack_found", []),
                 "icebreaker_angle": data.get("icebreaker_angle", ""),
-                "intent_signal":    data.get("intent_signal", ""),
+                "intent_signal": data.get("intent_signal", ""),
                 "dm": data.get("dm", "Failed to generate DM"),
                 "contact_endpoints": data.get("contact_endpoints", []),
-                "decision_maker_name":          data.get("decision_maker_name", "Unknown"),
-                "decision_maker_title":         data.get("decision_maker_title", "Unknown"),
-                "company_size_tier":            data.get("company_size_tier", "Unknown"),
+                "decision_maker_name": data.get("decision_maker_name", "Unknown"),
+                "decision_maker_title": data.get("decision_maker_title", "Unknown"),
+                "company_size_tier": data.get("company_size_tier", "Unknown"),
                 "primary_objection_hypothesis": data.get("primary_objection_hypothesis", "Unknown"),
                 "company_name": data.get("company_name") or None,
                 "score_reasoning": data.get("score_reasoning", ""),
                 "confidence_level": data.get("confidence_level", "SPECULATIVE"),
                 "evidence_chain": data.get("evidence_chain", []),
+                "scoring_context": scoring_meta,
             }
 
         matched.sort(key=lambda x: x.get("raw_score", 0), reverse=True)
-        base_score       = float(matched[0].get("raw_score", 0))
+        base_score = float(matched[0].get("raw_score", 0))
         highest_campaign = matched[0].get("campaign_id", "Unknown")
-        matched_ids      = [str(c.get("campaign_id")) for c in matched]
+        matched_ids = [str(c.get("campaign_id")) for c in matched]
 
         # Postmortem Fix #10: reduced multiplier table.
         # Old table {2: 1.3, else: 1.6} inflated base-6 leads → 9.6 (hot-lead alert).
         # New table caps at 1.3× for 4+ campaigns. A base-6 lead scores max 7.8 → 7,
         # staying below the WhatsApp trigger (>=8). Genuine 9+ leads still reach 10.
-        multiplier  = {1: 1.0, 2: 1.05, 3: 1.1}.get(len(matched), 1.15)
+        multiplier = {1: 1.0, 2: 1.05, 3: 1.1}.get(len(matched), 1.15)
         final_score = int(min(base_score * multiplier, 10.0))
 
+        log.info(
+            "final_score_decision",
+            source_url=(source_url or "")[:80],
+            base_score=base_score,
+            final_score=final_score,
+            matched_count=len(matched_ids),
+            highest_campaign_id=str(highest_campaign)[:64],
+            confidence_level=data.get("confidence_level"),
+            score_reasoning=(data.get("score_reasoning") or "")[:200],
+            **scoring_meta,
+        )
+
         return {
-            "score":                        final_score,
-            "matched_campaign_ids":         matched_ids,
-            "trend_mapped":                 len(matched) >= 3,
-            "highest_campaign_id":          highest_campaign,
-            "pain_point":                   data.get("pain_point", "Unknown"),
-            "hiring_intent_found":          data.get("hiring_intent_found", "No"),
-            "tech_stack_found":             data.get("tech_stack_found", []),
-            "icebreaker_angle":             data.get("icebreaker_angle", ""),
-            "intent_signal":                data.get("intent_signal", ""),
-            "dm":                           data.get("dm", "Failed to generate DM"),
-            "contact_endpoints":            data.get("contact_endpoints", []),
-            "decision_maker_name":          data.get("decision_maker_name", "Unknown"),
-            "decision_maker_title":         data.get("decision_maker_title", "Unknown"),
-            "company_size_tier":            data.get("company_size_tier", "Unknown"),
+            "score": final_score,
+            "matched_campaign_ids": matched_ids,
+            "trend_mapped": len(matched) >= 3,
+            "highest_campaign_id": highest_campaign,
+            "pain_point": data.get("pain_point", "Unknown"),
+            "hiring_intent_found": data.get("hiring_intent_found", "No"),
+            "tech_stack_found": data.get("tech_stack_found", []),
+            "icebreaker_angle": data.get("icebreaker_angle", ""),
+            "intent_signal": data.get("intent_signal", ""),
+            "dm": data.get("dm", "Failed to generate DM"),
+            "contact_endpoints": data.get("contact_endpoints", []),
+            "decision_maker_name": data.get("decision_maker_name", "Unknown"),
+            "decision_maker_title": data.get("decision_maker_title", "Unknown"),
+            "company_size_tier": data.get("company_size_tier", "Unknown"),
             "primary_objection_hypothesis": data.get("primary_objection_hypothesis", "Unknown"),
-            "company_name":                 data.get("company_name") or None,
+            "company_name": data.get("company_name") or None,
             "score_reasoning": data.get("score_reasoning", ""),
             "confidence_level": data.get("confidence_level", "SPECULATIVE"),
             "evidence_chain": data.get("evidence_chain", []),
+            "scoring_context": scoring_meta,
         }
 
     except Exception as exc:

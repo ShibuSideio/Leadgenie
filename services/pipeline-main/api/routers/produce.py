@@ -104,6 +104,7 @@ from services.serper_service import (  # type: ignore[import]
     SOCIAL_DOMAINS,
 )
 from services.telemetry import update_circuit_telemetry  # type: ignore[import]
+from shared.multi_entity_hosts import resolve_identity_key  # type: ignore[import]
 
 bp  = Blueprint("produce", __name__)
 log = get_logger("pipeline.produce")
@@ -137,6 +138,32 @@ _SYSTEM_JUNK_PATTERNS: frozenset[str] = frozenset({
     "test_keyword",
     "sample_data",
 })
+
+
+def _produce_identity_key(
+    url: str,
+    *,
+    sourcing_vector: str,
+    social_domains: set | frozenset,
+    shared_platforms: set | frozenset,
+) -> tuple[str, dict]:
+    """Path- or domain-level identity key for produce cache + dedup (V26.7.0).
+
+    Multi-entity portal hosts always use path-level keys regardless of vector.
+    """
+    domain = extract_root_domain(url)
+    is_social = any(domain.endswith(s) for s in social_domains)
+    is_shared = any(domain.endswith(s) for s in shared_platforms)
+    is_consumer = _is_consumer_archetype(sourcing_vector)
+    key, meta = resolve_identity_key(
+        url,
+        domain,
+        is_social=is_social,
+        is_shared=is_shared,
+        is_consumer=is_consumer,
+        include_fragment=False,
+    )
+    return key, meta
 
 
 def _is_recent_for_dedup(raw_created_at: object, cutoff: datetime) -> bool:
@@ -963,24 +990,18 @@ def produce():
         "community.hubspot.com", "community.g2.com",  # vendor community boards
         "forum.growthackers.com", "indiehackers.com",
     }
+    _multi_entity_cache_hits = 0
     for surl, meta in snippet_db.items():
-        s_domain    = extract_root_domain(surl)
-        is_social   = any(s_domain.endswith(d) for d in _SOCIAL_DOMAINS_PRODUCER)
-        is_shared   = any(s_domain.endswith(d) for d in shared_platforms)
-        
-        # Calculate matching dedup key to align scraped_cache document ID with dispatch lead_id
-        # P3 FIX (2026-06-20): B2C/Real Estate campaigns use URL-path dedup.
-        # Domain-level dedup exhausts inventory after ~3 produce cycles because
-        # listing aggregators (propertyfinder.ae, bayut.com) host thousands of
-        # distinct listings under a single root domain.
-        _is_b2c = _is_consumer_archetype(sourcing_vector)
-        if is_social or is_shared or _is_b2c:
-            from urllib.parse import urlparse as _urlparse
-            parsed = _urlparse(surl)
-            dedup_key = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
-        else:
-            dedup_key = s_domain
-            
+        # V26.7.0: align cache key with dispatch lead/lock identity (incl. multi-entity portals)
+        dedup_key, _id_meta = _produce_identity_key(
+            surl,
+            sourcing_vector=sourcing_vector,
+            social_domains=_SOCIAL_DOMAINS_PRODUCER,
+            shared_platforms=shared_platforms,
+        )
+        if _id_meta.get("multi_entity_host"):
+            _multi_entity_cache_hits += 1
+
         cache_key = hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
         combined  = f"Query: {meta.get('query', '')}\nTitle: {meta['title']}\nSnippet: {meta['snippet']}".strip()
         if combined:
@@ -996,6 +1017,14 @@ def produce():
                 }, merge=True)
             except Exception as exc:
                 log.warning("snippet_persist_failed", url=surl, error=str(exc))
+    if _multi_entity_cache_hits:
+        log.info(
+            "produce_multi_entity_path_identity",
+            campaign_id=campaign_id,
+            count=_multi_entity_cache_hits,
+            context="snippet_cache",
+            note="Path-level cache keys forced for multi-entity portal hosts.",
+        )
 
     # ------------------------------------------------------------------
     # Social-aware global deduplication
@@ -1041,23 +1070,14 @@ def produce():
                     "failed_vertex_timeout",
                 }:
                     continue
-                d_domain = extract_root_domain(u)
-                d_is_social = any(
-                    d_domain.endswith(s)
-                    for s in _SOCIAL_DOMAINS_PRODUCER
+                # V26.7.0: multi-entity portals always path-keyed (even for B2B
+                # producers) so portal inventory is not domain-collapsed.
+                dedup_key, _exist_meta = _produce_identity_key(
+                    u,
+                    sourcing_vector=sourcing_vector,
+                    social_domains=_SOCIAL_DOMAINS_PRODUCER,
+                    shared_platforms=shared_platforms,
                 )
-                d_is_shared = any(
-                    d_domain.endswith(s)
-                    for s in shared_platforms
-                )
-                # P3 FIX: B2C campaigns use URL-path dedup (matches snippet cache + fresh dedup)
-                _is_b2c = _is_consumer_archetype(sourcing_vector)
-                if d_is_social or d_is_shared or _is_b2c:
-                    from urllib.parse import urlparse as _urlparse
-                    parsed = _urlparse(u)
-                    dedup_key = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
-                else:
-                    dedup_key = d_domain
                 existing_ids.add(
                     hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
                 )
@@ -1066,36 +1086,37 @@ def produce():
         log.warning("produce_dedup_query_failed", error=str(exc))
 
     fresh_urls: list[str] = []
+    _multi_entity_fresh = 0
     for url in raw_urls:
-        f_domain = extract_root_domain(url)
-        f_is_social = any(
-            f_domain.endswith(s)
-            for s in _SOCIAL_DOMAINS_PRODUCER
+        dedup_key, _fresh_meta = _produce_identity_key(
+            url,
+            sourcing_vector=sourcing_vector,
+            social_domains=_SOCIAL_DOMAINS_PRODUCER,
+            shared_platforms=shared_platforms,
         )
-        f_is_shared = any(
-            f_domain.endswith(d)
-            for d in shared_platforms
-        )
-        # P3 FIX: B2C campaigns use URL-path dedup (matches snippet cache + existing leads)
-        _is_b2c = _is_consumer_archetype(sourcing_vector)
-        if f_is_social or f_is_shared or _is_b2c:
-            from urllib.parse import urlparse as _urlparse
-            parsed = _urlparse(url)
-            dedup_key = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
-        else:
-            dedup_key = f_domain
+        if _fresh_meta.get("multi_entity_host"):
+            _multi_entity_fresh += 1
         lead_hash = hashlib.sha256(f"{tenant_id}_{dedup_key}".encode()).hexdigest()
         if lead_hash not in existing_ids and url not in existing_ids:
             fresh_urls.append(url)
 
     duped_count  = fetched_count - len(fresh_urls)
     queued_count = len(fresh_urls)
+    if _multi_entity_fresh:
+        log.info(
+            "produce_multi_entity_path_identity",
+            campaign_id=campaign_id,
+            count=_multi_entity_fresh,
+            context="fresh_dedup",
+            note="Path-level dedup forced for multi-entity portal hosts (vector-independent).",
+        )
     log.info(
         "produce_dedup_complete",
         campaign_id=campaign_id,
         fetched=fetched_count,
         deduplicated=duped_count,
         queued=queued_count,
+        multi_entity_urls=_multi_entity_fresh,
     )
 
     # ------------------------------------------------------------------

@@ -1,6 +1,6 @@
-# LeadGenie (Sideio) — Platform Architecture V26.5.0
+# LeadGenie (Sideio) — Platform Architecture V26.7.0
 **Technical Specification Document**
-*Last Updated: 2026-07-16 | Version: V26.5.0 — Domain Intelligence GA + Thin Campaigns + Domain-Aware Inbound Radar*
+*Last Updated: 2026-07-16 | Version: V26.7.0 — Domain-Aware LLM Gates + Multi-Entity Hosts + Campaign Velocity Quotas*
 
 ---
 
@@ -14,23 +14,20 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 3. Pipeline-Main runs: **domain-profile resolve → intelligence-profile inference → domain-aware query generation → budget-aware source routing → scrape → domain-aware pre-filter → score → adaptive confidence qualification → entity extraction → write to Firestore**
 4. The PWA frontend listens via `onSnapshot` and renders leads in real-time
 
-### Latest implementation updates (V26.5.0)
+### Latest implementation updates (V26.7.0)
 - A shared heuristic planner now infers a campaign intelligence profile from sparse user input so the backend can make stronger decisions with minimal manual effort.
 - Source routing uses that inferred strategy plan and a daily budget guard to avoid wasting expensive Serper spend on weak or low-evidence campaigns.
 - Query generation now uses deterministic fallback logic and strategy-specific phrasing so the pipeline remains robust even when Gemini is unavailable.
-- Lead promotion is now gated by a deterministic confidence score combining evidence strength, buyer intent, urgency, geography, and source trust.
-- The pipeline also includes fallback heuristics for clustering and scoring so important signals are not dropped when LLM calls fail.
-- Campaign create/update now runs deterministic auto-enrichment and writes `system_enrichment` so sparse customer input is upgraded into runtime-safe persona/context fields.
-- A self-healing enrichment backfill job (`/api/internal/campaign-enrichment-run`) repairs active legacy campaigns with stale or incomplete context.
-- Query governance now applies portfolio shaping before Serper execution (intent balance, blacklist cap, platform query injection, dedup).
-- Producer now includes campaign-scoped novelty memory and exhaustion escalation to reduce repeated query loops when markets are saturated.
-- Dispatch uses an adaptive campaign policy engine (**`adaptive-v3`**) that adjusts strictness by queue health, campaign context, **domain `strictness_bias`**, **`profile_confidence` damping**, and recent yield.
-- Confidence promotion thresholds are dynamically adjusted per campaign cycle (bounded); low-confidence domain profiles apply attenuated adjustments so thin campaigns do not over-correct the gate.
-- Score-gate non-promotions are persisted as `scored_out` leads for diagnostics (including compact `domain_impact_summary`).
-- Snippet cache fallback now applies freshness checks; stale cache entries are not used for final scoring decisions.
-- **Domain Intelligence system (SSOT):** campaigns carry `system_domain_profile` (`domain_family`, numeric `confidence`, **`profile_confidence` tier**, `thin_campaign`, `strictness_bias`, preferred sources/hints, liquidity markers). Optional `domain_override` takes precedence over auto-inference.
-- Produce/dispatch are domain-aware for query shaping, pre-filter directory softening, and promotion bias; end-of-cycle logs emit `produce_domain_impact_summary` / `dispatch_domain_impact_summary`.
-- **Inbound Radar (both paths)** is domain-aware: Visitor Beacon (`POST /api/visitor-signals`) and Inbound Sentiment job stamp domain metadata and **actionable `enrichment_priority`** (`realtime` / `batch` / `deferred` processing contracts).
+- Lead promotion is gated by deterministic confidence scoring **plus** a hybrid Gemini score floor, after adapting `final_score_and_dm` output into the confidence schema (V26.5.1).
+- **Domain-aware LLM gates (V26.6.0):** `pre_filter_gemini` and `final_score_and_dm` receive structured campaign runtime context (`domain_family`, `profile_confidence`, `liquidity_level`, `sourcing_vector`, `primary_strategy`, enriched ICP). Scoring rules **branch** for `PLATFORM_MINING`, `COMPETITOR_TOUCHPOINT`, and consumer vectors (no single generic B2B brochure rule for all campaigns).
+- **Multi-entity host identity (V26.7.0):** known portal/aggregator hosts (Bayut, PropertyFinder, Dubizzle, G2, etc.) force **path-level** locking, lead dedup, and scraped-cache keys **even for B2B** campaigns — see `services/shared/multi_entity_hosts.py`.
+- **Velocity gate isolation (V26.7.0):** tenant-wide Medium hard cap remains; each campaign also has a **soft Medium intake quota** (default 12 / 24h, configurable).
+- Campaign create/update runs deterministic auto-enrichment (`system_enrichment`); self-healing enrichment backfill repairs sparse legacy campaigns.
+- Query governance, campaign-scoped novelty memory, and exhaustion escalation protect Serper spend.
+- Dispatch uses **`adaptive-v3`** (queue health + domain `strictness_bias` × `profile_confidence` damping).
+- Non-promotions persist as `scored_out` with confidence + domain impact + promotion-path diagnostics.
+- **Domain Intelligence system (SSOT):** `system_domain_profile` + optional `domain_override`; produce/dispatch emit domain impact summaries.
+- **Inbound Radar** remains domain-aware with `enrichment_priority` contracts (`realtime` / `batch` / `deferred`).
 
 **Intelligence Strategies (V26.0):**
 - `PLATFORM_MINING` — Extract leads from competitor directories, aggregator platforms, review sites
@@ -62,6 +59,7 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 │   │   ├── intelligence_profile.py  # Deterministic strategy-profile inference + execution plan
 │   │   ├── domain_constants.py      # SSOT: KNOWN_DOMAIN_FAMILIES, is_valid_domain_family()
 │   │   ├── domain_gate.py           # Shared thresholds + enrichment_priority contracts
+│   │   ├── multi_entity_hosts.py    # V26.7: portal/aggregator path-level identity SSOT
 │   │   └── campaign_enrichment.py   # Deterministic campaign field auto-enrichment
 │   ├── /orchestrator                # Cloud Run: REST API Gateway + Cron Dispatcher
 │   │   ├── api/routers/             # Modular Flask blueprints (campaigns, leads, visitor_signals…)
@@ -94,11 +92,11 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 │   │   │   ├── signal_harvest.py    #     Signal harvesting engine
 │   │   │   ├── signal_cluster_analyst.py # Signal clustering and analysis
 │   │   │   ├── budget_guard.py      #     Daily cost guard for costly discovery actions
-│   │   │   ├── lead_confidence.py   #     Deterministic promotion confidence scoring
+│   │   │   ├── lead_confidence.py   #     Confidence scoring + Gemini eval adapter + hybrid promotion
 │   │   │   ├── serper_service.py    #     Serper API client
 │   │   │   ├── neg_shield.py        #     Negative signal shield (BQ)
 │   │   │   ├── prism_pipeline.py    #     Headless browser scraping
-│   │   │   ├── gemini_service.py    #     Gemini AI + domain-aware pre-filter
+│   │   │   ├── gemini_service.py    #     Gemini AI: domain/strategy-aware pre-filter + final_score_and_dm
 │   │   │   ├── context_builder.py   #     Enriched ICP context builder
 │   │   │   └── telemetry.py         #     Pipeline telemetry
 │   │   └── requirements.txt
@@ -158,6 +156,9 @@ PIPELINE_BASE_URL=https://lead-pipeline-main-<hash>.a.run.app
 SERPER_DAILY_LIMIT=0                # 0 disables the budget guard
 SERPER_BUDGET_STATE_PATH=/tmp/serper_budget.json
 DEDUP_RECRAWL_DAYS=30              # Re-crawl horizon for lead dedup memory in producer
+MEDIUM_CAMPAIGN_QUOTA_24H=12       # Per-campaign Medium soft quota (0 = disable soft quota)
+MEDIUM_CAMPAIGN_QUOTA_ENABLED=true # Master switch for campaign Medium soft quota
+MULTI_ENTITY_HOST_SUFFIXES=        # Optional comma-separated extra portal host suffixes
 SNIPPET_CACHE_TTL_HOURS=72         # Max age for snippet-cache fallback in dispatch
 
 # Autonomous Engine
@@ -367,36 +368,44 @@ Core atomic lead document. Document ID is a deterministic SHA-256 hash.
 - `crm_delivery_status`: `"delivered"` | `"pending_retry"` | `"failed_permanent"` (V24.4 CRM retry)
 - `enrichment_pending`: set when Medium-tier URL has < 300 chars of text — awaiting full scrape (V24.4)
 
-**Score gate (V26.3.0):** Promotion is based on adaptive confidence thresholds (not a fixed static score bar). Non-promoted leads are retained as `scored_out` with confidence diagnostics for audit and tuning.
+**Score gate (V26.3.0 → V26.5.1):** Promotion uses adaptive **confidence** thresholds with a **hybrid Gemini score floor** after adapting `final_score_and_dm` into the confidence schema. Non-promotions persist as `scored_out` with `confidence_score`, `score_drop_reason`, `promotion_path`, `scoring_context`, and compact `domain_impact_summary`.
 
-**Deduplication key:**
-- **Social + shared-platform URLs** (`linkedin.com`, `reddit.com`, `quora.com`, `stackexchange.com`, `medium.com`, `substack.com`, `wordpress.com`, `github.io`, `news.ycombinator.com`, `indiehackers.com`, and vendor community boards): `sha256(tenant_id + '_' + netloc + path)` — each thread/post is a unique lead.
-- **B2B non-social domains** (all others for B2B campaigns): `sha256(tenant_id + '_' + root_domain)` — domain-level dedup prevents re-scraping the same company.
+**Deduplication key (V26.7.0 identity rules):**
+- **Social + shared-platform URLs** (`linkedin.com`, `reddit.com`, `quora.com`, etc.): `sha256(tenant_id + '_' + netloc + path)` — each thread/post is a unique lead.
+- **Multi-entity portal hosts** (Bayut, PropertyFinder, Dubizzle, G2, Capterra, OLX, Zillow, … — SSOT in `shared/multi_entity_hosts.py`): **always path-level** for lock, lead id, and scraped cache — **including B2B**.
 - **Consumer archetypes (B2C/D2C/B2B2C)**: always URL-path dedup regardless of domain.
-- **Recrawl TTL (V26.2.0)**: dedup uses only leads newer than `DEDUP_RECRAWL_DAYS` (default 30) so old/stale leads can be rediscovered after memory expiry.
+- **B2B normal company domains**: `sha256(tenant_id + '_' + root_domain)`.
+- **Recrawl TTL (V26.2.0)**: only leads newer than `DEDUP_RECRAWL_DAYS` (default 30).
+- Terminal non-promoted statuses (`scored_out`, `rlhf_filtered`, `failed*`) are excluded from produce dedup.
 
 ### 4.6 `global_lead_locks` Collection
-Cross-tenant exclusivity lock. Prevents two tenants from being served the same lead.
+Cross-tenant exclusivity lock (currently **3 days**, with `expire_at` for TTL cleanup).
 
 ```json
 {
-  "_id": "sha256(exact_path_or_root_domain)",
-  "locked_until": "<TIMESTAMP +14 days>"
+  "_id": "sha256(exact_path) | root_domain",
+  "locked_until": "<TIMESTAMP +3 days>",
+  "expire_at": "<TIMESTAMP +3 days>"
 }
 ```
 
+- Path-hash lock id for social / shared / consumer / **multi-entity portals**.
+- Root-domain string lock id only for normal B2B company domains.
+- Logs: `dispatch_multi_entity_path_identity` when portal path rules apply.
+
 ### 4.7 `scraped_cache` Collection
-Caches Playwright scrape results for 30 days.
+Caches Serper snippets and scrape text. Document id is `sha256(tenant_id + '_' + identity_key)` using the same path/domain rules as lead dedup (including multi-entity path keys).
 
 ```json
 {
-  "_id": "url_with_slashes_replaced_by_underscores",
-  "url": "https://techcorp.com",
-  "text": "<truncated DOM text, max 100KB>",
-  "tech_stack": ["wordpress"],
-  "emails": ["contact@techcorp.com"],
-  "phones": ["+13125550199"],
-  "expireAt": "<TIMESTAMP +30 days>"
+  "_id": "sha256(tenant_id + '_' + identity_key)",
+  "url": "https://www.bayut.com/brokers/agent-123.html",
+  "text": "Query: ...\nTitle: ...\nSnippet: ...",
+  "source": "serper_snippet",
+  "tech_stack": [],
+  "emails": [],
+  "phones": [],
+  "cached_at": "<SERVER_TIMESTAMP>"
 }
 ```
 
@@ -636,28 +645,54 @@ Post-flight noise filter (`filter_serper_noise`) removes:
 
 **B2B Forum Dedup (V24.5.5):** Reddit, Quora, StackExchange, HN and other buyer forum platforms are in `shared_platforms` — each thread/post gets URL-path dedup, not domain-level collapse. Without this, all Reddit URLs for a B2B campaign would collapse to one slot.
 
-### Step 7: Gemini Pre-Filter Gate
-All deduplicated Serper snippets pass through a Gemini `gemini-2.5-flash` LLM gate before scraping:
-- Rejects: SEO blogs, competitors, business directories, manufacturers
-- **B2B Buyer Forum Exception (V24.5.4):** Marketing-domain URLs with active practitioner complaint signals (frustrated tone, first-person pain, tool failure vocabulary) are classified as **High confidence** — not dropped as "marketing blog = Low". This was the root cause of zero leads in pre-V24.5.4 runs.
-- For consumer campaigns: evaluates the specific post intent, not the platform
-- Geo rule: if the site explicitly serves a different region → reject
-- Failure: pre-filter gate timeout → all URLs approved as High-tier (fail-open, logged at `WARNING`)
+### Step 7: Gemini Pre-Filter Gate (V26.6.0 domain/strategy-aware)
+Deduplicated Serper snippets pass through a Gemini `gemini-2.5-flash` tiering gate before heavy scrape (forum/classified domains may **bypass** to High — see dispatch `_PREFILTER_BYPASS_DOMAINS`).
+
+**Prompt context (always when known):**
+- `domain_family`, `profile_confidence`, `liquidity_level`, `strictness_bias`, `thin_campaign`
+- `sourcing_vector`, `primary_strategy` (from `intelligence_strategy.primary`)
+- Enriched USER BIO from `context_builder` (dispatch)
+
+**Strategy / domain behaviour:**
+- **PLATFORM_MINING / COMPETITOR_TOUCHPOINT:** directories, classifieds, review aggregators, and listing/profile pages default to **Medium/High** when ICP+geo match (not auto-Low solely for being a directory). Strategy forces directory softening even on thin profiles.
+- **Consumer vectors (B2C/D2C/B2B2C):** STEP 4 dialog-cue / query-context inference is **gated on** (not applied to pure B2B).
+- **Domain-family calibration examples:** real estate, marketing/SaaS, manufacturing, healthcare, or general High/Low anchors (replaces marketing-only few-shots).
+- Core Low categories remain: SEO listicles, wrong geography, pure competitors selling the same service as USER BIO.
+- Deterministic **directory rescue** may promote domain-valuable portal URLs Low→Medium when softening is active.
+- Failure/timeout: bounded High-tier degraded pass-through (not unlimited fail-open).
+
+Logs: `pre_filter_context_applied`, `pre_filter_domain_adjustment_applied`, `pre_filter_domain_directory_rescue`, `pre_filter_complete`.
 
 **B2B FAQ Sanitizer (V24.5.7):** After Gemini generates `translated_queries`, a post-generation filter drops any query starting with FAQ openers (`"how do you"`, `"what are good"`, `"what is the best"`, `"tips for"`, etc.) that match SEO agency blogs rather than buyer forums. If all queries are FAQ, one is kept as a last resort.
 
-### Step 8: Global Exclusivity Lock + Deduplication
+### Step 7b: Velocity Gate (Medium intake) — V26.7.0
+After pre-filter, **High** URLs always proceed. **Medium** URLs are gated:
+
+| Control | Scope | Default | Role |
+|---------|--------|---------|------|
+| Tenant hard cap | All campaigns for tenant | `VELOCITY_THRESHOLD` (env, often 10) on 24h `new` + `enrichment_pending` | Blocks Medium when tenant is saturated |
+| Policy `medium_budget` | Per dispatch cycle | From `adaptive-v3` (e.g. 2–8) | Caps how many Medium URLs enter this batch |
+| **Campaign soft quota** | Per campaign / 24h | **`MEDIUM_CAMPAIGN_QUOTA_24H=12`** | Prevents one aggressive campaign from consuming all Medium slots |
+| Campaign override | Firestore | `campaign.medium_intake_quota_24h` | Optional per-campaign soft quota |
+
+Effective Medium take = `min(policy_budget, campaign_remaining)` when tenant allows Medium; High never blocked by Medium quotas.
+
+Logs: `velocity_gate_tenant_medium_blocked`, `velocity_gate_campaign_medium_quota`, `TRACE-7` (`medium_throttle_reason`, `campaign_medium_used/quota/remaining`).
+
+### Step 8: Global Exclusivity Lock + Deduplication (V26.7.0 identity)
 ```python
+# resolve_identity_key(): path for social/shared/consumer/multi-entity; domain for normal B2B companies
+lock_entity = sha256(path_key) if path_mode else root_domain
 lock_ref = db.collection("global_lead_locks").document(lock_entity)
 if lock_doc.exists and lock_doc.to_dict().get("locked_until") > now_utc:
-    continue  # Locked by another tenant for 14 days
-lock_ref.set({"locked_until": now_utc + timedelta(days=14)})
+    continue  # Locked (3-day window)
+lock_ref.set({"locked_until": now_utc + timedelta(days=3), "expire_at": ...})
 
-lead_id = hashlib.sha256(f"{tenant_id}_{root_domain_or_url_path}".encode()).hexdigest()
-doc_ref.create({"status": "processing", ...})  # Raises AlreadyExists if duplicate
+lead_id = hashlib.sha256(f"{tenant_id}_{identity_key}".encode()).hexdigest()
+doc_ref.create({"status": "processing", "matched_campaigns": [campaign_id], ...})
 ```
 
-Lock-delete failures are logged at `ERROR` (V24.2 — was silent `except: pass`).
+Lock-delete failures are logged at `ERROR` (V24.2 — was silent `except: pass`). Multi-entity path application logs `dispatch_multi_entity_path_identity` / `produce_multi_entity_path_identity`.
 
 **Pre-PRISM TLD gate (V24.5.7):** Before running any PRISM scraping, `_process_single_url()` checks the domain TLD against a non-business list (`.org`, `.edu`, `.gov`, `.blog`, `.dev`, `.page`). If matched, the URL returns `skip_non_business_tld` immediately — saving 3–8 Serper credits that would otherwise be spent on PRISM WalledGardenHook queries + enrichment. Previously, this check only fired inside `deep_context_serper_dork()` *after* PRISM had already run.
 
@@ -692,7 +727,7 @@ Cloud Task to `scraper-heavy/scrape`:
 **Medium-tier enrichment pending (V24.4):**
 Medium-tier URLs with < 300 chars are marked `enrichment_pending` instead of being scored on snippet data. Scoring a 2-sentence snippet produces leads where all fields are "Unknown".
 
-### Step 10: RLHF Pre-Screen + Gemini Scoring
+### Step 10: RLHF Pre-Screen + Gemini Scoring (V26.6.0 domain/strategy-aware)
 
 **A. Python Fast-Fail Gate:** Heuristic blocklist check (global + tenant dynamic). Score > 3 → `failed`.
 
@@ -706,8 +741,22 @@ fit_score = preferences_weights.get("hiring_intent", 0) * native_hiring_intent
 for tech in tech_stack:
     fit_score += preferences_weights.get(f"tech_{tech}", 0)
 if fit_score <= -3:
-    doc_ref.delete()  # Skip Gemini — saves 1 token sequence
+    # Preserve lead as status=rlhf_filtered (not hard delete) for diagnostics
+    doc_ref.update({"status": "rlhf_filtered", ...})
 ```
+
+**E. `final_score_and_dm` (V26.6.0):** Gemini scores the full DOM (or snippet fallback) with structured runtime context:
+- Campaign cards include bio, keywords, `pain_point`, `target_angle_hook`, `unfair_advantage`, and enriched ICP context (from `context_builder` / campaign fields).
+- **Branched fit rules** (not one generic B2B brochure rule):
+  - `PLATFORM_MINING` — agent/listing/directory entities are valid without renter-style pain language.
+  - `COMPETITOR_TOUCHPOINT` — reviewers/commenters are primary leads.
+  - Consumer vectors — local service/listing fit without requiring B2B hiring intent.
+  - B2B default — pure brochures still low; strong ICP company footprint may score mid-band (4–6).
+- Lightweight **domain-family scoring guidance** (real_estate, saas, marketing_agency, manufacturing, healthcare, education, ecommerce, finance).
+- Returns `scoring_context` for observability; logs `final_score_context_applied`, `final_score_decision`.
+
+**F. Confidence adapter + hybrid promotion (V26.5.1):**  
+`adapt_gemini_evaluation_for_confidence()` maps Gemini score / `confidence_level` / `pain_point` / contacts into the harvest-style schema expected by `calculate_lead_confidence()`. Hybrid rule promotes if confidence passes **or** Gemini score clears a policy-aware floor. Logs: `dispatch_confidence_adapter_used`, `dispatch_hybrid_promotion_triggered`, `dispatch_score_gate_eval` / `_drop`.
 
 **E. Few-Shot Conversion Context:** Last 3 `converted` leads' DMs injected into Gemini prompt for tone enforcement.
 
@@ -1014,8 +1063,8 @@ log.warning("lead_lock_delete_failed",
 ## 17. KEY DESIGN INVARIANTS (NEVER BREAK)
 
 1. **Tenant isolation:** Every Firestore document a tenant touches must have `tenant_id == user.uid`. Every BQ query must be scoped by `tenant_id`.
-2. **Lead dedup ID:** Must be deterministic and campaign-vector-aware: `sha256(tenant_id + '_' + root_domain)` for B2B non-social domains; `sha256(tenant_id + '_' + netloc + path(+fragment where applicable))` for social/shared/consumer paths.
-3. **Score gate:** Promotion is confidence-threshold based (adaptive, bounded); non-promoted leads are retained as `scored_out` for diagnostics and model tuning.
+2. **Lead dedup ID:** Must be deterministic: `sha256(tenant_id + '_' + identity_key)`. Use **path** identity for social, shared platforms, consumer vectors, **and multi-entity portal hosts** (even under B2B). Use **root domain** only for normal B2B company hosts. SSOT: `shared/multi_entity_hosts.py`.
+3. **Score gate:** Promotion is confidence-threshold based (adaptive, bounded) with hybrid Gemini score floor after evaluation adapter; non-promoted leads are retained as `scored_out` for diagnostics and model tuning.
 4. **Firestore rules:** `leads` and `campaigns` are the only collections the frontend can read/write directly. All other collections are Admin SDK only.
 5. **SW Firebase bypass:** Never let the service worker intercept `googleapis.com` or `google.com` traffic.
 6. **Wallet shards:** True balance = `allocated_credits − consumed_credits − SUM(wallet_shards/0-9) − reserved_credits`.
@@ -1029,6 +1078,8 @@ log.warning("lead_lock_delete_failed",
 14. **Entity extraction thread safety:** `_ENTITY_DOMAIN_COUNTS` in `dispatch.py` is a module-level dict guarded by `_ENTITY_DOMAIN_LOCK`. All read-modify-write operations MUST hold the lock.
 15. **Contact endpoints schema:** Entity-extracted leads must use `list[dict]` format: `[{"type": "email", "value": "..."}]`. Never flat strings.
 16. **Strategy-aware blacklist:** PLATFORM_MINING strategy preserves review/directory sites (g2, capterra, yelp) in blacklist — these are intelligence sources, not noise.
+17. **Multi-entity portals:** Never domain-lock or domain-dedup hosts in the multi-entity catalogue (Bayut, PropertyFinder, Dubizzle, etc.). Path-level identity is mandatory for lock, lead id, and scraped cache.
+18. **Velocity Medium isolation:** Tenant hard cap remains; per-campaign Medium soft quota must not be bypassed without disabling `MEDIUM_CAMPAIGN_QUOTA_ENABLED` deliberately.
 
 ---
 
@@ -1040,9 +1091,9 @@ These are structural issues identified across V24–V25 audit cycles.
 |---|---|---|---|---|
 | I-1 | ✅ Resolved | `neg_shield.py` | `Negative_Signals` BQ table missing `sourcing_vector` column | Fixed 2026-07-02 |
 | I-2 | 🟠 High | `serper_service.py` | BQ audit telemetry schema mismatch → `serper_audit_broker_non_200` | Open — audit table schema needs investigation |
-| I-3 | 🟡 Medium | `dispatch.py` | Velocity gate Firestore composite index missing | Open — all Medium-tier URLs auto-approved |
+| I-3 | 🟡 Medium | `dispatch.py` | Velocity gate Firestore composite index missing | Mitigated V26.7 — fail-open campaign quota + degraded Medium sample; index still recommended |
 | I-4 | ✅ Resolved | `orchestrator` | `INTERNAL_CRON_SECRET` env var not set | Fixed 2026-07-02 |
-| I-5 | 🟡 Medium | `dispatch.py` | `enrichment_pending` leads not counted in velocity gate | Open |
+| I-5 | ✅ Resolved | `dispatch.py` | `enrichment_pending` leads not counted in velocity gate | Fixed earlier; tenant hard cap includes enrichment_pending |
 | I-6 | ✅ Resolved | All campaigns | Pre-filter context starvation | Fixed V24.6.1: `context_builder.py` |
 | I-7 | ✅ Resolved | `serper_service.py` | B2B had no temporal filter | Fixed V24.6.0: `tbs=qdr:y` |
 | I-8 | ✅ Resolved | `dispatch.py` | No page-type score cap | Fixed V24.6.0: structural regex cap |
@@ -1054,6 +1105,9 @@ These are structural issues identified across V24–V25 audit cycles.
 | I-14 | ✅ Resolved | `gemini_service.py` | `response.text` crash on empty candidates | Fixed V25.6.0: `_safe_extract()` guard |
 | I-15 | ✅ Resolved | `personas.py` | Cache invalidation queried wrong collection | Fixed V25.6.0: tenant-scoped subcollection |
 | I-16 | ✅ Resolved | `app.js` | 11 XSS injection points (campaign names, keywords, geo, timeline) | Fixed V25.6.0: `_escapeHTML()` |
+| I-17 | ✅ Resolved | `dispatch/produce` | B2B domain-level lock/dedup on multi-entity portals | Fixed V26.7.0: `multi_entity_hosts.py` path identity |
+| I-18 | ✅ Resolved | `dispatch.py` | One campaign could starve others of Medium intake | Fixed V26.7.0: per-campaign Medium soft quota |
+| I-19 | ✅ Resolved | `gemini_service` / `lead_confidence` | Gemini score ignored by confidence gate (schema mismatch) | Fixed V26.5.1 adapter + hybrid promotion |
 
 **Diagnostic shortcut for operators:** Filter Cloud Run logs for `context_builder_assembled sections=<N>`. Any campaign with `sections < 3` is a thin-context campaign that may produce poor leads — prompt customer to fill in bio, pain_point, or link a persona.
 
@@ -1246,12 +1300,32 @@ Sparse campaigns use softer family pick thresholds, light name/keyword industry 
 |-------|----------------|
 | **Produce** | `apply_domain_query_profile` after governance: drop blocked subreddits, boost/inject preferred `site:` queries |
 | **Query brain** | Seeds platform-mining from preferred platforms; platform mining for domain families even when not pure B2C |
-| **Pre-filter (Gemini)** | Softens directory/review auto-Low only when domain mode is active and profile confidence is not low |
+| **Pre-filter (Gemini)** | V26.6: domain/strategy/vector in prompt; PLATFORM_MINING forces directory softening; family calibration examples; STEP 4 consumer-gated |
+| **Final scoring (Gemini)** | V26.6: branched fit rules + domain guidance + enriched campaign cards; `scoring_context` on lead docs |
 | **Dispatch policy** | `threshold_adjustment` includes domain delta; medium budget mildly lifted in recovery + low liquidity |
+| **Velocity Medium** | V26.7: tenant hard cap + per-campaign soft quota (see Step 7b) |
+| **Lock / dedup / cache** | V26.7: multi-entity hosts always path-level (vector-independent) |
 | **Impact summary** | End-of-cycle structured log + funnel payload; compact copy on `scored_out` |
 
 ### 22.6 Inbound consumers
 See **§8**. Both Visitor Beacon and Sentiment Radar load `system_domain_profile` when present; absent profile = legacy behaviour.
+
+### 22.7 Multi-entity host identity (V26.7.0)
+
+**Module:** `services/shared/multi_entity_hosts.py` (copied into pipeline container as `./shared`).
+
+**Problem:** B2B domain-level locks/dedup on portals (`bayut.com`, `propertyfinder.*`, …) collapsed thousands of agents/listings into one slot and could exclusivity-lock an entire portal for all tenants for the lock window.
+
+**Rule:** If the host is in the multi-entity catalogue (or matches an env extension), identity is **always path-level** for:
+1. `global_lead_locks` document id (hash of path key)
+2. Lead document id `sha256(tenant_id + '_' + path_key)`
+3. `scraped_cache` document id
+
+Normal single-company domains under B2B remain domain-level. Social/shared/consumer path behaviour is unchanged.
+
+**Config:** `MULTI_ENTITY_HOST_SUFFIXES` — optional comma-separated extra suffixes at runtime.
+
+**Logs:** `dispatch_multi_entity_path_identity`, `produce_multi_entity_path_identity`.
 
 ---
 
@@ -1259,6 +1333,9 @@ See **§8**. Both Visitor Beacon and Sentiment Radar load `system_domain_profile
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V26.7.0** | **2026-07-16** | **Multi-entity path identity (`shared/multi_entity_hosts.py`) for portal lock/dedup/cache even under B2B; per-campaign Medium soft quota (`MEDIUM_CAMPAIGN_QUOTA_24H`, optional `campaign.medium_intake_quota_24h`) with tenant hard cap preserved; expanded velocity/identity observability.** |
+| **V26.6.0** | **2026-07-16** | **Domain/strategy/vector-aware LLM gates: `pre_filter_gemini` and `final_score_and_dm` receive structured runtime context; branched PLATFORM_MINING / COMPETITOR_TOUCHPOINT / consumer / B2B fit rules; domain-family calibration guidance; scoring_context diagnostics.** |
+| **V26.5.1** | **2026-07-16** | **Confidence evaluation adapter + hybrid Gemini score-floor promotion so Serper-path `final_score_and_dm` scores are not ignored by `calculate_lead_confidence`.** |
 | **V26.5.0** | **2026-07-16** | **Domain Intelligence GA: thin-campaign `profile_confidence` damping, manual `domain_override`, SSOT `domain_constants.py` + `domain_gate.py`, adaptive-v3 (`strictness_bias` × confidence scale), domain impact summaries, domain-aware Inbound Radar (visitor beacon + sentiment) with actionable `enrichment_priority` contracts (realtime/batch/deferred).** |
 | **V26.4.0** | **2026-07-16** | **Domain intelligence layer (`system_domain_profile`) added across produce/dispatch, domain-aware query pruning and tier filtering, adaptive policy upgraded to `adaptive-v2` with domain conditioning, and architecture invariants updated to reflect confidence-based promotion + `scored_out` persistence.** |
 | **V26.3.0** | **2026-07-16** | **Adaptive campaign dispatch policy engine (`adaptive-v1`), dynamic confidence threshold adjustments, `scored_out` status persistence instead of hard delete, snippet-cache freshness TTL guard (`SNIPPET_CACHE_TTL_HOURS`), and dedup exclusion of terminal non-promoted/failed statuses to reduce starvation across mixed campaign domains.** |

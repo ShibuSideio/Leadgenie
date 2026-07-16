@@ -42,6 +42,7 @@ from google.cloud.firestore_v1.transaction import transactional as _firestore_tr
 from core.config import (  # type: ignore[import]
     PROJECT_ID, LOCATION, QUEUE, ORCHESTRATOR_URL, SCRAPER_HEAVY_URL,
     SERPER_API_KEY_NAME, VELOCITY_THRESHOLD, ORCHESTRATOR_SA_EMAIL,
+    MEDIUM_CAMPAIGN_QUOTA_24H, MEDIUM_CAMPAIGN_QUOTA_ENABLED,
 )
 from core.clients import get_db, get_tasks_client, get_sm_client, get_serper_key  # type: ignore[import]
 from core.logging import get_logger                                 # type: ignore[import]
@@ -54,7 +55,11 @@ from services.gemini_service import (  # type: ignore[import]
     final_score_and_dm,
     is_prefilter_domain_softening_active,
 )
-from services.lead_confidence import calculate_lead_confidence  # type: ignore[import]
+from services.lead_confidence import (  # type: ignore[import]
+    adapt_gemini_evaluation_for_confidence,
+    apply_hybrid_promotion,
+    calculate_lead_confidence,
+)
 from services.adaptive_policy import build_dispatch_policy  # type: ignore[import]
 from services.domain_intelligence import (  # type: ignore[import]
     filter_tiered_urls_by_domain,
@@ -117,6 +122,85 @@ def _is_cache_record_fresh(cache_doc: dict, max_age_hours: int) -> bool:
     ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=datetime.timezone.utc)
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=max_age_hours)
     return ts >= cutoff
+
+
+def _resolve_url_identity(
+    url: str,
+    *,
+    sourcing_vector: str,
+    social_set: set,
+    shared_platforms: set,
+    include_fragment: bool = False,
+) -> tuple[str, str, dict]:
+    """Return (root_domain, identity_key, meta) for lock / lead / cache keys.
+
+    Multi-entity portal hosts always use path-level identity regardless of
+    sourcing_vector (V26.7.0). Social / shared / consumer vectors unchanged.
+    """
+    from shared.multi_entity_hosts import resolve_identity_key  # type: ignore[import]
+
+    domain = extract_root_domain(url)
+    is_social = any(domain.endswith(s) for s in social_set)
+    is_shared = any(domain.endswith(s) for s in shared_platforms)
+    is_consumer = _is_consumer_archetype(sourcing_vector)
+    identity_key, meta = resolve_identity_key(
+        url,
+        domain,
+        is_social=is_social,
+        is_shared=is_shared,
+        is_consumer=is_consumer,
+        include_fragment=include_fragment,
+    )
+    return domain, identity_key, meta
+
+
+def _campaign_medium_quota_limit(campaign: dict) -> int:
+    """Per-campaign Medium intake soft quota (24h). 0 = disabled."""
+    if not MEDIUM_CAMPAIGN_QUOTA_ENABLED:
+        return 0
+    raw = campaign.get("medium_intake_quota_24h")
+    if raw is not None and str(raw).strip() != "":
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return max(0, int(MEDIUM_CAMPAIGN_QUOTA_24H or 0))
+
+
+def _count_campaign_medium_intake_24h(campaign_id: str, cutoff) -> int:
+    """Count Medium-tier leads attributed to *campaign_id* in the velocity window.
+
+    Any lead created in-window with ``confidence_tier == Medium`` counts toward
+    the campaign soft quota (intake already consumed). Fail-open (return 0) on
+    query errors so a missing index cannot freeze High processing — the
+    tenant-wide hard cap still protects quality.
+    """
+    if not campaign_id:
+        return 0
+    try:
+        # matched_campaigns is present on the processing stub; campaign_id is
+        # written on full promote. array_contains covers both paths.
+        snaps = list(
+            _db().collection("leads")
+            .where(filter=FieldFilter("matched_campaigns", "array_contains", campaign_id))
+            .where(filter=FieldFilter("createdAt", ">=", cutoff))
+            .select(["confidence_tier"])
+            .limit(200)
+            .stream()
+        )
+        return sum(
+            1
+            for snap in snaps
+            if str((snap.to_dict() or {}).get("confidence_tier") or "").strip() == "Medium"
+        )
+    except Exception as exc:
+        log.warning(
+            "velocity_gate_campaign_medium_count_failed",
+            campaign_id=campaign_id,
+            error=str(exc),
+            note="Fail-open: campaign Medium soft quota treated as unused this cycle.",
+        )
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -512,21 +596,23 @@ def dispatch():
     }
     _snippet_cache_ttl_hours = max(6, min(240, int(os.environ.get("SNIPPET_CACHE_TTL_HOURS", "72"))))
     for batch_url in batch_urls:
-        b_domain  = extract_root_domain(batch_url)
-        is_social = any(b_domain.endswith(s) for s in SOCIAL_SET)
-        is_shared = any(b_domain.endswith(s) for s in SHARED_PLATFORMS)
-        # P3 FIX: B2C campaigns use URL-path dedup (matches produce.py cache_key)
-        _is_b2c = _is_consumer_archetype(sourcing_vector)
-        if is_social or is_shared or _is_b2c:
-            parsed     = urlparse(batch_url)
-            # V25.3.0: Include fragment (#review-0, etc.) for signal_harvest
-            # review URLs that use fragments for per-review uniqueness.
-            _frag = f"#{parsed.fragment}" if parsed.fragment else ""
-            exact_path = f"{parsed.netloc}{parsed.path}{_frag}".lower().replace("www.", "")
-            dedupe_target = exact_path
-        else:
-            dedupe_target = b_domain
-        
+        # V26.7.0: path identity for social/shared/consumer + multi-entity portals
+        _b_domain, dedupe_target, _id_meta = _resolve_url_identity(
+            batch_url,
+            sourcing_vector=sourcing_vector,
+            social_set=SOCIAL_SET,
+            shared_platforms=SHARED_PLATFORMS,
+            include_fragment=True,
+        )
+        if _id_meta.get("multi_entity_host") and _id_meta.get("identity_mode") == "path":
+            log.info(
+                "dispatch_multi_entity_path_identity",
+                url=batch_url[:80],
+                domain=_b_domain,
+                identity_reason=_id_meta.get("identity_reason"),
+                context="snippet_cache",
+            )
+
         try:
             cache_key = hashlib.sha256(f"{tenant_id}_{dedupe_target}".encode()).hexdigest()
             cdoc = _db().collection("scraped_cache").document(cache_key).get()
@@ -592,9 +678,16 @@ def dispatch():
             note="Passing system_domain_profile into pre_filter_gemini for domain-aware strictness.",
         )
 
+    _intel_strategy = campaign.get("intelligence_strategy") or {}
+    _primary_strategy = ""
+    if isinstance(_intel_strategy, dict):
+        _primary_strategy = str(_intel_strategy.get("primary") or "").strip()
+
     log.info("TRACE-7: Calling pre_filter_gemini.", url_count=len(filter_urls),
              bypassed=len(bypass_urls),
-             domain_family=_pf_family or None)
+             domain_family=_pf_family or None,
+             sourcing_vector=sourcing_vector,
+             primary_strategy=_primary_strategy or None)
 
     if filter_urls:
         synthetic_snippets = [
@@ -609,6 +702,8 @@ def dispatch():
                     bio,
                     location,
                     _pf_domain,
+                    sourcing_vector,
+                    _primary_strategy or None,
                 )
                 tiered = fut.result(timeout=30)
         except Exception as _pf_err:
@@ -649,6 +744,9 @@ def dispatch():
     velocity_threshold = VELOCITY_THRESHOLD
     _velocity_gate_mode = "normal"
     _degraded_medium_selected = 0
+    _medium_throttle_reason = "none"
+    _campaign_medium_used = 0
+    _campaign_medium_quota = _campaign_medium_quota_limit(campaign)
     recent_new_count = 0
     recent_enrichment_pending_count = 0
     try:
@@ -670,6 +768,10 @@ def dispatch():
             .count().get()[0][0].value
         ) or 0)
         recent_count = recent_new_count + recent_enrichment_pending_count
+        if _campaign_medium_quota > 0:
+            _campaign_medium_used = _count_campaign_medium_intake_24h(
+                campaign_id, cutoff_24h
+            )
     except Exception as _vel_err:
         # Enterprise quality-safe fallback: on velocity gate read failure, block
         # broad fail-open. We still allow a tiny bounded sample to prevent
@@ -732,36 +834,105 @@ def dispatch():
     )
     _domain_impact_scored_out = domain_impact_for_scored_out(_domain_impact_base)
 
-    allow_medium  = recent_count < velocity_threshold
+    # V26.7.0: tenant hard cap + per-campaign Medium soft quota.
+    # High tier is never blocked by Medium quotas.
+    allow_medium = recent_count < velocity_threshold
+    _policy_medium_budget = max(0, int(policy.get("medium_budget") or 0))
+    _campaign_medium_remaining = (
+        max(0, _campaign_medium_quota - _campaign_medium_used)
+        if _campaign_medium_quota > 0
+        else None  # None = no soft quota
+    )
+
+    def _apply_campaign_medium_cap(candidates: list, base_cap: int) -> list:
+        """Intersect policy/degraded cap with per-campaign soft remaining."""
+        nonlocal _medium_throttle_reason
+        cap = max(0, int(base_cap))
+        if _campaign_medium_remaining is not None:
+            if _campaign_medium_remaining <= 0:
+                _medium_throttle_reason = "campaign_medium_quota"
+                log.info(
+                    "velocity_gate_campaign_medium_quota",
+                    campaign_id=campaign_id,
+                    campaign_medium_used=_campaign_medium_used,
+                    campaign_medium_quota=_campaign_medium_quota,
+                    available_medium=len(candidates),
+                    note="Campaign 24h Medium soft quota exhausted; High tier still flows.",
+                )
+                return []
+            if cap > _campaign_medium_remaining:
+                _medium_throttle_reason = "campaign_medium_quota"
+                log.info(
+                    "velocity_gate_campaign_medium_quota",
+                    campaign_id=campaign_id,
+                    campaign_medium_used=_campaign_medium_used,
+                    campaign_medium_quota=_campaign_medium_quota,
+                    campaign_medium_remaining=_campaign_medium_remaining,
+                    policy_medium_budget=cap,
+                    available_medium=len(candidates),
+                    note="Medium intake reduced by per-campaign soft quota (tenant still allows Medium).",
+                )
+                cap = _campaign_medium_remaining
+        return candidates[:cap]
+
     if allow_medium:
-        approved_urls = high_urls + medium_urls[: int(policy.get("medium_budget") or len(medium_urls))]
+        _tenant_cap = _policy_medium_budget if _policy_medium_budget > 0 else len(medium_urls)
+        _selected_medium = _apply_campaign_medium_cap(medium_urls, _tenant_cap)
+        if (
+            not _selected_medium
+            and medium_urls
+            and _medium_throttle_reason == "none"
+            and _tenant_cap == 0
+        ):
+            _medium_throttle_reason = "tenant_policy_budget"
+        approved_urls = high_urls + _selected_medium
+        _degraded_medium_selected = len(_selected_medium)
     elif _velocity_gate_mode == "degraded_firestore_error" and medium_urls:
         _VELOCITY_DEGRADED_MEDIUM_CAP = max(1, min(10, int(policy.get("degraded_medium_budget") or 3)))
-        _degraded_medium = medium_urls[:_VELOCITY_DEGRADED_MEDIUM_CAP]
+        _degraded_medium = _apply_campaign_medium_cap(medium_urls, _VELOCITY_DEGRADED_MEDIUM_CAP)
         _degraded_medium_selected = len(_degraded_medium)
         approved_urls = high_urls + _degraded_medium
+        if _medium_throttle_reason == "none":
+            _medium_throttle_reason = "tenant_degraded_sample"
         log.warning(
             "velocity_gate_degraded_medium_sample",
             campaign_id=campaign_id,
             selected=_degraded_medium_selected,
             available_medium=len(medium_urls),
             cap=_VELOCITY_DEGRADED_MEDIUM_CAP,
+            medium_throttle_reason=_medium_throttle_reason,
             note="Firestore read error fallback: allowing bounded medium sample.",
         )
     elif policy.get("mode") == "recovery" and medium_urls:
         _recovery_budget = max(1, min(10, int(policy.get("degraded_medium_budget") or 2)))
-        _degraded_medium = medium_urls[:_recovery_budget]
+        _degraded_medium = _apply_campaign_medium_cap(medium_urls, _recovery_budget)
         _degraded_medium_selected = len(_degraded_medium)
         approved_urls = high_urls + _degraded_medium
         _velocity_gate_mode = "recovery_override"
+        if _medium_throttle_reason == "none":
+            _medium_throttle_reason = "recovery_override"
     else:
         approved_urls = high_urls
+        if medium_urls:
+            _medium_throttle_reason = "tenant_velocity_hard_cap"
+            log.info(
+                "velocity_gate_tenant_medium_blocked",
+                campaign_id=campaign_id,
+                tenant_recent_count=recent_count,
+                velocity_threshold=velocity_threshold,
+                available_medium=len(medium_urls),
+                note="Tenant-wide velocity hard cap blocked Medium intake; High still flows.",
+            )
     url_to_tier   = {u: "High" for u in high_urls}
     url_to_tier.update({u: "Medium" for u in medium_urls})
     log.info("TRACE-7: Gate complete.",
              high=len(high_urls), medium=len(medium_urls),
              approved=len(approved_urls), gate_rejected=len(batch_urls)-len(approved_urls),
              gate_mode=_velocity_gate_mode, degraded_medium_selected=_degraded_medium_selected,
+             medium_throttle_reason=_medium_throttle_reason,
+             campaign_medium_used=_campaign_medium_used,
+             campaign_medium_quota=_campaign_medium_quota or None,
+             campaign_medium_remaining=_campaign_medium_remaining,
              policy_mode=policy.get("mode"), policy_version=policy.get("policy_version"),
              policy_threshold_adjustment=policy.get("threshold_adjustment"),
              domain_threshold_delta=policy.get("domain_threshold_delta"),
@@ -825,18 +996,29 @@ def dispatch():
 
         is_social = any(target_domain.endswith(s) for s in SOCIAL_SET)
         is_shared = any(target_domain.endswith(s) for s in SHARED_PLATFORMS)
-        # P3 FIX: B2C/Real Estate campaigns use URL-path dedup (matches produce.py)
-        _is_b2c = _is_consumer_archetype(sourcing_vector)
-        if is_social or is_shared or _is_b2c:
-            parsed     = urlparse(url)
-            # V25.3.0: Include fragment for signal_harvest review URL uniqueness
-            _frag_per_url = f"#{parsed.fragment}" if parsed.fragment else ""
-            exact_path = f"{parsed.netloc}{parsed.path}{_frag_per_url}".lower().replace("www.", "")
-            lock_entity   = hashlib.sha256(exact_path.encode()).hexdigest()
-            dedupe_target = exact_path
+        # V26.7.0: path identity for social/shared/consumer + multi-entity portals
+        # (force path-level lock/dedup on bayut/propertyfinder/etc. even for B2B).
+        _, dedupe_target, _lock_id_meta = _resolve_url_identity(
+            url,
+            sourcing_vector=sourcing_vector,
+            social_set=SOCIAL_SET,
+            shared_platforms=SHARED_PLATFORMS,
+            include_fragment=True,
+        )
+        if _lock_id_meta.get("identity_mode") == "path":
+            lock_entity = hashlib.sha256(dedupe_target.encode()).hexdigest()
         else:
-            lock_entity   = target_domain
-            dedupe_target = target_domain
+            lock_entity = target_domain
+        if _lock_id_meta.get("multi_entity_host"):
+            log.info(
+                "dispatch_multi_entity_path_identity",
+                url=url[:80],
+                domain=target_domain,
+                identity_mode=_lock_id_meta.get("identity_mode"),
+                identity_reason=_lock_id_meta.get("identity_reason"),
+                lock_entity=str(lock_entity)[:16],
+                context="lock_and_dedup",
+            )
 
         # ── Global Exclusivity Lock ──────────────────────────────────────────
         lock_ref = _db().collection("global_lead_locks").document(lock_entity)
@@ -1091,13 +1273,21 @@ def dispatch():
                     .set({"gemini_calls": firestore.Increment(1)}, merge=True)
 
                 log.info("TRACE-9: Calling final_score_and_dm on full DOM.",
-                         url=url[:80], text_chars=len(text), prism_mode=prism_mode)
+                         url=url[:80], text_chars=len(text), prism_mode=prism_mode,
+                         domain_family=domain_profile.get("domain_family"),
+                         sourcing_vector=sourcing_vector,
+                         primary_strategy=_primary_strategy or None)
                 evaluation = final_score_and_dm(
                     text=text,
                     active_campaigns=active_campaigns,
                     context_payload=context_payload,
                     tech_stack=tech_stack,
-                    source_url=url
+                    source_url=url,
+                    domain_profile=domain_profile if isinstance(domain_profile, dict) else None,
+                    sourcing_vector=sourcing_vector,
+                    primary_strategy=_primary_strategy or None,
+                    enriched_context=bio,
+                    campaign=campaign,
                 )
             except TimeoutError:
                 doc_ref.update({"status": "failed", "error": "Vertex AI timeout"})
@@ -1202,8 +1392,27 @@ def dispatch():
             # threshold_adjustment already includes domain strictness_bias
             # (via adaptive-v3). Negative bias → lower bar → easier promotion.
             _gate_threshold_adj = float(policy.get("threshold_adjustment") or 0.0)
+
+            # V26.5.1: Normalize final_score_and_dm (and harvest) evaluation into
+            # the schema calculate_lead_confidence expects so Gemini score and
+            # confidence_level actually drive evidence_strength on the Serper path.
+            # Harvest-style fields are preserved when already present.
+            _adapted_eval = adapt_gemini_evaluation_for_confidence(evaluation)
+            log.info(
+                "dispatch_confidence_adapter_used",
+                url=url[:80],
+                adapter_used=bool(_adapted_eval.get("_adapter_used")),
+                harvest_fields_present=bool(_adapted_eval.get("_harvest_fields_present")),
+                adapter_source=_adapted_eval.get("_adapter_source"),
+                gemini_score=score,
+                adapted_tier=_adapted_eval.get("tier"),
+                adapted_coherence=_adapted_eval.get("topic_coherence"),
+                confidence_level=_adapted_eval.get("confidence_level"),
+                harvest_lead=is_harvest_lead,
+            )
+
             confidence_bundle = calculate_lead_confidence(
-                evaluation=evaluation,
+                evaluation=_adapted_eval,
                 text=text,
                 url=url,
                 source_tier=url_to_tier.get(url, "High"),
@@ -1213,6 +1422,25 @@ def dispatch():
                 campaign=campaign,
                 threshold_adjustment=_gate_threshold_adj,
             )
+            # Hybrid rule: confidence promotion OR Gemini score floor (policy-aware).
+            confidence_bundle = apply_hybrid_promotion(
+                confidence_bundle,
+                gemini_score=score,
+                policy_mode=str(policy.get("mode") or "balanced"),
+                is_thin_payload=is_thin_payload,
+                adapted_evaluation=_adapted_eval,
+            )
+            if confidence_bundle.get("hybrid_promotion_triggered"):
+                log.info(
+                    "dispatch_hybrid_promotion_triggered",
+                    url=url[:80],
+                    gemini_score=score,
+                    hybrid_score_floor=confidence_bundle.get("hybrid_score_floor"),
+                    confidence=confidence_bundle.get("confidence_score"),
+                    confidence_threshold=confidence_bundle.get("confidence_threshold"),
+                    policy_mode=policy.get("mode"),
+                    reason=confidence_bundle.get("reason"),
+                )
 
             log.info("dispatch_score_gate_eval",
                      url=url[:80], score=score, threshold=confidence_bundle["confidence_threshold"],
@@ -1223,16 +1451,34 @@ def dispatch():
                      domain_threshold_delta=policy.get("domain_threshold_delta"),
                      domain_strictness_bias=policy.get("domain_strictness_bias"),
                      domain_family=policy.get("domain_family") or domain_profile.get("domain_family"),
-                     promoted=bool(confidence_bundle.get("promotion")))
+                     promoted=bool(confidence_bundle.get("promotion")),
+                     promotion_path=confidence_bundle.get("promotion_path"),
+                     hybrid_triggered=bool(confidence_bundle.get("hybrid_promotion_triggered")),
+                     hybrid_score_floor=confidence_bundle.get("hybrid_score_floor"),
+                     adapter_source=_adapted_eval.get("_adapter_source"),
+                     adapted_tier=_adapted_eval.get("tier"))
 
             if not confidence_bundle["promotion"]:
+                _drop_reason = confidence_bundle.get("reason", "weak-evidence fallback")
+                _hybrid_floor = confidence_bundle.get("hybrid_score_floor")
+                if score > 0 and _hybrid_floor is not None and score < int(_hybrid_floor):
+                    _drop_reason = (
+                        f"{_drop_reason}; hybrid_score_below_floor "
+                        f"(gemini_score={score} < floor={_hybrid_floor})"
+                    )
+                elif not confidence_bundle.get("hybrid_basic_signals"):
+                    _drop_reason = f"{_drop_reason}; hybrid_missing_basic_signals"
                 log.info("dispatch_score_gate_drop", url=url[:80],
                          score=score, threshold=confidence_bundle["confidence_threshold"],
                          confidence=confidence_bundle["confidence_score"],
                          threshold_adjustment=confidence_bundle.get("threshold_adjustment", 0.0),
                          domain_threshold_delta=policy.get("domain_threshold_delta"),
                          domain_strictness_bias=policy.get("domain_strictness_bias"),
-                         domain_family=policy.get("domain_family") or domain_profile.get("domain_family"))
+                         domain_family=policy.get("domain_family") or domain_profile.get("domain_family"),
+                         promotion_path=confidence_bundle.get("promotion_path"),
+                         hybrid_score_floor=_hybrid_floor,
+                         adapter_source=_adapted_eval.get("_adapter_source"),
+                         score_drop_reason=_drop_reason)
                 _scored_out_payload = {
                     "status": "scored_out",
                     "score": score,
@@ -1241,7 +1487,17 @@ def dispatch():
                     "threshold_adjustment": confidence_bundle.get("threshold_adjustment", 0.0),
                     "domain_threshold_delta": policy.get("domain_threshold_delta"),
                     "domain_strictness_bias": policy.get("domain_strictness_bias"),
-                    "score_drop_reason": confidence_bundle.get("reason", "weak-evidence fallback"),
+                    "score_drop_reason": _drop_reason,
+                    "promotion_path": confidence_bundle.get("promotion_path", "none"),
+                    "hybrid_score_floor": confidence_bundle.get("hybrid_score_floor"),
+                    "adapter_source": _adapted_eval.get("_adapter_source"),
+                    "adapted_tier": _adapted_eval.get("tier"),
+                    "score_reasoning": evaluation.get("score_reasoning", ""),
+                    "scoring_context": evaluation.get("scoring_context") or {
+                        "domain_family": domain_profile.get("domain_family"),
+                        "sourcing_vector": sourcing_vector,
+                        "primary_strategy": _primary_strategy or None,
+                    },
                     "policy_mode": policy.get("mode"),
                     "domain_family": policy.get("domain_family") or domain_profile.get("domain_family"),
                     "updatedAt": firestore.SERVER_TIMESTAMP,
@@ -1257,6 +1513,12 @@ def dispatch():
                     _scored_out_payload["domain_impact_summary"][
                         "confidence_threshold"
                     ] = confidence_bundle["confidence_threshold"]
+                    _scored_out_payload["domain_impact_summary"][
+                        "promotion_path"
+                    ] = confidence_bundle.get("promotion_path")
+                    _scored_out_payload["domain_impact_summary"][
+                        "adapter_source"
+                    ] = _adapted_eval.get("_adapter_source")
                 doc_ref.update(_scored_out_payload)
                 try:
                     _db().collection("global_lead_locks").document(lock_entity).delete()
@@ -1384,6 +1646,19 @@ def dispatch():
                 "score_reasoning":              evaluation.get("score_reasoning", ""),
                 "confidence_level":             evaluation.get("confidence_level", "SPECULATIVE"),
                 "evidence_chain":               evaluation.get("evidence_chain", []),
+                # V26.6.0: Domain/strategy scoring context from final_score_and_dm
+                "scoring_context":              evaluation.get("scoring_context") or {
+                    "domain_family": domain_profile.get("domain_family"),
+                    "sourcing_vector": sourcing_vector,
+                    "primary_strategy": _primary_strategy or None,
+                },
+                # V26.5.1: Promotion diagnostics (adapter + hybrid gate)
+                "confidence_score":             confidence_bundle.get("confidence_score"),
+                "confidence_threshold":         confidence_bundle.get("confidence_threshold"),
+                "promotion_path":               confidence_bundle.get("promotion_path", "confidence"),
+                "hybrid_promotion_triggered":   bool(confidence_bundle.get("hybrid_promotion_triggered")),
+                "adapter_source":               _adapted_eval.get("_adapter_source"),
+                "adapted_tier":                 _adapted_eval.get("tier"),
                 "sourcing_vector":              sourcing_vector,
                 "confidence_tier":              url_to_tier.get(url, "High"),
                 "prism_mode":                   prism_mode,
@@ -1790,9 +2065,21 @@ def finalize():
     )
 
     try:
+        # Finalize path: best-effort domain/strategy from lead stub / campaign fields.
+        _fin_profile = lead_data.get("system_domain_profile")
+        if not isinstance(_fin_profile, dict):
+            _fin_profile = None
+        _fin_strategy = ""
+        _fin_intel = lead_data.get("intelligence_strategy") or {}
+        if isinstance(_fin_intel, dict):
+            _fin_strategy = str(_fin_intel.get("primary") or "").strip()
         evaluation = final_score_and_dm(
             text, active_campaigns, context_payload, tech_stack,
-            source_url=lead_data.get("url", "")
+            source_url=lead_data.get("url", ""),
+            domain_profile=_fin_profile,
+            sourcing_vector=sourcing_vector,
+            primary_strategy=_fin_strategy or None,
+            campaign=lead_data,
         )
     except Exception as eval_err:
         doc_ref.update({"status": "failed", "error": str(eval_err)})
