@@ -11,6 +11,7 @@ def build_dispatch_policy(
     recent_new_count: int,
     recent_enrichment_pending_count: int,
     velocity_threshold: int,
+    domain_profile: dict[str, Any] | None = None,
     gate_read_failed: bool = False,
 ) -> dict[str, Any]:
     recent_count = max(0, int(recent_new_count or 0) + int(recent_enrichment_pending_count or 0))
@@ -50,6 +51,13 @@ def build_dispatch_policy(
     if is_consumer and mode != "strict":
         threshold_adjustment -= 1.0
 
+    profile = domain_profile or {}
+    if bool(profile.get("low_liquidity_market")) and mode != "strict":
+        threshold_adjustment -= 1.5
+    domain_family = str(profile.get("domain_family") or "general_services")
+    if domain_family in {"real_estate", "manufacturing"} and mode == "recovery":
+        threshold_adjustment -= 1.0
+
     threshold_adjustment = max(-10.0, min(4.0, threshold_adjustment))
 
     medium_budget = 4
@@ -61,7 +69,7 @@ def build_dispatch_policy(
     degraded_medium_budget = max(1, min(10, medium_budget // 2 if mode != "recovery" else medium_budget))
 
     return {
-        "policy_version": "adaptive-v1",
+        "policy_version": "adaptive-v2",
         "mode": mode,
         "pressure_ratio": round(pressure_ratio, 3),
         "starvation_score": starvation_score,
@@ -70,5 +78,5 @@ def build_dispatch_policy(
         "degraded_medium_budget": degraded_medium_budget,
         "thin_context": thin_context,
         "is_consumer": is_consumer,
+        "domain_family": domain_family,
     }
-

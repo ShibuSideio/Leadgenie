@@ -92,6 +92,10 @@ from services.query_governance import (  # type: ignore[import]
     build_exhaustion_escalation_queries,
     query_signature,
 )
+from services.domain_intelligence import (  # type: ignore[import]
+    infer_domain_profile,
+    apply_domain_query_profile,
+)
 from services.serper_service import (  # type: ignore[import]
     search_serper,
     filter_serper_noise,
@@ -213,6 +217,25 @@ def produce():
     sourcing_vector = campaign.get("sourcing_vector", "B2B")
     location        = campaign.get("location", "").strip()
     gl              = campaign.get("gl", "").strip()
+    domain_profile = campaign.get("system_domain_profile")
+    if not isinstance(domain_profile, dict):
+        domain_profile = infer_domain_profile(campaign)
+        try:
+            campaign_ref.update({"system_domain_profile": domain_profile})
+        except Exception as _profile_write_err:
+            log.warning(
+                "produce_domain_profile_write_failed",
+                campaign_id=campaign_id,
+                error=str(_profile_write_err),
+            )
+    campaign["system_domain_profile"] = domain_profile
+    log.info(
+        "produce_domain_profile_loaded",
+        campaign_id=campaign_id,
+        domain_family=domain_profile.get("domain_family"),
+        confidence=domain_profile.get("confidence"),
+        low_liquidity=bool(domain_profile.get("low_liquidity_market")),
+    )
 
     # ------------------------------------------------------------------
     # Persona Vault field extraction (V23 Persona Vault precedence fix)
@@ -608,6 +631,17 @@ def produce():
         campaign_id=campaign_id,
         **_govern_stats,
     )
+    _domain_profiled = apply_domain_query_profile(smart_keywords, domain_profile)
+    smart_keywords = _domain_profiled.get("queries", []) or []
+    if int(_domain_profiled.get("dropped") or 0) > 0 or int(_domain_profiled.get("injected") or 0) > 0:
+        log.info(
+            "produce_domain_query_profile_applied",
+            campaign_id=campaign_id,
+            domain_family=domain_profile.get("domain_family"),
+            dropped=int(_domain_profiled.get("dropped") or 0),
+            injected=int(_domain_profiled.get("injected") or 0),
+            remaining=len(smart_keywords),
+        )
     _escalation_level = int(campaign.get("_query_exhaustion_escalation_level") or 0)
     if _escalation_level > 0:
         _escalation_queries = build_exhaustion_escalation_queries(

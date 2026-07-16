@@ -52,6 +52,10 @@ from services.serper_service import (  # type: ignore[import]
 from services.gemini_service import pre_filter_gemini, final_score_and_dm  # type: ignore[import]
 from services.lead_confidence import calculate_lead_confidence  # type: ignore[import]
 from services.adaptive_policy import build_dispatch_policy  # type: ignore[import]
+from services.domain_intelligence import (  # type: ignore[import]
+    infer_domain_profile,
+    filter_tiered_urls_by_domain,
+)
 from services.prism_pipeline import PrismPipeline                           # type: ignore[import]
 from services.query_brain import _is_consumer_archetype  # type: ignore[import]
 from services.intelligence_mesh import enrich_signals  # type: ignore[import]  # V24.0
@@ -264,6 +268,18 @@ def dispatch():
     bio             = campaign.get("bio", "")
     sourcing_vector = campaign.get("sourcing_vector", "B2B")
     location        = campaign.get("location", "").strip()
+    domain_profile = campaign.get("system_domain_profile")
+    if not isinstance(domain_profile, dict):
+        domain_profile = infer_domain_profile(campaign)
+        try:
+            campaign_ref.update({"system_domain_profile": domain_profile})
+        except Exception as _domain_write_err:
+            log.warning(
+                "dispatch_domain_profile_write_failed",
+                campaign_id=campaign_id,
+                error=str(_domain_write_err),
+            )
+    campaign["system_domain_profile"] = domain_profile
 
     # V25.3.1: Adaptive threshold — campaigns with thin bios (< 50 chars)
     # get a lower bar because Gemini can't produce high-confidence scores
@@ -307,7 +323,9 @@ def dispatch():
     log.info("TRACE-3: Campaign loaded.",
              campaign_id=campaign_id,
              sourcing_vector=sourcing_vector,
-             queue_depth=len(campaign.get("unprocessed_queue", [])))
+             queue_depth=len(campaign.get("unprocessed_queue", [])),
+             domain_family=domain_profile.get("domain_family"),
+             domain_confidence=domain_profile.get("confidence"))
 
     # ── TRACE-4: Fetch active campaigns for tenant swarm context ────────────
     log.info("TRACE-4: Fetching active campaign swarm for tenant.", tenant_id=tenant_id)
@@ -541,6 +559,16 @@ def dispatch():
 
     # Merge bypass URLs into High tier
     tiered["High"] = bypass_urls + tiered.get("High", [])
+    _domain_tier_filter = filter_tiered_urls_by_domain(tiered, domain_profile)
+    tiered = _domain_tier_filter.get("tiered", tiered)
+    _domain_tier_dropped = int(_domain_tier_filter.get("dropped") or 0)
+    if _domain_tier_dropped > 0:
+        log.info(
+            "dispatch_domain_tier_filter_applied",
+            campaign_id=campaign_id,
+            domain_family=domain_profile.get("domain_family"),
+            dropped=_domain_tier_dropped,
+        )
 
     high_urls   = tiered.get("High", [])
     medium_urls = tiered.get("Medium", [])
@@ -591,6 +619,7 @@ def dispatch():
         recent_new_count=recent_new_count,
         recent_enrichment_pending_count=recent_enrichment_pending_count,
         velocity_threshold=velocity_threshold,
+        domain_profile=domain_profile,
         gate_read_failed=(_velocity_gate_mode == "degraded_firestore_error"),
     )
 
@@ -625,7 +654,8 @@ def dispatch():
              approved=len(approved_urls), gate_rejected=len(batch_urls)-len(approved_urls),
              gate_mode=_velocity_gate_mode, degraded_medium_selected=_degraded_medium_selected,
              policy_mode=policy.get("mode"), policy_version=policy.get("policy_version"),
-             policy_threshold_adjustment=policy.get("threshold_adjustment"))
+             policy_threshold_adjustment=policy.get("threshold_adjustment"),
+             domain_family=domain_profile.get("domain_family"))
 
     # ── TRACE-8: PRISM Processing Loop (parallel, per-URL 25s timeout) ─────────
     # BUG-1 + BUG-4 FIX: Run each URL concurrently via ThreadPoolExecutor.
@@ -1088,6 +1118,7 @@ def dispatch():
                     "threshold_adjustment": confidence_bundle.get("threshold_adjustment", 0.0),
                     "score_drop_reason": confidence_bundle.get("reason", "weak-evidence fallback"),
                     "policy_mode": policy.get("mode"),
+                    "domain_family": domain_profile.get("domain_family"),
                     "updatedAt": firestore.SERVER_TIMESTAMP,
                 })
                 try:
@@ -1416,9 +1447,11 @@ def dispatch():
         gate_rejected=max(0, len(batch_urls) - len(approved_urls)),
         gate_mode=_velocity_gate_mode,
         degraded_medium_selected=_degraded_medium_selected,
+        domain_tier_dropped=_domain_tier_dropped,
         policy_mode=policy.get("mode"),
         policy_version=policy.get("policy_version"),
         policy_threshold_adjustment=policy.get("threshold_adjustment"),
+        domain_family=domain_profile.get("domain_family"),
         **status_counts,
     )
 
@@ -1509,9 +1542,11 @@ def dispatch():
             "approved_urls": len(approved_urls),
             "gate_mode": _velocity_gate_mode,
             "degraded_medium_selected": _degraded_medium_selected,
+            "domain_tier_dropped": _domain_tier_dropped,
             "policy_mode": policy.get("mode"),
             "policy_version": policy.get("policy_version"),
             "policy_threshold_adjustment": policy.get("threshold_adjustment"),
+            "domain_family": domain_profile.get("domain_family"),
             "status_counts": status_counts,
         },
     }), 200
