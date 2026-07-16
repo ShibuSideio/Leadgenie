@@ -27,6 +27,14 @@ from core.auth import require_auth  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
 from shared.campaign_enrichment import derive_campaign_enrichment  # type: ignore[import]
 from shared.intelligence_profile import infer_campaign_intelligence_profile  # type: ignore[import]
+from shared.domain_constants import (  # type: ignore[import]
+    DOMAIN_OVERRIDE_ALLOWED_KEYS,
+    KNOWN_DOMAIN_FAMILIES,
+    LIQUIDITY_LEVELS,
+    allowed_domain_families_csv,
+    is_valid_domain_family,
+    normalize_domain_family,
+)
 from core.helpers import (  # type: ignore[import]
     check_quota,
     get_service_account_email,
@@ -83,7 +91,16 @@ _CAMPAIGN_UPDATE_ALLOWED = {
     "persona_targeting_signals",
     "intelligence_strategy",
     "system_enrichment",
+    # Manual domain profile override (takes precedence over auto-inference).
+    # null / {} clears the override. Full validation in _normalize_domain_override.
+    "domain_override",
+    # Cleared/rewritten when domain_override changes so pipeline re-resolves.
+    "system_domain_profile",
 }
+
+# Domain families / override keys: shared.domain_constants (single source of truth).
+# KNOWN_DOMAIN_FAMILIES, DOMAIN_OVERRIDE_ALLOWED_KEYS, is_valid_domain_family,
+# normalize_domain_family imported above.
 
 # ---------------------------------------------------------------------------
 # FIX (2026-06-21): Campaign field sanitizer — server-side write boundary.
@@ -105,6 +122,96 @@ _LOCATION_JUNK_TOKENS: frozenset = frozenset({
     "interested", "customers", "vehicle", "users", "audience",
     "persona", "error", "exception", "fallback",
 })
+
+
+def _normalize_domain_override(raw):
+    """Validate campaign domain_override for API writes.
+
+    Uses shared.domain_constants for family allowlist / aliases / override keys.
+
+    Returns:
+        (normalized_dict_or_None, error_str_or_None)
+        None normalized means "clear the override".
+    """
+    if raw is None or raw is False:
+        return None, None
+    if isinstance(raw, str) and not raw.strip():
+        return None, None
+    if isinstance(raw, dict) and len(raw) == 0:
+        return None, None
+
+    if isinstance(raw, str):
+        family = normalize_domain_family(raw)
+        if not family:
+            return None, (
+                f"Unknown domain_family '{raw}'. "
+                f"Allowed: {allowed_domain_families_csv()}"
+            )
+        return {"domain_family": family}, None
+
+    if not isinstance(raw, dict):
+        return None, "domain_override must be an object, a family string, or null to clear"
+
+    unknown = sorted(
+        str(k) for k in raw.keys() if str(k) not in DOMAIN_OVERRIDE_ALLOWED_KEYS
+    )
+    if unknown:
+        return None, f"Unsupported domain_override keys: {', '.join(unknown)}"
+
+    family = normalize_domain_family(raw.get("domain_family"))
+    if not family:
+        return None, (
+            "domain_override.domain_family is required and must be one of: "
+            + allowed_domain_families_csv()
+        )
+
+    out = {"domain_family": family}
+
+    if raw.get("confidence") is not None:
+        try:
+            conf = float(raw["confidence"])
+            if conf != conf:
+                return None, "domain_override.confidence must be between 0 and 1"
+            out["confidence"] = round(max(0.0, min(1.0, conf)), 3)
+        except (TypeError, ValueError):
+            return None, "domain_override.confidence must be between 0 and 1"
+
+    if raw.get("liquidity_level") is not None:
+        liq = str(raw.get("liquidity_level") or "").strip().lower()
+        if liq not in LIQUIDITY_LEVELS:
+            return None, "domain_override.liquidity_level must be high, medium, or low"
+        out["liquidity_level"] = liq
+
+    if raw.get("low_liquidity_market") is not None:
+        out["low_liquidity_market"] = bool(raw.get("low_liquidity_market"))
+
+    if raw.get("strictness_bias") is not None:
+        try:
+            bias = float(raw["strictness_bias"])
+            if bias != bias:
+                return None, "domain_override.strictness_bias must be in [-0.5, 0.5]"
+            out["strictness_bias"] = round(max(-0.5, min(0.5, bias)), 3)
+        except (TypeError, ValueError):
+            return None, "domain_override.strictness_bias must be in [-0.5, 0.5]"
+
+    for list_key in ("preferred_sources", "preferred_query_hints", "blocked_subreddits"):
+        if raw.get(list_key) is None:
+            continue
+        val = raw.get(list_key)
+        if isinstance(val, str):
+            items = [val.strip()] if val.strip() else []
+        elif isinstance(val, (list, tuple, set)):
+            items = [str(x).strip() for x in val if str(x).strip()]
+        else:
+            return None, f"domain_override.{list_key} must be a list of strings"
+        out[list_key] = items[:20]
+
+    if raw.get("notes") is not None:
+        notes = str(raw.get("notes") or "").strip()
+        if notes:
+            out["notes"] = notes[:500]
+
+    return out, None
 
 
 def _sanitize_campaign_fields(data: dict) -> dict:
@@ -346,6 +453,21 @@ def create_campaign(uid, tenant_id, user_role):
     # Server-side field sanitization — last line of defense
     _sanitize_campaign_fields(data)
 
+    # Optional domain_override at create time (same validation as PUT).
+    if "domain_override" in data:
+        _override_norm, _override_err = _normalize_domain_override(data.get("domain_override"))
+        if _override_err:
+            return jsonify({"error": _override_err}), 400
+        if _override_norm is None:
+            data.pop("domain_override", None)
+        else:
+            data["domain_override"] = _override_norm
+            log.info(
+                "campaign_domain_override_set",
+                domain_family=_override_norm.get("domain_family"),
+                note="domain_override set on create.",
+            )
+
     try:
         _, doc_ref = db.collection("campaigns").add(data)
     except Exception as e:
@@ -585,6 +707,33 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
 
     # Server-side field sanitization — last line of defense
     _sanitize_campaign_fields(data)
+
+    # Domain override: manual domain_family (+ optional profile fields).
+    # null / {} / "" clears override and forces auto re-detection next cycle.
+    if "domain_override" in data:
+        _override_norm, _override_err = _normalize_domain_override(data.get("domain_override"))
+        if _override_err:
+            return jsonify({"error": _override_err}), 400
+        if _override_norm is None:
+            data["domain_override"] = firestore.DELETE_FIELD
+            data["system_domain_profile"] = firestore.DELETE_FIELD
+            log.info(
+                "campaign_domain_override_cleared",
+                campaign_id=doc_id,
+                note="domain_override cleared; pipeline will auto-infer on next run.",
+            )
+        else:
+            data["domain_override"] = _override_norm
+            # Drop cached profile so produce/dispatch expand the override fresh.
+            data["system_domain_profile"] = firestore.DELETE_FIELD
+            log.info(
+                "campaign_domain_override_set",
+                campaign_id=doc_id,
+                domain_family=_override_norm.get("domain_family"),
+                strictness_bias=_override_norm.get("strictness_bias"),
+                liquidity_level=_override_norm.get("liquidity_level"),
+                note="Manual domain_override set; takes precedence over auto-inference.",
+            )
 
     # V26.0.2: Auto-reclassify intelligence strategy on meaningful edits.
     # The user never picks a strategy — the AI always decides. Triggers when:

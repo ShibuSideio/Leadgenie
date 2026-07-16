@@ -238,14 +238,300 @@ _TIERING_SCHEMA = {
     },
 }
 
+# Verticals where directories / review portals / aggregators are often the
+# primary OSINT surface (entity mining, listing intent, local demand).
+_PLATFORM_TOLERANT_FAMILIES = frozenset({
+    "real_estate",
+    "manufacturing",
+    "professional_services",
+    "construction",
+    "healthcare",
+    "hospitality",
+})
 
-def pre_filter_gemini(snippets: list, bio: str, location_target: str) -> dict:
+# preferred_sources that strongly imply directory/classified platform mining.
+# (google_reviews alone is too common to use as a softening trigger.)
+_PLATFORM_SOURCE_HINTS = frozenset({
+    "classified_listings",
+})
+
+# URL signatures treated as directory / review / aggregator surfaces.
+# Softened (not auto-Low) when domain mode is platform-tolerant or low-liquidity.
+_DIRECTORY_REVIEW_AGG_SIGNATURES = (
+    "yelp.com",
+    "g2.com",
+    "capterra.com",
+    "clutch.co",
+    "trustpilot.com",
+    "expertise.com",
+    "justdial.com",
+    "indiamart.com",
+    "thomasnet.com",
+    "propertyfinder",
+    "bayut.com",
+    "dubizzle.com",
+    "zillow.com",
+    "rightmove",
+    "99acres.com",
+    "magicbricks.com",
+    "housing.com",
+    "houzz.com",
+    "angi.com",
+    "homestars.com",
+    "sulekha.com",
+    "practo.com",
+    "tripadvisor.com",
+    "bbb.org",
+    "yellowpages",
+    "zoominfo.com",
+    "crunchbase.com",
+    "glassdoor.com",
+)
+
+# Always-noise patterns — never rescued by domain softening.
+_HARD_NOISE_SIGNATURES = (
+    "expertise.com",
+    "wikipedia.org",
+    "amazon.com",
+    "/best-",
+    "/top-",
+    "/vs/",
+    "/compare/",
+    "linkedin.com/jobs",
+)
+
+# Baseline fallback noise set (exact legacy list when no domain profile).
+_LEGACY_FALLBACK_NOISE = {
+    "yelp.com", "expertise.com", "g2.com", "capterra.com", "upwork.com",
+    "glassdoor.com", "indeed.com", "linkedin.com/jobs", "quora.com",
+    "wikipedia.org", "amazon.com", "zoominfo.com", "crunchbase.com",
+    "/blog/", "/article/", "/post/", "/best-", "/top-", "/vs/", "/compare/",
+}
+
+
+def _snippet_url(snippet: dict[str, Any]) -> str:
+    return str(snippet.get("link") or snippet.get("url") or "").strip()
+
+
+def _url_matches_any(url: str, signatures: tuple[str, ...] | set[str]) -> bool:
+    lowered = (url or "").lower()
+    return bool(lowered) and any(sig in lowered for sig in signatures)
+
+
+def is_prefilter_domain_softening_active(
+    domain_profile: dict[str, Any] | None,
+) -> bool:
+    """True when domain profile will soften directory/review/aggregator rejections.
+
+    Lightweight observability helper for domain impact summaries. Safe when
+    *domain_profile* is missing (returns False).
+    """
+    mode = _resolve_prefilter_domain_mode(domain_profile)
+    return bool(mode and mode.get("active") and mode.get("soften_directories"))
+
+
+def _resolve_prefilter_domain_mode(
+    domain_profile: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Derive pre-filter strictness knobs from system_domain_profile.
+
+    Returns None when no usable profile is present → callers MUST keep the
+    legacy (strict directory rejection) path bit-for-bit.
+    """
+    if not isinstance(domain_profile, dict) or not domain_profile:
+        return None
+
+    family = str(domain_profile.get("domain_family") or "").strip().lower()
+    if not family and domain_profile.get("strictness_bias") is None:
+        # Empty-ish profile with no family and no bias → treat as absent.
+        if not domain_profile.get("preferred_sources") and not domain_profile.get(
+            "low_liquidity_market"
+        ):
+            return None
+
+    liquidity = str(domain_profile.get("liquidity_level") or "").strip().lower()
+    low_liquidity = bool(domain_profile.get("low_liquidity_market")) or liquidity == "low"
+
+    preferred = domain_profile.get("preferred_sources") or []
+    if not isinstance(preferred, (list, tuple, set)):
+        preferred = []
+    preferred_set = {str(s).strip().lower() for s in preferred if str(s).strip()}
+
+    platform_tolerant = family in _PLATFORM_TOLERANT_FAMILIES or bool(
+        preferred_set & _PLATFORM_SOURCE_HINTS
+    )
+
+    bias_raw = domain_profile.get("strictness_bias")
+    try:
+        bias = float(bias_raw) if bias_raw is not None else 0.0
+        if bias != bias:  # NaN
+            bias = 0.0
+        bias = max(-0.5, min(0.5, bias))
+    except (TypeError, ValueError):
+        bias = 0.0
+
+    # Strict domains (positive bias) do not get directory softening even if
+    # preferred_sources happen to include reviews (e.g. finance + g2).
+    if bias > 0.15:
+        platform_tolerant = False
+
+    profile_confidence = str(
+        domain_profile.get("profile_confidence") or ""
+    ).strip().lower()
+    thin_campaign = bool(domain_profile.get("thin_campaign"))
+    soft_domain = bool(domain_profile.get("soft_domain_adjustments"))
+    low_profile = profile_confidence == "low" or thin_campaign or soft_domain
+
+    soften_directories = platform_tolerant or low_liquidity or bias < -0.05
+    # Low-liquidity markets get broader Medium retention for ambiguous pages.
+    permissive_ambiguous = low_liquidity or bias <= -0.15
+
+    # Thin / low-confidence profiles: do not open directory softening or
+    # permissive ambiguous intake — risk of noise outweighs sparse benefits.
+    # Exception: explicit platform-tolerant family with medium+ confidence.
+    if low_profile:
+        if profile_confidence == "medium" and platform_tolerant:
+            permissive_ambiguous = False  # still no broad ambiguous pass
+        else:
+            soften_directories = False
+            permissive_ambiguous = False
+
+    if not soften_directories and not permissive_ambiguous:
+        # Profile present but no knobs that change strictness — still return
+        # a mode so callers can log family, without changing filter behaviour.
+        return {
+            "active": False,
+            "domain_family": family or "general_services",
+            "liquidity_level": liquidity or None,
+            "low_liquidity": low_liquidity,
+            "platform_tolerant": platform_tolerant,
+            "strictness_bias": bias,
+            "soften_directories": False,
+            "permissive_ambiguous": False,
+            "preferred_sources": sorted(preferred_set),
+            "profile_confidence": profile_confidence or None,
+            "thin_campaign": thin_campaign,
+        }
+
+    return {
+        "active": True,
+        "domain_family": family or "general_services",
+        "liquidity_level": liquidity or ("low" if low_liquidity else None),
+        "low_liquidity": low_liquidity,
+        "platform_tolerant": platform_tolerant,
+        "strictness_bias": bias,
+        "soften_directories": soften_directories,
+        "permissive_ambiguous": permissive_ambiguous,
+        "preferred_sources": sorted(preferred_set),
+        "profile_confidence": profile_confidence or None,
+        "thin_campaign": thin_campaign,
+    }
+
+
+def _domain_prefilter_guidance(mode: dict[str, Any]) -> str:
+    """Extra prompt section — adjusts strictness only; keeps core categories."""
+    if not mode or not mode.get("active"):
+        return ""
+
+    family = mode.get("domain_family") or "general_services"
+    parts = [
+        "",
+        "# STEP 5 — DOMAIN-AWARE STRICTNESS ADJUSTMENT (do not invent new rejection categories)",
+        f"Campaign domain_family: {family}",
+        f"Liquidity: {mode.get('liquidity_level') or ('low' if mode.get('low_liquidity') else 'unknown')}",
+        f"strictness_bias: {mode.get('strictness_bias')}",
+        "",
+        "HARD RULE: Core rejection categories are UNCHANGED and remain Low:",
+        "- SEO listicles / Top-N posts / how-to guides / pure educational content",
+        "- Wrong geography vs TARGET LOCATION",
+        "- Direct competitors/vendors SELLING the same service as USER BIO",
+        "",
+    ]
+    if mode.get("soften_directories"):
+        parts.extend([
+            "DIRECTORY / REVIEW / AGGREGATOR SOFTENING (this domain relies on platform mining):",
+            "Do NOT auto-classify directories (Yelp, JustDial, IndiaMART, Clutch), review sites",
+            "(G2, Capterra, Trustpilot, Google reviews), classified portals (Bayut, Property Finder,",
+            "Dubizzle, OLX), or aggregator profile/listing pages as Low solely because they are",
+            "directories. For this domain they are often valuable signal sources.",
+            "- Relevant local/industry listing or review pages → Medium (default)",
+            "- Snippet shows clear buyer/client pain, active listing intent, or a matching ICP entity → High",
+            "- Still Low if purely promotional vendor homepage selling the same service as USER BIO",
+            "",
+        ])
+    if mode.get("permissive_ambiguous"):
+        parts.extend([
+            "LOW-LIQUIDITY / SPARSE-MARKET MODE:",
+            "Prefer Medium over Low for ambiguous but industry- or location-relevant pages so the",
+            "funnel still receives candidates. Only apply Low when a hard rejection category clearly fits.",
+            "",
+        ])
+    return "\n".join(parts)
+
+
+def _fallback_noise_signatures(mode: dict[str, Any] | None) -> set[str]:
+    """Legacy noise set, optionally softened for platform-tolerant domains."""
+    if not mode or not mode.get("active") or not mode.get("soften_directories"):
+        return set(_LEGACY_FALLBACK_NOISE)
+
+    # Keep hard noise + blog/listicle patterns; allow directory/review hosts through.
+    softened = set(_LEGACY_FALLBACK_NOISE)
+    for sig in _DIRECTORY_REVIEW_AGG_SIGNATURES:
+        softened.discard(sig)
+    # Always keep pure spam / listicle hosts even if also in directory list.
+    softened.update({"expertise.com", "wikipedia.org", "amazon.com"})
+    return softened
+
+
+def _rescue_directory_urls_to_medium(
+    snippets: list,
+    output: dict[str, list],
+    mode: dict[str, Any] | None,
+) -> int:
+    """Promote domain-valuable directory/review URLs that Gemini marked Low → Medium.
+
+    Does not invent new categories: only rescues known platform surfaces when
+    domain mode requests softening. Hard noise (listicles, etc.) stays out.
+    """
+    if not mode or not mode.get("active") or not mode.get("soften_directories"):
+        return 0
+
+    already = set(output.get("High") or []) | set(output.get("Medium") or [])
+    rescued = 0
+    medium = list(output.get("Medium") or [])
+
+    for s in snippets:
+        url = _snippet_url(s)
+        if not url.startswith("http") or url in already:
+            continue
+        if _url_matches_any(url, _HARD_NOISE_SIGNATURES):
+            continue
+        if not _url_matches_any(url, _DIRECTORY_REVIEW_AGG_SIGNATURES):
+            continue
+        medium.append(url)
+        already.add(url)
+        rescued += 1
+
+    output["Medium"] = medium
+    return rescued
+
+
+def pre_filter_gemini(
+    snippets: list,
+    bio: str,
+    location_target: str,
+    domain_profile: dict[str, Any] | None = None,
+) -> dict:
     """Gemini tiering gate: classify Serper snippet URLs as High/Medium/Low.
 
     Args:
         snippets:        List of dicts with ``url``, ``title``, ``snippet`` keys.
         bio:             User's business bio (context for scoring).
         location_target: Geo target string.
+        domain_profile:  Optional ``system_domain_profile`` (domain-v2). When
+            absent/empty, behaviour is identical to the pre-domain gate.
+            When present, directory/review/aggregator strictness is softened
+            for platform-tolerant verticals and low-liquidity markets.
 
     Returns:
         ``{"High": [url, ...], "Medium": [url, ...]}`` — Low results dropped.
@@ -253,6 +539,9 @@ def pre_filter_gemini(snippets: list, bio: str, location_target: str) -> dict:
     """
     if not snippets:
         return {"High": [], "Medium": []}
+
+    mode = _resolve_prefilter_domain_mode(domain_profile)
+    domain_guidance = _domain_prefilter_guidance(mode) if mode else ""
 
     prompt = f"""CONFIDENCE TIERING GATE: Evaluate each URL snippet as an investigative OSINT engine against the user's business context.
 USER BIO: '{bio}'
@@ -289,9 +578,24 @@ These are LOW (look similar but are NOT buyer signals):
 
 # STEP 4 — CONTEXT-AWARE INFERENCE (B2C/D2C)
 For B2C or D2C campaigns, the snippet field may contain text prepended with 'Query: <the triggering search query>'. Use the triggering query context to reverse-engineer the thread state. If the query contains dialog dorks (like "pm me" or "still available"), analyze whether the snippet contains replies suggesting active consumer/buyer intent. Do not automatically classify forum posts or social media snippets as Low if the query context indicates an active B2C/D2C discussion thread.
-
+{domain_guidance}
 Snippets: {json.dumps(snippets)}"""
 
+    if mode and mode.get("active"):
+        log.info(
+            "pre_filter_domain_adjustment_applied",
+            domain_family=mode.get("domain_family"),
+            liquidity_level=mode.get("liquidity_level"),
+            low_liquidity=bool(mode.get("low_liquidity")),
+            platform_tolerant=bool(mode.get("platform_tolerant")),
+            soften_directories=bool(mode.get("soften_directories")),
+            permissive_ambiguous=bool(mode.get("permissive_ambiguous")),
+            strictness_bias=mode.get("strictness_bias"),
+            preferred_sources=mode.get("preferred_sources"),
+            url_count=len(snippets),
+            note="Domain profile softened pre-filter strictness for directories/reviews/aggregators "
+                 "and/or low-liquidity ambiguous pages. Core rejection categories unchanged.",
+        )
 
     try:
         tiered = call_gemini_2_5(prompt, expect_json=True, response_schema=_TIERING_SCHEMA)
@@ -303,34 +607,75 @@ Snippets: {json.dumps(snippets)}"""
             "pre_filter_gemini_failed_local_fallback",
             error=str(exc),
             url_count=len(snippets),
+            domain_family=(mode or {}).get("domain_family"),
+            soften_directories=bool((mode or {}).get("soften_directories")),
             action="Running local heuristic fallback filter to drop obvious noise.",
         )
-        fallback_high = []
-        noise_signatures = {
-            "yelp.com", "expertise.com", "g2.com", "capterra.com", "upwork.com",
-            "glassdoor.com", "indeed.com", "linkedin.com/jobs", "quora.com",
-            "wikipedia.org", "amazon.com", "zoominfo.com", "crunchbase.com",
-            "/blog/", "/article/", "/post/", "/best-", "/top-", "/vs/", "/compare/"
-        }
+        fallback_high: list[str] = []
+        fallback_medium: list[str] = []
+        noise_signatures = _fallback_noise_signatures(mode)
         for s in snippets:
-            link = s.get("link", s.get("url", ""))
-            if link and link.startswith("http"):
-                link_lower = link.lower()
-                if not any(sig in link_lower for sig in noise_signatures):
-                    fallback_high.append(link)
-        return {"High": fallback_high, "Medium": []}
+            link = _snippet_url(s)
+            if not (link and link.startswith("http")):
+                continue
+            link_lower = link.lower()
+            if any(sig in link_lower for sig in noise_signatures):
+                # Domain-softened path: keep directory/review hosts as Medium
+                # instead of hard-dropping them.
+                if (
+                    mode
+                    and mode.get("soften_directories")
+                    and _url_matches_any(link, _DIRECTORY_REVIEW_AGG_SIGNATURES)
+                    and not _url_matches_any(link, _HARD_NOISE_SIGNATURES)
+                ):
+                    fallback_medium.append(link)
+                continue
+            fallback_high.append(link)
+
+        if mode and mode.get("active") and fallback_medium:
+            log.info(
+                "pre_filter_domain_fallback_directory_kept",
+                domain_family=mode.get("domain_family"),
+                kept_medium=len(fallback_medium),
+                kept_high=len(fallback_high),
+                note="Fallback kept domain-valuable directory/review URLs as Medium.",
+            )
+        return {"High": fallback_high, "Medium": fallback_medium}
 
     output: dict[str, list] = {"High": [], "Medium": []}
     for item in tiered:
         tier = item.get("confidence_tier", "Low")
-        url  = item.get("url", "").strip()
+        url = item.get("url", "").strip()
         if not url.startswith("http"):
             continue
         if tier in ("High", "Medium"):
             output[tier].append(url)
 
-    log.info("pre_filter_complete",
-             high=len(output["High"]), medium=len(output["Medium"]))
+    # Deterministic safety net: if Gemini still auto-Low'd (or omitted)
+    # platform surfaces that this domain values, promote them to Medium.
+    # Scans all input snippets not already in High/Medium so rescue works
+    # even when Gemini drops Low rows from the JSON response.
+    rescued = 0
+    if mode and mode.get("active") and mode.get("soften_directories"):
+        rescued = _rescue_directory_urls_to_medium(snippets, output, mode)
+        if rescued:
+            log.info(
+                "pre_filter_domain_directory_rescue",
+                domain_family=mode.get("domain_family"),
+                rescued_to_medium=rescued,
+                high=len(output["High"]),
+                medium=len(output["Medium"]),
+                note="Rescued domain-valuable directory/review/aggregator URLs from Low → Medium.",
+            )
+
+    log.info(
+        "pre_filter_complete",
+        high=len(output["High"]),
+        medium=len(output["Medium"]),
+        domain_family=(mode or {}).get("domain_family"),
+        domain_adjustment_active=bool(mode and mode.get("active")),
+        directory_rescued=rescued,
+    )
     return output
 
 

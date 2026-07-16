@@ -10,4 +10,5 @@ Usage (in any service):
     from shared.base_path import parse_base_path, SOCIAL_ONTOLOGY_DOMAINS
     from shared.geo_map   import GL_MAP
     from shared.tech_signatures import TECH_SIGNATURES
+    from shared.domain_constants import KNOWN_DOMAIN_FAMILIES, is_valid_domain_family
 """

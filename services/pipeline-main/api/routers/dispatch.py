@@ -49,12 +49,18 @@ from middleware.oidc import require_tasks_oidc                      # type: igno
 from services.serper_service import (  # type: ignore[import]
     extract_root_domain, SOCIAL_DOMAINS, deep_context_serper_dork,
 )
-from services.gemini_service import pre_filter_gemini, final_score_and_dm  # type: ignore[import]
+from services.gemini_service import (  # type: ignore[import]
+    pre_filter_gemini,
+    final_score_and_dm,
+    is_prefilter_domain_softening_active,
+)
 from services.lead_confidence import calculate_lead_confidence  # type: ignore[import]
 from services.adaptive_policy import build_dispatch_policy  # type: ignore[import]
 from services.domain_intelligence import (  # type: ignore[import]
-    infer_domain_profile,
     filter_tiered_urls_by_domain,
+    build_domain_impact_summary,
+    domain_impact_for_scored_out,
+    resolve_campaign_domain_profile,
 )
 from services.prism_pipeline import PrismPipeline                           # type: ignore[import]
 from services.query_brain import _is_consumer_archetype  # type: ignore[import]
@@ -268,9 +274,9 @@ def dispatch():
     bio             = campaign.get("bio", "")
     sourcing_vector = campaign.get("sourcing_vector", "B2B")
     location        = campaign.get("location", "").strip()
-    domain_profile = campaign.get("system_domain_profile")
-    if not isinstance(domain_profile, dict):
-        domain_profile = infer_domain_profile(campaign)
+    # Domain profile: manual domain_override wins over auto-inference.
+    domain_profile, _domain_meta = resolve_campaign_domain_profile(campaign)
+    if _domain_meta.get("should_persist"):
         try:
             campaign_ref.update({"system_domain_profile": domain_profile})
         except Exception as _domain_write_err:
@@ -280,6 +286,36 @@ def dispatch():
                 error=str(_domain_write_err),
             )
     campaign["system_domain_profile"] = domain_profile
+    if _domain_meta.get("override_active"):
+        log.info(
+            "dispatch_domain_override_active",
+            campaign_id=campaign_id,
+            domain_family=domain_profile.get("domain_family"),
+            source=_domain_meta.get("source"),
+            strictness_bias=domain_profile.get("strictness_bias"),
+            note="Manual domain_override is active; auto-inference skipped.",
+        )
+    elif _domain_meta.get("error"):
+        log.warning(
+            "dispatch_domain_override_invalid",
+            campaign_id=campaign_id,
+            error=_domain_meta.get("error"),
+            note="Invalid domain_override ignored; fell back to auto-inference.",
+        )
+    if domain_profile.get("thin_campaign") or str(
+        domain_profile.get("profile_confidence") or ""
+    ).lower() == "low":
+        log.info(
+            "dispatch_domain_thin_profile",
+            campaign_id=campaign_id,
+            domain_family=domain_profile.get("domain_family"),
+            confidence=domain_profile.get("confidence"),
+            profile_confidence=domain_profile.get("profile_confidence"),
+            input_richness=domain_profile.get("input_richness"),
+            soft_domain_adjustments=bool(domain_profile.get("soft_domain_adjustments")),
+            strictness_bias=domain_profile.get("strictness_bias"),
+            note="Thin/low-confidence domain profile — milder gate/prefilter domain adjustments.",
+        )
 
     # V25.3.1: Adaptive threshold — campaigns with thin bios (< 50 chars)
     # get a lower bar because Gemini can't produce high-confidence scores
@@ -325,7 +361,11 @@ def dispatch():
              sourcing_vector=sourcing_vector,
              queue_depth=len(campaign.get("unprocessed_queue", [])),
              domain_family=domain_profile.get("domain_family"),
-             domain_confidence=domain_profile.get("confidence"))
+             domain_confidence=domain_profile.get("confidence"),
+             profile_confidence=domain_profile.get("profile_confidence"),
+             thin_campaign=bool(domain_profile.get("thin_campaign")),
+             liquidity_level=domain_profile.get("liquidity_level"),
+             strictness_bias=domain_profile.get("strictness_bias"))
 
     # ── TRACE-4: Fetch active campaigns for tenant swarm context ────────────
     log.info("TRACE-4: Fetching active campaign swarm for tenant.", tenant_id=tenant_id)
@@ -532,8 +572,29 @@ def dispatch():
                  count=len(bypass_urls),
                  note="V25.2.3: Forum/community URLs auto-classified High.")
 
+    # Domain profile drives pre-filter strictness (directories/reviews/aggregators).
+    # Absent/empty profile → pre_filter_gemini keeps legacy behaviour unchanged.
+    _pf_domain = domain_profile if isinstance(domain_profile, dict) else None
+    _pf_family = str((_pf_domain or {}).get("domain_family") or "")
+    _pf_liquidity = str((_pf_domain or {}).get("liquidity_level") or "")
+    _pf_bias = (_pf_domain or {}).get("strictness_bias")
+    _prefilter_domain_softening = is_prefilter_domain_softening_active(_pf_domain)
+    if _pf_domain:
+        log.info(
+            "dispatch_prefilter_domain_context",
+            campaign_id=campaign_id,
+            domain_family=_pf_family or None,
+            liquidity_level=_pf_liquidity or None,
+            low_liquidity=bool((_pf_domain or {}).get("low_liquidity_market")),
+            strictness_bias=_pf_bias,
+            prefilter_domain_softening=_prefilter_domain_softening,
+            preferred_sources=(_pf_domain or {}).get("preferred_sources"),
+            note="Passing system_domain_profile into pre_filter_gemini for domain-aware strictness.",
+        )
+
     log.info("TRACE-7: Calling pre_filter_gemini.", url_count=len(filter_urls),
-             bypassed=len(bypass_urls))
+             bypassed=len(bypass_urls),
+             domain_family=_pf_family or None)
 
     if filter_urls:
         synthetic_snippets = [
@@ -542,7 +603,13 @@ def dispatch():
         ]
         try:
             with _cf.ThreadPoolExecutor(max_workers=1) as pool:
-                fut    = pool.submit(pre_filter_gemini, synthetic_snippets, bio, location)
+                fut = pool.submit(
+                    pre_filter_gemini,
+                    synthetic_snippets,
+                    bio,
+                    location,
+                    _pf_domain,
+                )
                 tiered = fut.result(timeout=30)
         except Exception as _pf_err:
             _PREFILTER_DEGRADED_HIGH_CAP = 6
@@ -552,6 +619,7 @@ def dispatch():
                         url_count=len(filter_urls),
                         high_cap=_PREFILTER_DEGRADED_HIGH_CAP,
                         high_selected=len(_degraded_high),
+                        domain_family=_pf_family or None,
                         note="Pre-filter failed; entering degraded quality mode with bounded High-tier pass-through.")
             tiered = {"High": _degraded_high, "Medium": [], "Low": []}
     else:
@@ -623,6 +691,47 @@ def dispatch():
         gate_read_failed=(_velocity_gate_mode == "degraded_firestore_error"),
     )
 
+    # Domain-aware promotion adjustment observability.
+    # strictness_bias < 0 lowers the confidence bar; > 0 raises it.
+    if policy.get("domain_strictness_applied") or policy.get("domain_legacy_heuristics"):
+        log.info(
+            "dispatch_domain_threshold_adjustment",
+            campaign_id=campaign_id,
+            domain_family=policy.get("domain_family"),
+            liquidity_level=policy.get("liquidity_level"),
+            strictness_bias=policy.get("domain_strictness_bias"),
+            domain_threshold_delta=policy.get("domain_threshold_delta"),
+            total_threshold_adjustment=policy.get("threshold_adjustment"),
+            policy_mode=policy.get("mode"),
+            policy_version=policy.get("policy_version"),
+            strictness_applied=bool(policy.get("domain_strictness_applied")),
+            legacy_heuristics=bool(policy.get("domain_legacy_heuristics")),
+            note=(
+                "Domain profile adjusted confidence promotion gate. "
+                "Negative delta = easier qualification; positive = stricter."
+            ),
+        )
+    else:
+        log.info(
+            "dispatch_domain_threshold_none",
+            campaign_id=campaign_id,
+            domain_family=policy.get("domain_family"),
+            policy_mode=policy.get("mode"),
+            total_threshold_adjustment=policy.get("threshold_adjustment"),
+            note="No domain strictness_bias/heuristics applied; operational policy only.",
+        )
+
+    # Base domain impact (per-cycle). Final promoted/scored_out counts are filled
+    # at batch end; this base is also stamped on scored_out lead docs.
+    _domain_impact_base = build_domain_impact_summary(
+        domain_profile if isinstance(domain_profile, dict) else None,
+        policy=policy,
+        prefilter_domain_softening=_prefilter_domain_softening,
+        domain_tier_dropped=_domain_tier_dropped,
+        cycle="dispatch",
+    )
+    _domain_impact_scored_out = domain_impact_for_scored_out(_domain_impact_base)
+
     allow_medium  = recent_count < velocity_threshold
     if allow_medium:
         approved_urls = high_urls + medium_urls[: int(policy.get("medium_budget") or len(medium_urls))]
@@ -655,7 +764,10 @@ def dispatch():
              gate_mode=_velocity_gate_mode, degraded_medium_selected=_degraded_medium_selected,
              policy_mode=policy.get("mode"), policy_version=policy.get("policy_version"),
              policy_threshold_adjustment=policy.get("threshold_adjustment"),
-             domain_family=domain_profile.get("domain_family"))
+             domain_threshold_delta=policy.get("domain_threshold_delta"),
+             domain_strictness_bias=policy.get("domain_strictness_bias"),
+             domain_family=domain_profile.get("domain_family"),
+             liquidity_level=policy.get("liquidity_level") or domain_profile.get("liquidity_level"))
 
     # ── TRACE-8: PRISM Processing Loop (parallel, per-URL 25s timeout) ─────────
     # BUG-1 + BUG-4 FIX: Run each URL concurrently via ThreadPoolExecutor.
@@ -1087,6 +1199,9 @@ def dispatch():
                 _snippet_meta.get("source") == "signal_harvest"
                 or _snippet_meta.get("harvest_tier") in ("HIGH", "MEDIUM")
             )
+            # threshold_adjustment already includes domain strictness_bias
+            # (via adaptive-v3). Negative bias → lower bar → easier promotion.
+            _gate_threshold_adj = float(policy.get("threshold_adjustment") or 0.0)
             confidence_bundle = calculate_lead_confidence(
                 evaluation=evaluation,
                 text=text,
@@ -1096,7 +1211,7 @@ def dispatch():
                 is_thin_payload=is_thin_payload,
                 is_thin_bio=_is_thin_bio,
                 campaign=campaign,
-                threshold_adjustment=float(policy.get("threshold_adjustment") or 0.0),
+                threshold_adjustment=_gate_threshold_adj,
             )
 
             log.info("dispatch_score_gate_eval",
@@ -1104,23 +1219,45 @@ def dispatch():
                      confidence=confidence_bundle["confidence_score"], text_chars=len(text), thin=is_thin_payload,
                      shadow_thin=_is_shadow_thin, harvest_lead=is_harvest_lead,
                      prism_mode=prism_mode, policy_mode=policy.get("mode"),
-                     threshold_adjustment=confidence_bundle.get("threshold_adjustment", 0.0))
+                     threshold_adjustment=confidence_bundle.get("threshold_adjustment", 0.0),
+                     domain_threshold_delta=policy.get("domain_threshold_delta"),
+                     domain_strictness_bias=policy.get("domain_strictness_bias"),
+                     domain_family=policy.get("domain_family") or domain_profile.get("domain_family"),
+                     promoted=bool(confidence_bundle.get("promotion")))
 
             if not confidence_bundle["promotion"]:
                 log.info("dispatch_score_gate_drop", url=url[:80],
                          score=score, threshold=confidence_bundle["confidence_threshold"],
-                         confidence=confidence_bundle["confidence_score"])
-                doc_ref.update({
+                         confidence=confidence_bundle["confidence_score"],
+                         threshold_adjustment=confidence_bundle.get("threshold_adjustment", 0.0),
+                         domain_threshold_delta=policy.get("domain_threshold_delta"),
+                         domain_strictness_bias=policy.get("domain_strictness_bias"),
+                         domain_family=policy.get("domain_family") or domain_profile.get("domain_family"))
+                _scored_out_payload = {
                     "status": "scored_out",
                     "score": score,
                     "confidence_score": confidence_bundle["confidence_score"],
                     "confidence_threshold": confidence_bundle["confidence_threshold"],
                     "threshold_adjustment": confidence_bundle.get("threshold_adjustment", 0.0),
+                    "domain_threshold_delta": policy.get("domain_threshold_delta"),
+                    "domain_strictness_bias": policy.get("domain_strictness_bias"),
                     "score_drop_reason": confidence_bundle.get("reason", "weak-evidence fallback"),
                     "policy_mode": policy.get("mode"),
-                    "domain_family": domain_profile.get("domain_family"),
+                    "domain_family": policy.get("domain_family") or domain_profile.get("domain_family"),
                     "updatedAt": firestore.SERVER_TIMESTAMP,
-                })
+                }
+                if _domain_impact_scored_out:
+                    _scored_out_payload["domain_impact_summary"] = dict(
+                        _domain_impact_scored_out
+                    )
+                    # Per-lead gate snapshot (not cycle totals).
+                    _scored_out_payload["domain_impact_summary"][
+                        "confidence_score"
+                    ] = confidence_bundle["confidence_score"]
+                    _scored_out_payload["domain_impact_summary"][
+                        "confidence_threshold"
+                    ] = confidence_bundle["confidence_threshold"]
+                doc_ref.update(_scored_out_payload)
                 try:
                     _db().collection("global_lead_locks").document(lock_entity).delete()
                 except Exception as _lock_del_err:
@@ -1451,7 +1588,10 @@ def dispatch():
         policy_mode=policy.get("mode"),
         policy_version=policy.get("policy_version"),
         policy_threshold_adjustment=policy.get("threshold_adjustment"),
+        domain_threshold_delta=policy.get("domain_threshold_delta"),
+        domain_strictness_bias=policy.get("domain_strictness_bias"),
         domain_family=domain_profile.get("domain_family"),
+        liquidity_level=policy.get("liquidity_level") or domain_profile.get("liquidity_level"),
         **status_counts,
     )
 
@@ -1531,6 +1671,47 @@ def dispatch():
                 note="0 leads created from 5+ scored URLs. Funnel is broken.",
             )
 
+    # Domain impact end-of-cycle summary (promoted vs scored_out).
+    _leads_promoted_n = (
+        int(scrape_success or 0)
+        + int(status_counts.get("enrichment_pending", 0) or 0)
+        + int(status_counts.get("enrichment_pending_all_unknown", 0) or 0)
+    )
+    _leads_scored_out_n = int(status_counts.get("score_drop", 0) or 0)
+
+    _domain_impact = build_domain_impact_summary(
+        domain_profile if isinstance(domain_profile, dict) else None,
+        policy=policy,
+        prefilter_domain_softening=_prefilter_domain_softening,
+        domain_tier_dropped=_domain_tier_dropped,
+        leads_promoted=_leads_promoted_n,
+        leads_scored_out=_leads_scored_out_n,
+        cycle="dispatch",
+        extra={
+            "batch_urls": len(batch_urls),
+            "approved_urls": len(approved_urls),
+            "prefilter_high": len(high_urls),
+            "prefilter_medium": len(medium_urls),
+        },
+    )
+    log.info(
+        "dispatch_domain_impact_summary",
+        campaign_id=campaign_id,
+        domain_family=_domain_impact.get("domain_family"),
+        confidence=_domain_impact.get("confidence"),
+        strictness_bias=_domain_impact.get("strictness_bias"),
+        threshold_adjustment=_domain_impact.get("threshold_adjustment"),
+        domain_threshold_delta=_domain_impact.get("domain_threshold_delta"),
+        prefilter_domain_softening=_domain_impact.get("prefilter_domain_softening"),
+        domain_tier_dropped=_domain_impact.get("domain_tier_dropped"),
+        leads_promoted=_domain_impact.get("leads_promoted"),
+        leads_scored_out=_domain_impact.get("leads_scored_out"),
+        liquidity_level=_domain_impact.get("liquidity_level"),
+        policy_mode=_domain_impact.get("policy_mode"),
+        policy_version=_domain_impact.get("policy_version"),
+        note="End-of-dispatch domain intelligence impact for this campaign run.",
+    )
+
     return jsonify({
         "processed_leads": len(all_results),
         "scrape_success":  scrape_success,
@@ -1546,8 +1727,12 @@ def dispatch():
             "policy_mode": policy.get("mode"),
             "policy_version": policy.get("policy_version"),
             "policy_threshold_adjustment": policy.get("threshold_adjustment"),
+            "domain_threshold_delta": policy.get("domain_threshold_delta"),
+            "domain_strictness_bias": policy.get("domain_strictness_bias"),
             "domain_family": domain_profile.get("domain_family"),
+            "liquidity_level": policy.get("liquidity_level") or domain_profile.get("liquidity_level"),
             "status_counts": status_counts,
+            "domain_impact_summary": _domain_impact,
         },
     }), 200
 

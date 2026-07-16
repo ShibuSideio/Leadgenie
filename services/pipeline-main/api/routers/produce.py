@@ -93,8 +93,9 @@ from services.query_governance import (  # type: ignore[import]
     query_signature,
 )
 from services.domain_intelligence import (  # type: ignore[import]
-    infer_domain_profile,
     apply_domain_query_profile,
+    build_domain_impact_summary,
+    resolve_campaign_domain_profile,
 )
 from services.serper_service import (  # type: ignore[import]
     search_serper,
@@ -217,9 +218,9 @@ def produce():
     sourcing_vector = campaign.get("sourcing_vector", "B2B")
     location        = campaign.get("location", "").strip()
     gl              = campaign.get("gl", "").strip()
-    domain_profile = campaign.get("system_domain_profile")
-    if not isinstance(domain_profile, dict):
-        domain_profile = infer_domain_profile(campaign)
+    # Domain profile: manual domain_override wins over auto-inference.
+    domain_profile, _domain_meta = resolve_campaign_domain_profile(campaign)
+    if _domain_meta.get("should_persist"):
         try:
             campaign_ref.update({"system_domain_profile": domain_profile})
         except Exception as _profile_write_err:
@@ -229,12 +230,50 @@ def produce():
                 error=str(_profile_write_err),
             )
     campaign["system_domain_profile"] = domain_profile
+    if _domain_meta.get("override_active"):
+        log.info(
+            "produce_domain_override_active",
+            campaign_id=campaign_id,
+            domain_family=domain_profile.get("domain_family"),
+            source=_domain_meta.get("source"),
+            strictness_bias=domain_profile.get("strictness_bias"),
+            note="Manual domain_override is active; auto-inference skipped.",
+        )
+    elif _domain_meta.get("error"):
+        log.warning(
+            "produce_domain_override_invalid",
+            campaign_id=campaign_id,
+            error=_domain_meta.get("error"),
+            note="Invalid domain_override ignored; fell back to auto-inference.",
+        )
+    if domain_profile.get("thin_campaign") or str(
+        domain_profile.get("profile_confidence") or ""
+    ).lower() == "low":
+        log.info(
+            "produce_domain_thin_profile",
+            campaign_id=campaign_id,
+            domain_family=domain_profile.get("domain_family"),
+            confidence=domain_profile.get("confidence"),
+            profile_confidence=domain_profile.get("profile_confidence"),
+            input_richness=domain_profile.get("input_richness"),
+            soft_domain_adjustments=bool(domain_profile.get("soft_domain_adjustments")),
+            strictness_bias=domain_profile.get("strictness_bias"),
+            note="Thin/low-confidence domain profile — milder domain adjustments applied.",
+        )
     log.info(
         "produce_domain_profile_loaded",
         campaign_id=campaign_id,
         domain_family=domain_profile.get("domain_family"),
         confidence=domain_profile.get("confidence"),
+        profile_confidence=domain_profile.get("profile_confidence"),
+        thin_campaign=bool(domain_profile.get("thin_campaign")),
+        input_richness=domain_profile.get("input_richness"),
+        liquidity_level=domain_profile.get("liquidity_level"),
         low_liquidity=bool(domain_profile.get("low_liquidity_market")),
+        strictness_bias=domain_profile.get("strictness_bias"),
+        preferred_sources=domain_profile.get("preferred_sources"),
+        override_active=bool(_domain_meta.get("override_active")),
+        domain_source=_domain_meta.get("source"),
     )
 
     # ------------------------------------------------------------------
@@ -440,6 +479,7 @@ def produce():
             campaign_name=(campaign.get("name") or ""),
             location=location,
             pain_point=(campaign.get("pain_point") or ""),
+            domain_profile=domain_profile if isinstance(domain_profile, dict) else None,
         )
     except Exception as exc:
         log.critical(
@@ -631,16 +671,61 @@ def produce():
         campaign_id=campaign_id,
         **_govern_stats,
     )
-    _domain_profiled = apply_domain_query_profile(smart_keywords, domain_profile)
+    # Domain portfolio shaping runs AFTER governance and BEFORE Serper /
+    # exhaustion escalation so preferred platforms and blocked subreddits
+    # win over generic query mix without fighting governance caps.
+    _kw_for_domain = ""
+    if isinstance(keywords, list):
+        _kw_for_domain = ", ".join(str(k) for k in keywords if k)
+    else:
+        _kw_for_domain = str(
+            campaign.get("persona_keywords") or campaign.get("keywords") or ""
+        )
+    _domain_profiled = apply_domain_query_profile(
+        smart_keywords,
+        domain_profile if isinstance(domain_profile, dict) else None,
+        location=location or "",
+        keywords=_kw_for_domain,
+    )
     smart_keywords = _domain_profiled.get("queries", []) or []
-    if int(_domain_profiled.get("dropped") or 0) > 0 or int(_domain_profiled.get("injected") or 0) > 0:
+    _dom_dropped = int(_domain_profiled.get("dropped") or 0)
+    _dom_injected = int(_domain_profiled.get("injected") or 0)
+    _dom_boosted = int(_domain_profiled.get("boosted") or 0)
+    _dom_reordered = bool(_domain_profiled.get("reordered"))
+    if _dom_dropped or _dom_injected or _dom_boosted or _dom_reordered:
         log.info(
             "produce_domain_query_profile_applied",
             campaign_id=campaign_id,
-            domain_family=domain_profile.get("domain_family"),
-            dropped=int(_domain_profiled.get("dropped") or 0),
-            injected=int(_domain_profiled.get("injected") or 0),
+            domain_family=_domain_profiled.get("domain_family")
+            or (domain_profile.get("domain_family") if isinstance(domain_profile, dict) else None),
+            dropped=_dom_dropped,
+            injected=_dom_injected,
+            boosted=_dom_boosted,
+            reordered=_dom_reordered,
+            preferred_hints=(
+                (domain_profile.get("preferred_query_hints") or [])[:5]
+                if isinstance(domain_profile, dict)
+                else []
+            ),
+            preferred_sources=(
+                (domain_profile.get("preferred_sources") or [])[:5]
+                if isinstance(domain_profile, dict)
+                else []
+            ),
             remaining=len(smart_keywords),
+            note="Domain profile shaped governed queries before Serper execution.",
+        )
+    else:
+        log.info(
+            "produce_domain_query_profile_noop",
+            campaign_id=campaign_id,
+            domain_family=(
+                domain_profile.get("domain_family")
+                if isinstance(domain_profile, dict)
+                else None
+            ),
+            remaining=len(smart_keywords),
+            note="No domain query adjustments needed (or no domain profile signals).",
         )
     _escalation_level = int(campaign.get("_query_exhaustion_escalation_level") or 0)
     if _escalation_level > 0:
@@ -678,6 +763,34 @@ def produce():
             note="Governance removed/trimmed all candidate queries. Triggering harvest fallback.",
         )
         harvest_metrics = _run_signal_harvest_pathway(campaign)
+        _empty_domain_impact = build_domain_impact_summary(
+            domain_profile if isinstance(domain_profile, dict) else None,
+            query_stats={
+                "dropped": _dom_dropped,
+                "injected": _dom_injected,
+                "boosted": _dom_boosted,
+                "reordered": _dom_reordered,
+                "domain_family": (
+                    domain_profile.get("domain_family")
+                    if isinstance(domain_profile, dict)
+                    else None
+                ),
+            },
+            cycle="produce",
+            extra={"fetched": 0, "queued": 0, "query_count": 0, "empty_portfolio": True},
+        )
+        log.info(
+            "produce_domain_impact_summary",
+            campaign_id=campaign_id,
+            domain_family=_empty_domain_impact.get("domain_family"),
+            confidence=_empty_domain_impact.get("confidence"),
+            strictness_bias=_empty_domain_impact.get("strictness_bias"),
+            queries_dropped=_empty_domain_impact.get("queries_dropped"),
+            queries_injected=_empty_domain_impact.get("queries_injected"),
+            queries_boosted=_empty_domain_impact.get("queries_boosted"),
+            queries_reordered=_empty_domain_impact.get("queries_reordered"),
+            note="End-of-produce domain impact (empty query portfolio after governance).",
+        )
         return jsonify({
             "status": "produced",
             "fetched": 0,
@@ -686,6 +799,7 @@ def produce():
             "queue_depth": len(campaign.get("unprocessed_queue", [])),
             "warning": "No governed queries available.",
             "harvest": harvest_metrics,
+            "domain_impact_summary": _empty_domain_impact,
         }), 200
 
     for kw in smart_keywords:
@@ -1127,6 +1241,44 @@ def produce():
     # ------------------------------------------------------------------
     harvest_metrics = _run_signal_harvest_pathway(campaign)
 
+    # Domain impact summary for this produce cycle (query shaping focus).
+    _produce_domain_impact = build_domain_impact_summary(
+        domain_profile if isinstance(domain_profile, dict) else None,
+        query_stats={
+            "dropped": _dom_dropped,
+            "injected": _dom_injected,
+            "boosted": _dom_boosted,
+            "reordered": _dom_reordered,
+            "domain_family": (
+                domain_profile.get("domain_family")
+                if isinstance(domain_profile, dict)
+                else None
+            ),
+        },
+        cycle="produce",
+        extra={
+            "fetched": fetched_count,
+            "deduplicated": duped_count,
+            "queued": len(_capped_fresh),
+            "query_count": len(smart_keywords) if isinstance(smart_keywords, list) else 0,
+        },
+    )
+    log.info(
+        "produce_domain_impact_summary",
+        campaign_id=campaign_id,
+        domain_family=_produce_domain_impact.get("domain_family"),
+        confidence=_produce_domain_impact.get("confidence"),
+        strictness_bias=_produce_domain_impact.get("strictness_bias"),
+        queries_dropped=_produce_domain_impact.get("queries_dropped"),
+        queries_injected=_produce_domain_impact.get("queries_injected"),
+        queries_boosted=_produce_domain_impact.get("queries_boosted"),
+        queries_reordered=_produce_domain_impact.get("queries_reordered"),
+        liquidity_level=_produce_domain_impact.get("liquidity_level"),
+        fetched=fetched_count,
+        queued=len(_capped_fresh),
+        note="End-of-produce domain intelligence impact for this campaign run.",
+    )
+
     log.info("TRACE-DONE: produce() complete.",
              campaign_id=campaign_id, queue_depth=len(_capped_fresh))
 
@@ -1138,4 +1290,5 @@ def produce():
         "queue_depth":   len(combined_queue),
         # V25.1.0: Signal harvest pathway metrics
         "harvest": harvest_metrics,
+        "domain_impact_summary": _produce_domain_impact,
     }), 200

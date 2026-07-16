@@ -288,6 +288,31 @@ _PLATFORM_MINING_SCHEMA = {
 }
 
 
+def _domain_platform_targets(domain_profile: Optional[dict]) -> list[str]:
+    """Extract site hosts / platform brands from a system_domain_profile."""
+    if not isinstance(domain_profile, dict) or not domain_profile:
+        return []
+    targets: list[str] = []
+    seen: set[str] = set()
+    for hint in domain_profile.get("preferred_query_hints") or []:
+        text = str(hint).strip()
+        if not text:
+            continue
+        lower = text.lower()
+        if "site:" in lower:
+            # Pull host after site:
+            for part in lower.split():
+                if part.startswith("site:"):
+                    host = part[5:].split("/")[0].strip()
+                    if host and host not in seen:
+                        seen.add(host)
+                        targets.append(host)
+        elif text not in seen:
+            seen.add(text)
+            targets.append(text)
+    return targets[:8]
+
+
 def _generate_platform_mining_queries(
     ctx: "CampaignQueryContext",
     bio: str,
@@ -295,6 +320,7 @@ def _generate_platform_mining_queries(
     vector_label: str,
     blacklist: str,
     strategy_plan: Optional[dict] = None,
+    domain_profile: Optional[dict] = None,
 ) -> list[str]:
     """Generate site:-inclusion queries for competitor listing platforms.
 
@@ -306,12 +332,35 @@ def _generate_platform_mining_queries(
     don't contain pain language. Platform mining queries surface the actual
     entities with contact details.
 
+    When *domain_profile* is provided, preferred platforms / query hints seed
+    both the Gemini prompt and the deterministic fallback.
+
     Returns:
         List of ready-to-use Serper queries with site: operators.
         Empty list on Gemini failure (non-fatal).
     """
     from services.gemini_service import call_gemini_2_5  # type: ignore[import]
 
+    domain_family = ""
+    domain_platform_lines = ""
+    domain_targets = _domain_platform_targets(domain_profile)
+    if isinstance(domain_profile, dict) and domain_profile:
+        domain_family = str(domain_profile.get("domain_family") or "").strip()
+        if domain_targets:
+            domain_platform_lines = (
+                "DOMAIN PROFILE PREFERRED PLATFORMS (prioritise these when valid "
+                f"for the geography):\n- " + "\n- ".join(domain_targets) + "\n\n"
+            )
+            log.info(
+                "query_brain_platform_mining_domain_seeds",
+                campaign_id=ctx.campaign_id,
+                domain_family=domain_family or None,
+                seed_count=len(domain_targets),
+                seeds=domain_targets[:5],
+                note="Domain profile preferred platforms seeding platform-mining generation.",
+            )
+
+    _domain_family_line = f"DOMAIN FAMILY: {domain_family}\n" if domain_family else ""
     prompt = (
         f"You are a competitive intelligence analyst for lead generation.\n\n"
         f"TASK: Identify 3-5 competitor listing/directory/aggregator websites where\n"
@@ -319,19 +368,25 @@ def _generate_platform_mining_queries(
         f"for this business vertical are publicly listed with their profiles.\n\n"
         f"CAMPAIGN BIO:\n{bio[:500]}\n\n"
         f"KEYWORDS: {kw_str[:300]}\n"
-        f"VERTICAL: {vector_label}\n\n"
+        f"VERTICAL: {vector_label}\n"
+        f"{_domain_family_line}"
+        f"\n"
+        f"{domain_platform_lines}"
         f"For each platform, generate a Google search query using site: operator\n"
         f"that would find individual profiles (with names, contact info, listings).\n\n"
         f"EXAMPLES:\n"
         f"  Real Estate: site:dubizzle.com.om agent Muscat villa\n"
         f"  Real Estate: site:propertyfinder.com agent profile Oman\n"
         f"  Real Estate: site:bayut.com broker listings\n"
+        f"  Manufacturing: site:indiamart.com supplier RFQ equipment\n"
+        f"  Manufacturing: site:thomasnet.com manufacturer contact\n"
         f"  Education: site:shiksha.com consultant profile\n"
         f"  Health: site:practo.com doctor clinic\n"
         f"  Services: site:sulekha.com provider profile\n"
         f"  Services: site:justdial.com business contact\n\n"
         f"RULES:\n"
         f"- Use ONLY real, known listing platforms for this vertical and geography.\n"
+        f"- Prefer DOMAIN PROFILE PREFERRED PLATFORMS when listed above.\n"
         f"- Each query must have exactly ONE site: operator.\n"
         f"- Include entity terms: agent, broker, consultant, profile, contact, listings.\n"
         f"- Include geographic terms from the campaign context.\n"
@@ -388,19 +443,44 @@ def _generate_platform_mining_queries(
             note="Non-fatal — pain-discovery queries will still run.",
         )
 
-    # Fallback: use the shared strategy plan to build deterministic platform
-    # queries when Gemini doesn't produce usable site: queries.
+    # Fallback: use strategy plan + domain profile platforms when Gemini
+    # doesn't produce usable site: queries.
+    platform_targets: list[str] = []
     if strategy_plan:
-        platform_targets = [p for p in strategy_plan.get("platform_targets", []) if p][:4]
-        geo_terms = [g for g in strategy_plan.get("geo_terms", []) if g][:3]
+        platform_targets.extend(
+            [p for p in strategy_plan.get("platform_targets", []) if p][:4]
+        )
+    # Domain preferred hosts first so vertical-correct platforms win.
+    if domain_targets:
+        platform_targets = list(domain_targets) + platform_targets
+    # Dedupe hosts while preserving order.
+    _seen_hosts: set[str] = set()
+    _deduped_targets: list[str] = []
+    for target in platform_targets:
+        domain = str(target).strip().lower()
+        if domain.startswith("http"):
+            from urllib.parse import urlparse
+            domain = urlparse(domain).netloc
+        domain = domain.replace("site:", "").split("/")[0]
+        if not domain or domain in _seen_hosts:
+            continue
+        _seen_hosts.add(domain)
+        _deduped_targets.append(domain)
+    platform_targets = _deduped_targets[:5]
+
+    if platform_targets:
+        geo_terms = []
+        if strategy_plan:
+            geo_terms = [g for g in strategy_plan.get("geo_terms", []) if g][:3]
+        family = (domain_family or "").lower()
         fallback_queries: list[str] = []
-        for target in platform_targets:
-            domain = target.strip().lower()
-            if domain.startswith("http"):
-                from urllib.parse import urlparse
-                domain = urlparse(domain).netloc
+        for domain in platform_targets:
             entity_terms = ["agent", "broker", "profile", "contact"]
-            if "property" in domain or "realestate" in domain or "bayut" in domain or "dubizzle" in domain:
+            if family == "manufacturing" or "indiamart" in domain or "thomasnet" in domain:
+                entity_terms = ["supplier", "manufacturer", "RFQ", "contact"]
+            elif family == "real_estate" or any(
+                x in domain for x in ("property", "realestate", "bayut", "dubizzle", "zillow")
+            ):
                 entity_terms = ["agent", "broker", "listing", "contact"]
             elif "g2" in domain or "capterra" in domain or "trustpilot" in domain:
                 entity_terms = ["review", "profile", "contact"]
@@ -409,6 +489,14 @@ def _generate_platform_mining_queries(
                 base = f"{base} {' '.join(geo_terms)}"
             fallback_queries.append(f"{base} -wiki -jobs -careers")
         if fallback_queries:
+            if domain_targets:
+                log.info(
+                    "query_brain_platform_mining_domain_fallback",
+                    campaign_id=ctx.campaign_id,
+                    domain_family=domain_family or None,
+                    count=len(fallback_queries),
+                    note="Built platform-mining fallback queries from domain profile seeds.",
+                )
             return fallback_queries[:4]
 
     return []
@@ -432,6 +520,7 @@ def generate_smart_query(
     campaign_name: str = "",
     location: str = "",
     pain_point: str = "",
+    domain_profile: Optional[dict] = None,
 ) -> list[str]:
     """Generate Serper query strings via statistical router or Gemini fallback.
 
@@ -456,6 +545,9 @@ def generate_smart_query(
         campaign_name:      Campaign name for strategy-plan context.
         location:           Campaign location for geo-aware planning.
         pain_point:         Campaign pain point for strategy inference.
+        domain_profile:     Optional ``system_domain_profile``. Seeds platform
+                            mining with preferred sources/hints. Portfolio-level
+                            block/boost still runs post-governance in produce.
 
     Returns:
         List of ready-to-use Serper query strings (may be empty on error).
@@ -1605,9 +1697,20 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
     #
     # These queries get NO time filter (qdr:m) at the Serper level because
     # agent profiles and listings are evergreen pages.
-    if _is_consumer:
+    # Platform mining for consumer archetypes, plus domain-driven platform
+    # families (e.g. manufacturing B2B supplier directories) when profile says so.
+    _domain_family = ""
+    if isinstance(domain_profile, dict):
+        _domain_family = str(domain_profile.get("domain_family") or "").strip().lower()
+    _domain_wants_platforms = _domain_family in {
+        "real_estate", "manufacturing", "construction", "healthcare",
+        "professional_services", "hospitality",
+    }
+    if _is_consumer or _domain_wants_platforms:
         _platform_mining_queries = _generate_platform_mining_queries(
-            ctx, bio, kw_str, vector_label, blacklist, strategy_plan=_strategy_plan,
+            ctx, bio, kw_str, vector_label, blacklist,
+            strategy_plan=_strategy_plan,
+            domain_profile=domain_profile if isinstance(domain_profile, dict) else None,
         )
         if _platform_mining_queries:
             smart_queries.extend(_platform_mining_queries)
@@ -1616,6 +1719,8 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
                 campaign_id=ctx.campaign_id,
                 count=len(_platform_mining_queries),
                 queries=[q[:80] for q in _platform_mining_queries[:3]],
+                domain_family=_domain_family or None,
+                domain_driven=bool(_domain_wants_platforms and not _is_consumer),
                 note="Strategy 1 (Platform Mining) queries added for "
                      "competitor platform lead discovery.",
             )
