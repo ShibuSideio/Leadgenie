@@ -1,6 +1,6 @@
-# LeadGenie (Sideio) — Platform Architecture V26.4.0
+# LeadGenie (Sideio) — Platform Architecture V26.5.0
 **Technical Specification Document**
-*Last Updated: 2026-07-16 | Version: V26.4.0 — Domain Intelligence + Adaptive-v2 Controls*
+*Last Updated: 2026-07-16 | Version: V26.5.0 — Domain Intelligence GA + Thin Campaigns + Domain-Aware Inbound Radar*
 
 ---
 
@@ -11,10 +11,10 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 **Core loop:**
 1. Cloud Scheduler cron hits the Orchestrator every 5 minutes
 2. Orchestrator validates quota, checks drip cadence, enqueues a Cloud Task per active campaign
-3. Pipeline-Main runs: **intelligence-profile inference → strategy-aware query generation → budget-aware source routing → scrape → score → confidence qualification → entity extraction → write to Firestore**
+3. Pipeline-Main runs: **domain-profile resolve → intelligence-profile inference → domain-aware query generation → budget-aware source routing → scrape → domain-aware pre-filter → score → adaptive confidence qualification → entity extraction → write to Firestore**
 4. The PWA frontend listens via `onSnapshot` and renders leads in real-time
 
-### Latest implementation updates (V26.4.0)
+### Latest implementation updates (V26.5.0)
 - A shared heuristic planner now infers a campaign intelligence profile from sparse user input so the backend can make stronger decisions with minimal manual effort.
 - Source routing uses that inferred strategy plan and a daily budget guard to avoid wasting expensive Serper spend on weak or low-evidence campaigns.
 - Query generation now uses deterministic fallback logic and strategy-specific phrasing so the pipeline remains robust even when Gemini is unavailable.
@@ -24,11 +24,13 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 - A self-healing enrichment backfill job (`/api/internal/campaign-enrichment-run`) repairs active legacy campaigns with stale or incomplete context.
 - Query governance now applies portfolio shaping before Serper execution (intent balance, blacklist cap, platform query injection, dedup).
 - Producer now includes campaign-scoped novelty memory and exhaustion escalation to reduce repeated query loops when markets are saturated.
-- Dispatch now uses an adaptive campaign policy engine (`adaptive-v2`) that adjusts strictness by queue health, campaign context, domain profile, and recent yield instead of static gate behavior.
-- Confidence promotion thresholds are now dynamically adjusted per campaign cycle (bounded) to avoid starvation in sparse/early-stage campaigns while preserving quality controls.
-- Score-gate non-promotions are persisted as `scored_out` leads for diagnostics instead of being hard-deleted, improving observability and adaptive tuning.
+- Dispatch uses an adaptive campaign policy engine (**`adaptive-v3`**) that adjusts strictness by queue health, campaign context, **domain `strictness_bias`**, **`profile_confidence` damping**, and recent yield.
+- Confidence promotion thresholds are dynamically adjusted per campaign cycle (bounded); low-confidence domain profiles apply attenuated adjustments so thin campaigns do not over-correct the gate.
+- Score-gate non-promotions are persisted as `scored_out` leads for diagnostics (including compact `domain_impact_summary`).
 - Snippet cache fallback now applies freshness checks; stale cache entries are not used for final scoring decisions.
-- Campaigns now carry `system_domain_profile` metadata (`domain_family`, confidence, blocked subreddit list, preferred source/query hints, low-liquidity markers), and both produce/dispatch apply domain-aware filtering.
+- **Domain Intelligence system (SSOT):** campaigns carry `system_domain_profile` (`domain_family`, numeric `confidence`, **`profile_confidence` tier**, `thin_campaign`, `strictness_bias`, preferred sources/hints, liquidity markers). Optional `domain_override` takes precedence over auto-inference.
+- Produce/dispatch are domain-aware for query shaping, pre-filter directory softening, and promotion bias; end-of-cycle logs emit `produce_domain_impact_summary` / `dispatch_domain_impact_summary`.
+- **Inbound Radar (both paths)** is domain-aware: Visitor Beacon (`POST /api/visitor-signals`) and Inbound Sentiment job stamp domain metadata and **actionable `enrichment_priority`** (`realtime` / `batch` / `deferred` processing contracts).
 
 **Intelligence Strategies (V26.0):**
 - `PLATFORM_MINING` — Extract leads from competitor directories, aggregator platforms, review sites
@@ -56,10 +58,15 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 │   ├── sw.js                        # Service Worker (cache bust on deploy)
 │   └── manifest.json                # PWA manifest
 ├── /services
-│   ├── /shared                      # Shared backend heuristics and campaign strategy planning
-│   │   └── intelligence_profile.py # Deterministic profile inference and execution plan building
+│   ├── /shared                      # Shared cross-service heuristics (orchestrator + pipeline)
+│   │   ├── intelligence_profile.py  # Deterministic strategy-profile inference + execution plan
+│   │   ├── domain_constants.py      # SSOT: KNOWN_DOMAIN_FAMILIES, is_valid_domain_family()
+│   │   ├── domain_gate.py           # Shared thresholds + enrichment_priority contracts
+│   │   └── campaign_enrichment.py   # Deterministic campaign field auto-enrichment
 │   ├── /orchestrator                # Cloud Run: REST API Gateway + Cron Dispatcher
-│   │   ├── api/routers/             # Modular Flask blueprints (campaigns, leads, settings…)
+│   │   ├── api/routers/             # Modular Flask blueprints (campaigns, leads, visitor_signals…)
+│   │   ├── jobs/                    # inbound_sentiment_job.py (domain-aware radar cron)
+│   │   ├── services/                # inbound_sentiment_service.py, inbound_maps_service.py
 │   │   ├── services/intelligence/   # shadow_tracker.py, neg_signal.py
 │   │   ├── core/config.py           # Shared env-var config
 │   │   └── requirements.txt
@@ -67,7 +74,10 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 │   │   ├── api/routers/             # dispatch.py, produce.py
 │   │   ├── core/constants.py        # CONSUMER_ARCHETYPES, D2C_ARCHETYPES, B2B2C_ARCHETYPES
 │   │   ├── services/                # Core intelligence services:
-│   │   │   ├── query_brain.py       #   AI query generation + strategy-aware colloquial translation
+│   │   │   ├── domain_intelligence.py # Domain profile inference, override, query shaping
+│   │   │   ├── adaptive_policy.py   # adaptive-v3 dispatch gate policy
+│   │   │   ├── query_brain.py       # AI query generation + domain-seeded platform mining
+│   │   │   ├── query_governance.py  # Query portfolio governance (pre-Serper)
 │   │   │   ├── source_router.py     #   V26: Multi-source OSINT router (10 signal source plugins)
 │   │   │   ├── signal_sources/      #   V26: Pluggable signal source modules:
 │   │   │   │   ├── base.py          #     Abstract base class for all signal sources
@@ -88,7 +98,7 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 │   │   │   ├── serper_service.py    #     Serper API client
 │   │   │   ├── neg_shield.py        #     Negative signal shield (BQ)
 │   │   │   ├── prism_pipeline.py    #     Headless browser scraping
-│   │   │   ├── gemini_service.py    #     Gemini AI service wrapper
+│   │   │   ├── gemini_service.py    #     Gemini AI + domain-aware pre-filter
 │   │   │   ├── context_builder.py   #     Enriched ICP context builder
 │   │   │   └── telemetry.py         #     Pipeline telemetry
 │   │   └── requirements.txt
@@ -248,6 +258,24 @@ Distributed credit counters (bypass Firestore write contention).
   "target_angle_hook": "Message that resonates with buyer — informs query generation",
   "target_angle_adv": "Advantage angle for outreach",
   "unfair_advantage": "Seller differentiator — used by context_builder for ICP framing",
+  "system_domain_profile": {
+    "version": "domain-v2",
+    "domain_family": "real_estate",
+    "confidence": 0.92,
+    "profile_confidence": "high",
+    "thin_campaign": false,
+    "input_richness": "high",
+    "strictness_bias": -0.3,
+    "soft_domain_adjustments": false,
+    "liquidity_level": "low",
+    "low_liquidity_market": true,
+    "preferred_sources": ["classified_listings", "serper_discovery", "consumer_forum"],
+    "preferred_query_hints": ["site:propertyfinder", "site:bayut"],
+    "blocked_subreddits": ["frugal", "buyitforlife"],
+    "override_active": false,
+    "notes": "fields_used=...; profile_confidence=high"
+  },
+  "domain_override": null,
   "leads_generated": 105,
   "next_drip_due": "<TIMESTAMP>",
   "drip_interval_minutes": 60,
@@ -264,6 +292,8 @@ Distributed credit counters (bypass Firestore write contention).
   - `vocabulary_notes`: how the ICP speaks — fed to Gemini for colloquial query translation
   - `mining_targets`: auto-derived platform URLs for PLATFORM_MINING/COMPETITOR_TOUCHPOINT
   - `confidence`: classification confidence (0.0–1.0)
+- `system_domain_profile` (V26.4–V26.5): resolved domain intelligence snapshot (see §21). Written by produce/dispatch via `resolve_campaign_domain_profile()`.
+- `domain_override` (V26.5): optional manual override (`string` family or partial object). Validated on campaign create/update; takes precedence over auto-inference. `null` / `{}` clears override and forces re-infer.
 - `unprocessed_queue`: array of Serper result objects awaiting Gemini profiling; capped at 200 (backpressure at depth 150)
 - `next_drip_due`: updated on every produce run (V24.4 fix — was only set on first fill)
 - `keywords`: stored as comma-separated string, parsed to array in pipeline
@@ -733,19 +763,53 @@ if status == "ignored":
 
 ## 8. INBOUND RADAR (Visitor Signal Pipeline)
 
-The Inbound Radar converts website visitor signals (page visits, form submissions, scroll depth) into qualified leads by running Gemini intent inference on the visitor's behaviour.
+Inbound Radar has **two complementary paths**. Both are domain-aware as of V26.5:
+
+| Path | Endpoint / Job | Role |
+|------|----------------|------|
+| **Visitor Beacon** | `POST /api/visitor-signals` | Anonymous page-view beacons from `sideio-tracker.js`; firmographic enrichment later |
+| **Inbound Sentiment** | Cron → `jobs/inbound_sentiment_job.py` | Serper + Gemini OSINT intent mining per active campaign |
 
 ### 8.1 Opt-Out Gate (V24.5)
-`visitor_signals_enabled` field on `users` document. If `false` → `204 No Content` immediately. Prevents Inbound Radar from running for tenants who have disabled it.
+`visitor_signals_enabled` field on `users` document. If `false` → `204 No Content` immediately on beacon ingest. Inbound sentiment job only runs for tenants with `inbound_radar.enabled == true`.
 
-### 8.2 Intent Scoring
-`intent_score` is a 0.0–1.0 float. Inbound leads are written with:
+### 8.2 Visitor Beacon path (`visitor_signals.py`)
+- Writes `visitor_signals/{tenant_id}_{visit_hash}` (no cookies / no PII; IP hashed).
+- Loads best active-campaign `system_domain_profile` (override preferred; 5‑minute cache).
+- When a profile exists, stamps domain metadata + **actionable enrichment fields** (see §8.5). No profile → **identical legacy document shape** (BC).
+- Does **not** invent an intent score; domain bias drives `enrichment_priority` and observability deltas only.
+- Logs: `visitor_domain_profile_used`, `visitor_enrichment_priority_assigned`, `visitor_domain_adjustment_applied`.
+
+### 8.3 Inbound Sentiment path (`inbound_sentiment_service.py` + job)
+- Per active campaign: build Serper queries → Gemini intent classify → filter by write floor.
+- Base floors: Gemini garbage filter **0.30**, Firestore write **0.45** (`MIN_INTENT_SCORE`).
+- With `system_domain_profile`: floors adjusted via `shared.domain_gate.compute_intent_threshold()` using `strictness_bias` × `profile_confidence` scale (high=1.0, medium=0.6, low=0.3). Thin/low-confidence profiles get milder moves.
+- Signals persist `domain_family`, `domain_source`, `profile_confidence`, `thin_campaign`, `strictness_bias`, `intent_threshold_used`, and enrichment priority fields.
+- Logs: `inbound_domain_profile_used`, `inbound_domain_adjustment_applied`, `inbound_enrichment_priority_assigned`.
+
+### 8.4 Intent Scoring & Lead Promotion
+`intent_score` is a 0.0–1.0 float. Inbound leads (manual convert or auto-path) use:
 ```python
 "normalized_score": round(sig.get("intent_score", 0.5) * 100)
 ```
+- List API (`GET /api/inbound-signals`) respects each signal’s `intent_threshold_used` when present (else floor **0.35**) so domain-lenient writes are not dropped from the UI.
+- Convert-to-lead (`PUT /api/inbound-signals/<id>/status`) copies domain + enrichment fields onto the `leads` document.
 
-### 8.3 Lead Promotion
-Inbound signals scoring above the tenant's intent floor are promoted to the `leads` collection with `origin_engine: "inbound"`.
+### 8.5 Enrichment Priority (actionable contract)
+Computed by `shared.domain_gate.compute_enrichment_priority()` from domain family, `profile_confidence`, thin flags, optional intent score, and sourcing vector.
+
+| Priority | Queue | Company resolve | Max lookups | Deep graph | Budget-tight |
+|----------|-------|-----------------|-------------|------------|--------------|
+| `high` | `realtime` | yes | 5 | yes | still run |
+| `medium` | `batch` | yes | 2 | no | still run |
+| `low` | `deferred` | no | 1 | no | **skip** |
+
+**Helpers for workers:**
+- `enrichment_plan_for_priority(priority)` — processing depth dict
+- `enrichment_sort_key(doc)` — sort high → medium → low, then by intent
+- `should_run_company_resolve(priority, budget_tight=)` — firmographic gate
+
+**Decision highlights:** thin/low confidence → low; high confidence + B2B family → high; high confidence + consumer family (e.g. real_estate) demotes to medium for reverse-IP ROI; medium confidence + manufacturing/SaaS promotes to high; intent ≥ 0.70 can promote medium → high.
 
 ---
 
@@ -1029,7 +1093,8 @@ Multi-dimensional Lead Quality Score computed per signal:
 - 7-reason rejection granularity (V25.6.0: synced to frontend)
 - `force_query_refresh` flag on exhaustion detection
 - **V26.3.0 adaptive dispatch policy (`adaptive-v1`)**: campaign-level strict/balanced/recovery modes dynamically tune medium intake and confidence thresholds using queue depth, recent conversion pressure, and exhaustion signals.
-- **V26.4.0 adaptive dispatch policy (`adaptive-v2`)**: extends adaptive controls with domain profile awareness (`domain_family`, low-liquidity market hints) and domain-aware prefilter tier pruning.
+- **V26.4.0 adaptive dispatch policy (`adaptive-v2`)**: domain profile awareness (`domain_family`, low-liquidity market hints) and domain-aware prefilter tier pruning.
+- **V26.5.0 adaptive dispatch policy (`adaptive-v3`)**: domain contribution = `strictness_bias × 8.0 × confidence_scale`, where `confidence_scale` is **1.0 / 0.6 / 0.3** for `profile_confidence` high/medium/low. Thin/low-confidence domains cannot swing the gate aggressively. Policy returns `domain_threshold_delta`, `domain_strictness_bias`, `profile_confidence`, `thin_campaign` for logs and `scored_out` diagnostics.
 
 ---
 
@@ -1133,10 +1198,68 @@ Git history analysis identified 7 regressions introduced between V23 (April, B2B
 
 ---
 
-## 21. VERSION HISTORY (RECENT)
+## 21. DOMAIN INTELLIGENCE SYSTEM (V26.4–V26.5)
+
+Domain Intelligence classifies each campaign into a **vertical domain family** and emits a runtime profile that conditions query generation, pre-filter strictness, promotion thresholds, and inbound enrichment priority.
+
+### 22.1 Module map
+
+| Module | Location | Role |
+|--------|----------|------|
+| `domain_constants.py` | `services/shared/` | **SSOT** for `KNOWN_DOMAIN_FAMILIES` (14 families), aliases, `is_valid_domain_family()`, `normalize_domain_family()` |
+| `domain_gate.py` | `services/shared/` | Cross-service gates: `compute_intent_threshold()`, `compute_enrichment_priority()`, `enrichment_plan_for_priority()`, `enrichment_sort_key()` |
+| `domain_intelligence.py` | `pipeline-main/services/` | `infer_domain_profile()`, override validate/expand, `resolve_campaign_domain_profile()`, `apply_domain_query_profile()`, `build_domain_impact_summary()` |
+| `adaptive_policy.py` | `pipeline-main/services/` | `build_dispatch_policy()` — **adaptive-v3** with damped `strictness_bias` |
+| Campaigns API | `orchestrator/api/routers/campaigns.py` | Validates/persists `domain_override` using shared constants |
+
+**Supported families:** `real_estate`, `saas`, `manufacturing`, `professional_services`, `healthcare`, `education`, `finance`, `ecommerce`, `hospitality`, `logistics`, `construction`, `hr_recruiting`, `marketing_agency`, `general_services`.
+
+### 22.2 Resolution precedence
+```
+domain_override (valid)  →  expand to full profile (override_active=true, profile_confidence=high)
+         ↓ missing/cleared
+system_domain_profile cache (current version, not override-stale)
+         ↓ missing/stale
+infer_domain_profile(campaign)  →  persist system_domain_profile
+```
+Invalid overrides fail open: log + auto-infer (pipeline never aborts).
+
+### 22.3 Profile fields (runtime contract)
+| Field | Meaning |
+|-------|---------|
+| `domain_family` | Vertical label |
+| `confidence` | Numeric 0–1 match strength |
+| `profile_confidence` | **high / medium / low** tier for damping |
+| `thin_campaign` | Sparse ICP input (short bio, few keywords, no persona) |
+| `input_richness` | high / medium / low field depth |
+| `strictness_bias` | ∈ [−0.5, +0.5]; negative = more lenient promotion |
+| `soft_domain_adjustments` | True when low-confidence defaults applied |
+| `preferred_sources` / `preferred_query_hints` | Domain-biased discovery surfaces |
+| `blocked_subreddits` | Noise communities to drop |
+| `liquidity_level` / `low_liquidity_market` | Geo/OSINT density |
+
+### 22.4 Thin campaign graceful degradation
+Sparse campaigns use softer family pick thresholds, light name/keyword industry hints, and **cannot claim high `profile_confidence`**. Low tier attenuates `strictness_bias` (~35%), caps preferred-hint injection (`max_inject` ≤ 1), and disables aggressive pre-filter directory softening. Well-filled campaigns keep original pick thresholds and full bias (backward compatible).
+
+### 22.5 Pipeline consumers
+| Stage | Domain effect |
+|-------|----------------|
+| **Produce** | `apply_domain_query_profile` after governance: drop blocked subreddits, boost/inject preferred `site:` queries |
+| **Query brain** | Seeds platform-mining from preferred platforms; platform mining for domain families even when not pure B2C |
+| **Pre-filter (Gemini)** | Softens directory/review auto-Low only when domain mode is active and profile confidence is not low |
+| **Dispatch policy** | `threshold_adjustment` includes domain delta; medium budget mildly lifted in recovery + low liquidity |
+| **Impact summary** | End-of-cycle structured log + funnel payload; compact copy on `scored_out` |
+
+### 22.6 Inbound consumers
+See **§8**. Both Visitor Beacon and Sentiment Radar load `system_domain_profile` when present; absent profile = legacy behaviour.
+
+---
+
+## 22. VERSION HISTORY (RECENT)
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V26.5.0** | **2026-07-16** | **Domain Intelligence GA: thin-campaign `profile_confidence` damping, manual `domain_override`, SSOT `domain_constants.py` + `domain_gate.py`, adaptive-v3 (`strictness_bias` × confidence scale), domain impact summaries, domain-aware Inbound Radar (visitor beacon + sentiment) with actionable `enrichment_priority` contracts (realtime/batch/deferred).** |
 | **V26.4.0** | **2026-07-16** | **Domain intelligence layer (`system_domain_profile`) added across produce/dispatch, domain-aware query pruning and tier filtering, adaptive policy upgraded to `adaptive-v2` with domain conditioning, and architecture invariants updated to reflect confidence-based promotion + `scored_out` persistence.** |
 | **V26.3.0** | **2026-07-16** | **Adaptive campaign dispatch policy engine (`adaptive-v1`), dynamic confidence threshold adjustments, `scored_out` status persistence instead of hard delete, snippet-cache freshness TTL guard (`SNIPPET_CACHE_TTL_HOURS`), and dedup exclusion of terminal non-promoted/failed statuses to reduce starvation across mixed campaign domains.** |
 | **V26.2.0** | **2026-07-15** | **Autonomous campaign enrichment and self-healing backfill, query governance integration in producer, campaign-scoped query novelty memory, exhaustion escalation, dedup recrawl TTL (`DEDUP_RECRAWL_DAYS`), and deployment/runtime hardening for shared module packaging.** |

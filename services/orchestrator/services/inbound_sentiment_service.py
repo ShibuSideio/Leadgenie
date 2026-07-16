@@ -274,10 +274,19 @@ GLOBAL_NEGATIVE = (
 # Gemini scoring
 # ---------------------------------------------------------------------------
 
-def _score_with_gemini(title: str, snippet: str, url: str, query: str, icp_description: str) -> Optional[dict]:
+def _score_with_gemini(
+    title: str,
+    snippet: str,
+    url: str,
+    query: str,
+    icp_description: str,
+    *,
+    min_intent_score: float = 0.30,
+) -> Optional[dict]:
     """
     Call Gemini Flash to classify the intent of a single search result.
-    Returns a scored dict or None if intent_score < 0.30.
+    Returns a scored dict or None if intent_score < *min_intent_score*
+    (default 0.30 — domain-aware jobs may raise/lower this floor).
 
     Intent labels:
       ACTIVE_SEEKING   — explicitly looking for a solution / asking for recommendations
@@ -352,7 +361,8 @@ INFORMATIONAL FILTER: General educational articles, blogs, listicles, directorie
             reasoning=scored.get("reasoning", "")
         )
 
-        if scored.get("intent_label") == "NONE" or raw_score < 0.30:
+        floor = float(min_intent_score)
+        if scored.get("intent_label") == "NONE" or raw_score < floor:
             return None
 
         return {
@@ -381,10 +391,24 @@ class InboundSentimentService:
         signals = svc.run()   # list of signal dicts sorted by intent_score desc
     """
 
-    def __init__(self, persona: dict, campaign: dict, force_day_of_week: Optional[int] = None):
+    def __init__(
+        self,
+        persona: dict,
+        campaign: dict,
+        force_day_of_week: Optional[int] = None,
+        domain_profile: Optional[dict] = None,
+        gemini_min_intent_score: float = 0.30,
+    ):
         self.persona       = persona
         self.campaign      = campaign
         self.force_day_of_week = force_day_of_week
+        # Domain profile (system_domain_profile) — optional; None = legacy behaviour.
+        self.domain_profile = domain_profile if isinstance(domain_profile, dict) else None
+        if self.domain_profile is None and isinstance(campaign, dict):
+            _cached = campaign.get("system_domain_profile")
+            if isinstance(_cached, dict) and _cached.get("domain_family"):
+                self.domain_profile = _cached
+        self.gemini_min_intent_score = float(gemini_min_intent_score)
         self.pain_kws      = [str(p) for p in (persona.get("pain_points") or [])[:5]]
         # INT-11: Use campaign keywords or 'general business' instead of hardcoded 'B2B software'
         _campaign_kws = (campaign.get("keywords") or "").strip()
@@ -628,7 +652,14 @@ class InboundSentimentService:
                 title   = result.get("title", "")
                 snippet = result.get("snippet", "")
 
-                scored = _score_with_gemini(title, snippet, url, query, self.icp_desc)
+                scored = _score_with_gemini(
+                    title,
+                    snippet,
+                    url,
+                    query,
+                    self.icp_desc,
+                    min_intent_score=self.gemini_min_intent_score,
+                )
                 if not scored:
                     continue
 
@@ -638,7 +669,7 @@ class InboundSentimentService:
                     self.pain_kws[0] if self.pain_kws else "general",
                 )
 
-                signals.append({
+                signal_row = {
                     "signal_id":           hashlib.sha256(url.encode()).hexdigest()[:16],
                     "source_url":          url,
                     "source_platform":     _detect_platform(url),
@@ -651,7 +682,21 @@ class InboundSentimentService:
                     "week":                _week_label(),
                     "status":              "new",
                     **scored,  # intent_label, intent_score, pain_keywords, company_name, etc.
-                })
+                }
+                # Domain metadata (omitted keys stay absent when no profile).
+                if self.domain_profile:
+                    try:
+                        from shared.domain_gate import extract_domain_meta  # type: ignore[import]
+                        _dmeta = extract_domain_meta(self.domain_profile)
+                        if _dmeta.get("domain_family"):
+                            signal_row["domain_family"] = _dmeta["domain_family"]
+                            signal_row["domain_source"] = _dmeta.get("domain_source")
+                            signal_row["profile_confidence"] = _dmeta.get("profile_confidence")
+                            signal_row["thin_campaign"] = _dmeta.get("thin_campaign")
+                            signal_row["strictness_bias"] = _dmeta.get("strictness_bias")
+                    except Exception:
+                        pass
+                signals.append(signal_row)
 
         result_list = sorted(signals, key=lambda x: x["intent_score"], reverse=True)
         log.info(
@@ -659,6 +704,12 @@ class InboundSentimentService:
             queries_run=len(queries),
             urls_scanned=len(seen_urls),
             signals_found=len(result_list),
+            domain_family=(
+                (self.domain_profile or {}).get("domain_family")
+                if self.domain_profile
+                else None
+            ),
+            gemini_min_intent_score=self.gemini_min_intent_score,
         )
         return result_list
 

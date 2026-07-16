@@ -593,12 +593,24 @@ def list_inbound_signals(uid, tenant_id, user_role):
             signals = [_sanitize_signal_doc(d) for d in fallback_query.stream()]
 
         # Execute Application-Level Filtering / Validation
-        # V25.2.2: Aligned floor to 0.45 (matches MIN_INTENT_SCORE in inbound_sentiment_job.py).
-        # Previously hardcoded 0.55 silently dropped signals the job had written at 0.45–0.54.
+        # Floor 0.35 matches the domain-adjusted write-threshold floor used by
+        # inbound_sentiment_job (base 0.45 ± domain strictness_bias). Prefer each
+        # signal's intent_threshold_used when present so domain-lenient signals
+        # are not silently dropped by a hard 0.45 list filter.
+        def _passes_intent_floor(s: dict) -> bool:
+            score = float(s.get("intent_score", 0.0) or 0.0)
+            used = s.get("intent_threshold_used")
+            if used is not None:
+                try:
+                    return score >= float(used)
+                except (TypeError, ValueError):
+                    pass
+            return score >= 0.35
+
         signals = [
             s for s in signals
             if s.get("status") == status
-            and float(s.get("intent_score", 0.0)) >= 0.45
+            and _passes_intent_floor(s)
         ]
 
         # Optional label filter — applied after Firestore fetch (no composite index needed)
@@ -708,7 +720,7 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
         # Promote signal to a full lead document
         lead_ref = _db().collection("leads").document()
         company  = sig.get("company_name") or "Unknown Company"
-        lead_ref.set({
+        lead_doc = {
             "uid":                uid,
             "tenant_id":          tenant_id,
             "url":                sig.get("source_url", ""),
@@ -733,13 +745,69 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
             ),
             "createdAt":          fs.SERVER_TIMESTAMP,
             "updatedAt":          fs.SERVER_TIMESTAMP,
-        })
+        }
+        # Propagate domain intelligence from signal (and campaign fallback).
+        _domain_family = sig.get("domain_family")
+        _domain_source = sig.get("domain_source")
+        _profile_conf = sig.get("profile_confidence")
+        if not _domain_family and sig.get("matched_campaign_id"):
+            try:
+                _camp_snap = (
+                    _db().collection("campaigns")
+                    .document(str(sig.get("matched_campaign_id")))
+                    .get()
+                )
+                if _camp_snap.exists:
+                    _dp = (_camp_snap.to_dict() or {}).get("system_domain_profile") or {}
+                    if isinstance(_dp, dict) and _dp.get("domain_family"):
+                        _domain_family = _dp.get("domain_family")
+                        _domain_source = (
+                            "domain_override"
+                            if _dp.get("override_active")
+                            else "system_domain_profile"
+                        )
+                        _profile_conf = _dp.get("profile_confidence")
+                        if sig.get("thin_campaign") is None and _dp.get("thin_campaign") is not None:
+                            lead_doc["thin_campaign"] = bool(_dp.get("thin_campaign"))
+                        if sig.get("strictness_bias") is None and _dp.get("strictness_bias") is not None:
+                            lead_doc["strictness_bias"] = _dp.get("strictness_bias")
+            except Exception:
+                pass
+        if _domain_family:
+            lead_doc["domain_family"] = _domain_family
+            lead_doc["domain_source"] = _domain_source or "system_domain_profile"
+        if _profile_conf:
+            lead_doc["profile_confidence"] = _profile_conf
+        if sig.get("thin_campaign") is not None:
+            lead_doc["thin_campaign"] = bool(sig.get("thin_campaign"))
+        if sig.get("strictness_bias") is not None:
+            lead_doc["strictness_bias"] = sig.get("strictness_bias")
+        if sig.get("intent_threshold_used") is not None:
+            lead_doc["intent_threshold_used"] = sig.get("intent_threshold_used")
+        for _ek in (
+            "enrichment_priority",
+            "enrichment_priority_rank",
+            "enrichment_queue",
+            "enrichment_resolve_company",
+            "enrichment_max_lookups",
+            "enrichment_score",
+            "firmographic_value",
+        ):
+            if sig.get(_ek) is not None:
+                lead_doc[_ek] = sig.get(_ek)
+
+        lead_ref.set(lead_doc)
         lead_id = lead_ref.id
         log.info(
             "inbound_signal_converted_to_lead",
             uid=uid[:8],
             signal_id=sig.get("signal_id", ""),
             lead_id=lead_id,
+            domain_family=lead_doc.get("domain_family"),
+            domain_source=lead_doc.get("domain_source"),
+            profile_confidence=lead_doc.get("profile_confidence"),
+            enrichment_priority=lead_doc.get("enrichment_priority"),
+            enrichment_queue=lead_doc.get("enrichment_queue"),
         )
 
     resp = {"status": new_status}

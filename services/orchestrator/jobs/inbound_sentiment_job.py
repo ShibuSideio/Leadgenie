@@ -24,7 +24,8 @@ from collections import Counter
 # Allow running as __main__ from the orchestrator root
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ORCH_ROOT = os.path.dirname(_HERE)
-for _p in (_HERE, _ORCH_ROOT):
+_SERVICES_ROOT = os.path.dirname(_ORCH_ROOT)
+for _p in (_HERE, _ORCH_ROOT, _SERVICES_ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -34,6 +35,12 @@ from core.clients import get_db, get_bq_client  # type: ignore[import]
 from core.config import PROJECT_ID  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
 from services.inbound_sentiment_service import InboundSentimentService  # type: ignore[import]
+from shared.domain_gate import (  # type: ignore[import]
+    compute_enrichment_priority,
+    compute_intent_threshold,
+    enrichment_plan_for_priority,
+    extract_domain_meta,
+)
 
 log = get_logger("orchestrator.inbound_sentiment_job")
 
@@ -41,6 +48,7 @@ BQ_DATASET  = os.environ.get("BQ_DATASET", "leads_intelligence")
 BQ_KW_TABLE = f"{PROJECT_ID}.{BQ_DATASET}.Intent_Keywords"
 
 MIN_INTENT_SCORE = 0.45   # Minimum score to write a signal to Firestore (V24.1.25 — lowered from 0.55)
+GEMINI_MIN_INTENT_SCORE = 0.30  # Layer-2 garbage filter inside InboundSentimentService
 MAX_SIGNALS_PER_TENANT = 25  # Serper quota guard per run
 RLHF_BOOST  = 0.12        # yield_weight increment for hot keywords
 RLHF_MIN    = 0.70        # Only boost keywords from signals above this score
@@ -53,6 +61,18 @@ _MAX_QUERIES       = int(os.environ.get("INBOUND_MAX_QUERIES", "14"))
 # V25.2.2: Cross-run URL dedup — 7-day window prevents re-scoring same URLs every 6h.
 _DEDUP_TTL_DAYS = 7
 _DEDUP_COLL     = "inbound_dedup"
+
+
+def _load_campaign_domain_profile(camp: dict) -> dict | None:
+    """Return campaign system_domain_profile when usable; else None (legacy path)."""
+    if not isinstance(camp, dict):
+        return None
+    profile = camp.get("system_domain_profile")
+    if isinstance(profile, dict) and (
+        profile.get("domain_family") or profile.get("strictness_bias") is not None
+    ):
+        return profile
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -231,8 +251,68 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
             )
 
         try:
+            # Domain intelligence: load system_domain_profile when present.
+            # Missing profile → identical legacy thresholds (full BC).
+            domain_profile = _load_campaign_domain_profile(camp)
+            write_threshold = float(MIN_INTENT_SCORE)
+            gemini_floor = float(GEMINI_MIN_INTENT_SCORE)
+            thresh_meta: dict = {}
+            gemini_meta: dict = {}
+            domain_meta = extract_domain_meta(domain_profile)
+
+            if domain_profile:
+                write_threshold, thresh_meta = compute_intent_threshold(
+                    MIN_INTENT_SCORE,
+                    domain_profile,
+                    floor=0.35,
+                    ceiling=0.60,
+                    bias_unit=0.12,
+                )
+                gemini_floor, gemini_meta = compute_intent_threshold(
+                    GEMINI_MIN_INTENT_SCORE,
+                    domain_profile,
+                    floor=0.22,
+                    ceiling=0.42,
+                    bias_unit=0.08,
+                )
+                log.info(
+                    "inbound_domain_profile_used",
+                    uid=uid[:8],
+                    campaign_id=camp["campaign_id"],
+                    domain_family=domain_meta.get("domain_family"),
+                    profile_confidence=domain_meta.get("profile_confidence"),
+                    thin_campaign=domain_meta.get("thin_campaign"),
+                    strictness_bias=domain_meta.get("strictness_bias"),
+                    domain_source=domain_meta.get("domain_source"),
+                    override_active=domain_meta.get("override_active"),
+                )
+                if thresh_meta.get("domain_applied") and abs(
+                    float(thresh_meta.get("threshold_delta") or 0)
+                ) > 1e-9:
+                    log.info(
+                        "inbound_domain_adjustment_applied",
+                        uid=uid[:8],
+                        campaign_id=camp["campaign_id"],
+                        domain_family=thresh_meta.get("domain_family"),
+                        profile_confidence=thresh_meta.get("profile_confidence"),
+                        base_write_threshold=thresh_meta.get("base_threshold"),
+                        effective_write_threshold=thresh_meta.get("effective_threshold"),
+                        write_threshold_delta=thresh_meta.get("threshold_delta"),
+                        gemini_floor=gemini_meta.get("effective_threshold"),
+                        confidence_scale=thresh_meta.get("confidence_scale"),
+                        note=(
+                            "Domain strictness_bias adjusted inbound intent floors. "
+                            "Low profile_confidence damps the adjustment."
+                        ),
+                    )
+
             # 1. Run web and social inbound sentiment service
-            svc     = InboundSentimentService(persona=persona, campaign=camp)
+            svc = InboundSentimentService(
+                persona=persona,
+                campaign=camp,
+                domain_profile=domain_profile,
+                gemini_min_intent_score=gemini_floor,
+            )
             # V25.2.2: Load cross-run seen hashes to skip already-scored URLs
             seen_hashes = _load_dedup_hashes(db, uid)
             signals = svc.run(
@@ -246,6 +326,16 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
                 from services.inbound_maps_service import InboundMapsService
                 maps_svc = InboundMapsService(persona=persona, campaign=camp)
                 maps_signals = maps_svc.run(max_places=5)
+                # Stamp domain meta on maps signals too (when available).
+                if domain_profile and domain_meta.get("domain_family"):
+                    for ms in maps_signals:
+                        ms.setdefault("domain_family", domain_meta["domain_family"])
+                        ms.setdefault("domain_source", domain_meta.get("domain_source"))
+                        ms.setdefault(
+                            "profile_confidence", domain_meta.get("profile_confidence")
+                        )
+                        ms.setdefault("thin_campaign", domain_meta.get("thin_campaign"))
+                        ms.setdefault("strictness_bias", domain_meta.get("strictness_bias"))
                 signals.extend(maps_signals)
             except Exception as maps_exc:
                 log.warning(
@@ -255,8 +345,56 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
                     error=str(maps_exc),
                 )
 
-            high    = [s for s in signals if s["intent_score"] >= MIN_INTENT_SCORE]
+            # Promote / persist only signals at or above domain-adjusted floor.
+            high = []
+            _prio_counts = {"high": 0, "medium": 0, "low": 0}
+            for s in signals:
+                s["intent_threshold_used"] = write_threshold
+                if domain_meta.get("domain_family"):
+                    s.setdefault("domain_family", domain_meta["domain_family"])
+                    s.setdefault("domain_source", domain_meta.get("domain_source"))
+                    s.setdefault(
+                        "profile_confidence", domain_meta.get("profile_confidence")
+                    )
+                    s.setdefault("thin_campaign", domain_meta.get("thin_campaign"))
+                    s.setdefault("strictness_bias", domain_meta.get("strictness_bias"))
+                # Actionable enrichment priority for firmographic/graph workers.
+                if domain_profile:
+                    _prio, _prio_meta = compute_enrichment_priority(
+                        domain_profile,
+                        intent_score=float(s.get("intent_score") or 0),
+                        sourcing_vector=str(camp.get("sourcing_vector") or ""),
+                    )
+                    _plan = enrichment_plan_for_priority(_prio)
+                    s["enrichment_priority"] = _prio
+                    s["enrichment_priority_rank"] = _plan.get("rank")
+                    s["enrichment_queue"] = _plan.get("queue")
+                    s["enrichment_resolve_company"] = _plan.get("resolve_company")
+                    s["enrichment_max_lookups"] = _plan.get("max_lookups")
+                    s["enrichment_score"] = _prio_meta.get("score")
+                    s["enrichment_reasons"] = _prio_meta.get("reasons")
+                    s["firmographic_value"] = _prio_meta.get("firmographic_value")
+                    _prio_counts[_prio] = _prio_counts.get(_prio, 0) + 1
+                if float(s.get("intent_score") or 0) >= write_threshold:
+                    high.append(s)
+
             all_signals.extend(high[:MAX_SIGNALS_PER_TENANT])
+
+            if domain_profile and any(_prio_counts.values()):
+                log.info(
+                    "inbound_enrichment_priority_assigned",
+                    uid=uid[:8],
+                    campaign_id=camp["campaign_id"],
+                    domain_family=domain_meta.get("domain_family"),
+                    profile_confidence=domain_meta.get("profile_confidence"),
+                    priority_high=_prio_counts.get("high", 0),
+                    priority_medium=_prio_counts.get("medium", 0),
+                    priority_low=_prio_counts.get("low", 0),
+                    note=(
+                        "Sort inbound_signals by enrichment_priority_rank; "
+                        "use enrichment_queue/max_lookups for depth control."
+                    ),
+                )
 
             log.info(
                 "inbound_signals_found",
@@ -264,6 +402,10 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
                 campaign=camp.get("name", camp["campaign_id"])[:30],
                 total=len(signals),
                 high_intent=len(high),
+                intent_threshold=write_threshold,
+                domain_family=domain_meta.get("domain_family"),
+                profile_confidence=domain_meta.get("profile_confidence"),
+                enrichment_priority_counts=_prio_counts if domain_profile else None,
             )
         except Exception as exc:
             log.warning(
@@ -319,32 +461,48 @@ def _write_signals(db, uid: str, signals: list[dict]) -> None:
         for sig in signals[i : i + CHUNK]:
             doc_id = f"{uid}_{sig['signal_id']}"
             ref    = db.collection("inbound_signals").document(doc_id)
-            batch.set(
-                ref,
-                {
-                    "tenant_id":           uid,
-                    "signal_id":           sig["signal_id"],
-                    "source_url":          sig.get("source_url", ""),
-                    "source_platform":     sig.get("source_platform", "web"),
-                    "headline":            sig.get("headline", ""),
-                    "snippet":             sig.get("snippet", ""),
-                    "serper_query":        sig.get("serper_query", ""),
-                    "triggering_keyword":  sig.get("triggering_keyword", ""),
-                    "intent_label":        sig.get("intent_label", "TREND"),
-                    "intent_score":        sig.get("intent_score", 0.0),
-                    "pain_keywords":       sig.get("pain_keywords", []),
-                    "company_name":        sig.get("company_name"),
-                    "industry_hint":       sig.get("industry_hint"),
-                    "gemini_reasoning":    sig.get("gemini_reasoning", ""),
-                    "matched_persona":     sig.get("matched_persona", ""),
-                    "matched_campaign_id": sig.get("matched_campaign_id", ""),
-                    "week":                sig.get("week", ""),
-                    "status":              sig.get("status", "new"),
-                    "synced_at":           firestore.SERVER_TIMESTAMP,
-                    "expire_at":           _signal_expire,  # V25.2.2: TTL field
-                },
-                merge=True,
-            )
+            payload = {
+                "tenant_id":           uid,
+                "signal_id":           sig["signal_id"],
+                "source_url":          sig.get("source_url", ""),
+                "source_platform":     sig.get("source_platform", "web"),
+                "headline":            sig.get("headline", ""),
+                "snippet":             sig.get("snippet", ""),
+                "serper_query":        sig.get("serper_query", ""),
+                "triggering_keyword":  sig.get("triggering_keyword", ""),
+                "intent_label":        sig.get("intent_label", "TREND"),
+                "intent_score":        sig.get("intent_score", 0.0),
+                "pain_keywords":       sig.get("pain_keywords", []),
+                "company_name":        sig.get("company_name"),
+                "industry_hint":       sig.get("industry_hint"),
+                "gemini_reasoning":    sig.get("gemini_reasoning", ""),
+                "matched_persona":     sig.get("matched_persona", ""),
+                "matched_campaign_id": sig.get("matched_campaign_id", ""),
+                "week":                sig.get("week", ""),
+                "status":              sig.get("status", "new"),
+                "synced_at":           firestore.SERVER_TIMESTAMP,
+                "expire_at":           _signal_expire,  # V25.2.2: TTL field
+            }
+            # Domain intelligence metadata (only when present — BC for older signals).
+            for _dk in (
+                "domain_family",
+                "domain_source",
+                "profile_confidence",
+                "thin_campaign",
+                "strictness_bias",
+                "intent_threshold_used",
+                "enrichment_priority",
+                "enrichment_priority_rank",
+                "enrichment_queue",
+                "enrichment_resolve_company",
+                "enrichment_max_lookups",
+                "enrichment_score",
+                "enrichment_reasons",
+                "firmographic_value",
+            ):
+                if sig.get(_dk) is not None:
+                    payload[_dk] = sig.get(_dk)
+            batch.set(ref, payload, merge=True)
         batch.commit()
         log.info("inbound_signals_batch_written", uid=uid[:8], count=min(CHUNK, len(signals) - i))
 
