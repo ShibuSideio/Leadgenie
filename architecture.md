@@ -1,6 +1,6 @@
-# LeadGenie (Sideio) — Platform Architecture V26.3.0
+# LeadGenie (Sideio) — Platform Architecture V26.4.0
 **Technical Specification Document**
-*Last Updated: 2026-07-16 | Version: V26.3.0 — Adaptive Campaign Gating + Recovery Controls*
+*Last Updated: 2026-07-16 | Version: V26.4.0 — Domain Intelligence + Adaptive-v2 Controls*
 
 ---
 
@@ -14,7 +14,7 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 3. Pipeline-Main runs: **intelligence-profile inference → strategy-aware query generation → budget-aware source routing → scrape → score → confidence qualification → entity extraction → write to Firestore**
 4. The PWA frontend listens via `onSnapshot` and renders leads in real-time
 
-### Latest implementation updates (V26.3.0)
+### Latest implementation updates (V26.4.0)
 - A shared heuristic planner now infers a campaign intelligence profile from sparse user input so the backend can make stronger decisions with minimal manual effort.
 - Source routing uses that inferred strategy plan and a daily budget guard to avoid wasting expensive Serper spend on weak or low-evidence campaigns.
 - Query generation now uses deterministic fallback logic and strategy-specific phrasing so the pipeline remains robust even when Gemini is unavailable.
@@ -24,10 +24,11 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 - A self-healing enrichment backfill job (`/api/internal/campaign-enrichment-run`) repairs active legacy campaigns with stale or incomplete context.
 - Query governance now applies portfolio shaping before Serper execution (intent balance, blacklist cap, platform query injection, dedup).
 - Producer now includes campaign-scoped novelty memory and exhaustion escalation to reduce repeated query loops when markets are saturated.
-- Dispatch now uses an adaptive campaign policy engine (`adaptive-v1`) that adjusts strictness by queue health, campaign context, and recent yield instead of static gate behavior.
+- Dispatch now uses an adaptive campaign policy engine (`adaptive-v2`) that adjusts strictness by queue health, campaign context, domain profile, and recent yield instead of static gate behavior.
 - Confidence promotion thresholds are now dynamically adjusted per campaign cycle (bounded) to avoid starvation in sparse/early-stage campaigns while preserving quality controls.
 - Score-gate non-promotions are persisted as `scored_out` leads for diagnostics instead of being hard-deleted, improving observability and adaptive tuning.
 - Snippet cache fallback now applies freshness checks; stale cache entries are not used for final scoring decisions.
+- Campaigns now carry `system_domain_profile` metadata (`domain_family`, confidence, blocked subreddit list, preferred source/query hints, low-liquidity markers), and both produce/dispatch apply domain-aware filtering.
 
 **Intelligence Strategies (V26.0):**
 - `PLATFORM_MINING` — Extract leads from competitor directories, aggregator platforms, review sites
@@ -949,8 +950,8 @@ log.warning("lead_lock_delete_failed",
 ## 17. KEY DESIGN INVARIANTS (NEVER BREAK)
 
 1. **Tenant isolation:** Every Firestore document a tenant touches must have `tenant_id == user.uid`. Every BQ query must be scoped by `tenant_id`.
-2. **Lead dedup ID:** Always `sha256(tenant_id + '_' + root_domain)`. Never auto-generate.
-3. **Score gate:** Only leads `>= 7` are written as `"new"`. Everything below is deleted from Firestore immediately.
+2. **Lead dedup ID:** Must be deterministic and campaign-vector-aware: `sha256(tenant_id + '_' + root_domain)` for B2B non-social domains; `sha256(tenant_id + '_' + netloc + path(+fragment where applicable))` for social/shared/consumer paths.
+3. **Score gate:** Promotion is confidence-threshold based (adaptive, bounded); non-promoted leads are retained as `scored_out` for diagnostics and model tuning.
 4. **Firestore rules:** `leads` and `campaigns` are the only collections the frontend can read/write directly. All other collections are Admin SDK only.
 5. **SW Firebase bypass:** Never let the service worker intercept `googleapis.com` or `google.com` traffic.
 6. **Wallet shards:** True balance = `allocated_credits − consumed_credits − SUM(wallet_shards/0-9) − reserved_credits`.
@@ -1028,6 +1029,7 @@ Multi-dimensional Lead Quality Score computed per signal:
 - 7-reason rejection granularity (V25.6.0: synced to frontend)
 - `force_query_refresh` flag on exhaustion detection
 - **V26.3.0 adaptive dispatch policy (`adaptive-v1`)**: campaign-level strict/balanced/recovery modes dynamically tune medium intake and confidence thresholds using queue depth, recent conversion pressure, and exhaustion signals.
+- **V26.4.0 adaptive dispatch policy (`adaptive-v2`)**: extends adaptive controls with domain profile awareness (`domain_family`, low-liquidity market hints) and domain-aware prefilter tier pruning.
 
 ---
 
@@ -1135,6 +1137,7 @@ Git history analysis identified 7 regressions introduced between V23 (April, B2B
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V26.4.0** | **2026-07-16** | **Domain intelligence layer (`system_domain_profile`) added across produce/dispatch, domain-aware query pruning and tier filtering, adaptive policy upgraded to `adaptive-v2` with domain conditioning, and architecture invariants updated to reflect confidence-based promotion + `scored_out` persistence.** |
 | **V26.3.0** | **2026-07-16** | **Adaptive campaign dispatch policy engine (`adaptive-v1`), dynamic confidence threshold adjustments, `scored_out` status persistence instead of hard delete, snippet-cache freshness TTL guard (`SNIPPET_CACHE_TTL_HOURS`), and dedup exclusion of terminal non-promoted/failed statuses to reduce starvation across mixed campaign domains.** |
 | **V26.2.0** | **2026-07-15** | **Autonomous campaign enrichment and self-healing backfill, query governance integration in producer, campaign-scoped query novelty memory, exhaustion escalation, dedup recrawl TTL (`DEDUP_RECRAWL_DAYS`), and deployment/runtime hardening for shared module packaging.** |
 | **V26.0.4.1** | **2026-07-05** | **B2B regression fixes: unblock LinkedIn from `_ENTERPRISE_DOMAINS`, remove LinkedIn/Facebook from Serper sanitizer `forbidden` list, B2B news exception in content farm filter (Bloomberg, Reuters, CNBC pass through), raise page-type score caps (press: 4→7, jobs: 4→6), remove `research.*` CDN prefix, reduce RLHF blacklist TTL 30→7 days.** |
