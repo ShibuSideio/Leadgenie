@@ -1,6 +1,6 @@
-# LeadGenie (Sideio) — Platform Architecture V26.2.0
+# LeadGenie (Sideio) — Platform Architecture V26.3.0
 **Technical Specification Document**
-*Last Updated: 2026-07-15 | Version: V26.2.0 — Autonomous Enrichment + Query Governance + Novelty Recovery*
+*Last Updated: 2026-07-16 | Version: V26.3.0 — Adaptive Campaign Gating + Recovery Controls*
 
 ---
 
@@ -14,7 +14,7 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 3. Pipeline-Main runs: **intelligence-profile inference → strategy-aware query generation → budget-aware source routing → scrape → score → confidence qualification → entity extraction → write to Firestore**
 4. The PWA frontend listens via `onSnapshot` and renders leads in real-time
 
-### Latest implementation updates (V26.2.0)
+### Latest implementation updates (V26.3.0)
 - A shared heuristic planner now infers a campaign intelligence profile from sparse user input so the backend can make stronger decisions with minimal manual effort.
 - Source routing uses that inferred strategy plan and a daily budget guard to avoid wasting expensive Serper spend on weak or low-evidence campaigns.
 - Query generation now uses deterministic fallback logic and strategy-specific phrasing so the pipeline remains robust even when Gemini is unavailable.
@@ -24,6 +24,10 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 - A self-healing enrichment backfill job (`/api/internal/campaign-enrichment-run`) repairs active legacy campaigns with stale or incomplete context.
 - Query governance now applies portfolio shaping before Serper execution (intent balance, blacklist cap, platform query injection, dedup).
 - Producer now includes campaign-scoped novelty memory and exhaustion escalation to reduce repeated query loops when markets are saturated.
+- Dispatch now uses an adaptive campaign policy engine (`adaptive-v1`) that adjusts strictness by queue health, campaign context, and recent yield instead of static gate behavior.
+- Confidence promotion thresholds are now dynamically adjusted per campaign cycle (bounded) to avoid starvation in sparse/early-stage campaigns while preserving quality controls.
+- Score-gate non-promotions are persisted as `scored_out` leads for diagnostics instead of being hard-deleted, improving observability and adaptive tuning.
+- Snippet cache fallback now applies freshness checks; stale cache entries are not used for final scoring decisions.
 
 **Intelligence Strategies (V26.0):**
 - `PLATFORM_MINING` — Extract leads from competitor directories, aggregator platforms, review sites
@@ -143,6 +147,7 @@ PIPELINE_BASE_URL=https://lead-pipeline-main-<hash>.a.run.app
 SERPER_DAILY_LIMIT=0                # 0 disables the budget guard
 SERPER_BUDGET_STATE_PATH=/tmp/serper_budget.json
 DEDUP_RECRAWL_DAYS=30              # Re-crawl horizon for lead dedup memory in producer
+SNIPPET_CACHE_TTL_HOURS=72         # Max age for snippet-cache fallback in dispatch
 
 # Autonomous Engine
 DAILY_GEMINI_BUDGET=1000
@@ -319,7 +324,7 @@ Core atomic lead document. Document ID is a deterministic SHA-256 hash.
 }
 ```
 
-**Status Enum:** `processing` → `new` → `reviewed` → `contacted` → `converted` | `ignored` | `failed` | `enrichment_pending`
+**Status Enum:** `processing` → `new` → `reviewed` → `contacted` → `converted` | `ignored` | `failed` | `enrichment_pending` | `scored_out` | `rlhf_filtered`
 
 > [!NOTE]
 > The GET /api/leads feed (V24.5.6) filters exclusively on `status == "new"`. Zombie stubs
@@ -331,7 +336,7 @@ Core atomic lead document. Document ID is a deterministic SHA-256 hash.
 - `crm_delivery_status`: `"delivered"` | `"pending_retry"` | `"failed_permanent"` (V24.4 CRM retry)
 - `enrichment_pending`: set when Medium-tier URL has < 300 chars of text — awaiting full scrape (V24.4)
 
-**Score gate:** Only leads scoring `>= 7` are written as `"new"`. Leads below 7 delete the document.
+**Score gate (V26.3.0):** Promotion is based on adaptive confidence thresholds (not a fixed static score bar). Non-promoted leads are retained as `scored_out` with confidence diagnostics for audit and tuning.
 
 **Deduplication key:**
 - **Social + shared-platform URLs** (`linkedin.com`, `reddit.com`, `quora.com`, `stackexchange.com`, `medium.com`, `substack.com`, `wordpress.com`, `github.io`, `news.ycombinator.com`, `indiehackers.com`, and vendor community boards): `sha256(tenant_id + '_' + netloc + path)` — each thread/post is a unique lead.
@@ -1022,6 +1027,7 @@ Multi-dimensional Lead Quality Score computed per signal:
 - Pattern mining from accepted leads (`accepted_patterns`)
 - 7-reason rejection granularity (V25.6.0: synced to frontend)
 - `force_query_refresh` flag on exhaustion detection
+- **V26.3.0 adaptive dispatch policy (`adaptive-v1`)**: campaign-level strict/balanced/recovery modes dynamically tune medium intake and confidence thresholds using queue depth, recent conversion pressure, and exhaustion signals.
 
 ---
 
@@ -1129,6 +1135,7 @@ Git history analysis identified 7 regressions introduced between V23 (April, B2B
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V26.3.0** | **2026-07-16** | **Adaptive campaign dispatch policy engine (`adaptive-v1`), dynamic confidence threshold adjustments, `scored_out` status persistence instead of hard delete, snippet-cache freshness TTL guard (`SNIPPET_CACHE_TTL_HOURS`), and dedup exclusion of terminal non-promoted/failed statuses to reduce starvation across mixed campaign domains.** |
 | **V26.2.0** | **2026-07-15** | **Autonomous campaign enrichment and self-healing backfill, query governance integration in producer, campaign-scoped query novelty memory, exhaustion escalation, dedup recrawl TTL (`DEDUP_RECRAWL_DAYS`), and deployment/runtime hardening for shared module packaging.** |
 | **V26.0.4.1** | **2026-07-05** | **B2B regression fixes: unblock LinkedIn from `_ENTERPRISE_DOMAINS`, remove LinkedIn/Facebook from Serper sanitizer `forbidden` list, B2B news exception in content farm filter (Bloomberg, Reuters, CNBC pass through), raise page-type score caps (press: 4→7, jobs: 4→6), remove `research.*` CDN prefix, reduce RLHF blacklist TTL 30→7 days.** |
 | **V26.0.4** | **2026-07-05** | **Smart pipeline: vocabulary_notes as Gemini query seeds, thin bio enrichment with vocab, platform domain resolution (22 brand→domain mappings), dynamic industry/geo subreddit selection, Reddit RSS→Serper fallback, fix colloquial translation crash (unsupported temperature kwarg).** |
