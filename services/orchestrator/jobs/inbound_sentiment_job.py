@@ -33,6 +33,7 @@ from google.cloud import firestore  # noqa: E402 — after sys.path bootstrap
 
 from core.clients import get_db, get_bq_client  # type: ignore[import]
 from core.config import PROJECT_ID  # type: ignore[import]
+from core.firestore_utils import materialize_query  # type: ignore[import]
 from core.logging import get_logger  # type: ignore[import]
 from services.inbound_sentiment_service import InboundSentimentService  # type: ignore[import]
 from shared.domain_gate import (  # type: ignore[import]
@@ -93,17 +94,43 @@ def run() -> dict:
     signals_written   = 0
     errors            = 0
 
-    # Stream all tenants with inbound_radar enabled
-    try:
-        tenant_docs = (
-            db.collection("users")
-            .where(filter=firestore.FieldFilter("inbound_radar.enabled", "==", True))
-            .stream()
+    # Materialize tenant list with an explicit public Retry policy.
+    # CRITICAL: Do not use bare .stream() — lazy generators open the RPC on
+    # first next(), so try/except around .stream() alone does not catch
+    # UnaryStreamMultiCallable/_retry crashes during iteration.
+    tenant_docs = materialize_query(
+        db.collection("users").where(
+            filter=firestore.FieldFilter("inbound_radar.enabled", "==", True)
+        ),
+        timeout=90.0,
+        label="inbound_tenants_radar_enabled",
+        empty_on_error=True,
+    )
+    if not tenant_docs:
+        # Fallback if the composite index isn't ready or the filtered query failed
+        log.warning(
+            "inbound_job_index_missing_fallback",
+            note="Radar-enabled query empty/failed — scanning users collection.",
         )
-    except Exception:
-        # Fallback if the composite index isn't ready yet — scan all users
-        log.warning("inbound_job_index_missing_fallback")
-        tenant_docs = db.collection("users").stream()
+        tenant_docs = materialize_query(
+            db.collection("users"),
+            timeout=120.0,
+            label="inbound_tenants_full_scan",
+            empty_on_error=True,
+        )
+        if not tenant_docs:
+            log.error(
+                "inbound_job_no_tenants_loaded",
+                note="Both radar-enabled and full user scans failed or returned empty. "
+                     "Aborting run without writing signals_this_week=0.",
+            )
+            result = {
+                "tenants_processed": 0,
+                "signals_written": 0,
+                "errors": 1,
+            }
+            log.info("inbound_sentiment_job_complete", **result)
+            return result
 
     for snap in tenant_docs:
         uid      = snap.id
@@ -119,23 +146,42 @@ def run() -> dict:
             signals_written   += len(tenant_signals)
             tenants_processed += 1
 
-            # Update radar stats on the user doc
-            top_kws = _top_keywords(tenant_signals)
-            db.collection("users").document(uid).set(
-                {
-                    "inbound_radar": {
-                        "enabled":          True,
-                        "last_ran_at":      firestore.SERVER_TIMESTAMP,
-                        "signals_this_week": len(tenant_signals),
-                        "top_pain_keywords": top_kws,
-                    }
-                },
-                merge=True,
-            )
+            # Update radar stats — isolated so a stats write failure does not
+            # discard already-persisted signals or kill remaining tenants.
+            try:
+                top_kws = _top_keywords(tenant_signals)
+                db.collection("users").document(uid).set(
+                    {
+                        "inbound_radar": {
+                            "enabled":          True,
+                            "last_ran_at":      firestore.SERVER_TIMESTAMP,
+                            "signals_this_week": len(tenant_signals),
+                            "top_pain_keywords": top_kws,
+                        }
+                    },
+                    merge=True,
+                )
+            except Exception as stats_exc:
+                errors += 1
+                log.error(
+                    "inbound_job_stats_update_failed",
+                    uid=uid[:8],
+                    signals=len(tenant_signals),
+                    error=str(stats_exc),
+                    error_type=type(stats_exc).__name__,
+                    exc_info=True,
+                    note="Signals may already be written; stats update failed independently.",
+                )
 
         except Exception as exc:
             errors += 1
-            log.error("inbound_job_tenant_failed", uid=uid[:8], error=str(exc))
+            log.error(
+                "inbound_job_tenant_failed",
+                uid=uid[:8],
+                error=str(exc),
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
 
     result = {
         "tenants_processed": tenants_processed,
@@ -155,24 +201,35 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
     # Fetch this tenant's active campaigns (limit 5 — don't over-burn Serper quota)
     # Canonical field is tenant_id (used by cron/sweep and all other paths).
     # Fallback to uid for backward compatibility with legacy campaign docs.
-    campaigns = [
-        {**c.to_dict(), "campaign_id": c.id}
-        for c in db.collection("campaigns")
+    #
+    # Use materialize_query (explicit public Retry) — bare .stream() can crash
+    # with '_UnaryStreamMultiCallable' object has no attribute '_retry' when the
+    # SDK tries to recover DEFAULT retry via a private gRPC attribute.
+    camp_snaps = materialize_query(
+        db.collection("campaigns")
         .where(filter=firestore.FieldFilter("tenant_id", "==", uid))
         .where(filter=firestore.FieldFilter("status", "==", "active"))
-        .limit(5)
-        .stream()
-    ]
-    if not campaigns:
+        .limit(5),
+        timeout=60.0,
+        label=f"inbound_campaigns_tenant_id:{uid[:8]}",
+        empty_on_error=True,
+    )
+    if not camp_snaps:
         # Fallback: try legacy 'uid' field
-        campaigns = [
-            {**c.to_dict(), "campaign_id": c.id}
-            for c in db.collection("campaigns")
+        camp_snaps = materialize_query(
+            db.collection("campaigns")
             .where(filter=firestore.FieldFilter("uid", "==", uid))
             .where(filter=firestore.FieldFilter("status", "==", "active"))
-            .limit(5)
-            .stream()
-        ]
+            .limit(5),
+            timeout=60.0,
+            label=f"inbound_campaigns_uid:{uid[:8]}",
+            empty_on_error=True,
+        )
+
+    campaigns = [
+        {**(c.to_dict() or {}), "campaign_id": c.id}
+        for c in camp_snaps
+    ]
 
     if not campaigns:
         log.info("inbound_job_no_active_campaigns", uid=uid[:8])
@@ -192,14 +249,28 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
 
         persona_id = camp.get("persona_id")
         if persona_id:
-            persona_snap = (
-                db.collection("tenant_profiles")
-                .document(uid)
-                .collection("personas")
-                .document(persona_id)
-                .get()
-            )
-            if not persona_snap.exists:
+            try:
+                persona_snap = (
+                    db.collection("tenant_profiles")
+                    .document(uid)
+                    .collection("personas")
+                    .document(persona_id)
+                    .get()
+                )
+            except Exception as persona_exc:
+                log.warning(
+                    "inbound_job_persona_read_failed",
+                    uid=uid[:8],
+                    persona_id=persona_id,
+                    campaign_id=camp.get("campaign_id"),
+                    error=str(persona_exc),
+                    error_type=type(persona_exc).__name__,
+                    note="Falling back to campaign bio for this campaign.",
+                )
+                persona_id = None
+                persona_snap = None
+
+            if persona_id and persona_snap is not None and not persona_snap.exists:
                 # Persona was deleted after campaign creation — fall through to bio fallback
                 log.warning(
                     "inbound_job_persona_missing",
@@ -208,7 +279,7 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
                     note="Persona doc not found — falling back to campaign bio.",
                 )
                 persona_id = None
-            else:
+            elif persona_id and persona_snap is not None:
                 persona = persona_snap.to_dict() or {}
                 if not (persona.get("uid") == uid or persona.get("tenant_id") == uid):
                     log.warning(
@@ -413,6 +484,9 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
                 uid=uid[:8],
                 campaign_id=camp["campaign_id"],
                 error=str(exc),
+                error_type=type(exc).__name__,
+                exc_info=True,
+                note="Campaign skipped; remaining campaigns continue.",
             )
 
     if not all_signals:
@@ -426,14 +500,38 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
             unique[sid] = sig
     deduped = sorted(unique.values(), key=lambda x: x["intent_score"], reverse=True)
 
-    # Write to Firestore (idempotent via signal_id — set with merge=True)
-    _write_signals(db, uid, deduped)
+    # Write to Firestore (idempotent via signal_id — set with merge=True).
+    # Failures here are logged but do not raise — caller still updates stats.
+    written = _write_signals(db, uid, deduped)
+    if written == 0 and deduped:
+        log.error(
+            "inbound_write_all_batches_failed",
+            uid=uid[:8],
+            signal_count=len(deduped),
+            note="Signals detected but none persisted this run.",
+        )
 
     # V25.2.2: Save processed URL hashes to Firestore dedup cache for next run
-    _save_dedup_hashes(db, uid, [s.get("source_url", "") for s in deduped])
+    try:
+        _save_dedup_hashes(db, uid, [s.get("source_url", "") for s in deduped])
+    except Exception as dedup_exc:
+        log.warning(
+            "inbound_dedup_save_unhandled",
+            uid=uid[:8],
+            error=str(dedup_exc),
+            error_type=type(dedup_exc).__name__,
+        )
 
     # RLHF: boost keywords from ACTIVE_SEEKING / COMPETITOR_CHURN signals
-    _boost_rlhf(bq, uid, deduped)
+    try:
+        _boost_rlhf(bq, uid, deduped)
+    except Exception as rlhf_exc:
+        log.warning(
+            "inbound_rlhf_unhandled",
+            uid=uid[:8],
+            error=str(rlhf_exc),
+            error_type=type(rlhf_exc).__name__,
+        )
 
     return deduped
 
@@ -442,10 +540,15 @@ def _run_for_tenant(db, bq, uid: str, user_doc: dict) -> list[dict]:
 # Firestore write
 # ---------------------------------------------------------------------------
 
-def _write_signals(db, uid: str, signals: list[dict]) -> None:
-    """Batch-upsert signals into inbound_signals collection."""
+def _write_signals(db, uid: str, signals: list[dict]) -> int:
+    """Batch-upsert signals into inbound_signals collection.
+
+    Returns:
+        Number of signals successfully committed. One failed chunk does not
+        abort remaining chunks.
+    """
     if not signals:
-        return
+        return 0
 
     import datetime
 
@@ -454,57 +557,77 @@ def _write_signals(db, uid: str, signals: list[dict]) -> None:
         datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30)
     )
 
+    written = 0
     # Firestore batch limit is 500 — chunk if needed
     CHUNK = 400
     for i in range(0, len(signals), CHUNK):
-        batch = db.batch()
-        for sig in signals[i : i + CHUNK]:
-            doc_id = f"{uid}_{sig['signal_id']}"
-            ref    = db.collection("inbound_signals").document(doc_id)
-            payload = {
-                "tenant_id":           uid,
-                "signal_id":           sig["signal_id"],
-                "source_url":          sig.get("source_url", ""),
-                "source_platform":     sig.get("source_platform", "web"),
-                "headline":            sig.get("headline", ""),
-                "snippet":             sig.get("snippet", ""),
-                "serper_query":        sig.get("serper_query", ""),
-                "triggering_keyword":  sig.get("triggering_keyword", ""),
-                "intent_label":        sig.get("intent_label", "TREND"),
-                "intent_score":        sig.get("intent_score", 0.0),
-                "pain_keywords":       sig.get("pain_keywords", []),
-                "company_name":        sig.get("company_name"),
-                "industry_hint":       sig.get("industry_hint"),
-                "gemini_reasoning":    sig.get("gemini_reasoning", ""),
-                "matched_persona":     sig.get("matched_persona", ""),
-                "matched_campaign_id": sig.get("matched_campaign_id", ""),
-                "week":                sig.get("week", ""),
-                "status":              sig.get("status", "new"),
-                "synced_at":           firestore.SERVER_TIMESTAMP,
-                "expire_at":           _signal_expire,  # V25.2.2: TTL field
-            }
-            # Domain intelligence metadata (only when present — BC for older signals).
-            for _dk in (
-                "domain_family",
-                "domain_source",
-                "profile_confidence",
-                "thin_campaign",
-                "strictness_bias",
-                "intent_threshold_used",
-                "enrichment_priority",
-                "enrichment_priority_rank",
-                "enrichment_queue",
-                "enrichment_resolve_company",
-                "enrichment_max_lookups",
-                "enrichment_score",
-                "enrichment_reasons",
-                "firmographic_value",
-            ):
-                if sig.get(_dk) is not None:
-                    payload[_dk] = sig.get(_dk)
-            batch.set(ref, payload, merge=True)
-        batch.commit()
-        log.info("inbound_signals_batch_written", uid=uid[:8], count=min(CHUNK, len(signals) - i))
+        chunk = signals[i : i + CHUNK]
+        try:
+            batch = db.batch()
+            for sig in chunk:
+                doc_id = f"{uid}_{sig['signal_id']}"
+                ref    = db.collection("inbound_signals").document(doc_id)
+                payload = {
+                    "tenant_id":           uid,
+                    "signal_id":           sig["signal_id"],
+                    "source_url":          sig.get("source_url", ""),
+                    "source_platform":     sig.get("source_platform", "web"),
+                    "headline":            sig.get("headline", ""),
+                    "snippet":             sig.get("snippet", ""),
+                    "serper_query":        sig.get("serper_query", ""),
+                    "triggering_keyword":  sig.get("triggering_keyword", ""),
+                    "intent_label":        sig.get("intent_label", "TREND"),
+                    "intent_score":        sig.get("intent_score", 0.0),
+                    "pain_keywords":       sig.get("pain_keywords", []),
+                    "company_name":        sig.get("company_name"),
+                    "industry_hint":       sig.get("industry_hint"),
+                    "gemini_reasoning":    sig.get("gemini_reasoning", ""),
+                    "matched_persona":     sig.get("matched_persona", ""),
+                    "matched_campaign_id": sig.get("matched_campaign_id", ""),
+                    "week":                sig.get("week", ""),
+                    "status":              sig.get("status", "new"),
+                    "synced_at":           firestore.SERVER_TIMESTAMP,
+                    "expire_at":           _signal_expire,  # V25.2.2: TTL field
+                }
+                # Domain intelligence metadata (only when present — BC for older signals).
+                for _dk in (
+                    "domain_family",
+                    "domain_source",
+                    "profile_confidence",
+                    "thin_campaign",
+                    "strictness_bias",
+                    "intent_threshold_used",
+                    "enrichment_priority",
+                    "enrichment_priority_rank",
+                    "enrichment_queue",
+                    "enrichment_resolve_company",
+                    "enrichment_max_lookups",
+                    "enrichment_score",
+                    "enrichment_reasons",
+                    "firmographic_value",
+                ):
+                    if sig.get(_dk) is not None:
+                        payload[_dk] = sig.get(_dk)
+                batch.set(ref, payload, merge=True)
+            batch.commit()
+            written += len(chunk)
+            log.info(
+                "inbound_signals_batch_written",
+                uid=uid[:8],
+                count=len(chunk),
+            )
+        except Exception as write_exc:
+            log.error(
+                "inbound_signals_batch_failed",
+                uid=uid[:8],
+                chunk_start=i,
+                chunk_size=len(chunk),
+                error=str(write_exc),
+                error_type=type(write_exc).__name__,
+                exc_info=True,
+                note="Chunk failed; continuing with remaining chunks.",
+            )
+    return written
 
 
 # ---------------------------------------------------------------------------

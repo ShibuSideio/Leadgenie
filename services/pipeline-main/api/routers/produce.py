@@ -558,6 +558,8 @@ def produce():
         if not _harvest_enabled:
             return harvest_metrics
 
+        # Produce-gated path: Serper-backed harvest sources are allowed.
+        # Contrast with /harvest which always sets allow_serper=False.
         _serper_key_for_harvest = ""
         try:
             from core.clients import get_serper_key  # type: ignore[import]
@@ -579,6 +581,7 @@ def produce():
                     campaign=_campaign_with_id,
                     db=get_db(),
                     serper_api_key=_serper_key_for_harvest,
+                    allow_serper=True,
                 )
                 harvest_result_holder.append(result)
             except Exception as _h_exc:

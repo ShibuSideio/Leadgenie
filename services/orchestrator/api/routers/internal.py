@@ -11,7 +11,7 @@ Routes:
   POST /api/internal/telemetry/bq-push
   POST /api/internal/credits/settle
   POST /api/internal/cron/sweep            (Serper produce fan-out, every 24h)
-  POST /api/internal/cron/harvest-sweep   (Signal harvest fan-out, every 4h — V25.2.0)
+  POST /api/internal/cron/harvest-sweep   (Free-source harvest fan-out, 4h; allow_serper=False)
   POST /api/internal/campaign-enrichment-run
   POST /api/internal/cron/reflection
   POST /api/internal/cron/ontology-decay
@@ -1061,16 +1061,22 @@ def cron_sweep():
 # =============================================================================
 # POST /api/internal/cron/harvest-sweep  (V25.2.0)
 # Called by Cloud Scheduler every 4 hours (offset by 2h from /cron/sweep).
-# Fans out one /harvest Cloud Task per active campaign — no Serper, no QueryBrain.
+# Fans out one /harvest Cloud Task per active campaign.
+# COST GUARD: /harvest runs with allow_serper=False — free sources only
+# (Reddit RSS, HN, RSS, classifieds, forums, jobs, YouTube). SerperDiscovery,
+# Google Reviews, and Reddit Serper fallback are blocked. QueryBrain Serper
+# remains produce-gated only.
 # =============================================================================
 @bp.route("/api/internal/cron/harvest-sweep", methods=["POST"])
 def cron_harvest_sweep():
-    """V25.2.0 — Signal harvest fan-out sweep (4-hour cadence).
+    """V25.2.0 — Free-source signal harvest fan-out (4-hour cadence).
 
     Identical fan-out pattern to cron_sweep(), but targets /harvest
-    instead of /produce. Does NOT run Serper or QueryBrain — signal
-    harvest sources (Reddit, classified, forum, Google Reviews, YouTube)
-    only. Allows fresh signals between 6-hour Serper sweeps.
+    instead of /produce. /harvest enforces allow_serper=False so automatic
+    harvest never burns Serper credits. Free sources only: Reddit RSS, HN,
+    RSS feeds, classifieds, consumer forums, job posts, YouTube.
+    SerperDiscovery, Google Reviews (Maps+Reviews), and Reddit Serper
+    fallback run only on the produce-gated path.
 
     Guards applied:
       - OIDC verification (same as all cron routes)

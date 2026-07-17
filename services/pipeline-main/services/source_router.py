@@ -226,16 +226,44 @@ class SourceRouter:
     No hardcoded subreddits, no hardcoded topics — the LLM understands the
     campaign's ICP and selects appropriate sources dynamically.
 
+    Cost-protection split:
+      * Free / non-Serper sources (Reddit RSS, HN, RSS, jobs, classifieds,
+        consumer forums, YouTube) always available.
+      * Serper-backed sources (SerperDiscovery, Google Reviews, Reddit Serper
+        fallback) only when ``allow_serper=True`` **and** a key is present.
+        Produce-gated callers must opt in; harvest must leave this False.
+
     Args:
-        serper_api_key: Serper API key for SerperDiscoverySource instances.
+        serper_api_key: Serper API key for SerperDiscovery / GoogleReviews.
+        allow_serper:   When False (default), never instantiate Serper-backed
+                        sources even if a key is supplied. Hard cost guard for
+                        the automatic /harvest path.
     """
 
-    def __init__(self, serper_api_key: str = "") -> None:
-        self._serper_key = serper_api_key
+    def __init__(
+        self,
+        serper_api_key: str = "",
+        allow_serper: bool = False,
+    ) -> None:
+        self._allow_serper = bool(allow_serper)
+        # Hard-clear the key when Serper is not permitted so no nested path
+        # can accidentally spend credits from a leaked key.
+        self._serper_key = (serper_api_key or "").strip() if self._allow_serper else ""
+        if allow_serper is False and serper_api_key:
+            log.info(
+                "source_router_serper_key_ignored",
+                note="allow_serper=False — Serper key discarded. "
+                     "Serper-backed sources will not be instantiated.",
+            )
         self._budget_guard = BudgetGuard(
             daily_limit=int(os.environ.get("SERPER_DAILY_LIMIT", "0")),
             state_path=os.environ.get("SERPER_BUDGET_STATE_PATH", ""),
         )
+
+    @property
+    def allow_serper(self) -> bool:
+        """True only when this router is permitted to spend Serper credits."""
+        return self._allow_serper and bool(self._serper_key)
 
     def route(
         self,
@@ -533,11 +561,13 @@ IMPORTANT:
                     search_terms = search_terms,
                     geo_terms    = geo_filter_terms if geo_filter_terms else None,
                     max_age_days = 14,
+                    allow_serper = self._allow_serper,
                 ))
                 log.info(
                     "source_router_reddit_configured",
                     subreddits=subreddits,
                     search_terms=search_terms[:3],
+                    allow_serper=self._allow_serper,
                 )
 
         # 4. Hacker News (B2B, SaaS, startup, D2C founder only)
@@ -573,11 +603,28 @@ IMPORTANT:
             ))
 
         # 7. Serper discovery (URLs → PRISM scrapes for full content)
+        #    PRODUCE-GATED ONLY: requires allow_serper=True + API key.
+        #    Harvest mode must never instantiate this source.
         #    For B2C/D2C: queries target consumer platforms (expatriates.com, dubizzle.com)
         #    For B2B: queries target professional forums and industry sites
         discovery_queries = [q for q in config.get("serper_discovery_queries", []) if q]
-        if discovery_queries and self._serper_key:
-            if self._budget_guard.daily_limit > 0 and not self._budget_guard.can_spend(1):
+        if discovery_queries:
+            if not self._allow_serper:
+                log.info(
+                    "source_router_serper_discovery_skipped",
+                    reason="not_produce_gated",
+                    allow_serper=False,
+                    query_count=len(discovery_queries),
+                    note="SerperDiscoverySource blocked — harvest/free path. "
+                         "Only produce-gated runs may spend Serper credits.",
+                )
+            elif not self._serper_key:
+                log.info(
+                    "source_router_serper_discovery_skipped",
+                    reason="missing_api_key",
+                    query_count=len(discovery_queries),
+                )
+            elif self._budget_guard.daily_limit > 0 and not self._budget_guard.can_spend(1):
                 log.info(
                     "source_router_serper_budget_blocked",
                     reason="daily_budget_exhausted",
@@ -594,28 +641,43 @@ IMPORTANT:
                 ))
 
         # 8. Google Reviews (all archetypes — competitor review mining)
+        #    PRODUCE-GATED ONLY: Serper Maps + Reviews burn credits.
         #    Gemini derives competitor names from ICP; Serper Maps + Reviews
         #    fetch buyer-language reviews. Works for B2B service firms too.
         #    V25.2.1: Once-daily cooldown gate — _reviews_due is set above.
         raw_arch = config.get("_archetype", "B2B")  # Hoist for YouTube logging
-        if self._serper_key and _reviews_due:
-            icp_context = config.get("_icp_context", "")
-            if self._budget_guard.daily_limit > 0 and not self._budget_guard.can_spend(1):
+        if _reviews_due:
+            if not self._allow_serper:
                 log.info(
-                    "source_router_google_reviews_budget_blocked",
-                    reason="daily_budget_exhausted",
-                    remaining=self._budget_guard.remaining(),
+                    "source_router_google_reviews_skipped",
+                    reason="not_produce_gated",
+                    allow_serper=False,
+                    note="GoogleReviewSource blocked — harvest/free path. "
+                         "Maps+Reviews Serper spend requires produce gate.",
+                )
+            elif not self._serper_key:
+                log.info(
+                    "source_router_google_reviews_skipped",
+                    reason="missing_api_key",
                 )
             else:
-                if self._budget_guard.daily_limit > 0:
-                    self._budget_guard.record_spend(1)
-                sources.append(GoogleReviewSource(
-                    icp_context    = icp_context,
-                    geo            = geo,
-                    archetype      = raw_arch,
-                    serper_api_key = self._serper_key,
-                    max_age_days   = 60,
-                ))
+                icp_context = config.get("_icp_context", "")
+                if self._budget_guard.daily_limit > 0 and not self._budget_guard.can_spend(1):
+                    log.info(
+                        "source_router_google_reviews_budget_blocked",
+                        reason="daily_budget_exhausted",
+                        remaining=self._budget_guard.remaining(),
+                    )
+                else:
+                    if self._budget_guard.daily_limit > 0:
+                        self._budget_guard.record_spend(1)
+                    sources.append(GoogleReviewSource(
+                        icp_context    = icp_context,
+                        geo            = geo,
+                        archetype      = raw_arch,
+                        serper_api_key = self._serper_key,
+                        max_age_days   = 60,
+                    ))
 
         # 9. YouTube (B2C and D2C only — video discovery for consumer ICPs)
         #    B2C/D2C buyers research purchases on YouTube before converting.
@@ -689,8 +751,13 @@ IMPORTANT:
             elif _strat_primary == "COMPETITOR_TOUCHPOINT":
                 # Prioritize: GoogleReviews + SerperDiscovery + Reddit
                 sources = _prioritize(sources, {"google_reviews", "serper_discovery", "reddit"})
-                # Force-add GoogleReviewSource if not present and reviews are due
-                if "google_reviews" not in _existing_types and self._serper_key and _reviews_due:
+                # Force-add GoogleReviewSource only on produce-gated runs
+                if (
+                    "google_reviews" not in _existing_types
+                    and self._allow_serper
+                    and self._serper_key
+                    and _reviews_due
+                ):
                     icp_ctx = config.get("_icp_context", "")
                     raw_a = config.get("_archetype", "B2B")
                     sources.insert(0, GoogleReviewSource(
@@ -700,6 +767,13 @@ IMPORTANT:
                         serper_api_key=self._serper_key,
                         max_age_days=60,
                     ))
+                elif "google_reviews" not in _existing_types and not self._allow_serper:
+                    log.info(
+                        "source_router_google_reviews_force_add_skipped",
+                        reason="not_produce_gated",
+                        strategy=_strat_primary,
+                        note="COMPETITOR_TOUCHPOINT force-add blocked without allow_serper.",
+                    )
 
             elif _strat_primary == "PROFESSIONAL_NETWORK":
                 # Prioritize: SerperDiscovery (LinkedIn queries) + HackerNews + JobPosts
@@ -877,6 +951,7 @@ IMPORTANT:
                 search_terms = search_terms,
                 geo_terms    = [geo] if geo else None,
                 max_age_days = 14,
+                allow_serper = self._allow_serper,
             ))
 
         # B2C fallback: ClassifiedListingSource with category terms from keywords

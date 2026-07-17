@@ -176,3 +176,141 @@ def sanitize_update(updates: dict[str, Any]) -> dict[str, Any]:
         {'next_produce_due': '2026-01-02T00:00:00+00:00', 'status': 'active', 'updatedAt': <SERVER_TIMESTAMP>}
     """
     return {k: to_firestore_ts(v) for k, v in updates.items()}
+
+
+# ---------------------------------------------------------------------------
+# Safe query materialization (public Retry — never touch gRPC ._retry)
+# ---------------------------------------------------------------------------
+
+def firestore_stream_retry():
+    """Build an explicit public ``google.api_core.retry.Retry`` for Firestore streams.
+
+    Why this exists
+    ---------------
+    ``Query.stream()`` defaults to ``retry=gapic_v1.method.DEFAULT``.  When a
+    transient ``GoogleAPICallError`` occurs mid-stream, google-cloud-firestore
+    tries to recover the default policy via::
+
+        gapic_callable = transport.run_query
+        retry = gapic_callable._retry   # private attribute
+
+    Streaming RPCs are bound as ``_UnaryStreamMultiCallable``, which does **not**
+    expose ``_retry``.  That produces::
+
+        AttributeError: '_UnaryStreamMultiCallable' object has no attribute '_retry'
+
+    Passing an explicit public ``Retry`` object skips that private-attribute path
+    entirely (``_retry_query_after_exception`` uses ``retry._predicate(exc)`` on
+    the object we provide).
+
+    Returns:
+        ``google.api_core.retry.Retry`` configured for common transient errors.
+    """
+    from google.api_core import exceptions as core_exceptions
+    from google.api_core import retry as retries
+
+    # ``timeout`` is the modern Retry kwarg (api-core ≥2.x).  Older releases
+    # accepted ``deadline`` as an alias; prefer the public ``timeout`` name.
+    return retries.Retry(
+        predicate=retries.if_exception_type(
+            core_exceptions.ServiceUnavailable,
+            core_exceptions.InternalServerError,
+            core_exceptions.DeadlineExceeded,
+            core_exceptions.Aborted,
+            core_exceptions.Unknown,
+            core_exceptions.ResourceExhausted,
+            core_exceptions.Cancelled,
+        ),
+        initial=0.5,
+        maximum=30.0,
+        multiplier=1.5,
+        timeout=120.0,
+    )
+
+
+def materialize_query(
+    query,
+    *,
+    timeout: float = 90.0,
+    label: str = "firestore_query",
+    empty_on_error: bool = False,
+) -> list:
+    """Materialize a Firestore query with a public Retry policy.
+
+    Always passes an explicit ``retry=`` to ``.stream()`` so the SDK never
+    resolves ``gapic_v1.method.DEFAULT`` via private ``callable._retry``.
+
+    The stream is fully consumed into a list so lazy generator errors surface
+    inside this helper (callers used to wrap only ``.stream()`` construction,
+    which does not open the RPC).
+
+    Args:
+        query:          Firestore ``Query`` / ``CollectionReference``.
+        timeout:        Per-RPC timeout seconds.
+        label:          Log context tag.
+        empty_on_error: When True, log and return ``[]`` instead of re-raising.
+
+    Returns:
+        List of ``DocumentSnapshot`` (may be empty).
+
+    Raises:
+        Exception: Re-raised when ``empty_on_error`` is False.
+    """
+    # Local import keeps firestore_utils importable without logging deps in tests.
+    try:
+        from core.logging import get_logger  # type: ignore[import]
+        _log = get_logger("orchestrator.firestore_utils")
+    except Exception:  # pragma: no cover
+        import logging
+        _log = logging.getLogger("orchestrator.firestore_utils")
+
+    retry = firestore_stream_retry()
+    try:
+        # Explicit public Retry — never DEFAULT, never private gRPC attrs.
+        return list(query.stream(retry=retry, timeout=timeout))
+    except AttributeError as exc:
+        # Defense in depth: if an older SDK path still hits ._retry, fall back
+        # to Query.get() with the same explicit Retry (same RunQuery RPC but
+        # different call site that often avoids the stream-retry helper).
+        if "_retry" not in str(exc):
+            if empty_on_error:
+                _log.error(
+                    "firestore_query_attribute_error",
+                    label=label,
+                    error=str(exc),
+                    empty_on_error=True,
+                )
+                return []
+            raise
+        _log.warning(
+            "firestore_stream_retry_attr_error",
+            label=label,
+            error=str(exc),
+            note="Caught UnaryStreamMultiCallable/_retry bug. "
+                 "Retrying once via Query.get() with explicit public Retry.",
+        )
+        try:
+            return list(query.get(retry=retry, timeout=timeout))
+        except Exception as fallback_exc:
+            _log.error(
+                "firestore_query_fallback_failed",
+                label=label,
+                error=str(fallback_exc),
+                empty_on_error=empty_on_error,
+                exc_info=True,
+            )
+            if empty_on_error:
+                return []
+            raise
+    except Exception as exc:
+        _log.error(
+            "firestore_query_failed",
+            label=label,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            empty_on_error=empty_on_error,
+            exc_info=True,
+        )
+        if empty_on_error:
+            return []
+        raise

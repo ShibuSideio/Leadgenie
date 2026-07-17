@@ -23,9 +23,12 @@ DESIGN PRINCIPLES:
   6. PRISM enrichment runs for thin signals (Serper URLs, link posts).
 
 INTEGRATION:
-  Called from produce.py as a parallel signal pathway.
-  The existing Serper pathway continues to run for backward compatibility.
-  Both pathways write to the same scraped_cache / unprocessed_queue collections.
+  Called from:
+    * produce.py  — allow_serper=True  (produce-gated; may spend Serper)
+    * /harvest    — allow_serper=False (free sources only; zero Serper)
+
+  Serper-backed sources (SerperDiscovery, Google Reviews, Reddit Serper
+  fallback) are only enabled when allow_serper=True AND a key is provided.
 """
 from __future__ import annotations
 
@@ -145,6 +148,7 @@ def harvest_signals(
     campaign: dict,
     db: Any,
     serper_api_key: str = "",
+    allow_serper: bool = False,
 ) -> dict:
     """Run the full signal harvest pipeline for a campaign.
 
@@ -155,8 +159,12 @@ def harvest_signals(
     Args:
         campaign:        Full campaign dict from Firestore.
         db:              Firestore client (from core.clients.get_db()).
-        serper_api_key:  Serper API key for URL discovery source.
-                         If empty, SerperDiscoverySource is skipped.
+        serper_api_key:  Serper API key for produce-gated Serper sources.
+                         Ignored when allow_serper is False.
+        allow_serper:    When True, SerperDiscovery / Google Reviews / Reddit
+                         Serper fallback may run (produce path only).
+                         Default False — automatic /harvest must never spend
+                         Serper credits.
 
     Returns:
         Dict with harvest summary metrics:
@@ -165,20 +173,33 @@ def harvest_signals(
           queued:     signals written to unprocessed_queue (HIGH/MEDIUM)
           prism_enriched: thin signals enriched via PRISM scraping
           errors:     count of sources that failed
+          allow_serper: whether Serper was permitted for this run
     """
     campaign_id = campaign.get("id", campaign.get("campaign_id", "unknown"))
     archetype   = (campaign.get("sourcing_vector") or "B2B").upper()
     geo         = campaign.get("location", "")
     tenant_id   = campaign.get("tenant_id", "")
+    # Defense in depth: strip key when Serper is not permitted.
+    effective_serper_key = (serper_api_key or "").strip() if allow_serper else ""
 
     log.info(
         "signal_harvest_start",
         campaign_id=campaign_id,
         archetype=archetype,
         geo=geo or "global",
+        allow_serper=bool(allow_serper),
+        serper_key_present=bool(effective_serper_key),
     )
 
-    metrics = {"discovered": 0, "scored": 0, "queued": 0, "direct_leads": 0, "prism_enriched": 0, "errors": 0}
+    metrics = {
+        "discovered": 0,
+        "scored": 0,
+        "queued": 0,
+        "direct_leads": 0,
+        "prism_enriched": 0,
+        "errors": 0,
+        "allow_serper": bool(allow_serper),
+    }
 
     # ------------------------------------------------------------------ #
     # Stage 1 — Build ICP context                                         #
@@ -197,7 +218,10 @@ def harvest_signals(
     # Stage 2 — Gemini-driven source routing                              #
     # ------------------------------------------------------------------ #
     try:
-        router = SourceRouter(serper_api_key=serper_api_key)
+        router = SourceRouter(
+            serper_api_key=effective_serper_key,
+            allow_serper=bool(allow_serper),
+        )
         routing: RoutingConfig = router.route(
             archetype   = archetype,
             icp_context = icp_context,

@@ -1,6 +1,6 @@
-# LeadGenie (Sideio) — Platform Architecture V26.7.0
+# LeadGenie (Sideio) — Platform Architecture V26.8.0
 **Technical Specification Document**
-*Last Updated: 2026-07-16 | Version: V26.7.0 — Domain-Aware LLM Gates + Multi-Entity Hosts + Campaign Velocity Quotas*
+*Last Updated: 2026-07-17 | Version: V26.8.0 — Serper Produce Gate + Inbound Radar Hardening*
 
 ---
 
@@ -14,7 +14,10 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 3. Pipeline-Main runs: **domain-profile resolve → intelligence-profile inference → domain-aware query generation → budget-aware source routing → scrape → domain-aware pre-filter → score → adaptive confidence qualification → entity extraction → write to Firestore**
 4. The PWA frontend listens via `onSnapshot` and renders leads in real-time
 
-### Latest implementation updates (V26.7.0)
+### Latest implementation updates (V26.8.0)
+- **Serper produce-gate cost protection (V26.8.0):** Automatic `/harvest` and `cron_harvest_sweep` run with `allow_serper=False`. Serper-backed sources (SerperDiscovery, Google Reviews Maps+Reviews, Reddit Serper fallback) only run on the produce-gated path (`allow_serper=True`). See §7.1.
+- **Inbound Radar Firestore stream fix (V26.8.0):** Queries materialize via `core.firestore_utils.materialize_query()` with an explicit public `google.api_core.retry.Retry` — avoids `'_UnaryStreamMultiCallable' object has no attribute '_retry'` crashes that zeroed `signals_this_week`. Tenant/campaign/write failures are isolated. See §8.3.
+- **Inbound URL pre-screen (V26.8.0):** Review platforms (Trustpilot, G2, Capterra, Yelp, …) are **allowlisted**; `/blog/` is soft-filtered (complaint blogs kept, SEO listicles dropped). Precision over aggressive drop. See §8.3.1.
 - A shared heuristic planner now infers a campaign intelligence profile from sparse user input so the backend can make stronger decisions with minimal manual effort.
 - Source routing uses that inferred strategy plan and a daily budget guard to avoid wasting expensive Serper spend on weak or low-evidence campaigns.
 - Query generation now uses deterministic fallback logic and strategy-specific phrasing so the pipeline remains robust even when Gemini is unavailable.
@@ -67,6 +70,8 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 │   │   ├── services/                # inbound_sentiment_service.py, inbound_maps_service.py
 │   │   ├── services/intelligence/   # shadow_tracker.py, neg_signal.py
 │   │   ├── core/config.py           # Shared env-var config
+│   │   ├── core/firestore_utils.py  # sanitize_update + materialize_query (safe stream Retry)
+│   │   ├── core/produce_gate.py     # should_dispatch_produce (next_produce_due gate)
 │   │   └── requirements.txt
 │   ├── /pipeline-main               # Cloud Run: AI Extraction Engine (Cartographer)
 │   │   ├── api/routers/             # dispatch.py, produce.py
@@ -79,17 +84,17 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 │   │   │   ├── source_router.py     #   V26: Multi-source OSINT router (10 signal source plugins)
 │   │   │   ├── signal_sources/      #   V26: Pluggable signal source modules:
 │   │   │   │   ├── base.py          #     Abstract base class for all signal sources
-│   │   │   │   ├── serper_discovery.py  # Google Search via Serper API
-│   │   │   │   ├── reddit.py        #     Reddit thread monitoring
+│   │   │   │   ├── serper_discovery.py  # PRODUCE-GATED Serper URL discovery
+│   │   │   │   ├── reddit.py        #     Reddit RSS (+ Serper fallback if allow_serper)
 │   │   │   │   ├── hackernews.py    #     HackerNews signal extraction
-│   │   │   │   ├── google_reviews.py #    Google Reviews competitor mining
+│   │   │   │   ├── google_reviews.py #    PRODUCE-GATED Serper Maps+Reviews
 │   │   │   │   ├── consumer_forum.py #    Consumer forum monitoring
 │   │   │   │   ├── classified_listings.py # Classified ad monitoring
 │   │   │   │   ├── job_posts.py     #     Job board signal extraction
 │   │   │   │   ├── rss_feed.py      #     RSS/Atom feed monitoring
 │   │   │   │   └── youtube.py       #     YouTube video/comment extraction
 │   │   │   ├── intelligence_mesh.py #   V26: Cross-source dedup + merge
-│   │   │   ├── signal_harvest.py    #     Signal harvesting engine
+│   │   │   ├── signal_harvest.py    #     Signal harvest (allow_serper produce-only)
 │   │   │   ├── signal_cluster_analyst.py # Signal clustering and analysis
 │   │   │   ├── budget_guard.py      #     Daily cost guard for costly discovery actions
 │   │   │   ├── lead_confidence.py   #     Confidence scoring + Gemini eval adapter + hybrid promotion
@@ -620,6 +625,25 @@ WHERE (tenant_id = @tenant_id OR tenant_id = 'GLOBAL')
 B2B rejected domains (e.g., `clutch.co`) no longer suppress B2C/D2C search results.
 Cache is keyed by `tenant_id::sourcing_vector` with 10-minute TTL.
 
+### 6.1 Serper Cost Protection — Produce Gate (V26.8.0)
+
+**Hard rule:** Automatic harvest must not burn Serper credits. Serper-backed discovery is opt-in via `allow_serper=True` on the produce path only.
+
+| Path | `allow_serper` | SerperDiscovery | Google Reviews | Reddit Serper fallback | QueryBrain `search_serper` |
+|------|----------------|-----------------|----------------|------------------------|----------------------------|
+| `/produce` (sweep when `should_dispatch_produce`) | **True** | ✅ | ✅ (cooldown) | ✅ | ✅ |
+| `/harvest` + `cron_harvest_sweep` (every 4h) | **False** | ❌ | ❌ | ❌ | ❌ (never runs QueryBrain) |
+
+**Implementation:**
+- `SourceRouter(serper_api_key=…, allow_serper=False)` default; key discarded when `allow_serper` is false
+- `harvest_signals(..., allow_serper=False)` default; produce passes `True`
+- Free sources always available on harvest: Reddit RSS, HN, RSS, classifieds, consumer forums, job posts, YouTube
+- Skip logs: `source_router_serper_discovery_skipped`, `source_router_google_reviews_skipped`, `reddit_serper_fallback_skipped` with `reason=not_produce_gated`
+
+**Produce gate location:** `orchestrator/core/produce_gate.py` → `should_dispatch_produce()` used only by `cron_sweep` when enqueueing `/produce`. `/harvest` does not re-check produce-due (and must not load a Serper key).
+
+**Still not produce-gated (known residual spend):** Inbound Radar Serper, `/dispatch` enrichment (`deep_context_serper_dork`, PRISM, mesh), agent run, digital-twin onboarding — intentional product surfaces or deferred hardening.
+
 ### Step 6: Serper Search Execution
 **Location:** `pipeline-main/services/serper_service.py`
 
@@ -830,11 +854,38 @@ Inbound Radar has **two complementary paths**. Both are domain-aware as of V26.5
 - Logs: `visitor_domain_profile_used`, `visitor_enrichment_priority_assigned`, `visitor_domain_adjustment_applied`.
 
 ### 8.3 Inbound Sentiment path (`inbound_sentiment_service.py` + job)
-- Per active campaign: build Serper queries → Gemini intent classify → filter by write floor.
+- Trigger: `POST /api/internal/inbound-sentiment-run` (cron ~6h) → `jobs/inbound_sentiment_job.run()`.
+- Per active campaign: build Serper queries → **URL pre-screen** (§8.3.1) → Gemini intent classify → filter by write floor.
 - Base floors: Gemini garbage filter **0.30**, Firestore write **0.45** (`MIN_INTENT_SCORE`).
 - With `system_domain_profile`: floors adjusted via `shared.domain_gate.compute_intent_threshold()` using `strictness_bias` × `profile_confidence` scale (high=1.0, medium=0.6, low=0.3). Thin/low-confidence profiles get milder moves.
 - Signals persist `domain_family`, `domain_source`, `profile_confidence`, `thin_campaign`, `strictness_bias`, `intent_threshold_used`, and enrichment priority fields.
-- Logs: `inbound_domain_profile_used`, `inbound_domain_adjustment_applied`, `inbound_enrichment_priority_assigned`.
+- **Firestore safety (V26.8.0):** Tenant and campaign list queries use `core.firestore_utils.materialize_query()` with an **explicit public** `google.api_core.retry.Retry`. This avoids the google-cloud-firestore bug where `Query.stream(retry=DEFAULT)` resolves policy via private `transport.run_query._retry` on a `_UnaryStreamMultiCallable` (AttributeError that aborted the job and left `signals_this_week=0`). Streams are fully materialised (lazy generator errors cannot escape). One failed tenant/campaign/write/stats update does not kill remaining work.
+- Logs: `inbound_domain_profile_used`, `inbound_domain_adjustment_applied`, `inbound_enrichment_priority_assigned`, `firestore_query_failed`, `inbound_signals_batch_failed`.
+
+#### 8.3.1 URL Pre-Screen Policy (V26.8.0)
+**Location:** `inbound_sentiment_service.classify_inbound_url()` / `_is_noise_url()`
+
+Maintainable module constants (not scattered magic strings):
+
+| Constant | Purpose |
+|----------|---------|
+| `INBOUND_REVIEW_ALLOW_HOSTS` | Trustpilot, G2, Capterra, Yelp, Sitejabber, TrustRadius, Glassdoor, Clutch, … — **keep** |
+| `INBOUND_SOCIAL_ALLOW_HOSTS` | Reddit, Facebook, Quora, HN, GitHub, LinkedIn (non-jobs), … — **keep** |
+| `INBOUND_NOISE_HOST_MARKERS` | Wikipedia, ZoomInfo, Crunchbase, Upwork, Indeed, Amazon, … — **drop** |
+| `INBOUND_NOISE_PATH_PATTERNS` | `/login`, `/signup`, `/careers`, `/jobs`, `/pricing`, `/best-`, `/top-`, `/vs/`, `/compare/` — **drop** |
+
+**Decision order (precision over aggressive drop):**
+1. Review platform host → keep (`allow_review_platform`); jobs paths on those hosts still drop
+2. Social/community host → keep
+3. True noise hosts → drop
+4. Competitor own-site URLs → drop (third-party `/review` of competitor still allowed)
+5. Hard path noise (auth, careers, SEO listicles, pricing) → drop
+6. `/blog/` soft filter: SEO-listicle-shaped paths or (with title/snippet) zero sentiment cues → drop; complaint blogs and bare blog URLs → keep for Gemini
+7. Default → keep (Gemini intent floor is the quality gate)
+
+**Logs:** `inbound_url_pre_screen_kept` / `inbound_url_filtered_domain` / `_pattern` / `_competitor` / `_other` with structured `reason` + `decision`.
+
+> **Bug fixed:** Query templates deliberately targeted `site:trustpilot.com/review` and G2 reviews, then the old pre-screen **blocked** those same domains — self-defeating drop of high-value sentiment.
 
 ### 8.4 Intent Scoring & Lead Promotion
 `intent_score` is a 0.0–1.0 float. Inbound leads (manual convert or auto-path) use:
@@ -1181,17 +1232,17 @@ source_router.execute_multi_source_pipeline(campaign, queries)
 
 **Signal Source Plugins** (`signal_sources/`):
 
-| Plugin | Source | Cooldown | Entity Extraction |
-|---|---|---|---|
-| `serper_discovery.py` | Google Search via Serper API | Standard (drip) | ❌ |
-| `reddit.py` | Reddit threads | 30 min | ❌ |
-| `hackernews.py` | HN posts/comments | 30 min | ❌ |
-| `google_reviews.py` | Google Business Reviews | 6h (COMPETITOR_TOUCHPOINT) / 24h (default) | ✅ |
-| `consumer_forum.py` | Consumer forums (Quora, etc.) | 30 min | ❌ |
-| `classified_listings.py` | Classified ads (Craigslist, etc.) | 1h | ❌ |
-| `job_posts.py` | Job boards (Indeed, etc.) | 2h | ❌ |
-| `rss_feed.py` | RSS/Atom feeds | 30 min | ❌ |
-| `youtube.py` | YouTube videos/comments | 1h | ❌ |
+| Plugin | Source | Cooldown | Entity Extraction | Harvest (`allow_serper=False`) |
+|---|---|---|---|---|
+| `serper_discovery.py` | Google Search via Serper API | Standard (drip) | ❌ | **Blocked** (produce-only) |
+| `reddit.py` | Reddit RSS threads | 30 min | ❌ | ✅ RSS only; Serper fallback produce-only |
+| `hackernews.py` | HN posts/comments | 30 min | ❌ | ✅ |
+| `google_reviews.py` | Serper Maps + Reviews | 6h (COMPETITOR_TOUCHPOINT) / 23h (default) | ✅ | **Blocked** (produce-only) |
+| `consumer_forum.py` | Consumer forums (Quora, etc.) | 30 min | ❌ | ✅ |
+| `classified_listings.py` | Classified ads (Craigslist, etc.) | 1h | ❌ | ✅ |
+| `job_posts.py` | Job boards (Indeed, etc.) | 2h | ❌ | ✅ |
+| `rss_feed.py` | RSS/Atom feeds | 30 min | ❌ | ✅ |
+| `youtube.py` | YouTube videos/comments | 1h | ❌ | ✅ |
 
 ### 20.3 Entity Extraction Engine (V26.0)
 **Location:** `pipeline-main/api/routers/dispatch.py` (lines 1654+)
@@ -1233,7 +1284,7 @@ Post-generation, a regex filter strips any `-site:` exclusions that conflict wit
 
 **Dynamic Subreddit Selection:** Fallback subreddit lists are now 3-layer: industry-specific (real estate, education, marketing) + geo-specific (Oman, India, UAE) + archetype base. Capped at 8 subreddits.
 
-**Reddit RSS → Serper Fallback:** When Reddit RSS feeds return 0 items (blocked by Cloud Run IP), the system falls back to Serper `site:reddit.com/r/{subreddit}` queries. Budget-controlled at max 6 queries (2 subreddits × 3 terms).
+**Reddit RSS → Serper Fallback:** When Reddit RSS feeds return 0 items (blocked by Cloud Run IP), the system may fall back to Serper `site:reddit.com/r/{subreddit}` queries. Budget-controlled at max 6 queries (2 subreddits × 3 terms). **V26.8.0:** fallback requires `RedditSource(allow_serper=True)` — only wired from produce-gated `SourceRouter`; harvest logs `reddit_serper_fallback_skipped`.
 
 **Colloquial Translation Fix:** Fixed `TypeError` crash caused by unsupported `temperature=0.4` kwarg in `call_gemini_2_5()`. Colloquial translation now fires correctly.
 
@@ -1333,6 +1384,7 @@ Normal single-company domains under B2B remain domain-level. Social/shared/consu
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V26.8.0** | **2026-07-17** | **Serper produce-gate: `/harvest` + harvest-sweep hard-block SerperDiscovery / Google Reviews / Reddit Serper fallback (`allow_serper=False`); produce path opts in. Inbound Radar: safe Firestore query materialization (explicit public Retry — fixes `_UnaryStreamMultiCallable` / `_retry` crash); defensive tenant/write isolation. Inbound URL pre-screen: allowlist review platforms (Trustpilot/G2/Capterra/…), soft `/blog/` filter, structured keep/filter reasons. Tests: `test_harvest_serper_gate`, `test_inbound_firestore_stream`, `test_inbound_url_prescreen`.** |
 | **V26.7.0** | **2026-07-16** | **Multi-entity path identity (`shared/multi_entity_hosts.py`) for portal lock/dedup/cache even under B2B; per-campaign Medium soft quota (`MEDIUM_CAMPAIGN_QUOTA_24H`, optional `campaign.medium_intake_quota_24h`) with tenant hard cap preserved; expanded velocity/identity observability.** |
 | **V26.6.0** | **2026-07-16** | **Domain/strategy/vector-aware LLM gates: `pre_filter_gemini` and `final_score_and_dm` receive structured runtime context; branched PLATFORM_MINING / COMPETITOR_TOUCHPOINT / consumer / B2B fit rules; domain-family calibration guidance; scoring_context diagnostics.** |
 | **V26.5.1** | **2026-07-16** | **Confidence evaluation adapter + hybrid Gemini score-floor promotion so Serper-path `final_score_and_dm` scores are not ignored by `calculate_lead_confidence`.** |

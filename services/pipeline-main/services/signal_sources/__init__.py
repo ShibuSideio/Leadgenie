@@ -16,7 +16,7 @@ Available sources:
   RedditSource             — Reddit RSS (public) + OAuth JSON API (upgrade path)
   HackerNewsSource         — HN Algolia API (no auth, full text)
   RssFeedSource            — Generic RSS/Atom parser (any feed URL)
-  SerperDiscoverySource    — Serper as URL discovery only → PRISM scrapes full content
+  SerperDiscoverySource    — PRODUCE-GATED only (allow_serper=True). Serper URL discovery.
   JobPostSource            — Job board signals: capability gap = buying trigger
 
   === B2C / D2C ===
@@ -26,9 +26,8 @@ Available sources:
   ConsumerForumSource      — Consumer review and product comparison platforms
                              (r/BuyItForLife, r/frugal, Quora, ProductHunt, IndieHackers)
                              D2C founder signal: Show HN, IndieHackers, Shopify community
-  GoogleReviewSource       — Google Maps reviews of competitor businesses.
-                             Gemini derives competitor names from ICP; Serper Maps + Reviews
-                             API fetches buyer-language reviews. All archetypes.
+  GoogleReviewSource       — PRODUCE-GATED only (allow_serper=True). Competitor GMB reviews
+                             via Serper Maps + Reviews. All archetypes on produce path.
   YouTubeSource            — YouTube video discovery via YouTube Data API v3.
                              Video title + description as buyer-intent signal text.
                              B2C and D2C archetypes only.

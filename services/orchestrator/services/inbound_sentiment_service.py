@@ -67,14 +67,18 @@ def _get_serper_key() -> str:
 # Platform detection (for signal metadata — NOT for query filtering)
 # ---------------------------------------------------------------------------
 _PLATFORM_RE: list[tuple[str, re.Pattern]] = [
-    ("reddit",    re.compile(r"reddit\.com",   re.I)),
-    ("linkedin",  re.compile(r"linkedin\.com", re.I)),
-    ("quora",     re.compile(r"quora\.com",    re.I)),
-    ("g2",        re.compile(r"g2\.com",       re.I)),
-    ("capterra",  re.compile(r"capterra\.com", re.I)),
-    ("glassdoor", re.compile(r"glassdoor\.com",re.I)),
-    ("hn",        re.compile(r"news\.ycombinator\.com", re.I)),
-    ("news",      re.compile(
+    ("reddit",     re.compile(r"reddit\.com",   re.I)),
+    ("linkedin",   re.compile(r"linkedin\.com", re.I)),
+    ("quora",      re.compile(r"quora\.com",    re.I)),
+    ("trustpilot", re.compile(r"trustpilot\.com", re.I)),
+    ("g2",         re.compile(r"g2\.com",       re.I)),
+    ("capterra",   re.compile(r"capterra\.com", re.I)),
+    ("yelp",       re.compile(r"yelp\.com",     re.I)),
+    ("glassdoor",  re.compile(r"glassdoor\.com",re.I)),
+    ("sitejabber", re.compile(r"sitejabber\.com", re.I)),
+    ("trustradius", re.compile(r"trustradius\.com", re.I)),
+    ("hn",         re.compile(r"news\.ycombinator\.com", re.I)),
+    ("news",       re.compile(
         r"(techcrunch|businesswire|prnewswire|forbes|venturebeat|theregister)",
         re.I,
     )),
@@ -86,6 +90,97 @@ def _detect_platform(url: str) -> str:
         if pat.search(url):
             return name
     return "web"
+
+
+# ---------------------------------------------------------------------------
+# Inbound URL pre-screen policy (maintainable constants)
+# ---------------------------------------------------------------------------
+# High-value review / complaint platforms for inbound sentiment.
+# These match query templates that deliberately target site:trustpilot / g2.
+# Blocking them was a self-defeating bug (search then drop).
+INBOUND_REVIEW_ALLOW_HOSTS: frozenset[str] = frozenset({
+    "trustpilot.com",
+    "g2.com",
+    "capterra.com",
+    "sitejabber.com",
+    "trustradius.com",
+    "softwareadvice.com",
+    "getapp.com",
+    "gartner.com",
+    "mouthshut.com",
+    "yelp.com",
+    "bbb.org",
+    "consumeraffairs.com",
+    "productreview.com.au",
+    "glassdoor.com",
+    "clutch.co",
+    "goodfirms.co",
+    "serchen.com",
+})
+
+# Social / community hubs — always keep (path noise rules do not apply).
+INBOUND_SOCIAL_ALLOW_HOSTS: frozenset[str] = frozenset({
+    "facebook.com",
+    "reddit.com",
+    "twitter.com",
+    "x.com",
+    "quora.com",
+    "news.ycombinator.com",
+    "linkedin.com",  # profile/posts OK; jobs path blocked separately
+    "medium.com",
+    "stackoverflow.com",
+    "stackexchange.com",
+    "github.com",
+})
+
+# True noise: directories, job boards, data brokers — no review signal value.
+# Host substrings matched against full URL lowercased host+path.
+INBOUND_NOISE_HOST_MARKERS: frozenset[str] = frozenset({
+    "wikipedia.org",
+    "zoominfo.com",
+    "crunchbase.com",
+    "upwork.com",
+    "indeed.com",
+    "expertise.com",
+    "amazon.com",
+    "amazon.",          # regional amazon TLDs
+    "linkedin.com/jobs",
+})
+
+# Path patterns that are almost never useful inbound sentiment footprints.
+# /blog/ is intentionally NOT here — blogs may carry complaint write-ups;
+# Gemini intent scoring is the quality gate. SEO listicles use /best- /top-.
+INBOUND_NOISE_PATH_PATTERNS: list[tuple[str, str]] = [
+    (r"/login(?:/|$|\?)", "auth_wall"),
+    (r"/signup(?:/|$|\?)", "auth_wall"),
+    (r"/sign-up(?:/|$|\?)", "auth_wall"),
+    (r"/register(?:/|$|\?)", "auth_wall"),
+    (r"/careers(?:/|$|\?)", "jobs_page"),
+    (r"/jobs(?:/|$|\?)", "jobs_page"),
+    (r"/pricing(?:/|$|\?)", "marketing_pricing"),
+    (r"/best-[a-z0-9-]+", "seo_listicle"),
+    (r"/top-\d+", "seo_listicle"),
+    (r"/top-[a-z0-9-]+", "seo_listicle"),
+    (r"/vs/", "seo_comparison"),
+    (r"/compare/", "seo_comparison"),
+]
+
+# Soft blog filter: only drop /blog/ paths that look like pure SEO listicles
+# or that carry zero sentiment cues in title/snippet when available.
+_BLOG_SEO_PATH_RE = re.compile(
+    r"/blog/.{0,80}(?:best-|top-\d|top-|vs-|compare|alternatives?|tools-list)",
+    re.I,
+)
+_SENTIMENT_CUE_RE = re.compile(
+    r"\b("
+    r"review|reviews|complaint|complaints|scam|refund|cancel|cancelled|"
+    r"terrible|worst|awful|frustrated|frustrating|hate|regret|"
+    r"not\s+worth|waste\s+of|billing\s+issue|poor\s+support|"
+    r"switching\s+from|alternative\s+to|looking\s+for|"
+    r"disappointed|ripoff|rip-off|broken|doesn'?t\s+work"
+    r")\b",
+    re.I,
+)
 
 
 def _clean_query_syntax(raw: str) -> str:
@@ -560,50 +655,137 @@ class InboundSentimentService:
     # Main pipeline
     # ------------------------------------------------------------------
 
-    def _is_noise_url(self, url: str) -> bool:
-        """Pre-screens a URL to check if it matches directory, listicle, or competitor signatures."""
-        url_lower = url.lower()
+    def _url_host(self, url: str) -> str:
+        """Extract lowercase hostname without leading www."""
+        try:
+            from urllib.parse import urlparse
+            host = (urlparse(url).netloc or "").lower()
+            if host.startswith("www."):
+                host = host[4:]
+            return host
+        except Exception:
+            return ""
 
-        # 1. Social Media Bypass: Skip blog/listicle path patterns for major social hubs
-        # V24.1.25 — Moved to top to prevent Quora/Reddit being caught by general noise_domains
-        social_domains = {
-            "facebook.com", "reddit.com", "twitter.com", "x.com", "quora.com",
-            "news.ycombinator.com"
-        }
-        if any(social in url_lower for social in social_domains):
+    def _host_matches_allowlist(self, host: str, allow: frozenset[str]) -> bool:
+        """True if host is equal to or a subdomain of any allowlisted apex host."""
+        if not host:
             return False
-
-        # 2. Directory and review aggregators blocklist
-        noise_domains = {
-            "yelp.com", "expertise.com", "g2.com", "capterra.com", "upwork.com",
-            "glassdoor.com", "indeed.com", "linkedin.com/jobs", "quora.com",
-            "wikipedia.org", "amazon.com", "zoominfo.com", "crunchbase.com",
-            "trustpilot.com/review"
-        }
-        for domain in noise_domains:
-            if domain in url_lower:
-                log.info("inbound_url_filtered_domain", url=url[:80], reason=f"domain:{domain}")
+        for apex in allow:
+            if host == apex or host.endswith("." + apex):
                 return True
+        return False
 
-        # 3. Competitors URL check
+    def classify_inbound_url(
+        self,
+        url: str,
+        title: str = "",
+        snippet: str = "",
+    ) -> tuple[bool, str]:
+        """Classify a URL for inbound pre-screen.
+
+        Returns:
+            (is_noise, reason) where is_noise=True means drop before Gemini.
+
+        Policy (precision over aggressive drop):
+          1. Review platforms (Trustpilot, G2, …) → KEEP (high-value sentiment)
+          2. Social / community hubs → KEEP
+          3. True noise hosts (wiki, data brokers, job boards) → DROP
+          4. Competitor homepage mirrors → DROP
+          5. Auth walls / careers / SEO listicles / pure pricing → DROP
+          6. /blog/ only dropped when path is SEO-listicle-shaped OR text has
+             no sentiment cues (when title/snippet provided)
+          7. Everything else → KEEP (Gemini intent floor is the quality gate)
+        """
+        if not url or not str(url).strip():
+            return True, "empty_url"
+
+        url_lower = url.lower().strip()
+        host = self._url_host(url_lower)
+        title_l = (title or "").lower()
+        snippet_l = (snippet or "").lower()
+        text_blob = f"{title_l} {snippet_l} {url_lower}"
+
+        # 1. Review / complaint platforms — keep (high-value inbound sentiment)
+        if self._host_matches_allowlist(host, INBOUND_REVIEW_ALLOW_HOSTS):
+            # Job-board paths on review hosts are still noise
+            if re.search(r"/(?:job|jobs|career|careers)(?:/|$|\?)", url_lower):
+                return True, "review_host_jobs_path"
+            return False, "allow_review_platform"
+
+        # 2. Social / community — keep (path noise rules do not apply)
+        if self._host_matches_allowlist(host, INBOUND_SOCIAL_ALLOW_HOSTS):
+            if "linkedin.com" in host and re.search(r"/jobs(?:/|$|\?)", url_lower):
+                return True, "noise_host:linkedin_jobs"
+            return False, "allow_social_community"
+
+        # 3. True noise hosts / markers (directories, data brokers, marketplaces)
+        for marker in INBOUND_NOISE_HOST_MARKERS:
+            if marker.startswith("glassdoor"):
+                continue  # glassdoor handled via review allowlist + jobs path
+            if marker in url_lower:
+                return True, f"noise_host:{marker}"
+
+        # 4. Competitor URL check (own marketing sites, not review of competitor)
         for comp in self.competitors:
             comp_clean = comp.lower().strip().replace(" ", "")
             if comp_clean and len(comp_clean) > 3 and comp_clean in url_lower:
-                log.info("inbound_url_filtered_competitor", url=url[:80], reason=f"competitor:{comp_clean}")
-                return True
+                # Allow if this is clearly a third-party review of the competitor
+                if any(
+                    rev in url_lower
+                    for rev in ("/review", "/reviews", "trustpilot", "g2.com", "capterra")
+                ):
+                    continue
+                return True, f"competitor_site:{comp_clean}"
 
-        # 4. Path keywords indicating listicles, blogs, and other non-footprint pages
-        # V24.1.25 — Removed /post/ and /article/ as these often house legitimate forum threads
-        noise_patterns = [
-            r"/blog/", r"/best-", r"/top-", r"/vs/",
-            r"/compare/", r"/pricing", r"/login", r"/signup", r"/careers", r"/jobs"
-        ]
-        for pat in noise_patterns:
+        # 5. Hard path noise (auth, careers, SEO listicles, pricing)
+        for pat, reason in INBOUND_NOISE_PATH_PATTERNS:
             if re.search(pat, url_lower):
-                log.info("inbound_url_filtered_pattern", url=url[:80], reason=f"pattern:{pat}")
-                return True
+                return True, f"noise_path:{reason}:{pat}"
 
-        return False
+        # 6. Soft blog handling — do NOT blanket-block /blog/
+        if re.search(r"/blog/", url_lower):
+            if _BLOG_SEO_PATH_RE.search(url_lower):
+                return True, "blog_seo_listicle_path"
+            # If we have title/snippet and zero sentiment cues, treat as marketing filler
+            if (title_l or snippet_l) and not _SENTIMENT_CUE_RE.search(text_blob):
+                return True, "blog_no_sentiment_cues"
+            # Bare URL-only check (no title/snippet): keep and let Gemini decide
+            return False, "allow_blog_candidate"
+
+        return False, "allow_default"
+
+    def _is_noise_url(self, url: str, title: str = "", snippet: str = "") -> bool:
+        """Pre-screen URL; True = drop before Gemini scoring.
+
+        Backward-compatible wrapper around :meth:`classify_inbound_url`.
+        Logs keep vs filter with structured reason codes.
+        """
+        is_noise, reason = self.classify_inbound_url(url, title=title, snippet=snippet)
+        if is_noise:
+            if reason.startswith("noise_host:") or reason.startswith("noise_path:"):
+                log_event = (
+                    "inbound_url_filtered_domain"
+                    if reason.startswith("noise_host:")
+                    else "inbound_url_filtered_pattern"
+                )
+            elif reason.startswith("competitor_site:"):
+                log_event = "inbound_url_filtered_competitor"
+            else:
+                log_event = "inbound_url_filtered_other"
+            log.info(
+                log_event,
+                url=url[:120],
+                reason=reason,
+                decision="filter",
+            )
+        else:
+            log.info(
+                "inbound_url_pre_screen_kept",
+                url=url[:120],
+                reason=reason,
+                decision="keep",
+            )
+        return is_noise
 
     def run(
         self,
@@ -644,13 +826,18 @@ class InboundSentimentService:
                     log.info("inbound_url_cross_run_dedup", url=url[:80])
                     continue
 
-                # Pre-screen URL to drop obvious lists, blogs, or competitors
-                if self._is_noise_url(url):
-                    log.info("inbound_url_pre_screen_filtered", url=url[:80])
-                    continue
-
                 title   = result.get("title", "")
                 snippet = result.get("snippet", "")
+
+                # Pre-screen: drop pure noise; keep review platforms + candidate blogs.
+                # Pass title/snippet so soft blog filter can retain complaint posts.
+                if self._is_noise_url(url, title=title, snippet=snippet):
+                    log.info(
+                        "inbound_url_pre_screen_filtered",
+                        url=url[:120],
+                        title=(title or "")[:60],
+                    )
+                    continue
 
                 scored = _score_with_gemini(
                     title,

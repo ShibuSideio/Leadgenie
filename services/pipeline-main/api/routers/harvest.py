@@ -8,9 +8,12 @@ of the Serper /produce sweep. Called by Cloud Scheduler every 4 hours via
 Orchestrator /cron/harvest-sweep fan-out.
 
 Key difference from /produce:
-  - /produce runs BOTH Serper (QueryBrain) AND signal harvest
-  - /harvest runs ONLY signal harvest (no Serper, no QueryBrain)
-  - This allows fresh signals to surface between 6-hour Serper sweeps
+  - /produce runs QueryBrain Serper AND signal harvest with allow_serper=True
+  - /harvest runs ONLY free (non-Serper) signal sources: Reddit RSS, HN,
+    RSS feeds, classifieds, consumer forums, job posts, YouTube, etc.
+  - SerperDiscovery, Google Reviews (Maps+Reviews), and Reddit Serper
+    fallback are HARD-BLOCKED here (allow_serper=False). No API key is
+    loaded. Automatic harvest must never burn Serper credits.
 
 Auth: @require_tasks_oidc (same as /produce and /dispatch)
 Payload: { "tenant_id": str, "campaign_id": str }
@@ -18,15 +21,13 @@ Payload: { "tenant_id": str, "campaign_id": str }
 from __future__ import annotations
 
 import datetime
-import os
 
 from flask import Blueprint, jsonify, request
 
-from core.clients import get_db, get_sm_client                       # type: ignore[import]
-from core.config import SERPER_API_KEY_NAME                           # type: ignore[import]
-from core.logging import get_logger                                   # type: ignore[import]
-from middleware.oidc import require_tasks_oidc                        # type: ignore[import]
-from services.signal_harvest import harvest_signals                   # type: ignore[import]
+from core.clients import get_db                                           # type: ignore[import]
+from core.logging import get_logger                                       # type: ignore[import]
+from middleware.oidc import require_tasks_oidc                            # type: ignore[import]
+from services.signal_harvest import harvest_signals                       # type: ignore[import]
 
 bp  = Blueprint("harvest", __name__)
 log = get_logger("pipeline.harvest")
@@ -36,20 +37,15 @@ def _db():
     return get_db()
 
 
-def _get_serper_key() -> str:
-    client   = get_sm_client()
-    response = client.access_secret_version(request={"name": SERPER_API_KEY_NAME})
-    return response.payload.data.decode("utf-8")
-
-
 @bp.route("/harvest", methods=["POST"])
 @require_tasks_oidc
 def harvest():
-    """V25.2.0 — Signal harvest endpoint (4-hour cadence).
+    """V25.2.0 — Free-source signal harvest endpoint (4-hour cadence).
 
-    Runs signal_harvest.harvest_signals() for a single campaign.
-    Writes signals to scraped_cache + unprocessed_queue (same as /produce).
-    Does NOT run Serper/QueryBrain — that is /produce's responsibility.
+    Runs signal_harvest.harvest_signals() for a single campaign with
+    allow_serper=False. Writes free-source signals to scraped_cache +
+    unprocessed_queue. Does NOT load a Serper key and does NOT run
+    SerperDiscovery / Google Reviews / Reddit Serper fallback.
 
     Request body: {"tenant_id": "...", "campaign_id": "..."}
     Returns: harvest metrics dict
@@ -93,25 +89,22 @@ def harvest():
         )
         return jsonify({"message": "Campaign is not active — harvest skipped", "skipped": True}), 200
 
-    # Run harvest
+    # Run free-source harvest only — never load Serper credentials here.
     log.info(
         "harvest_start",
         campaign_id=campaign_id,
         tenant_id=tenant_id,
         archetype=campaign.get("sourcing_vector", "B2B"),
+        allow_serper=False,
+        note="Free sources only. Serper blocked on automatic harvest path.",
     )
 
     try:
-        serper_key = _get_serper_key()
-    except Exception as exc:
-        log.warning("harvest_serper_key_failed", error=str(exc), note="Proceeding without SerperDiscoverySource.")
-        serper_key = ""
-
-    try:
         metrics = harvest_signals(
-            campaign      = campaign,
-            db            = _db(),
-            serper_api_key= serper_key,
+            campaign       = campaign,
+            db             = _db(),
+            serper_api_key = "",
+            allow_serper   = False,
         )
     except Exception as exc:
         log.error(
@@ -153,5 +146,6 @@ def harvest():
         "campaign_id": campaign_id,
         "tenant_id":   tenant_id,
         "metrics":     metrics,
+        "allow_serper": False,
         "harvested_at": datetime.datetime.utcnow().isoformat() + "Z",
     }), 200

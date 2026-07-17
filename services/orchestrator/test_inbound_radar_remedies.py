@@ -25,20 +25,31 @@ from gemini_service import pre_filter_gemini
 class TestInboundRadarRemedies(unittest.TestCase):
 
     def test_url_pre_screen_filter(self):
-        """Verify that _is_noise_url correctly identifies and filters directories, listicles, and competitor URLs."""
+        """Inbound pre-screen keeps review platforms; drops pure noise only."""
         svc = InboundSentimentService(
             persona={"competitors": ["competitorone", "competitor two"]},
             campaign={}
         )
-        
-        # Obvious directories / aggregators
-        self.assertTrue(svc._is_noise_url("https://www.g2.com/products/competitor/reviews"))
-        self.assertTrue(svc._is_noise_url("https://yelp.com/biz/local-business"))
-        self.assertTrue(svc._is_noise_url("https://capterra.com/reviews/123"))
-        
-        # Path-based listicles / blogs / jobs
-        self.assertTrue(svc._is_noise_url("https://example.com/blog/how-to-do-leads"))
-        self.assertTrue(svc._is_noise_url("https://example.com/article/lead-gen-tips"))
+
+        # Review platforms — HIGH VALUE for inbound sentiment (must KEEP)
+        self.assertFalse(svc._is_noise_url(
+            "https://www.trustpilot.com/review/acme-crm.com"
+        ))
+        self.assertFalse(svc._is_noise_url(
+            "https://www.g2.com/products/competitor/reviews"
+        ))
+        self.assertFalse(svc._is_noise_url("https://yelp.com/biz/local-business"))
+        self.assertFalse(svc._is_noise_url("https://capterra.com/reviews/123"))
+        self.assertFalse(svc._is_noise_url(
+            "https://www.sitejabber.com/reviews/example.com"
+        ))
+        self.assertFalse(svc._is_noise_url(
+            "https://www.trustradius.com/products/acme/reviews"
+        ))
+
+        # True noise: data brokers, job boards, auth, SEO listicles
+        self.assertTrue(svc._is_noise_url("https://www.zoominfo.com/c/acme"))
+        self.assertTrue(svc._is_noise_url("https://www.wikipedia.org/wiki/CRM"))
         self.assertTrue(svc._is_noise_url("https://example.com/best-lead-generation-tools"))
         self.assertTrue(svc._is_noise_url("https://example.com/top-10-alternatives"))
         self.assertTrue(svc._is_noise_url("https://example.com/vs/competitor"))
@@ -46,17 +57,46 @@ class TestInboundRadarRemedies(unittest.TestCase):
         self.assertTrue(svc._is_noise_url("https://example.com/pricing"))
         self.assertTrue(svc._is_noise_url("https://example.com/login"))
         self.assertTrue(svc._is_noise_url("https://example.com/careers/sdr-opening"))
-        
-        # Competitor URL check
+
+        # Competitor own sites — still filtered
         self.assertTrue(svc._is_noise_url("https://competitorone.com"))
         self.assertTrue(svc._is_noise_url("https://competitortwo.com/features"))
-        
-        # Valid footprint URLs (niche blogs, customer forums, support tickets, help boards)
-        self.assertFalse(svc._is_noise_url("https://nicheforum.net/threads/123-issues-with-billing"))
+
+        # Valid footprint URLs (forums, social, github)
+        self.assertFalse(svc._is_noise_url(
+            "https://nicheforum.net/threads/123-issues-with-billing"
+        ))
         self.assertFalse(svc._is_noise_url("https://github.com/org/repo/issues/456"))
         self.assertFalse(svc._is_noise_url("https://reddit.com/r/sales/comments/xyz"))
-        self.assertFalse(svc._is_noise_url("https://www.facebook.com/groups/muscat/posts/123456"))
+        self.assertFalse(svc._is_noise_url(
+            "https://www.facebook.com/groups/muscat/posts/123456"
+        ))
 
+        # Blogs: complaint content kept; pure SEO blog listicle dropped
+        self.assertFalse(svc._is_noise_url(
+            "https://example.com/blog/our-billing-nightmare",
+            title="We regret switching — terrible billing support",
+            snippet="Worst experience with refunds and cancellations",
+        ))
+        self.assertTrue(svc._is_noise_url(
+            "https://example.com/blog/best-crm-tools-2026",
+            title="Best CRM tools of 2026",
+            snippet="Our roundup of top software",
+        ))
+        # Bare blog URL without title still allowed (Gemini is quality gate)
+        self.assertFalse(svc._is_noise_url("https://example.com/blog/customer-story"))
+
+    def test_classify_inbound_url_reasons(self):
+        svc = InboundSentimentService(persona={}, campaign={})
+        is_noise, reason = svc.classify_inbound_url(
+            "https://www.trustpilot.com/review/foo.com"
+        )
+        self.assertFalse(is_noise)
+        self.assertEqual(reason, "allow_review_platform")
+
+        is_noise, reason = svc.classify_inbound_url("https://example.com/login")
+        self.assertTrue(is_noise)
+        self.assertIn("auth_wall", reason)
     @patch("gemini_service.call_gemini_2_5")
     def test_pre_filter_gemini_fallback(self, mock_call):
         """Verify that pre_filter_gemini falls back to python-based heuristic on exception."""

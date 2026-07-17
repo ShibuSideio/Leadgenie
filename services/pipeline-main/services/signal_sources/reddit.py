@@ -71,6 +71,9 @@ class RedditSource(BaseSignalSource):
         geo_terms:      Optional geographic filter keywords.
         max_age_days:   Discard posts older than this many days.
         max_per_source: Maximum signals returned per discover() call.
+        allow_serper:   When True (produce-gated only), empty RSS may fall
+                        back to Serper site:reddit.com queries. Harvest must
+                        leave this False so automatic jobs never burn credits.
     """
 
     source_type = "reddit"
@@ -82,12 +85,14 @@ class RedditSource(BaseSignalSource):
         geo_terms: Optional[list[str]] = None,
         max_age_days: int = 14,
         max_per_source: int = 50,
+        allow_serper: bool = False,
     ) -> None:
         self._subreddits     = [s.lstrip("r/") for s in subreddits]
         self._search_terms   = search_terms or []
         self._geo_terms      = [g.lower() for g in (geo_terms or [])]
         self._max_age_days   = max_age_days
         self._max_per_source = max_per_source
+        self._allow_serper   = bool(allow_serper)
 
         # Detect OAuth credentials for JSON API upgrade
         self._client_id     = os.environ.get("REDDIT_CLIENT_ID", "")
@@ -165,10 +170,18 @@ class RedditSource(BaseSignalSource):
         )
 
         # V26.0.4: Serper fallback — fires ONLY when RSS returns 0 items.
-        # Queries site:reddit.com/r/{subreddit} {term} via Google Search.
-        # Limited to 3 terms × 2 subreddits (max 6 queries) to control
-        # Serper credit spend.
-        if not signals and self._subreddits and self._search_terms:
+        # PRODUCE-GATED: require allow_serper=True. Harvest must never take
+        # this path (automatic jobs must not burn Serper credits).
+        # Limited to 3 terms × 2 subreddits (max 6 queries) to control spend.
+        if not signals and self._subreddits and self._search_terms and not self._allow_serper:
+            log.info(
+                "reddit_serper_fallback_skipped",
+                reason="not_produce_gated",
+                allow_serper=False,
+                note="RSS empty but Serper fallback blocked — harvest/free path. "
+                     "Produce-gated runs may set allow_serper=True.",
+            )
+        elif not signals and self._subreddits and self._search_terms and self._allow_serper:
             try:
                 from services.serper_service import search_serper  # type: ignore[import]
 
@@ -178,7 +191,7 @@ class RedditSource(BaseSignalSource):
                     "reddit_serper_fallback_triggered",
                     subreddits=_fallback_subs,
                     terms=_fallback_terms,
-                    note="All RSS feeds returned 0 items. Falling back to Serper.",
+                    note="All RSS feeds returned 0 items. Falling back to Serper (produce-gated).",
                 )
                 _serper_seen: set[str] = set()
                 for sub in _fallback_subs:

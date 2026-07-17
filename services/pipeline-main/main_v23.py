@@ -5,7 +5,7 @@ V25.2.0 Blueprint Registry:
   /produce   -> api/routers/produce.py      [FULL IMPL — stub retired]
   /dispatch  -> api/routers/dispatch.py     [FULL IMPL — PRISM engine active v23.3.1]
   /finalize  -> api/routers/dispatch.py     [OIDC hardened]
-  /harvest   -> api/routers/harvest.py      [V25.2.0 — 4-hour signal harvest cadence]
+  /harvest   -> api/routers/harvest.py      [V25.2.0 — free sources only; allow_serper=False]
 
 V23 Security Amendments (Enterprise Architecture Review 2026-04-18):
   1. Zero-Trust OIDC JWT validation on /produce and /dispatch via @require_tasks_oidc.
@@ -13,7 +13,7 @@ V23 Security Amendments (Enterprise Architecture Review 2026-04-18):
   3. All gRPC clients via threading.Lock DCL accessors (BQ and Tasks upgraded).
 
 V25.2.0 Additions (2026-07-03):
-  + /harvest endpoint — dedicated 4-hour signal harvest (no Serper/QueryBrain).
+  + /harvest endpoint — free non-Serper sources only (allow_serper=False hard guard).
   + signal_cluster_analyst — Gemini-powered intent clustering from BQ raw_signals.
   + signal_bq_writer — non-blocking BQ write of all scored signals (all tiers).
 """
