@@ -1,6 +1,6 @@
-# LeadGenie (Sideio) — Platform Architecture V26.8.0
+# LeadGenie (Sideio) — Platform Architecture V26.8.1
 **Technical Specification Document**
-*Last Updated: 2026-07-17 | Version: V26.8.0 — Serper Produce Gate + Inbound Radar Hardening*
+*Last Updated: 2026-07-17 | Version: V26.8.1 — Produce Recall Fix (Geo Fallback + Query Governance)*
 
 ---
 
@@ -14,8 +14,12 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 3. Pipeline-Main runs: **domain-profile resolve → intelligence-profile inference → domain-aware query generation → budget-aware source routing → scrape → domain-aware pre-filter → score → adaptive confidence qualification → entity extraction → write to Firestore**
 4. The PWA frontend listens via `onSnapshot` and renders leads in real-time
 
-### Latest implementation updates (V26.8.0)
-- **Serper produce-gate cost protection (V26.8.0):** Automatic `/harvest` and `cron_harvest_sweep` run with `allow_serper=False`. Serper-backed sources (SerperDiscovery, Google Reviews Maps+Reviews, Reddit Serper fallback) only run on the produce-gated path (`allow_serper=True`). See §7.1.
+### Latest implementation updates (V26.8.1)
+- **Produce recall fix (V26.8.1):** Low-liquidity markets (e.g. `gl=om`) force one **global Serper fallback** when geo returns 0 — including non-platform colloquial queries. High/medium liquidity still skip non-platform doubles (credit protection). See §6.2.
+- **Query governance trim (V26.8.1):** Cap `-site:` exclusions (max 6; max 4 low-liquidity); priority-aware drop; never negate positive `site:reddit.com` / platform targets; force ≥3–4 PLATFORM_MINING queries front-loaded. Logs: `produce_query_governance_trimmed`, `produce_platform_mining_forced`. See §6.2.
+- **Domain classification (V26.8.1):** Brand-strategy signals (`brand narrative`, `brand positioning`, `FMCG`, …) map to `marketing_agency` instead of weak `general_services`.
+- **Produce datetime fix (V26.8.1):** Removed local `import datetime` that shadowed module-level imports and caused `UnboundLocalError` on the dedup path (`produce_dedup_query_failed`).
+- **Serper produce-gate cost protection (V26.8.0):** Automatic `/harvest` and `cron_harvest_sweep` run with `allow_serper=False`. Serper-backed sources (SerperDiscovery, Google Reviews Maps+Reviews, Reddit Serper fallback) only run on the produce-gated path (`allow_serper=True`). See §6.1.
 - **Inbound Radar Firestore stream fix (V26.8.0):** Queries materialize via `core.firestore_utils.materialize_query()` with an explicit public `google.api_core.retry.Retry` — avoids `'_UnaryStreamMultiCallable' object has no attribute '_retry'` crashes that zeroed `signals_this_week`. Tenant/campaign/write failures are isolated. See §8.3.
 - **Inbound URL pre-screen (V26.8.0):** Review platforms (Trustpilot, G2, Capterra, Yelp, …) are **allowlisted**; `/blog/` is soft-filtered (complaint blogs kept, SEO listicles dropped). Precision over aggressive drop. See §8.3.1.
 - A shared heuristic planner now infers a campaign intelligence profile from sparse user input so the backend can make stronger decisions with minimal manual effort.
@@ -644,6 +648,61 @@ Cache is keyed by `tenant_id::sourcing_vector` with 10-minute TTL.
 
 **Still not produce-gated (known residual spend):** Inbound Radar Serper, `/dispatch` enrichment (`deep_context_serper_dork`, PRISM, mesh), agent run, digital-twin onboarding — intentional product surfaces or deferred hardening.
 
+### 6.2 Produce Recall — Geo Fallback + Query Governance (V26.8.1)
+
+**Problem fixed:** Low-liquidity campaigns (e.g. Oman Realty `gl=om`) and mis-governed portfolios returned `raw=0` on every Serper query → empty `unprocessed_queue`. Over-long `-site:` lists sterilized queries; geo-zero colloquial queries skipped global retry by design (credit protection meant for high-liquidity markets only).
+
+#### 6.2.1 Geo fallback policy (`produce.should_attempt_geo_fallback`)
+
+Consumer vectors still try **geo-restricted** Serper first (`gl` + location). When results are empty:
+
+| Condition | Action | Log |
+|-----------|--------|-----|
+| `low_liquidity_market` **or** `liquidity_level == "low"` | Always one global retry (`gl=None`) — platform **and** colloquial | `produce_geo_fallback_low_liquidity` |
+| Positive `site:` platform dork (any liquidity) | One global retry | `produce_geo_fallback` |
+| High/medium liquidity + non-platform | **Skip** global retry (credit protection) | `produce_geo_fallback_skipped` |
+| Already has results / no `gl` | No retry | — |
+
+B2B remains global-only (geo terms already in query text from query_brain).
+
+#### 6.2.2 Query governance (`query_governance.govern_query_portfolio`)
+
+| Rule | Default | Low liquidity |
+|------|---------|---------------|
+| Max `-site:` exclusions per query | **6** | **4** |
+| Trim priority | Keep high-value noise (upwork, fiverr, zoominfo, wiki, amazon); drop long-tail first | Same, tighter cap |
+| Positive-site deconflict | Never keep `-site:reddit.com` when query has `site:reddit.com` (same for quora, bayut, propertyfinder, …) | Same |
+| PLATFORM_MINING inject | Force ≥ **3–4** clean `site:` templates (bayut / propertyfinder / dubizzle / olx defaults for real estate); light negatives only (`-jobs -careers -wiki`) | Same + tighter exclusions |
+| Execution order | Platform `site:` queries **front-loaded** before colloquial | Same |
+
+Logs: `produce_query_governance_trimmed`, `produce_query_governance_applied`, `produce_platform_mining_forced`, `produce_platform_mining_execution_order`.
+
+`query_brain` also prepends platform-mining queries when strategy is PLATFORM_MINING, domain family is real_estate / manufacturing / construction / marketing_agency / …, or low-confidence marketing/professional profiles.
+
+#### 6.2.3 Domain family — marketing / brand strategy
+
+`domain_intelligence` scoring packs include brand-narrative phrases so campaigns like **Brand Narrative** classify as `marketing_agency` (not weak `general_services` at ~0.27 confidence):  
+`brand narrative`, `brand positioning`, `brand identity`, `brand architecture`, `marketing strategy`, `FMCG`, `retail marketing`, `creative agency`, etc.
+
+#### 6.2.4 Produce datetime scoping
+
+`produce()` must use module-level `from datetime import datetime, timezone`. A local `import datetime` inside the function previously caused:
+
+```text
+UnboundLocalError: cannot access local variable 'datetime' ...
+```
+
+on the dedup path (`produce_dedup_query_failed`). Fixed; regression-tested.
+
+#### 6.2.5 Observability fields
+
+Produce JSON response + `domain_impact_summary` extras include:
+
+- `geo_fallbacks_attempted` / `geo_fallbacks_succeeded`
+- `negative_filters_trimmed`
+- `platform_queries_executed`
+- `low_liquidity_market`
+
 ### Step 6: Serper Search Execution
 **Location:** `pipeline-main/services/serper_service.py`
 
@@ -1180,7 +1239,7 @@ V25.5.x introduced a 4-phase lead quality system. V25.6.0 fixed the remaining in
 - **Buyer language injection** into search queries
 - **Query exhaustion/refresh** when sources return stale content
 - **7-day blacklist TTL** (V26.0.4.1: reduced from 30 — prevents month-long starvation from a single noise rejection), 8-domain count cap (V26.0.3: reduced from 15)
-- **V26.2.0 query governance**: deterministic query portfolio balancing, blacklist-size control, and platform-mining query injection before Serper calls.
+- **V26.2.0 / V26.8.1 query governance**: deterministic query portfolio balancing, priority-aware `-site:` caps (6 / 4 low-liq), positive-site deconflict, forced PLATFORM_MINING inject + front-load before Serper calls.
 - **V26.2.0 novelty memory**: producer stores query signatures per campaign and suppresses recently repeated queries to protect Serper credits.
 - **V26.2.0 exhaustion escalation**: consecutive zero-fresh cycles raise escalation level and inject alternate objective/source packs until novelty resumes.
 
@@ -1384,6 +1443,7 @@ Normal single-company domains under B2B remain domain-level. Social/shared/consu
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V26.8.1** | **2026-07-17** | **Produce recall fix: low-liquidity geo global fallback (colloquial + platform); high/medium still skips non-platform doubles. Query governance: max 6/4 `-site:` caps, priority trim, positive-site deconflict, force ≥3–4 PLATFORM_MINING queries front-loaded. Brand Narrative → `marketing_agency` scoring. Fix `UnboundLocalError` on `datetime` in produce dedup. Observability: geo_fallbacks_*, negative_filters_trimmed, platform_queries_executed. Tests: `test_produce_geo_fallback`, governance cap/platform tests.** |
 | **V26.8.0** | **2026-07-17** | **Serper produce-gate: `/harvest` + harvest-sweep hard-block SerperDiscovery / Google Reviews / Reddit Serper fallback (`allow_serper=False`); produce path opts in. Inbound Radar: safe Firestore query materialization (explicit public Retry — fixes `_UnaryStreamMultiCallable` / `_retry` crash); defensive tenant/write isolation. Inbound URL pre-screen: allowlist review platforms (Trustpilot/G2/Capterra/…), soft `/blog/` filter, structured keep/filter reasons. Tests: `test_harvest_serper_gate`, `test_inbound_firestore_stream`, `test_inbound_url_prescreen`.** |
 | **V26.7.0** | **2026-07-16** | **Multi-entity path identity (`shared/multi_entity_hosts.py`) for portal lock/dedup/cache even under B2B; per-campaign Medium soft quota (`MEDIUM_CAMPAIGN_QUOTA_24H`, optional `campaign.medium_intake_quota_24h`) with tenant hard cap preserved; expanded velocity/identity observability.** |
 | **V26.6.0** | **2026-07-16** | **Domain/strategy/vector-aware LLM gates: `pre_filter_gemini` and `final_score_and_dm` receive structured runtime context; branched PLATFORM_MINING / COMPETITOR_TOUCHPOINT / consumer / B2B fit rules; domain-family calibration guidance; scoring_context diagnostics.** |

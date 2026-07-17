@@ -33,6 +33,28 @@ from core.clients import get_db        # type: ignore[import]
 from middleware.oidc import require_tasks_oidc  # type: ignore[import]
 
 
+def should_attempt_geo_fallback(
+    *,
+    gl: str,
+    has_results: bool,
+    is_platform_query: bool,
+    low_liquidity: bool,
+) -> tuple[bool, str]:
+    """Decide whether to retry a geo-zero Serper query on the global index.
+
+    Returns:
+        (should_retry, reason) where reason is one of:
+          no_need | low_liquidity | platform | high_liquidity_skip
+    """
+    if has_results or not (gl or "").strip():
+        return False, "no_need"
+    if low_liquidity:
+        return True, "low_liquidity"
+    if is_platform_query:
+        return True, "platform"
+    return False, "high_liquidity_skip"
+
+
 # ---------------------------------------------------------------------------
 # V25.5.0: Content age filter — reject stale Reddit/forum posts
 # ---------------------------------------------------------------------------
@@ -664,6 +686,23 @@ def produce():
     # ------------------------------------------------------------------
     raw_urls:   list[str] = []
     snippet_db: dict[str, dict] = {}
+    # Observability counters for domain_impact / produce summary (V26.8.1)
+    _geo_fallbacks_attempted = 0
+    _geo_fallbacks_succeeded = 0
+    _platform_queries_executed = 0
+    _negative_filters_trimmed = 0
+    _is_low_liquidity = bool(
+        isinstance(domain_profile, dict)
+        and (
+            domain_profile.get("low_liquidity_market")
+            or str(domain_profile.get("liquidity_level") or "").lower() == "low"
+        )
+    )
+    _liquidity_level = (
+        str(domain_profile.get("liquidity_level") or "unknown").lower()
+        if isinstance(domain_profile, dict)
+        else "unknown"
+    )
 
     # ------------------------------------------------------------------
     # V26 (Task 2.4): Case-insensitive deduplication of smart_keywords.
@@ -693,9 +732,56 @@ def produce():
         campaign=campaign,
         sourcing_vector=sourcing_vector,
         location=location,
+        domain_profile=domain_profile if isinstance(domain_profile, dict) else None,
     )
     smart_keywords = _governed.get("queries", []) or []
     _govern_stats = _governed.get("stats", {}) or {}
+    _negative_filters_trimmed = int(
+        _govern_stats.get("blacklist_sites_trimmed")
+        or _govern_stats.get("negatives_trimmed")
+        or 0
+    )
+    if _negative_filters_trimmed or int(_govern_stats.get("platform_injected") or 0):
+        log.info(
+            "produce_query_governance_trimmed",
+            campaign_id=campaign_id,
+            original_count=int(_govern_stats.get("original_count") or 0),
+            final_count=int(_govern_stats.get("final_count") or 0),
+            dropped_negatives=int(_govern_stats.get("negative_dropped") or 0),
+            blacklist_sites_trimmed=_negative_filters_trimmed,
+            platform_injected=int(_govern_stats.get("platform_injected") or 0),
+            max_site_exclusions=int(_govern_stats.get("max_site_exclusions") or 0),
+            reason=_govern_stats.get("trim_reason") or "governance_cap",
+            low_liquidity=bool(
+                isinstance(domain_profile, dict)
+                and (
+                    domain_profile.get("low_liquidity_market")
+                    or str(domain_profile.get("liquidity_level") or "").lower() == "low"
+                )
+            ),
+        )
+    _platform_qs = [
+        q for q in smart_keywords
+        if re.search(r"(?<!-)site:", q or "")
+    ]
+    if int(_govern_stats.get("platform_injected") or 0) > 0 or _platform_qs:
+        log.info(
+            "produce_platform_mining_forced",
+            campaign_id=campaign_id,
+            platform_count=int(_govern_stats.get("platform_count") or len(_platform_qs)),
+            platform_injected=int(_govern_stats.get("platform_injected") or 0),
+            primary_strategy=_govern_stats.get("primary_strategy"),
+            platform_queries=[q[:80] for q in _platform_qs[:6]],
+        )
+        log.info(
+            "produce_platform_mining_execution_order",
+            campaign_id=campaign_id,
+            order=[
+                ("platform" if re.search(r"(?<!-)site:", q or "") else "other")
+                for q in smart_keywords[:12]
+            ],
+            queries=[q[:70] for q in smart_keywords[:8]],
+        )
     log.info(
         "produce_query_governance_applied",
         campaign_id=campaign_id,
@@ -786,6 +872,14 @@ def produce():
             dropped=int(_memory_filtered.get("dropped") or 0),
             kept=int(_memory_filtered.get("kept") or 0),
         )
+    # Final front-load of platform site: queries so low-liquidity markets
+    # execute Bayut/PropertyFinder/etc. before colloquial noise queries.
+    if smart_keywords:
+        _pf = [q for q in smart_keywords if re.search(r"(?<!-)site:", q or "")]
+        _ot = [q for q in smart_keywords if not re.search(r"(?<!-)site:", q or "")]
+        if _pf:
+            smart_keywords = _pf + _ot
+
     if not smart_keywords:
         log.warning(
             "produce_query_governance_empty",
@@ -871,18 +965,25 @@ def produce():
 
         _executed_query_signatures.append(query_signature(search_query))
 
-        # V25.3.0: Split Serper strategy by sourcing vector.
-        # B2B niche queries (boolean dorks with buyer-language phrases) return
-        # 0 results on geo-restricted Google indexes (gl=in, gl=ae, etc.).
-        # The old dual-query pattern sent the geo call first then retried
-        # globally — doubling Serper credit spend with zero benefit for B2B.
-        # Consumer archetypes (B2C, D2C, B2B2C) still benefit from geo-
-        # restricted indexes because local business discovery depends on
-        # Google's locale-specific ranking.
+        # V25.3.0 / V26.8.1: Split Serper strategy by sourcing vector + liquidity.
+        # Consumer archetypes use geo-restricted indexes first (local ranking).
+        # B2B defaults to global-only (geo terms already in query text).
+        # Low-liquidity markets (e.g. gl=om) force one global fallback when
+        # geo returns 0 — even for non-platform colloquial queries — so sparse
+        # markets are not starved by the high-liquidity credit-protection skip.
         _is_consumer_vector = _is_consumer_archetype(sourcing_vector)
+        import re as _re_produce
+        _query_body = _re_produce.split(
+            r'\s+-(?:site:|wiki\b|jobs\b|careers\b|investors\b|directory\b|listicle\b|")',
+            search_query,
+            maxsplit=1,
+        )[0].strip()
+        _is_platform_query = bool(_re_produce.search(r'(?<!\-)site:', _query_body))
+        if _is_platform_query:
+            _platform_queries_executed += 1
 
         if _is_consumer_vector:
-            # Consumer: geo-restricted first, then global fallback
+            # Consumer: geo-restricted first, then conditional global fallback
             raw_results = search_serper(
                 search_query,
                 location=clean_location or None,
@@ -891,50 +992,61 @@ def produce():
                 tenant_id=tenant_id,
                 sourcing_vector=sourcing_vector,
             )
-            # V26.0.4.4: Only retry globally if the query is a structured dork
-            # (contains POSITIVE site: operators, OR booleans, or quoted phrases).
-            # Natural-language colloquial queries ("cheap property Muscat")
-            # return 0 results on BOTH geo and global indexes — retrying
-            # globally just burns a second Serper credit for nothing.
-            # V26.0.4.5 FIX: Must extract the QUERY BODY only (before the
-            # blacklist). The blacklist contains "-site:", -"login", -"our
-            # services" etc. — their quote chars and site: operators were
-            # making EVERY query look "structured", defeating the guard.
-            import re as _re_produce
-            _query_body = _re_produce.split(r'\s+-(?:site:|wiki\b|jobs\b|careers\b|investors\b|directory\b|listicle\b|")', search_query, maxsplit=1)[0].strip()
-            _is_platform_query = bool(_re_produce.search(r'(?<!\-)site:', _query_body))
-            if not raw_results and gl and _is_platform_query:
-                log.info(
-                    "produce_geo_fallback",
-                    query=search_query[:80],
-                    original_gl=gl,
-                    sourcing_vector=sourcing_vector,
-                    note="Consumer geo-restricted platform query returned 0 results. "
-                         "Retrying once on global index.",
-                    campaign_id=campaign_id,
+            if not raw_results and gl:
+                _do_fallback, _fb_reason = should_attempt_geo_fallback(
+                    gl=gl,
+                    has_results=False,
+                    is_platform_query=_is_platform_query,
+                    low_liquidity=_is_low_liquidity,
                 )
-                raw_results = search_serper(
-                    search_query,
-                    location=None,
-                    gl=None,
-                    campaign_id=campaign_id,
-                    tenant_id=tenant_id,
-                    sourcing_vector=sourcing_vector,
-                )
-            elif not raw_results and gl and not _is_platform_query:
-                log.info(
-                    "produce_geo_fallback_skipped",
-                    query=search_query[:80],
-                    original_gl=gl,
-                    sourcing_vector=sourcing_vector,
-                    note="Non-platform query returned 0 on geo — skipping global retry "
-                         "to avoid duplicate credit burn.",
-                    campaign_id=campaign_id,
-                )
+                if _do_fallback:
+                    _geo_fallbacks_attempted += 1
+                    log.info(
+                        "produce_geo_fallback_low_liquidity"
+                        if _fb_reason == "low_liquidity"
+                        else "produce_geo_fallback",
+                        query=search_query[:80],
+                        original_gl=gl,
+                        sourcing_vector=sourcing_vector,
+                        is_platform_query=_is_platform_query,
+                        low_liquidity=_is_low_liquidity,
+                        liquidity_level=_liquidity_level,
+                        fallback_reason=_fb_reason,
+                        campaign_id=campaign_id,
+                        note=(
+                            "Geo returned 0; retrying once on global index."
+                            + (
+                                " Forced for low-liquidity market."
+                                if _fb_reason == "low_liquidity"
+                                else " Platform query eligible for global fallback."
+                            )
+                        ),
+                    )
+                    raw_results = search_serper(
+                        search_query,
+                        location=None,
+                        gl=None,
+                        campaign_id=campaign_id,
+                        tenant_id=tenant_id,
+                        sourcing_vector=sourcing_vector,
+                    )
+                    if raw_results:
+                        _geo_fallbacks_succeeded += 1
+                else:
+                    log.info(
+                        "produce_geo_fallback_skipped",
+                        query=search_query[:80],
+                        original_gl=gl,
+                        sourcing_vector=sourcing_vector,
+                        low_liquidity=_is_low_liquidity,
+                        liquidity_level=_liquidity_level,
+                        fallback_reason=_fb_reason,
+                        campaign_id=campaign_id,
+                        note="Non-platform query returned 0 on geo in high/medium "
+                             "liquidity market — skipping global retry to save credits.",
+                    )
         else:
             # B2B: global-only (geo terms already in query text from query_brain).
-            # V25.3.0: B2B niche queries return 0 results on geo-restricted
-            # indexes. Geo relevance handled by Gemini scoring downstream.
             raw_results = search_serper(
                 search_query,
                 location=None,
@@ -973,10 +1085,18 @@ def produce():
                  after_noise_filter=_filtered_count,
                  rejected_stale=_rejected_stale,
                  new_urls=_new_count,
+                 is_platform_query=_is_platform_query,
                  cumulative=len(raw_urls))
 
     fetched_count = len(raw_urls)
-    log.info("TRACE-10: Serper loop complete.", fetched_count=fetched_count)
+    log.info(
+        "TRACE-10: Serper loop complete.",
+        fetched_count=fetched_count,
+        geo_fallbacks_attempted=_geo_fallbacks_attempted,
+        geo_fallbacks_succeeded=_geo_fallbacks_succeeded,
+        platform_queries_executed=_platform_queries_executed,
+        negative_filters_trimmed=_negative_filters_trimmed,
+    )
 
     # ------------------------------------------------------------------
     # Snippet cache: persist snippets universally for two-stage funnel
@@ -1214,7 +1334,10 @@ def produce():
         queued_count = len(_capped_fresh)  # Update queued_count to reflect actual appended
 
     try:
-        import datetime
+        # NOTE: Use module-level `from datetime import datetime, timezone`.
+        # A local `import datetime` here previously shadowed the binding and
+        # caused UnboundLocalError on earlier `datetime.now(...)` in this
+        # function (produce_dedup_query_failed).
         update_data = {
             "unprocessed_queue": firestore.ArrayUnion(_capped_fresh),
             "last_produced_at":  firestore.SERVER_TIMESTAMP,
@@ -1223,7 +1346,7 @@ def produce():
         # not only on first fill. A stale next_drip_due causes immediate dispatch
         # on every sweep instead of respecting the configured drip cadence.
         if _capped_fresh:
-            update_data["next_drip_due"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            update_data["next_drip_due"] = datetime.now(timezone.utc).isoformat()
 
         campaign_ref.update(update_data)
 
@@ -1285,6 +1408,11 @@ def produce():
             "deduplicated": duped_count,
             "queued": len(_capped_fresh),
             "query_count": len(smart_keywords) if isinstance(smart_keywords, list) else 0,
+            "geo_fallbacks_attempted": _geo_fallbacks_attempted,
+            "geo_fallbacks_succeeded": _geo_fallbacks_succeeded,
+            "negative_filters_trimmed": _negative_filters_trimmed,
+            "platform_queries_executed": _platform_queries_executed,
+            "low_liquidity_market": _is_low_liquidity,
         },
     )
     log.info(
@@ -1300,6 +1428,10 @@ def produce():
         liquidity_level=_produce_domain_impact.get("liquidity_level"),
         fetched=fetched_count,
         queued=len(_capped_fresh),
+        geo_fallbacks_attempted=_geo_fallbacks_attempted,
+        geo_fallbacks_succeeded=_geo_fallbacks_succeeded,
+        negative_filters_trimmed=_negative_filters_trimmed,
+        platform_queries_executed=_platform_queries_executed,
         note="End-of-produce domain intelligence impact for this campaign run.",
     )
 
@@ -1315,4 +1447,8 @@ def produce():
         # V25.1.0: Signal harvest pathway metrics
         "harvest": harvest_metrics,
         "domain_impact_summary": _produce_domain_impact,
+        "geo_fallbacks_attempted": _geo_fallbacks_attempted,
+        "geo_fallbacks_succeeded": _geo_fallbacks_succeeded,
+        "negative_filters_trimmed": _negative_filters_trimmed,
+        "platform_queries_executed": _platform_queries_executed,
     }), 200

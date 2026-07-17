@@ -322,6 +322,24 @@ _DOMAIN_TERM_PACKS: dict[str, tuple[tuple[str, float], ...]] = {
         ("growth marketing", 1.8),
         ("media buying", 1.8),
         ("social media marketing", 1.8),
+        # Brand-strategy / narrative consultancies (e.g. Brand Narrative)
+        ("brand narrative", 3.0),
+        ("brand positioning", 2.8),
+        ("brand identity", 2.6),
+        ("brand architecture", 2.6),
+        ("brand strategy", 2.5),
+        ("brand storytelling", 2.4),
+        ("marketing strategy", 2.3),
+        ("retail marketing", 2.2),
+        ("fmcg marketing", 2.4),
+        ("fmcg", 1.8),
+        ("differentiate", 1.6),
+        ("brand differentiation", 2.4),
+        ("go-to-market", 1.8),
+        ("gtm strategy", 2.0),
+        ("creative agency", 2.2),
+        ("brand consultancy", 2.5),
+        ("brand consulting", 2.5),
     ),
 }
 
@@ -694,7 +712,9 @@ _THIN_SIGNAL_HINTS: dict[str, tuple[str, ...]] = {
     ),
     "marketing_agency": (
         "agency", "seo", "ppc", "digital marketing", "growth marketing",
-        "media buying",
+        "media buying", "brand narrative", "brand positioning", "brand identity",
+        "brand architecture", "brand strategy", "marketing strategy", "fmcg",
+        "retail marketing", "creative agency", "brand consultancy",
     ),
     "professional_services": (
         "consulting", "consultancy", "advisory", "law firm", "accounting",

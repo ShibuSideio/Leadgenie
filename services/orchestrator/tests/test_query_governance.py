@@ -13,6 +13,8 @@ from services.query_governance import (
     filter_queries_against_memory,
     build_exhaustion_escalation_queries,
     query_signature,
+    _cap_blacklist_sites,
+    _is_platform_query,
 )
 
 
@@ -99,3 +101,88 @@ def test_exhaustion_escalation_queries_expand_with_level():
     assert len(level_1) >= 3
     assert len(level_3) >= len(level_1)
     assert any("site:propertyfinder.com" in q for q in level_1)
+
+
+def test_negative_site_list_is_capped():
+    q = (
+        'site:bayut.com agent Muscat '
+        '-site:upwork.com -site:fiverr.com -site:freelancer.com '
+        '-site:a.com -site:b.com -site:c.com -site:d.com -site:e.com -site:f.com'
+    )
+    capped, trimmed = _cap_blacklist_sites(q, max_sites=6)
+    site_count = sum(1 for t in capped.split() if t.startswith("-site:"))
+    assert site_count <= 6
+    assert trimmed > 0
+    # High-value noise domains retained preferentially
+    assert "-site:upwork.com" in capped or "upwork.com" in capped
+
+
+def test_never_negates_positive_platform_target():
+    q = 'site:reddit.com/r/Oman property agent -site:reddit.com -site:upwork.com'
+    capped, trimmed = _cap_blacklist_sites(q, max_sites=8)
+    assert "-site:reddit.com" not in capped
+    assert "site:reddit.com" in capped
+    assert trimmed >= 1
+
+
+def test_low_liquidity_uses_tighter_site_cap():
+    campaign = {
+        "keywords": "property Oman",
+        "intelligence_strategy": {
+            "primary": "PLATFORM_MINING",
+            "platform_targets": ["Bayut", "Property Finder", "Dubizzle", "OLX"],
+        },
+        "system_domain_profile": {
+            "domain_family": "real_estate",
+            "low_liquidity_market": True,
+            "liquidity_level": "low",
+        },
+    }
+    long_neg = (
+        '"cheap villa Muscat" '
+        '-site:a.com -site:b.com -site:c.com -site:d.com -site:e.com '
+        '-site:f.com -site:g.com -site:h.com -site:upwork.com'
+    )
+    result = govern_query_portfolio(
+        [long_neg, '"property agent Oman"'],
+        campaign=campaign,
+        sourcing_vector="B2C",
+        location="Muscat, Oman",
+        domain_profile=campaign["system_domain_profile"],
+    )
+    assert result["stats"]["max_site_exclusions"] <= 5
+    for q in result["queries"]:
+        site_excl = sum(1 for t in q.split() if t.startswith("-site:"))
+        assert site_excl <= 5
+
+
+def test_platform_mining_queries_survive_and_frontload():
+    campaign = {
+        "keywords": "property for sale Oman, villa Muscat",
+        "intelligence_strategy": {
+            "primary": "PLATFORM_MINING",
+            "platform_targets": ["Property Finder Oman", "Bayut Oman", "Dubizzle", "OLX Oman"],
+        },
+        "system_domain_profile": {
+            "domain_family": "real_estate",
+            "low_liquidity_market": True,
+            "liquidity_level": "low",
+        },
+    }
+    candidates = [
+        '"trusted property agents oman" -site:a.com -site:b.com -site:c.com -site:d.com -site:e.com -site:f.com -site:g.com',
+        '"muscat broker expensive"',
+    ]
+    result = govern_query_portfolio(
+        candidates,
+        campaign=campaign,
+        sourcing_vector="B2C",
+        location="Muscat, Oman",
+        domain_profile=campaign["system_domain_profile"],
+    )
+    governed = result["queries"]
+    platform_qs = [q for q in governed if _is_platform_query(q)]
+    assert len(platform_qs) >= 3
+    # Platform queries should lead the execution order
+    assert _is_platform_query(governed[0])
+    assert result["stats"]["platform_count"] >= 3

@@ -1704,24 +1704,60 @@ Return ONLY the JSON object. No explanation, no markdown.{_query_refresh_instruc
         _domain_family = str(domain_profile.get("domain_family") or "").strip().lower()
     _domain_wants_platforms = _domain_family in {
         "real_estate", "manufacturing", "construction", "healthcare",
-        "professional_services", "hospitality",
+        "professional_services", "hospitality", "marketing_agency",
     }
-    if _is_consumer or _domain_wants_platforms:
+    # Also force platform mining when intelligence_strategy.primary says so
+    # (not only consumer vectors / domain families).
+    _strategy_primary = ""
+    if isinstance(_strategy_plan, dict):
+        _strategy_primary = str(
+            _strategy_plan.get("primary_strategy")
+            or _strategy_plan.get("primary")
+            or ""
+        ).upper().strip()
+    if not _strategy_primary and isinstance(ctx.__dict__.get("strategy") if hasattr(ctx, "__dict__") else None, str):
+        _strategy_primary = str(getattr(ctx, "strategy", "") or "").upper().strip()
+    # Campaign strategy may live on ctx.campaign or strategy_plan
+    try:
+        _camp_strat = getattr(ctx, "campaign", None) or {}
+        if isinstance(_camp_strat, dict):
+            _intel = _camp_strat.get("intelligence_strategy") or {}
+            if isinstance(_intel, dict) and _intel.get("primary"):
+                _strategy_primary = str(_intel.get("primary") or "").upper().strip()
+    except Exception:
+        pass
+    _force_platform_strategy = "PLATFORM_MINING" in _strategy_primary
+    # Low profile confidence on marketing/professional → still inject broader discovery
+    _low_conf = False
+    if isinstance(domain_profile, dict):
+        _low_conf = str(domain_profile.get("profile_confidence") or "").lower() == "low"
+    _inject_platforms = (
+        _is_consumer
+        or _domain_wants_platforms
+        or _force_platform_strategy
+        or (_low_conf and _domain_family in {"marketing_agency", "professional_services", "general_services"})
+    )
+    if _inject_platforms:
+        # Platform mining queries: light blacklist only (full blacklist sterilizes site: dorks)
+        _pm_blacklist = " -jobs -careers -wiki"
         _platform_mining_queries = _generate_platform_mining_queries(
-            ctx, bio, kw_str, vector_label, blacklist,
+            ctx, bio, kw_str, vector_label, _pm_blacklist,
             strategy_plan=_strategy_plan,
             domain_profile=domain_profile if isinstance(domain_profile, dict) else None,
         )
         if _platform_mining_queries:
-            smart_queries.extend(_platform_mining_queries)
+            # Front-load platform queries so produce executes them first
+            smart_queries = list(_platform_mining_queries) + list(smart_queries)
             log.info(
                 "query_brain_platform_mining_injected",
                 campaign_id=ctx.campaign_id,
                 count=len(_platform_mining_queries),
-                queries=[q[:80] for q in _platform_mining_queries[:3]],
+                queries=[q[:80] for q in _platform_mining_queries[:4]],
                 domain_family=_domain_family or None,
                 domain_driven=bool(_domain_wants_platforms and not _is_consumer),
-                note="Strategy 1 (Platform Mining) queries added for "
+                strategy_forced=_force_platform_strategy,
+                low_profile_confidence=_low_conf,
+                note="Strategy 1 (Platform Mining) queries prepended for "
                      "competitor platform lead discovery.",
             )
 
