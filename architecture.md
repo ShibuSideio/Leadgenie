@@ -1,13 +1,13 @@
-# LeadGenie (Sideio) — Platform Architecture V27.0
+# LeadGenie (Sideio) — Platform Architecture V27.0.2
 **Technical Specification Document**
-*Last Updated: 2026-07-18 | Version: V27.0 — Intent Domain Orchestrator*
+*Last Updated: 2026-07-18 | Version: V27.0.2 — Intent Orchestrator packaging + Vertex project fix*
 
-### Latest: V27.0 Intent Domain Orchestrator
-- **Single brain:** `services/intelligence/orchestrator.py` builds unified `intent_profile` (use case, platform mining level, channel admission, competitor path exclusion, nourish plan, geo/yield knobs).
-- **Flag:** `V27_INTELLIGENCE_ORCHESTRATOR` (default **false** — full backward compatibility).
-- **No hard public-channel domain bans** when active: G2, Capterra, Trustpilot, Reddit, Quora, LinkedIn public, directories admitted; exclude via author/path/snippet rules only.
-- **Wired into:** produce, query_governance, `filter_serper_noise`, sanitize_query, dispatch (entity + nourish).
-- **Observability:** `intent_profile` + `last_cycle_funnel` on campaigns; structured logs at every stage.
+### Latest: V27.0.2 (flag packaging + Vertex)
+- **V27 SSOT:** `services/shared/intent_orchestrator.py` (always in pipeline image via `COPY services/shared`). BC re-export: `services/intelligence/*`.
+- **Flag fix:** Produce/dispatch import `shared.intent_orchestrator` first — no longer silently stubs `is_v27_orchestrator_enabled→False` when optional `intelligence` package is missing. Campaign `flags.v27=null` no longer suppresses env.
+- **Cloud Build:** `deploy-pipeline-main` injects `V27_INTELLIGENCE_ORCHESTRATOR=true` and `VERTEX_AI_PROJECT=lead-sniper-prod` (plus `VERTEX_AI_LOCATION`).
+- **Vertex (V27.0.1):** `init_vertex()` uses `VERTEX_AI_PROJECT` → `PROJECT_ID` → `lead-sniper-prod` (never `trendpulse-app-2025`). Platform mining Gemini 403 is fail-open with deterministic `site:` fallback.
+- **Channel admission (V27 on):** G2/Capterra/Trustpilot/Reddit/Quora/LinkedIn public never hard-blocked as domains.
 - See **§27** for full design.
 
 ---
@@ -71,11 +71,15 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 │   └── manifest.json                # PWA manifest
 ├── /services
 │   ├── /shared                      # Shared cross-service heuristics (orchestrator + pipeline)
+│   │   ├── intent_orchestrator.py   # V27 SSOT: IntentDomainOrchestrator + flag (always packaged)
 │   │   ├── intelligence_profile.py  # Deterministic strategy-profile inference + execution plan
 │   │   ├── domain_constants.py      # SSOT: KNOWN_DOMAIN_FAMILIES, is_valid_domain_family()
 │   │   ├── domain_gate.py           # Shared thresholds + enrichment_priority contracts
 │   │   ├── multi_entity_hosts.py    # V26.7: portal/aggregator path-level identity SSOT
 │   │   └── campaign_enrichment.py   # Deterministic campaign field auto-enrichment
+│   ├── /intelligence                # BC re-export of shared.intent_orchestrator (optional path)
+│   │   ├── __init__.py
+│   │   └── orchestrator.py          # from shared.intent_orchestrator import *
 │   ├── /orchestrator                # Cloud Run: REST API Gateway + Cron Dispatcher
 │   │   ├── api/routers/             # Modular Flask blueprints (campaigns, leads, visitor_signals…)
 │   │   ├── jobs/                    # inbound_sentiment_job.py (domain-aware radar cron)
@@ -1471,12 +1475,30 @@ Normal single-company domains under B2B remain domain-level. Social/shared/consu
 
 ## 27. V27 INTENT DOMAIN ORCHESTRATOR
 
-**Version:** V27.0 | **Flag:** `V27_INTELLIGENCE_ORCHESTRATOR` (default **false** — backward compatible)  
-**Package:** `services/intelligence/orchestrator.py` (deployed into pipeline as `./intelligence`)
+**Version:** V27.0.2 | **Flag:** `V27_INTELLIGENCE_ORCHESTRATOR` (default **false** in code; **true** in CI deploy for pipeline-main)  
+**Package (SSOT):** `services/shared/intent_orchestrator.py` (always in pipeline image via `COPY services/shared ./shared`)  
+**BC re-export:** `services/intelligence/orchestrator.py` → re-exports shared  
+**Docker:** `pipeline-main/Dockerfile` also copies `services/intelligence` → `./intelligence` (optional fallback import)
 
 ### 27.1 Purpose
 
 A **single cohesive brain** that understands domain + intent for real-life campaigns and drives produce, governance, channel admission, entity extraction, and nourish — replacing scattered hard-coded domain bans and one-off rules.
+
+### 27.0 Packaging & flag resolution (V27.0.2 — production bugfix)
+
+**Root cause (pre-fix):** Produce imported `intelligence.orchestrator`. On `ModuleNotFoundError`, a stub set `is_v27_orchestrator_enabled = lambda: False`, so Cloud Run env `V27_INTELLIGENCE_ORCHESTRATOR=true` was ignored and every cycle logged `produce_intent_orchestrator_skipped`.
+
+**Fix:**
+1. SSOT lives under **`shared/`** (proven packaging path, same as `domain_gate` / `multi_entity_hosts`).
+2. Produce/dispatch import order: `shared.intent_orchestrator` → fallback `intelligence.orchestrator`.
+3. Flag parse: campaign `flags.v27_intelligence_orchestrator=null` **falls through** to env (only explicit false disables when env is true).
+4. Skip logs include `skip_reason`, `available`, `import_error`, `env_raw`, `env_enabled`, `campaign_flag_*`.
+
+| Flag source | Behavior |
+|-------------|----------|
+| `os.environ["V27_INTELLIGENCE_ORCHESTRATOR"]` | Primary deploy control (`true`/`1`/`yes`/`on`; quoted `"true"` tolerated) |
+| `campaign.flags.v27_intelligence_orchestrator` | Explicit bool/string only; `null`/missing → env |
+| `campaign.v27_intelligence_orchestrator` | Same as flags top-level |
 
 ### 27.2 Intent profile (unified contract)
 
@@ -1520,9 +1542,9 @@ Built by `build_intent_profile(campaign, domain_profile)`:
 
 ### 27.5 Fail-open / BC rules
 
-- Default flag **false** — no behavior change for existing deployments.
-- Campaign override: `flags.v27_intelligence_orchestrator` or `v27_intelligence_orchestrator`.
-- Import failure of `intelligence` package → legacy path + warning log.
+- Code default for unset env is **false** (legacy path). CI/deploy sets **true** for pipeline-main (see `cloudbuild.yaml`).
+- Campaign override: explicit `flags.v27_intelligence_orchestrator` true/false only; null does not suppress env.
+- Import failure of `shared.intent_orchestrator` → legacy path + **WARNING** with `import_error` (should not happen if shared is packaged).
 - Never abort produce/dispatch because of orchestrator errors.
 - Additive Firestore fields only: `intent_profile`, `intent_profile_updated_at`, `last_cycle_funnel`, lead `nourish_*`.
 
@@ -1530,26 +1552,51 @@ Built by `build_intent_profile(campaign, domain_profile)`:
 
 | Log / field | Meaning |
 |-------------|---------|
-| `produce_intent_profile_built` | Use case + knobs for cycle |
+| `produce_intent_profile_built` | Use case + knobs for cycle; includes `env_raw` |
 | `produce_funnel_telemetry` / `last_cycle_funnel` | raw → noise → stale → queued |
 | `noise_filter_summary` (+ `v27_orchestrator`, `channel_admitted`) | Admission stats |
 | `sanitize_query_positive_site_preserved` | Free-tier site: keep |
 | `dispatch_intent_profile_loaded` | Consumer-side profile |
-| `produce_intent_orchestrator_skipped` | Flag off |
+| `produce_intent_orchestrator_skipped` | `skip_reason`: `package_unavailable` \| `flag_disabled` \| `build_returned_none`; includes `env_raw`, `import_error` |
+| `vertex_ai_initialized` / `platform_mining_vertex_project_used` | Vertex project resolution |
+| `platform_mining_gemini_skipped` | Gemini 403/empty → deterministic site: fallback |
 
-### 27.7 Deployment
+### 27.7 Deployment (Cloud Run + Cloud Build)
+
+**Dockerfile (`pipeline-main`):**
+```dockerfile
+COPY services/pipeline-main .
+COPY services/shared ./shared              # V27 SSOT + domain/multi-entity
+COPY services/intelligence ./intelligence  # optional BC re-export
+```
+
+**`cloudbuild.yaml` → `deploy-pipeline-main` injects (among others):**
+```text
+V27_INTELLIGENCE_ORCHESTRATOR=true
+VERTEX_AI_PROJECT=lead-sniper-prod
+VERTEX_AI_LOCATION=asia-south1
+PROJECT_ID=$PROJECT_ID
+LOCATION=asia-south1
+...
+```
+
+Uses `--update-env-vars` (not `--set-env-vars`) so console-only secrets are preserved.
 
 ```bash
-# pipeline-main Cloud Run
-V27_INTELLIGENCE_ORCHESTRATOR=true   # enable after UAT
+# Manual override / UAT
+V27_INTELLIGENCE_ORCHESTRATOR=true
+VERTEX_AI_PROJECT=lead-sniper-prod
 SERPER_PAID_TIER=true                # recommended with V27
 ```
 
-Dockerfile copies `services/intelligence` → `./intelligence`.
+**Post-deploy health:** produce logs must show `produce_intent_profile_built` (not skip with `package_unavailable`).
 
 ### 27.8 Tests
 
-`services/orchestrator/tests/test_intent_orchestrator_v27.py` — Oman RE, scam recovery, Kerala SaaS CAC, brand narrative, G2 admit, legacy block BC, governance force, funnel, nourish.
+| File | Coverage |
+|------|----------|
+| `test_intent_orchestrator_v27.py` | Use cases (Oman RE, scam, Kerala CAC, brand narrative), G2 admit, flag/env/null/quoted, shared import |
+| `test_vertex_project_platform_mining.py` | Vertex project resolution, no trendpulse default, Gemini 403 fallback |
 
 ### 27.9 CEO gap closure (V27.0)
 
@@ -1717,6 +1764,7 @@ All items: **fail-open** (prefer admit + score over silent drop), **structured l
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V27.0.2** | **2026-07-18** | **V27 flag audit fix: SSOT moved to `shared/intent_orchestrator.py` (always packaged). Produce no longer stubs flag to False when optional `intelligence` package missing. Campaign `flags.v27=null` no longer suppresses env. Skip logs include `skip_reason`, `env_raw`, `import_error`. Tests: null-flag / quoted-env / shared import regression.** |
 | **V27.0.1** | **2026-07-18** | **Vertex AI project fix: remove hardcoded `trendpulse-app-2025` from `init_vertex()`; resolve via `VERTEX_AI_PROJECT` → `PROJECT_ID` → `lead-sniper-prod`. Platform mining Gemini 403 is non-fatal with deterministic `site:` fallback + logs `platform_mining_vertex_project_used` / `platform_mining_gemini_skipped`. Tests: `test_vertex_project_platform_mining`.** |
 | **V27.0** | **2026-07-18** | **IntentDomainOrchestrator (`services/intelligence/orchestrator.py`): unified intent_profile for domain+use-case intelligence; flag `V27_INTELLIGENCE_ORCHESTRATOR` (default false). Channel admission replaces hard G2/Capterra bans when active; path/author exclusion; produce/governance/noise/dispatch/nourish consume profile; funnel telemetry `last_cycle_funnel`. Dockerfile copies intelligence package. Tests: `test_intent_orchestrator_v27` (Oman RE, Kerala CAC, brand narrative, scam recovery).** |
 | **V26.8.1** | **2026-07-17** | **Produce recall fix: low-liquidity geo global fallback (colloquial + platform); high/medium still skips non-platform doubles. Query governance: max 6/4 `-site:` caps, priority trim, positive-site deconflict, force ≥3–4 PLATFORM_MINING queries front-loaded. Brand Narrative → `marketing_agency` scoring. Fix `UnboundLocalError` on `datetime` in produce dedup. Observability: geo_fallbacks_*, negative_filters_trimmed, platform_queries_executed. Tests: `test_produce_geo_fallback`, governance cap/platform tests.** |

@@ -126,29 +126,54 @@ from services.serper_service import (  # type: ignore[import]
     SOCIAL_DOMAINS,
 )
 
-# V27 IntentDomainOrchestrator — fail-open import (legacy path if missing)
+# V27 IntentDomainOrchestrator — SSOT is shared.intent_orchestrator (always in image).
+# Optional intelligence.* package is a BC re-export only.
+_V27_ORCH_AVAILABLE = False
+_V27_IMPORT_ERROR: str | None = None
 try:
-    from intelligence.orchestrator import (  # type: ignore[import]
+    from shared.intent_orchestrator import (  # type: ignore[import]
         build_intent_profile,
         is_v27_orchestrator_enabled,
         funnel_snapshot,
         merge_intent_into_campaign,
+        v27_flag_diagnostics,
+        env_v27_flag,
     )
     _V27_ORCH_AVAILABLE = True
-except Exception:  # pragma: no cover - container without intelligence package
-    _V27_ORCH_AVAILABLE = False
+except Exception as _v27_imp_err:  # pragma: no cover
+    _V27_IMPORT_ERROR = f"shared.intent_orchestrator: {_v27_imp_err}"
+    try:
+        # Fallback: top-level intelligence package (monorepo / alt Docker layout)
+        from intelligence.orchestrator import (  # type: ignore[import]
+            build_intent_profile,
+            is_v27_orchestrator_enabled,
+            funnel_snapshot,
+            merge_intent_into_campaign,
+            v27_flag_diagnostics,
+            env_v27_flag,
+        )
+        _V27_ORCH_AVAILABLE = True
+        _V27_IMPORT_ERROR = None
+    except Exception as _v27_imp_err2:  # pragma: no cover
+        _V27_IMPORT_ERROR = f"{_V27_IMPORT_ERROR}; intelligence: {_v27_imp_err2}"
 
-    def build_intent_profile(*_a, **_k):  # type: ignore[misc]
-        return None
+        def build_intent_profile(*_a, **_k):  # type: ignore[misc]
+            return None
 
-    def is_v27_orchestrator_enabled(*_a, **_k):  # type: ignore[misc]
-        return False
+        def is_v27_orchestrator_enabled(*_a, **_k):  # type: ignore[misc]
+            return False
 
-    def funnel_snapshot(**kwargs):  # type: ignore[misc]
-        return dict(kwargs)
+        def funnel_snapshot(**kwargs):  # type: ignore[misc]
+            return dict(kwargs)
 
-    def merge_intent_into_campaign(campaign, _profile):  # type: ignore[misc]
-        return campaign
+        def merge_intent_into_campaign(campaign, _profile):  # type: ignore[misc]
+            return campaign
+
+        def v27_flag_diagnostics(*_a, **_k):  # type: ignore[misc]
+            return {"enabled": False, "env_raw": "", "env_enabled": False}
+
+        def env_v27_flag(*_a, **_k):  # type: ignore[misc]
+            return False, ""
 from services.telemetry import update_circuit_telemetry  # type: ignore[import]
 from shared.multi_entity_hosts import resolve_identity_key  # type: ignore[import]
 
@@ -356,7 +381,33 @@ def produce():
     _intent_profile_dict: dict = {}
     _v27_active = False
     try:
-        if _V27_ORCH_AVAILABLE and is_v27_orchestrator_enabled(campaign=campaign):
+        _flag_diag = {}
+        try:
+            _flag_diag = v27_flag_diagnostics(campaign) if _V27_ORCH_AVAILABLE else {
+                "enabled": False,
+                "env_raw": (os.environ.get("V27_INTELLIGENCE_ORCHESTRATOR") or ""),
+                "env_enabled": str(os.environ.get("V27_INTELLIGENCE_ORCHESTRATOR") or "").strip().lower()
+                in ("1", "true", "yes", "on"),
+            }
+        except Exception:
+            _flag_diag = {
+                "enabled": False,
+                "env_raw": (os.environ.get("V27_INTELLIGENCE_ORCHESTRATOR") or ""),
+            }
+
+        if not _V27_ORCH_AVAILABLE:
+            log.warning(
+                "produce_intent_orchestrator_skipped",
+                campaign_id=campaign_id,
+                available=False,
+                import_error=_V27_IMPORT_ERROR,
+                env_raw=_flag_diag.get("env_raw"),
+                env_enabled=_flag_diag.get("env_enabled"),
+                skip_reason="package_unavailable",
+                note="V27 package import failed — env flag cannot activate without shared.intent_orchestrator. "
+                     "Check Docker COPY of services/shared.",
+            )
+        elif is_v27_orchestrator_enabled(campaign=campaign):
             _intent_profile = build_intent_profile(campaign, domain_profile)
             if _intent_profile is not None:
                 _intent_profile_dict = (
@@ -391,20 +442,36 @@ def produce():
                     channel_priority=(_intent_profile_dict.get("channel_priority") or [])[:6],
                     decision_reasons=(_intent_profile_dict.get("decision_reasons") or [])[:8],
                     domain_family=_intent_profile_dict.get("domain_family"),
+                    env_raw=_flag_diag.get("env_raw"),
                     note="V27 IntentDomainOrchestrator active for this produce cycle.",
+                )
+            else:
+                log.warning(
+                    "produce_intent_orchestrator_skipped",
+                    campaign_id=campaign_id,
+                    available=True,
+                    skip_reason="build_returned_none",
+                    **{k: _flag_diag.get(k) for k in ("env_raw", "env_enabled", "campaign_flag_source")},
                 )
         else:
             log.info(
                 "produce_intent_orchestrator_skipped",
                 campaign_id=campaign_id,
-                available=_V27_ORCH_AVAILABLE,
-                note="V27_INTELLIGENCE_ORCHESTRATOR off — legacy domain/strategy path.",
+                available=True,
+                skip_reason="flag_disabled",
+                env_raw=_flag_diag.get("env_raw"),
+                env_enabled=_flag_diag.get("env_enabled"),
+                campaign_flag_source=_flag_diag.get("campaign_flag_source"),
+                campaign_flag_raw=_flag_diag.get("campaign_flag_raw"),
+                note="V27 flag off (env and/or campaign) — legacy domain/strategy path.",
             )
     except Exception as _orch_err:
         log.warning(
             "produce_intent_orchestrator_failed",
             campaign_id=campaign_id,
             error=str(_orch_err),
+            available=_V27_ORCH_AVAILABLE,
+            import_error=_V27_IMPORT_ERROR,
             note="Fail-open: continuing with legacy produce path.",
         )
         _intent_profile = None

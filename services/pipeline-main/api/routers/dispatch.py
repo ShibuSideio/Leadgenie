@@ -76,25 +76,37 @@ from services.intelligence_mesh import enrich_signals  # type: ignore[import]  #
 # of monolith code including Flask app creation and Fernet(ENCRYPTION_KEY)
 # which crashed the worker on env var gaps. This import is safe.
 
-# V27 IntentDomainOrchestrator — fail-open
+# V27 IntentDomainOrchestrator — SSOT shared.intent_orchestrator (always in image)
+_V27_ORCH_AVAILABLE = False
+_V27_IMPORT_ERROR: str | None = None
 try:
-    from intelligence.orchestrator import (  # type: ignore[import]
+    from shared.intent_orchestrator import (  # type: ignore[import]
         build_intent_profile,
         is_v27_orchestrator_enabled,
         nourish_plan_for_profile,
     )
     _V27_ORCH_AVAILABLE = True
-except Exception:  # pragma: no cover
-    _V27_ORCH_AVAILABLE = False
+except Exception as _v27_imp_err:  # pragma: no cover
+    _V27_IMPORT_ERROR = str(_v27_imp_err)
+    try:
+        from intelligence.orchestrator import (  # type: ignore[import]
+            build_intent_profile,
+            is_v27_orchestrator_enabled,
+            nourish_plan_for_profile,
+        )
+        _V27_ORCH_AVAILABLE = True
+        _V27_IMPORT_ERROR = None
+    except Exception as _v27_imp_err2:  # pragma: no cover
+        _V27_IMPORT_ERROR = f"{_V27_IMPORT_ERROR}; {_v27_imp_err2}"
 
-    def build_intent_profile(*_a, **_k):  # type: ignore[misc]
-        return None
+        def build_intent_profile(*_a, **_k):  # type: ignore[misc]
+            return None
 
-    def is_v27_orchestrator_enabled(*_a, **_k):  # type: ignore[misc]
-        return False
+        def is_v27_orchestrator_enabled(*_a, **_k):  # type: ignore[misc]
+            return False
 
-    def nourish_plan_for_profile(*_a, **_k):  # type: ignore[misc]
-        return {}
+        def nourish_plan_for_profile(*_a, **_k):  # type: ignore[misc]
+            return {}
 
 bp  = Blueprint("dispatch", __name__)
 log = get_logger("pipeline.dispatch")

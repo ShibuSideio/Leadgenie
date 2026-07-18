@@ -22,17 +22,19 @@ for path in (ROOT, PIPELINE_ROOT):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from intelligence.orchestrator import (  # noqa: E402
+from shared.intent_orchestrator import (  # noqa: E402
     USE_CASE_BRAND_NARRATIVE,
     USE_CASE_CAC_COMPETITOR_TOUCHPOINT,
     USE_CASE_PLATFORM_BUYER_MINING,
     USE_CASE_SCAM_RECOVERY,
     build_intent_profile,
     channel_is_admissible,
+    env_v27_flag,
     funnel_snapshot,
     is_v27_orchestrator_enabled,
     nourish_plan_for_profile,
     should_hard_drop_result,
+    v27_flag_diagnostics,
 )
 from services.query_governance import govern_query_portfolio  # noqa: E402
 from services.serper_service import filter_serper_noise  # noqa: E402
@@ -59,6 +61,42 @@ def test_flag_campaign_override():
         {"flags": {"v27_intelligence_orchestrator": False}},
         env={"V27_INTELLIGENCE_ORCHESTRATOR": "true"},
     ) is False
+
+
+def test_flag_null_campaign_does_not_suppress_env():
+    """Regression: flags.v27=null must fall through to env=true (prod bug)."""
+    assert is_v27_orchestrator_enabled(
+        {"flags": {"v27_intelligence_orchestrator": None}},
+        env={"V27_INTELLIGENCE_ORCHESTRATOR": "true"},
+    ) is True
+
+
+def test_flag_quoted_env_true():
+    assert is_v27_orchestrator_enabled(
+        env={"V27_INTELLIGENCE_ORCHESTRATOR": '"true"'}
+    ) is True
+    assert is_v27_orchestrator_enabled(
+        env={"V27_INTELLIGENCE_ORCHESTRATOR": "'true'"}
+    ) is True
+
+
+def test_env_v27_flag_and_diagnostics():
+    on, raw = env_v27_flag({"V27_INTELLIGENCE_ORCHESTRATOR": "true"})
+    assert on is True
+    assert raw == "true"
+    diag = v27_flag_diagnostics(
+        {"flags": {}},
+        env={"V27_INTELLIGENCE_ORCHESTRATOR": "true"},
+    )
+    assert diag["enabled"] is True
+    assert diag["env_enabled"] is True
+
+
+def test_shared_package_import_always_available():
+    """Pipeline Docker image always has shared/ — this is the production import path."""
+    import shared.intent_orchestrator as mod
+    assert hasattr(mod, "is_v27_orchestrator_enabled")
+    assert mod.is_v27_orchestrator_enabled(env={"V27_INTELLIGENCE_ORCHESTRATOR": "1"}) is True
 
 
 def test_build_inactive_when_flag_off():

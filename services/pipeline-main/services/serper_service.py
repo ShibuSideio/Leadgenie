@@ -293,11 +293,18 @@ def filter_serper_noise(
     _profile_obj = None
     try:
         if intent_profile is not None:
-            from intelligence.orchestrator import (  # type: ignore[import]
-                IntentProfile,
-                should_hard_drop_result,
-                channel_is_admissible,
-            )
+            try:
+                from shared.intent_orchestrator import (  # type: ignore[import]
+                    IntentProfile,
+                    should_hard_drop_result,
+                    channel_is_admissible,
+                )
+            except Exception:
+                from intelligence.orchestrator import (  # type: ignore[import]
+                    IntentProfile,
+                    should_hard_drop_result,
+                    channel_is_admissible,
+                )
             if isinstance(intent_profile, IntentProfile):
                 _profile_obj = intent_profile
             elif isinstance(intent_profile, dict):
@@ -325,10 +332,16 @@ def filter_serper_noise(
         # ── V27 intent-aware admission (no hard channel domain bans) ──────
         if _v27_active and _profile_obj is not None:
             try:
-                from intelligence.orchestrator import (  # type: ignore[import]
-                    should_hard_drop_result,
-                    channel_is_admissible,
-                )
+                try:
+                    from shared.intent_orchestrator import (  # type: ignore[import]
+                        should_hard_drop_result,
+                        channel_is_admissible,
+                    )
+                except Exception:
+                    from intelligence.orchestrator import (  # type: ignore[import]
+                        should_hard_drop_result,
+                        channel_is_admissible,
+                    )
                 # CDN still always dropped (asset hosts, not pages)
                 try:
                     raw_netloc = urlparse(link).netloc.lower()
@@ -500,12 +513,16 @@ def sanitize_query(query: str) -> str:
     # lead channels (reddit/quora/youtube/g2/…). Fail-open if import fails.
     _v27_preserve_site = False
     try:
-        from intelligence.orchestrator import is_v27_orchestrator_enabled  # type: ignore[import]
+        from shared.intent_orchestrator import is_v27_orchestrator_enabled  # type: ignore[import]
         _v27_preserve_site = is_v27_orchestrator_enabled()
     except Exception:
-        _v27_preserve_site = os.getenv("V27_INTELLIGENCE_ORCHESTRATOR", "").lower() in (
-            "1", "true", "yes", "on",
-        )
+        try:
+            from intelligence.orchestrator import is_v27_orchestrator_enabled  # type: ignore[import]
+            _v27_preserve_site = is_v27_orchestrator_enabled()
+        except Exception:
+            _v27_preserve_site = os.getenv("V27_INTELLIGENCE_ORCHESTRATOR", "").strip().lower() in (
+                "1", "true", "yes", "on",
+            )
 
     # V26.0.4: B2B exception — LinkedIn and Facebook are primary B2B lead sources.
     # On free tier, strip consumer-only social platforms but preserve B2B-critical ones.

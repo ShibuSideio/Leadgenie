@@ -1,6 +1,12 @@
 # =============================================================================
-# cloudbuild.yaml — LeadGenie (Sideio) V26.0.1 Enterprise Build Pipeline
-# Deploy trigger: 2026-07-04 | V26.0.1 — Multi-Strategy OSINT Engine + E2E Audit Fixes
+# cloudbuild.yaml — LeadGenie (Sideio) V27.0.2 Enterprise Build Pipeline
+# Last reviewed: 2026-07-18 | V27.0.2 — Intent orchestrator packaging + Vertex project
+#
+# V27.0.2 pipeline-main deploy env (required for production correctness):
+#   V27_INTELLIGENCE_ORCHESTRATOR=true   — IntentDomainOrchestrator (shared.intent_orchestrator)
+#   VERTEX_AI_PROJECT=lead-sniper-prod   — Gemini host (never trendpulse-app-2025)
+#   VERTEX_AI_LOCATION=asia-south1
+# Docker image includes: services/shared → ./shared, services/intelligence → ./intelligence
 #
 # Changes from V23.5.2 (2026-04-30):
 #
@@ -425,7 +431,10 @@ steps:
   - --service-account=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com
   # V23.4: ORCHESTRATOR_URL added to CI/CD inject (previously console-only).
   # Enables serper_service.py telemetry push on every fresh deploy.
-  - --update-env-vars=PROJECT_ID=$PROJECT_ID,GCP_PROJECT=$PROJECT_ID,LOCATION=asia-south1,CB_WINDOW_MINUTES=15,PIPELINE_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,ORCHESTRATOR_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,PIPELINE_MAIN_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,VERSION=$COMMIT_SHA
+  # V27.0.2: V27_INTELLIGENCE_ORCHESTRATOR + VERTEX_AI_PROJECT must be in CI so
+  # console-only env is not required for IntentDomainOrchestrator / Gemini.
+  # --update-env-vars preserves other console secrets (ENCRYPTION_KEY, SERPER, etc.).
+  - --update-env-vars=PROJECT_ID=$PROJECT_ID,GCP_PROJECT=$PROJECT_ID,LOCATION=asia-south1,VERTEX_AI_PROJECT=lead-sniper-prod,VERTEX_AI_LOCATION=asia-south1,V27_INTELLIGENCE_ORCHESTRATOR=true,CB_WINDOW_MINUTES=15,PIPELINE_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,ORCHESTRATOR_SA_EMAIL=lead-pipeline-sa@$PROJECT_ID.iam.gserviceaccount.com,PIPELINE_MAIN_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app,ORCHESTRATOR_URL=$_ORCHESTRATOR_URL,VERSION=$COMMIT_SHA
   - --quiet
 
 
