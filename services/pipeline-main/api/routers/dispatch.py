@@ -76,6 +76,26 @@ from services.intelligence_mesh import enrich_signals  # type: ignore[import]  #
 # of monolith code including Flask app creation and Fernet(ENCRYPTION_KEY)
 # which crashed the worker on env var gaps. This import is safe.
 
+# V27 IntentDomainOrchestrator — fail-open
+try:
+    from intelligence.orchestrator import (  # type: ignore[import]
+        build_intent_profile,
+        is_v27_orchestrator_enabled,
+        nourish_plan_for_profile,
+    )
+    _V27_ORCH_AVAILABLE = True
+except Exception:  # pragma: no cover
+    _V27_ORCH_AVAILABLE = False
+
+    def build_intent_profile(*_a, **_k):  # type: ignore[misc]
+        return None
+
+    def is_v27_orchestrator_enabled(*_a, **_k):  # type: ignore[misc]
+        return False
+
+    def nourish_plan_for_profile(*_a, **_k):  # type: ignore[misc]
+        return {}
+
 bp  = Blueprint("dispatch", __name__)
 log = get_logger("pipeline.dispatch")
 
@@ -400,6 +420,47 @@ def dispatch():
             strictness_bias=domain_profile.get("strictness_bias"),
             note="Thin/low-confidence domain profile — milder gate/prefilter domain adjustments.",
         )
+
+    # V27 intent profile — reuse produce-written profile or rebuild (fail-open)
+    _intent_profile_dict: dict = {}
+    _v27_active = False
+    _nourish_plan: dict = {}
+    try:
+        if _V27_ORCH_AVAILABLE and is_v27_orchestrator_enabled(campaign=campaign):
+            existing = campaign.get("intent_profile")
+            if isinstance(existing, dict) and existing.get("orchestrator_active"):
+                _intent_profile_dict = existing
+            else:
+                _built = build_intent_profile(campaign, domain_profile)
+                if _built is not None and hasattr(_built, "to_dict"):
+                    _intent_profile_dict = _built.to_dict()
+                elif isinstance(_built, dict):
+                    _intent_profile_dict = _built
+            _v27_active = bool(_intent_profile_dict.get("orchestrator_active"))
+            if _v27_active:
+                campaign["intent_profile"] = _intent_profile_dict
+                _nourish_plan = nourish_plan_for_profile(_intent_profile_dict)
+                log.info(
+                    "dispatch_intent_profile_loaded",
+                    campaign_id=campaign_id,
+                    use_case=_intent_profile_dict.get("use_case"),
+                    primary_strategy=_intent_profile_dict.get("primary_strategy"),
+                    nourish_depth=_intent_profile_dict.get("nourish_depth"),
+                    entity_extraction_enabled=_intent_profile_dict.get("entity_extraction_enabled"),
+                    soft_directory_prefilter=_intent_profile_dict.get("soft_directory_prefilter"),
+                    decision_reasons=(_intent_profile_dict.get("decision_reasons") or [])[:6],
+                    note="V27 IntentDomainOrchestrator active for dispatch.",
+                )
+    except Exception as _disp_orch_err:
+        log.warning(
+            "dispatch_intent_orchestrator_failed",
+            campaign_id=campaign_id,
+            error=str(_disp_orch_err),
+            note="Fail-open: legacy dispatch path.",
+        )
+        _v27_active = False
+        _intent_profile_dict = {}
+        _nourish_plan = {}
 
     # V25.3.1: Adaptive threshold — campaigns with thin bios (< 50 chars)
     # get a lower bar because Gemini can't produce high-confidence scores
@@ -1139,6 +1200,11 @@ def dispatch():
             # Principle: A listing page is a listing page — extract every lead from it.
             _intel_strategy = campaign.get("intelligence_strategy", {})
             _primary_strategy = _intel_strategy.get("primary", "")
+            # V27: intent profile may override strategy for extraction decisions
+            if _v27_active and _intent_profile_dict.get("primary_strategy"):
+                _primary_strategy = (
+                    str(_intent_profile_dict.get("primary_strategy") or _primary_strategy)
+                )
 
             _AGGREGATOR_DOMAINS = frozenset({
                 "g2.com", "capterra.com", "trustpilot.com", "yelp.com",
@@ -1157,6 +1223,9 @@ def dispatch():
             _strategy_wants_extraction = _primary_strategy in (
                 "PLATFORM_MINING", "COMPETITOR_TOUCHPOINT"
             )
+            # V27: entity extraction also when intent_profile.entity_extraction_enabled
+            if _v27_active and _intent_profile_dict.get("entity_extraction_enabled"):
+                _strategy_wants_extraction = True
             # V26.0.4.2: Social media URLs are NOT entity extraction targets.
             # LinkedIn posts, Reddit threads, Facebook pages etc. mention company
             # names casually — they are NOT structured directory/listing pages.
@@ -2517,6 +2586,29 @@ def _extract_entities_from_dom(
             if _entity_phone:
                 _entity_contacts.append({"platform": "phone", "uri": _entity_phone})
 
+            # V27 nourish status for entity leads (fail-open defaults)
+            _entity_nourish = {
+                "nourish_status": "partial",
+                "nourish_depth": "entity_first",
+                "nourish_priority": "realtime",
+            }
+            try:
+                _ip = campaign.get("intent_profile") if isinstance(campaign, dict) else None
+                if isinstance(_ip, dict) and _ip.get("orchestrator_active"):
+                    _np = _ip.get("nourish_plan") or {}
+                    _has_contact = bool(_entity_contacts)
+                    _entity_nourish = {
+                        "nourish_status": "complete" if (
+                            entity_name and _has_contact
+                        ) else "partial",
+                        "nourish_depth": _ip.get("nourish_depth") or "entity_first",
+                        "nourish_priority": (_np.get("priority") or "realtime"),
+                        "use_case": _ip.get("use_case"),
+                        "required_fields": _np.get("required_fields") or [],
+                    }
+            except Exception:
+                pass
+
             entity_payload = {
                 "id":                   entity_lead_id,
                 "source_url":           entity.get("profile_url") or source_url,
@@ -2552,6 +2644,7 @@ def _extract_entities_from_dom(
                 "cluster_label":        "",
                 "createdAt":            firestore.SERVER_TIMESTAMP,
                 "updatedAt":            firestore.SERVER_TIMESTAMP,
+                **_entity_nourish,
             }
 
             try:

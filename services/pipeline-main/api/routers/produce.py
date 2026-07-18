@@ -125,6 +125,30 @@ from services.serper_service import (  # type: ignore[import]
     extract_root_domain,
     SOCIAL_DOMAINS,
 )
+
+# V27 IntentDomainOrchestrator — fail-open import (legacy path if missing)
+try:
+    from intelligence.orchestrator import (  # type: ignore[import]
+        build_intent_profile,
+        is_v27_orchestrator_enabled,
+        funnel_snapshot,
+        merge_intent_into_campaign,
+    )
+    _V27_ORCH_AVAILABLE = True
+except Exception:  # pragma: no cover - container without intelligence package
+    _V27_ORCH_AVAILABLE = False
+
+    def build_intent_profile(*_a, **_k):  # type: ignore[misc]
+        return None
+
+    def is_v27_orchestrator_enabled(*_a, **_k):  # type: ignore[misc]
+        return False
+
+    def funnel_snapshot(**kwargs):  # type: ignore[misc]
+        return dict(kwargs)
+
+    def merge_intent_into_campaign(campaign, _profile):  # type: ignore[misc]
+        return campaign
 from services.telemetry import update_circuit_telemetry  # type: ignore[import]
 from shared.multi_entity_hosts import resolve_identity_key  # type: ignore[import]
 
@@ -324,6 +348,68 @@ def produce():
         override_active=bool(_domain_meta.get("override_active")),
         domain_source=_domain_meta.get("source"),
     )
+
+    # ------------------------------------------------------------------
+    # V27 IntentDomainOrchestrator — single brain (flag-gated, fail-open)
+    # ------------------------------------------------------------------
+    _intent_profile = None
+    _intent_profile_dict: dict = {}
+    _v27_active = False
+    try:
+        if _V27_ORCH_AVAILABLE and is_v27_orchestrator_enabled(campaign=campaign):
+            _intent_profile = build_intent_profile(campaign, domain_profile)
+            if _intent_profile is not None:
+                _intent_profile_dict = (
+                    _intent_profile.to_dict()
+                    if hasattr(_intent_profile, "to_dict")
+                    else dict(_intent_profile)
+                )
+                _v27_active = bool(_intent_profile_dict.get("orchestrator_active"))
+                merge_intent_into_campaign(campaign, _intent_profile)
+                # Persist for dispatch / later cycles (additive BC field)
+                try:
+                    campaign_ref.update({
+                        "intent_profile": _intent_profile_dict,
+                        "intent_profile_updated_at": firestore.SERVER_TIMESTAMP,
+                    })
+                except Exception as _ip_write_err:
+                    log.warning(
+                        "produce_intent_profile_write_failed",
+                        campaign_id=campaign_id,
+                        error=str(_ip_write_err),
+                    )
+                log.info(
+                    "produce_intent_profile_built",
+                    campaign_id=campaign_id,
+                    use_case=_intent_profile_dict.get("use_case"),
+                    primary_strategy=_intent_profile_dict.get("primary_strategy"),
+                    platform_mining_level=_intent_profile_dict.get("platform_mining_level"),
+                    buyer_intent=_intent_profile_dict.get("buyer_intent"),
+                    nourish_depth=_intent_profile_dict.get("nourish_depth"),
+                    force_geo_global_fallback=_intent_profile_dict.get("force_geo_global_fallback"),
+                    force_platform_mining=_intent_profile_dict.get("force_platform_mining"),
+                    channel_priority=(_intent_profile_dict.get("channel_priority") or [])[:6],
+                    decision_reasons=(_intent_profile_dict.get("decision_reasons") or [])[:8],
+                    domain_family=_intent_profile_dict.get("domain_family"),
+                    note="V27 IntentDomainOrchestrator active for this produce cycle.",
+                )
+        else:
+            log.info(
+                "produce_intent_orchestrator_skipped",
+                campaign_id=campaign_id,
+                available=_V27_ORCH_AVAILABLE,
+                note="V27_INTELLIGENCE_ORCHESTRATOR off — legacy domain/strategy path.",
+            )
+    except Exception as _orch_err:
+        log.warning(
+            "produce_intent_orchestrator_failed",
+            campaign_id=campaign_id,
+            error=str(_orch_err),
+            note="Fail-open: continuing with legacy produce path.",
+        )
+        _intent_profile = None
+        _intent_profile_dict = {}
+        _v27_active = False
 
     # ------------------------------------------------------------------
     # Persona Vault field extraction (V23 Persona Vault precedence fix)
@@ -691,6 +777,10 @@ def produce():
     _geo_fallbacks_succeeded = 0
     _platform_queries_executed = 0
     _negative_filters_trimmed = 0
+    _funnel_raw_hits = 0
+    _funnel_after_noise = 0
+    _funnel_after_stale = 0
+    _funnel_channel_admitted = 0
     _is_low_liquidity = bool(
         isinstance(domain_profile, dict)
         and (
@@ -698,11 +788,18 @@ def produce():
             or str(domain_profile.get("liquidity_level") or "").lower() == "low"
         )
     )
+    # V27: intent may force low-liquidity / geo fallback behaviour
+    if _v27_active and _intent_profile_dict.get("low_liquidity_market"):
+        _is_low_liquidity = True
+    if _v27_active and _intent_profile_dict.get("force_geo_global_fallback"):
+        _is_low_liquidity = True  # force geo fallback path via should_attempt_geo_fallback
     _liquidity_level = (
         str(domain_profile.get("liquidity_level") or "unknown").lower()
         if isinstance(domain_profile, dict)
         else "unknown"
     )
+    if _v27_active and _intent_profile_dict.get("liquidity_level"):
+        _liquidity_level = str(_intent_profile_dict.get("liquidity_level")).lower()
 
     # ------------------------------------------------------------------
     # V26 (Task 2.4): Case-insensitive deduplication of smart_keywords.
@@ -733,6 +830,7 @@ def produce():
         sourcing_vector=sourcing_vector,
         location=location,
         domain_profile=domain_profile if isinstance(domain_profile, dict) else None,
+        intent_profile=_intent_profile_dict if _v27_active else None,
     )
     smart_keywords = _governed.get("queries", []) or []
     _govern_stats = _governed.get("stats", {}) or {}
@@ -1059,8 +1157,13 @@ def produce():
         update_circuit_telemetry("serper_call")
 
         _raw_count = len(raw_results) if raw_results else 0
-        filtered = filter_serper_noise(raw_results)
+        _funnel_raw_hits += _raw_count
+        filtered = filter_serper_noise(
+            raw_results,
+            intent_profile=_intent_profile_dict if _v27_active else None,
+        )
         _filtered_count = len(filtered)
+        _funnel_after_noise += _filtered_count
         _new_count = 0
         _rejected_stale = 0
         for r in filtered:
@@ -1073,6 +1176,7 @@ def produce():
                 continue
             raw_urls.append(link)
             _new_count += 1
+            _funnel_after_stale += 1
             snippet_db[link] = {
                 "title":   r.get("title", ""),
                 "snippet": r.get("snippet", ""),
@@ -1086,6 +1190,7 @@ def produce():
                  rejected_stale=_rejected_stale,
                  new_urls=_new_count,
                  is_platform_query=_is_platform_query,
+                 v27_orchestrator=_v27_active,
                  cumulative=len(raw_urls))
 
     fetched_count = len(raw_urls)
@@ -1435,6 +1540,40 @@ def produce():
         note="End-of-produce domain intelligence impact for this campaign run.",
     )
 
+    # V27 funnel telemetry — additive campaign field for observability
+    _cycle_funnel = {}
+    try:
+        _cycle_funnel = funnel_snapshot(
+            intent_profile=_intent_profile_dict if _v27_active else None,
+            queries_executed=len(smart_keywords) if isinstance(smart_keywords, list) else 0,
+            raw_hits=_funnel_raw_hits,
+            after_noise=_funnel_after_noise,
+            after_stale=_funnel_after_stale,
+            queued=len(_capped_fresh),
+            geo_fallbacks_attempted=_geo_fallbacks_attempted,
+            geo_fallbacks_succeeded=_geo_fallbacks_succeeded,
+            platform_queries_executed=_platform_queries_executed,
+            noise_dropped=max(0, _funnel_raw_hits - _funnel_after_noise),
+            channel_admitted=_funnel_channel_admitted,
+            extra={
+                "deduplicated": duped_count,
+                "use_case": (_intent_profile_dict or {}).get("use_case"),
+            },
+        )
+        campaign_ref.update({"last_cycle_funnel": _cycle_funnel})
+        log.info(
+            "produce_funnel_telemetry",
+            campaign_id=campaign_id,
+            **{k: v for k, v in _cycle_funnel.items() if k != "recorded_at"},
+        )
+    except Exception as _funnel_err:
+        log.warning(
+            "produce_funnel_telemetry_failed",
+            campaign_id=campaign_id,
+            error=str(_funnel_err),
+            note="Fail-open: funnel write skipped.",
+        )
+
     log.info("TRACE-DONE: produce() complete.",
              campaign_id=campaign_id, queue_depth=len(_capped_fresh))
 
@@ -1451,4 +1590,11 @@ def produce():
         "geo_fallbacks_succeeded": _geo_fallbacks_succeeded,
         "negative_filters_trimmed": _negative_filters_trimmed,
         "platform_queries_executed": _platform_queries_executed,
+        "intent_profile": {
+            "use_case": (_intent_profile_dict or {}).get("use_case"),
+            "primary_strategy": (_intent_profile_dict or {}).get("primary_strategy"),
+            "platform_mining_level": (_intent_profile_dict or {}).get("platform_mining_level"),
+            "orchestrator_active": _v27_active,
+        } if _v27_active else None,
+        "last_cycle_funnel": _cycle_funnel or None,
     }), 200

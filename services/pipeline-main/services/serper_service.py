@@ -257,7 +257,10 @@ def extract_root_domain(url: str) -> str:
         return ""
 
 
-def filter_serper_noise(serper_results: list) -> list:
+def filter_serper_noise(
+    serper_results: list,
+    intent_profile: dict | object | None = None,
+) -> list:
     """Remove enterprise, noise-path, CDN, and bot-page results from Serper output.
 
     V24.1.1 FIX: Uses proper domain extraction and path-segment matching
@@ -267,6 +270,11 @@ def filter_serper_noise(serper_results: list) -> list:
     V24.6.3 FIX: Added per-reason telemetry counter (noise_filter_summary)
     so operators can diagnose which filter is killing results without
     expanding individual log entries.
+
+    V27.0: When ``intent_profile.orchestrator_active`` is true, public lead
+    channels (G2, Capterra, Trustpilot, Reddit, Quora, …) are **never**
+    hard-blocked as domains. Exclusion is path/snippet/intent-aware only.
+    Backward compatible: omit intent_profile → legacy hard filters.
     """
     clean = []
     # V24.6.3: per-reason counters for observability
@@ -277,11 +285,103 @@ def filter_serper_noise(serper_results: list) -> list:
     _rejected_subreddit    = 0
     _rejected_megathread   = 0
     _rejected_content_farm = 0
+    _channel_admitted      = 0
+    _intent_soft_drop      = 0
+
+    # Resolve V27 intent profile (fail-open: inactive if import/shape fails)
+    _v27_active = False
+    _profile_obj = None
+    try:
+        if intent_profile is not None:
+            from intelligence.orchestrator import (  # type: ignore[import]
+                IntentProfile,
+                should_hard_drop_result,
+                channel_is_admissible,
+            )
+            if isinstance(intent_profile, IntentProfile):
+                _profile_obj = intent_profile
+            elif isinstance(intent_profile, dict):
+                _profile_obj = IntentProfile.from_dict(intent_profile)
+            else:
+                _profile_obj = intent_profile
+            _v27_active = bool(getattr(_profile_obj, "orchestrator_active", False))
+            if isinstance(_profile_obj, dict):
+                _v27_active = bool(_profile_obj.get("orchestrator_active"))
+    except Exception as _intent_err:
+        log.warning(
+            "noise_filter_intent_profile_failed",
+            error=str(_intent_err),
+            note="Fail-open to legacy noise filter.",
+        )
+        _v27_active = False
+        _profile_obj = None
+
     for r in serper_results:
         link    = r.get("link", "").lower()
         snippet = r.get("snippet", "").lower()
         # V24.1.1: Use root domain extraction instead of substring match
         link_domain = extract_root_domain(link)
+
+        # ── V27 intent-aware admission (no hard channel domain bans) ──────
+        if _v27_active and _profile_obj is not None:
+            try:
+                from intelligence.orchestrator import (  # type: ignore[import]
+                    should_hard_drop_result,
+                    channel_is_admissible,
+                )
+                # CDN still always dropped (asset hosts, not pages)
+                try:
+                    raw_netloc = urlparse(link).netloc.lower()
+                except Exception:
+                    raw_netloc = link_domain
+                if any(raw_netloc.startswith(pfx) for pfx in _CDN_SUBDOMAIN_PREFIXES):
+                    _rejected_cdn += 1
+                    continue
+
+                drop, reason = should_hard_drop_result(
+                    r,
+                    _profile_obj,
+                    legacy_enterprise_domains=_ENTERPRISE_DOMAINS,
+                )
+                if drop:
+                    _intent_soft_drop += 1
+                    if reason.startswith("path_exclude"):
+                        _rejected_path += 1
+                    elif reason.startswith("snippet_exclude"):
+                        _rejected_snippet += 1
+                    elif "content_farm" in reason:
+                        _rejected_content_farm += 1
+                    elif "enterprise" in reason or "infrastructure" in reason:
+                        _rejected_enterprise += 1
+                    elif "megathread" in reason:
+                        _rejected_megathread += 1
+                    continue
+
+                if channel_is_admissible(link_domain, _profile_obj):
+                    _channel_admitted += 1
+
+                # Reddit news-subreddit still filtered (not a domain ban)
+                if "reddit.com" in link_domain:
+                    try:
+                        path_parts = urlparse(link).path.strip("/").lower().split("/")
+                        if len(path_parts) >= 2 and path_parts[0] == "r":
+                            if path_parts[1] in _REDDIT_NEWS_SUBREDDITS:
+                                _rejected_subreddit += 1
+                                continue
+                    except Exception:
+                        pass
+
+                clean.append(r)
+                continue
+            except Exception as _v27_loop_err:
+                log.warning(
+                    "noise_filter_v27_item_failed",
+                    error=str(_v27_loop_err),
+                    link=link[:80],
+                    note="Fail-open: item falls through to legacy checks.",
+                )
+
+        # ── Legacy path (V26 and earlier / orchestrator off) ──────────────
         if link_domain in _ENTERPRISE_DOMAINS:
             _rejected_enterprise += 1
             continue
@@ -343,8 +443,10 @@ def filter_serper_noise(serper_results: list) -> list:
     total_rejected = (
         _rejected_enterprise + _rejected_cdn + _rejected_path + _rejected_snippet
         + _rejected_subreddit + _rejected_megathread + _rejected_content_farm
+        + _intent_soft_drop
     )
-    if total_rejected > 0:
+    # Deduplicate intent soft-drop from category counters for log clarity
+    if total_rejected > 0 or _channel_admitted > 0 or _v27_active:
         log.info(
             "noise_filter_summary",
             total_in=total_in,
@@ -357,6 +459,9 @@ def filter_serper_noise(serper_results: list) -> list:
             rejected_subreddit=_rejected_subreddit,
             rejected_megathread=_rejected_megathread,
             rejected_content_farm=_rejected_content_farm,
+            v27_orchestrator=_v27_active,
+            channel_admitted=_channel_admitted,
+            intent_soft_drop=_intent_soft_drop,
         )
     return clean
 
@@ -391,12 +496,27 @@ def sanitize_query(query: str) -> str:
     if _SERPER_PAID_TIER:
         return query
 
+    # V27.0: When orchestrator is on, never strip positive site: for public
+    # lead channels (reddit/quora/youtube/g2/…). Fail-open if import fails.
+    _v27_preserve_site = False
+    try:
+        from intelligence.orchestrator import is_v27_orchestrator_enabled  # type: ignore[import]
+        _v27_preserve_site = is_v27_orchestrator_enabled()
+    except Exception:
+        _v27_preserve_site = os.getenv("V27_INTELLIGENCE_ORCHESTRATOR", "").lower() in (
+            "1", "true", "yes", "on",
+        )
 
     # V26.0.4: B2B exception — LinkedIn and Facebook are primary B2B lead sources.
     # On free tier, strip consumer-only social platforms but preserve B2B-critical ones.
     # LinkedIn company pages, posts, articles — all contain B2B buyer signals.
     # Facebook business pages — contain SMB buyer signals.
     forbidden = ["twitter", "instagram", "reddit", "quora", "youtube", "x.com"]
+    # Public channels whose positive site: must survive free-tier sanitize under V27
+    _V27_SITE_KEEP = (
+        "reddit", "quora", "youtube", "twitter", "x.com", "instagram",
+        "g2.com", "capterra", "trustpilot", "linkedin", "facebook",
+    )
 
     # Matches quoted strings (possibly with prefix like -site: or -intitle:) or parentheses or words
     token_re = re.compile(r'([^\s()"]*"[^"]*"|[()]|[^\s()"]+)')
@@ -414,11 +534,25 @@ def sanitize_query(query: str) -> str:
                 is_forbidden = True
                 break
         if is_forbidden:
+            # V27: preserve positive site: operators for public lead channels
+            if _v27_preserve_site and (
+                token_lower.startswith("site:")
+                or token_lower.startswith("-site:") is False and "site:" in token_lower
+            ):
+                if any(k in token_lower for k in _V27_SITE_KEEP) and token_lower.startswith("site:"):
+                    log.info(
+                        "sanitize_query_positive_site_preserved",
+                        token=token[:80],
+                        note="V27 orchestrator: public channel site: kept on free tier.",
+                    )
+                    clean_tokens.append(token)
+                    continue
             # V24.1.1: Log when positive site: operators are stripped
             if token_lower.startswith("site:"):
                 log.warning("sanitize_query_positive_site_stripped",
                             token=token[:80], query=query[:100],
-                            note="Set SERPER_PAID_TIER=true to preserve social site: operators.")
+                            note="Set SERPER_PAID_TIER=true or V27_INTELLIGENCE_ORCHESTRATOR=true "
+                                 "to preserve social site: operators.")
             continue
         clean_tokens.append(token)
 

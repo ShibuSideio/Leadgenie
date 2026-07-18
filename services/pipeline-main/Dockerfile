@@ -12,6 +12,8 @@ RUN pip install --no-cache-dir \
 
 COPY services/pipeline-main .
 COPY services/shared ./shared
+# V27 IntentDomainOrchestrator — single brain package
+COPY services/intelligence ./intelligence
 
 CMD exec gunicorn \
       --config gunicorn.conf.py \

@@ -315,6 +315,7 @@ def govern_query_portfolio(
     sourcing_vector: str,
     location: str,
     domain_profile: dict[str, Any] | None = None,
+    intent_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Govern candidate queries for diversity, precision, and cost safety.
 
@@ -324,15 +325,38 @@ def govern_query_portfolio(
         sourcing_vector: B2B / B2C / …
         location: Campaign location string.
         domain_profile: Optional system_domain_profile for liquidity / family.
+        intent_profile: Optional V27 intent_profile (overrides caps when active).
     """
     # Prefer explicit domain_profile; fall back to campaign snapshot.
     if domain_profile is None and isinstance(campaign.get("system_domain_profile"), dict):
         domain_profile = campaign.get("system_domain_profile")
+    if intent_profile is None and isinstance(campaign.get("intent_profile"), dict):
+        intent_profile = campaign.get("intent_profile")
 
     low_liq = _is_low_liquidity(domain_profile)
     max_sites = (
         _LOW_LIQUIDITY_MAX_SITE_EXCLUSIONS if low_liq else _DEFAULT_MAX_SITE_EXCLUSIONS
     )
+
+    # V27: intent_profile knobs override governance caps (fail-open if missing)
+    _v27_force_platform = False
+    _v27_min_platform = 0
+    _v27_neg_ratio: float | None = None
+    _v27_use_case = ""
+    if isinstance(intent_profile, dict) and intent_profile.get("orchestrator_active"):
+        try:
+            max_sites = int(
+                intent_profile.get("max_site_exclusions") or max_sites
+            )
+            _v27_force_platform = bool(intent_profile.get("force_platform_mining"))
+            _v27_min_platform = int(intent_profile.get("min_platform_queries") or 0)
+            if intent_profile.get("negative_intent_cap_ratio") is not None:
+                _v27_neg_ratio = float(intent_profile.get("negative_intent_cap_ratio"))
+            _v27_use_case = str(intent_profile.get("use_case") or "")
+            if intent_profile.get("low_liquidity_market"):
+                low_liq = True
+        except (TypeError, ValueError):
+            pass  # fail-open to defaults
 
     normalized: list[str] = []
     seen: set[str] = set()
@@ -366,9 +390,16 @@ def govern_query_portfolio(
         }
 
     primary_strategy = _primary_strategy(campaign)
+    # V27 may override primary_strategy from intent_profile
+    if isinstance(intent_profile, dict) and intent_profile.get("orchestrator_active"):
+        _ip_primary = str(intent_profile.get("primary_strategy") or "").upper().strip()
+        if _ip_primary:
+            primary_strategy = _ip_primary
+
     force_platform = (
         primary_strategy == "PLATFORM_MINING"
         or _domain_wants_platform_mining(domain_profile)
+        or _v27_force_platform
     )
 
     portfolio_size = min(12, max(6, len(normalized)))
@@ -381,6 +412,8 @@ def govern_query_portfolio(
         negative_cap_ratio = 0.35
     if low_liq:
         negative_cap_ratio = min(negative_cap_ratio, 0.25)
+    if _v27_neg_ratio is not None:
+        negative_cap_ratio = _v27_neg_ratio
     max_negative = max(1, int(portfolio_size * negative_cap_ratio))
 
     negatives: list[str] = []
@@ -401,7 +434,13 @@ def govern_query_portfolio(
     platform_injected = 0
     if force_platform:
         platform_count = sum(1 for query in selected if _is_platform_query(query))
-        min_needed = _PLATFORM_MINING_TARGET_QUERIES if primary_strategy == "PLATFORM_MINING" else _PLATFORM_MINING_MIN_QUERIES
+        min_needed = (
+            _PLATFORM_MINING_TARGET_QUERIES
+            if primary_strategy == "PLATFORM_MINING"
+            else _PLATFORM_MINING_MIN_QUERIES
+        )
+        if _v27_min_platform > 0:
+            min_needed = max(min_needed, _v27_min_platform)
         if platform_count < min_needed:
             needed = min_needed - platform_count
             for query in _build_platform_templates(
@@ -457,6 +496,11 @@ def govern_query_portfolio(
             "primary_strategy": primary_strategy or "UNKNOWN",
             "sourcing_vector": (sourcing_vector or "").upper().strip() or "UNKNOWN",
             "force_platform_mining": force_platform,
+            "v27_use_case": _v27_use_case or None,
+            "v27_orchestrator": bool(
+                isinstance(intent_profile, dict)
+                and intent_profile.get("orchestrator_active")
+            ),
         },
     }
 

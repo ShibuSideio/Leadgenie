@@ -1,6 +1,14 @@
-# LeadGenie (Sideio) — Platform Architecture V26.8.1
+# LeadGenie (Sideio) — Platform Architecture V27.0
 **Technical Specification Document**
-*Last Updated: 2026-07-17 | Version: V26.8.1 — Produce Recall Fix (Geo Fallback + Query Governance)*
+*Last Updated: 2026-07-18 | Version: V27.0 — Intent Domain Orchestrator*
+
+### Latest: V27.0 Intent Domain Orchestrator
+- **Single brain:** `services/intelligence/orchestrator.py` builds unified `intent_profile` (use case, platform mining level, channel admission, competitor path exclusion, nourish plan, geo/yield knobs).
+- **Flag:** `V27_INTELLIGENCE_ORCHESTRATOR` (default **false** — full backward compatibility).
+- **No hard public-channel domain bans** when active: G2, Capterra, Trustpilot, Reddit, Quora, LinkedIn public, directories admitted; exclude via author/path/snippet rules only.
+- **Wired into:** produce, query_governance, `filter_serper_noise`, sanitize_query, dispatch (entity + nourish).
+- **Observability:** `intent_profile` + `last_cycle_funnel` on campaigns; structured logs at every stage.
+- See **§27** for full design.
 
 ---
 
@@ -1439,10 +1447,255 @@ Normal single-company domains under B2B remain domain-level. Social/shared/consu
 
 ---
 
+## 27. V27 INTENT DOMAIN ORCHESTRATOR
+
+**Version:** V27.0 | **Flag:** `V27_INTELLIGENCE_ORCHESTRATOR` (default **false** — backward compatible)  
+**Package:** `services/intelligence/orchestrator.py` (deployed into pipeline as `./intelligence`)
+
+### 27.1 Purpose
+
+A **single cohesive brain** that understands domain + intent for real-life campaigns and drives produce, governance, channel admission, entity extraction, and nourish — replacing scattered hard-coded domain bans and one-off rules.
+
+### 27.2 Intent profile (unified contract)
+
+Built by `build_intent_profile(campaign, domain_profile)`:
+
+| Field | Role |
+|-------|------|
+| `use_case` | Real-life class: `PLATFORM_BUYER_MINING`, `SCAM_RECOVERY_PLATFORM_MINING`, `CAC_COMPETITOR_TOUCHPOINT`, `BRAND_NARRATIVE_OUTREACH`, `COLLOQUIAL_PAIN_DISCOVERY`, `EVENT_TRIGGER_MONITOR`, `PROFESSIONAL_NETWORK_OUTREACH` |
+| `buyer_intent` | high / medium / low / mixed |
+| `primary_strategy` / `secondary_strategy` | Pipeline strategy (may refine campaign strategy) |
+| `platform_mining_level` | force / prefer / optional / none |
+| `liquidity_*` / `force_geo_global_fallback` | Yield policy for sparse markets |
+| `max_site_exclusions` / `negative_intent_cap_ratio` | Query governance knobs |
+| `channel_priority` | Ordered public channels for the use case |
+| `never_block_domains` / `always_admit_channels` | Public channel matrix (G2, Capterra, Trustpilot, Reddit, Quora, LinkedIn, directories, …) |
+| `competitor_exclusion_mode` + path/snippet patterns | **No domain bans** — exclude author/seller paths and bot snippets only |
+| `nourish_depth` / `nourish_plan` / `entity_extraction_enabled` | Standardized lead nourishment |
+| `decision_reasons` | Observable classification trail |
+| `orchestrator_active` | True only when flag on |
+
+### 27.3 Real-life classification examples
+
+| Campaign signal | Use case | Effect |
+|-----------------|----------|--------|
+| Scam / fake agent / hidden fees | `SCAM_RECOVERY_PLATFORM_MINING` | Force platform mining + entity extract |
+| Oman real estate / Bayut / villa | `PLATFORM_BUYER_MINING` | Force site: portals, low-liq geo fallback |
+| High CAC / alternative to / churn | `CAC_COMPETITOR_TOUCHPOINT` | G2/Capterra/Trustpilot priority + entity |
+| Brand narrative / FMCG / marketing_agency | `BRAND_NARRATIVE_OUTREACH` | LinkedIn/Reddit/news; standard nourish |
+| Funding / hiring / expansion | `EVENT_TRIGGER_MONITOR` | News admitted; deep company context |
+
+### 27.4 Integration points (flag-gated)
+
+| Stage | Behavior when V27 on |
+|-------|----------------------|
+| **produce** | Build + persist `intent_profile`; pass to governance + `filter_serper_noise`; geo fallback honors `force_geo_global_fallback`; write `last_cycle_funnel` |
+| **query_governance** | Caps, negative ratio, min platform queries from profile |
+| **filter_serper_noise** | Public channels never hard-dropped; path/snippet/intent soft drops only |
+| **sanitize_query** | Preserve positive `site:` for public channels on free tier |
+| **dispatch** | Load/rebuild profile; entity extract when `entity_extraction_enabled`; stamp `nourish_status` on entity leads |
+| **Flag off** | Identical legacy V26 path (G2 still hard-blocked in legacy noise filter) |
+
+### 27.5 Fail-open / BC rules
+
+- Default flag **false** — no behavior change for existing deployments.
+- Campaign override: `flags.v27_intelligence_orchestrator` or `v27_intelligence_orchestrator`.
+- Import failure of `intelligence` package → legacy path + warning log.
+- Never abort produce/dispatch because of orchestrator errors.
+- Additive Firestore fields only: `intent_profile`, `intent_profile_updated_at`, `last_cycle_funnel`, lead `nourish_*`.
+
+### 27.6 Observability
+
+| Log / field | Meaning |
+|-------------|---------|
+| `produce_intent_profile_built` | Use case + knobs for cycle |
+| `produce_funnel_telemetry` / `last_cycle_funnel` | raw → noise → stale → queued |
+| `noise_filter_summary` (+ `v27_orchestrator`, `channel_admitted`) | Admission stats |
+| `sanitize_query_positive_site_preserved` | Free-tier site: keep |
+| `dispatch_intent_profile_loaded` | Consumer-side profile |
+| `produce_intent_orchestrator_skipped` | Flag off |
+
+### 27.7 Deployment
+
+```bash
+# pipeline-main Cloud Run
+V27_INTELLIGENCE_ORCHESTRATOR=true   # enable after UAT
+SERPER_PAID_TIER=true                # recommended with V27
+```
+
+Dockerfile copies `services/intelligence` → `./intelligence`.
+
+### 27.8 Tests
+
+`services/orchestrator/tests/test_intent_orchestrator_v27.py` — Oman RE, scam recovery, Kerala SaaS CAC, brand narrative, G2 admit, legacy block BC, governance force, funnel, nourish.
+
+### 27.9 CEO gap closure (V27.0)
+
+| # | Requirement | V27 state |
+|---|-------------|-----------|
+| 1 | Google snippet / public only | Unchanged legal posture; WalledGarden triangulation; no login scrapers |
+| 2 | Smart domain/intent query | Unified profile drives governance + platform force/prefer |
+| 3 | No domain block; smart exclude | **Closed when flag on** — G2/Capterra/… admitted; path/author exclude |
+| 4 | High yield public channels | Channel matrix + geo force + platform inject + funnel |
+| 5 | Leads nourished | `nourish_plan` + entity `nourish_status` |
+| 6 | Real-life use case intelligence | `classify_use_case` auto-adapt |
+| 7 | Secure/scalable/observable/legal-first | Flag BC, fail-open, structured logs, public-data only |
+
+---
+
+## 23. CEO REQUIREMENTS — CAPABILITY ARCHITECTURE & GAP AUDIT (V26.8.1)
+
+*Enterprise Solution Architect audit of the live codebase against CEO core requirements.
+Audit date: 2026-07-18. Scope: produce → query_brain → query_governance → source_router → dispatch → pre_filter → entity_extraction → nourish/enrichment. Constraints for all remediations: **fail-open**, **structured-log observable**, **backward-compatible** with existing campaigns.*
+
+### 23.1 Target capability architecture (legal-first OSINT)
+
+```
+Campaign (minimal input)
+    │
+    ├─ system_enrichment + domain_profile + intelligence_strategy   [nourish campaign]
+    │
+    ▼
+Query Brain (smart query build: colloquial + platform + strategy seeds)
+    │
+    ├─ Neg shield / RLHF exclusions (vector-scoped; never block whole channel domains
+    │   as a class — only competitor *authors/sellers* and learned noise)
+    ├─ Query governance (cap -site:, deconflict positive site:, force platform mining)
+    └─ Domain query profile (preferred sources / liquidity shaping)
+    │
+    ▼
+Serper (Google public index only) + free signal plugins (RSS/HN/Reddit public)
+    │   [no login, no API behind walls, no scraping private gardens]
+    │
+    ▼
+Result governance (strategy-aware noise filter — NOT hard domain ban of G2/Trustpilot)
+    │
+    ▼
+Pre-filter (domain/strategy-aware Gemini tiering) → Velocity / adaptive-v3
+    │
+    ▼
+PRISM / WalledGarden triangulation (public snippets only for social)
+    │
+    ├─ Entity extraction (PLATFORM_MINING / COMPETITOR_TOUCHPOINT / aggregator hosts)
+    └─ Lead nourish: deep_context_serper_dork + intelligence_mesh + confidence gate
+    │
+    ▼
+Firestore leads (new | enrichment_pending | scored_out) + BQ telemetry
+```
+
+**Legal-first invariants:** Serper Google organic/Maps/Reviews public surfaces only; PRISM GeneralDomain for open web; WalledGarden = snippet triangulation (no session login); harvest free sources only unless produce-gated; PII scrub before BQ; OIDC on internal paths.
+
+### 23.2 Gap analysis (CEO × current state)
+
+| # | Requirement | Current State | Missing / Regressed | Recommendation |
+|---|-------------|---------------|---------------------|----------------|
+| **1** | Use Google snippet to reverse-engineer leads from public data (no walled-garden trespass) | **Largely implemented.** Primary discovery is Serper Google Search (`search_serper`). Social/login surfaces use `WalledGardenHook` (snippet triangulation, not session scrape). Free RSS/HN/Reddit RSS avoid login APIs. Produce path caches Serper title+snippet in `scraped_cache`. | Residual: Inbound Radar / dispatch `deep_context` / mesh still spend Serper outside produce gate (documented residual). Free-tier `sanitize_query` still strips Reddit/Quora/YouTube `site:` tokens unless `SERPER_PAID_TIER=true` — query intent loss. | Codify “public-snippet SSOT”: paid-tier sanitizer default in prod; never invent login crawlers. Keep residual Serper paths budget-metered + audited. |
+| **2** | Dynamically search by domain/subdomain with minimal user input (smart query building) | **Strong.** `context_builder` + `campaign_enrichment` + `intelligence_profile` + `domain_intelligence` turn sparse campaigns into strategy + preferred platforms. `query_brain`: Gemini dorks, platform mining, colloquial, vocabulary seeds, RLHF/stat path. `query_governance` + exhaustion escalation + novelty memory. | Thin campaigns still depend on Gemini quality; platform mining templates skew real-estate (`agent/broker`). Domain profile wrong-family → wrong preferred sources. | Expand domain-family platform template packs (SaaS, manufacturing, marketing) as deterministic SSOT; keep Gemini as overlay. Fail-open if enrichment empty. |
+| **3** | No domain blocking; intelligently exclude authors/social pages promoting competitor products | **Partial / conflicted.** Intent is intelligent: pre-filter COMPETITOR RULE, Gemini seller exclusion, `/author/` path noise, strategy-aware keep of review sites in **queries**, neg-shield vector isolation. | **Regression:** `_ENTERPRISE_DOMAINS` hard-drops **g2.com / capterra.com** results after search — contradicts “no domain blocking” and PLATFORM_MINING. Content-farm list hard-blocks most **news** (except B2B exception set). Reddit news-subreddit + megathread filters are hard blocks (acceptable if intentional). Enrichment blacklists review hosts wholesale. Free-tier sanitize strips whole social platforms from queries. | Replace hard channel bans with **role-based exclusion**: drop seller/author/listicle *pages*, keep buyer/reviewer/entity pages. Strategy-aware allowlist override in `filter_serper_noise`. |
+| **4** | High yield from public sources | **Improved (V26.8.1) but still fragile.** Low-liquidity geo fallback, `-site:` caps, platform force-inject, multi-entity path identity, hybrid confidence promotion, directory rescue, stale window relaxed (B2C 90d). | Yield killers still live: (a) G2/Capterra result drop; (b) high/medium liquidity skip of non-platform geo fallback; (c) velocity/tenant Medium hard cap; (d) pre-filter timeout → only 6 High; (e) dedup scan limit 500; (f) queue full skip at 150; (g) content-farm news drop; (h) entity extraction rate limit 5 pages/domain/batch. | Yield SLO dashboard: raw→noise→stale→queue→prefilter→score funnels per campaign. Priority fix G2/news policy + funnel metrics. |
+| **5** | Leads must be nourished (enriched) | **Implemented on two layers.** Campaign: `derive_campaign_enrichment` + enrichment job. Lead: `deep_context_serper_dork` (Places/profile/hiring or consumer reviews), `intelligence_mesh` (hiring/reviews), Gemini `final_score_and_dm`, `enrichment_pending` for thin Medium, entity contacts. | Social/review domains on `_ENRICHMENT_SOCIAL_BLACKLIST` get **zero** deep enrich (by design for platform roots) — entity leads from G2 never get mesh if domain gated. Entity leads skip full nourish path (name/phone/email only). Mesh 3s timeout fail-silent. No standardized “nourish completeness” score on lead docs. | Define **nourish contract** per source type: directory entity → contact + company context; social post → author + pain + geo; company site → mesh full. Persist `enrichment_status` + plan. Fail-open: promote with thin fields + `enrichment_pending`. |
+| **6** | All major public channels (Reddit, Quora, Trustpilot, G2, Google Reviews, news, directories, public social) | **Partial coverage matrix.** Reddit: RSS + Serper fallback (produce). Quora: query + shared_platforms (not WAF-blocked). Trustpilot: query keep + aggregator extract. G2/Capterra: **queries allowed, results blocked** at noise filter. Google Reviews: produce-gated Maps+Reviews. News: mostly content-farm blocked; B2B exceptions only. Directories: platform mining + entity extract. LinkedIn/Facebook: unblocked V26.0.4. YouTube plugin free-source. | **G2/Capterra result path broken.** News channel largely unavailable. No first-class Trustpilot/G2 plugin (only Serper dorks + reviews mesh). Quora/Reddit quality depends on free-tier sanitize. Google Reviews cooldown 23h (6h for COMPETITOR_TOUCHPOINT only). | Channel matrix SSOT: each channel → query allow / result allow / enrich mode / legal notes. Unblock G2/Capterra results under strategy or always-as-aggregator. News allow-list by EVENT_TRIGGER + family. |
+| **7** | Secure, scalable, observable, legal-first architecture | **Solid foundation.** OIDC + Cloud Run unauthenticated-off; multi-tenant Firestore rules; produce gate; budget guard; structured logs (produce_*, pre_filter_*, noise_filter_summary, domain_impact); Serper audit BQ; PII scrub to BQ; adaptive velocity; shadow learner. | Observability gaps: no single **yield funnel** metric productized; residual ungated Serper; entity `_ENTITY_DOMAIN_COUNTS` is process-local (not multi-instance safe); SF-005 dedup scan cap; limited SLOs/alerts beyond Trace-9 timeout. Legal: no explicit robots/ToS matrix in code (policy is architectural). | Enterprise: funnel counters + alerting; distributed entity rate limit; Serper budget SLOs; document public-data legal matrix; continue fail-open gates with bounded degraded caps. |
+
+### 23.3 Low-yield root-cause map (code-backed)
+
+| Mechanism | Location | Effect on yield | Severity |
+|-----------|----------|-----------------|----------|
+| Hard block `g2.com`, `capterra.com` in result filter | `serper_service._ENTERPRISE_DOMAINS` + `filter_serper_noise` | PLATFORM_MINING / B2B review queries burn credits, return 0 | **P0** |
+| Free-tier `sanitize_query` strips reddit/quora/youtube | `serper_service.sanitize_query` | Destroys positive `site:` for free tier | **P0** if prod not paid |
+| Content-farm hard block (news) | `_CONTENT_FARM_DOMAINS` | Event/news channel near-dead except exception list | **P1** |
+| High/medium liquidity: skip non-platform geo fallback | `produce.should_attempt_geo_fallback` | Zero-result colloquial geo queries not retried globally | **P1** (by design for credits) |
+| Aggressive `-site:` before V26.8.1 | `query_governance` (now capped 6/4) | Historical sterilisation; largely mitigated | Mitigated |
+| Pre-filter timeout → max 6 High, 0 Medium | `dispatch.py` degraded mode | Batch collapse under Gemini latency | **P1** |
+| Tenant velocity + campaign Medium quota | `dispatch` velocity gate | Caps Medium intake (precision > recall) | **P2** intentional |
+| Entity extraction social skip + 5 pages/domain | `dispatch._extract_entities_from_dom` | Misses multi-entity yield on large portals | **P2** |
+| Enrichment social/review blacklist | `deep_context_serper_dork` | Nourish skip on channel domains | **P2** by design, document |
+| Dedup scan limit 500 | `produce` | Possible re-queue or miss under scale | **P2** |
+| Query novelty memory drop | `filter_queries_against_memory` | Can over-suppress until keep_minimum | **P3** fail-open |
+
+### 23.4 Channel coverage matrix (as implemented)
+
+| Channel | Query generation | Result admit | Scrape / text | Entity extract | Lead nourish |
+|---------|------------------|--------------|---------------|----------------|--------------|
+| Reddit | Yes (`site:`, RSS) | Yes (news-subs blocked) | WalledGarden snippets | No (social skip) | Snippet-only path |
+| Quora | Yes | Yes | WalledGarden | No | Snippet-only |
+| Trustpilot | Yes (strategy keep) | Yes | Aggregator | Yes if aggregator URL | Root enrich gated |
+| G2 / Capterra | Yes (strategy keep) | **NO — noise filter** | N/A if dropped early | Intended yes | Mesh can query G2 for *other* domains |
+| Google Reviews | GoogleReviewSource (produce) | Maps/Reviews APIs | Review text | Via competitor touchpoint | Inline harvest score |
+| News | EVENT / RSS / Serper | **Mostly blocked** as content farm | Rare | No | N/A |
+| Directories (Bayut, PF, etc.) | Platform mining | Yes (multi-entity path) | PRISM | Yes | Entity fields |
+| LinkedIn / Facebook | Yes (paid path) | Yes (V26.0.4) | WalledGarden / company path | No for social | Snippet / company |
+| YouTube | Plugin + queries | Free sanitize may strip | WalledGarden | No | Thin |
+
+### 23.5 Prioritized enterprise fix plan
+
+All items: **fail-open** (prefer admit + score over silent drop), **structured logs**, **BC** (flags / strategy-aware defaults; do not invalidate existing campaign docs).
+
+#### P0 — Correctness / yield blockers (1–2 sprints)
+
+1. **Strategy-aware result admit (replace hard G2/Capterra ban)**  
+   - Change `filter_serper_noise` to accept optional `sourcing_vector` + `primary_strategy` + `domain_profile`.  
+   - Never hard-drop aggregator/review hosts when strategy ∈ {PLATFORM_MINING, COMPETITOR_TOUCHPOINT} or domain preferred_sources includes them; always admit Trustpilot/G2/Capterra as *candidate* URLs, let pre-filter + competitor rules score.  
+   - Log: `noise_filter_channel_admit`, `noise_filter_channel_soft_drop`.  
+   - Flag: `NOISE_FILTER_STRATEGY_AWARE=true` (default on; off restores legacy hard ban).
+
+2. **Serper sanitizer production contract**  
+   - Ensure `SERPER_PAID_TIER=true` in Cloud Run env; add startup log `serper_tier_config`.  
+   - Even on free tier: never strip positive `site:` for keep-list (reddit, quora, youtube, trustpilot, g2).  
+   - Log: `sanitize_query_positive_site_preserved`.
+
+3. **Yield funnel telemetry (observable)**  
+   - Per produce cycle counters: `queries_executed`, `raw_hits`, `after_noise`, `after_stale`, `queued`, `geo_fallback_*`.  
+   - Per dispatch: `prefilter_high/medium/low`, `velocity_blocked`, `entity_extracted`, `promoted`, `scored_out`, `enrichment_pending`.  
+   - Persist on campaign `last_cycle_funnel` + BQ optional. BC: additive fields only.
+
+#### P1 — Channel completeness & nourish (2–3 sprints)
+
+4. **News / public mention path**  
+   - EVENT_TRIGGER + selected domain families: content-farm exception expand (regional business press) or soft-score instead of hard drop.  
+   - Fail-open: if strategy needs news and filter would zero a batch, admit top-N with `source_class=news`.
+
+5. **Lead nourish contract**  
+   - `enrichment_plan_for_priority` already exists for inbound — extend to outbound leads.  
+   - Entity leads: optional deferred mesh job (batch) without blocking `status=new`.  
+   - Persist `nourish_status`: `none|partial|complete` + missing fields list.
+
+6. **Geo fallback policy refinement**  
+   - Keep credit protection for high-liquidity colloquial; add **campaign-level override** `force_geo_global_fallback` and auto-escalate after N zero cycles (already have exhaustion level — wire to geo policy).
+
+#### P2 — Scale / security / governance (ongoing)
+
+7. **Distributed entity rate limit** (Firestore/Redis counter per domain per day), not process memory.  
+8. **SF-005 cursor dedup** when tenant leads > 500.  
+9. **Legal matrix doc** in architecture (public Google index, no credentialed social APIs, respect rate limits).  
+10. **Residual Serper spend catalog** with owner + budget cap (Inbound, mesh, digital twin).
+
+### 23.6 Non-goals / explicit non-trespass
+
+- No LinkedIn/Facebook authenticated API scraping.  
+- No CAPTCHA solving or cookie-jar session farms.  
+- No dark-web or paid data brokers without product decision.  
+- No silent fail-closed that zeros campaigns without `produce_*` / `dispatch_*` structured reasons.
+
+### 23.7 Acceptance criteria for “CEO-complete”
+
+| Requirement | Done when |
+|-------------|-----------|
+| 1 Public snippet OSINT | ≥95% of lead text origin ∈ {serper_snippet, prism_public, walled_garden_triangulation, free_rss}; zero login scrapers |
+| 2 Smart query | Sparse campaign (name+location only) produces ≥6 governed queries including ≥1 preferred channel `site:` when family known |
+| 3 Intelligent exclude | G2/Trustpilot/Reddit not hard-blocked as domains; competitor *seller* pages Low via pre-filter; author paths dropped |
+| 4 High yield | Low-liquidity campaigns: non-zero queue rate in 7d rolling; funnel visible in logs/UI |
+| 5 Nourish | ≥80% of `status=new` leads have company OR contact OR pain_point populated; thin → `enrichment_pending` not empty shell |
+| 6 Channels | Matrix green for Reddit, Quora, Trustpilot, G2, Google Reviews, news (strategy), directories, public social |
+| 7 Enterprise | OIDC, tenant isolation, Serper budget, funnel metrics, fail-open degraded caps, legal matrix documented |
+
+---
+
 ## 22. VERSION HISTORY (RECENT)
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V27.0** | **2026-07-18** | **IntentDomainOrchestrator (`services/intelligence/orchestrator.py`): unified intent_profile for domain+use-case intelligence; flag `V27_INTELLIGENCE_ORCHESTRATOR` (default false). Channel admission replaces hard G2/Capterra bans when active; path/author exclusion; produce/governance/noise/dispatch/nourish consume profile; funnel telemetry `last_cycle_funnel`. Dockerfile copies intelligence package. Tests: `test_intent_orchestrator_v27` (Oman RE, Kerala CAC, brand narrative, scam recovery).** |
 | **V26.8.1** | **2026-07-17** | **Produce recall fix: low-liquidity geo global fallback (colloquial + platform); high/medium still skips non-platform doubles. Query governance: max 6/4 `-site:` caps, priority trim, positive-site deconflict, force ≥3–4 PLATFORM_MINING queries front-loaded. Brand Narrative → `marketing_agency` scoring. Fix `UnboundLocalError` on `datetime` in produce dedup. Observability: geo_fallbacks_*, negative_filters_trimmed, platform_queries_executed. Tests: `test_produce_geo_fallback`, governance cap/platform tests.** |
 | **V26.8.0** | **2026-07-17** | **Serper produce-gate: `/harvest` + harvest-sweep hard-block SerperDiscovery / Google Reviews / Reddit Serper fallback (`allow_serper=False`); produce path opts in. Inbound Radar: safe Firestore query materialization (explicit public Retry — fixes `_UnaryStreamMultiCallable` / `_retry` crash); defensive tenant/write isolation. Inbound URL pre-screen: allowlist review platforms (Trustpilot/G2/Capterra/…), soft `/blog/` filter, structured keep/filter reasons. Tests: `test_harvest_serper_gate`, `test_inbound_firestore_stream`, `test_inbound_url_prescreen`.** |
 | **V26.7.0** | **2026-07-16** | **Multi-entity path identity (`shared/multi_entity_hosts.py`) for portal lock/dedup/cache even under B2B; per-campaign Medium soft quota (`MEDIUM_CAMPAIGN_QUOTA_24H`, optional `campaign.medium_intake_quota_24h`) with tenant hard cap preserved; expanded velocity/identity observability.** |
