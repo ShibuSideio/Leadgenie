@@ -313,6 +313,107 @@ def _domain_platform_targets(domain_profile: Optional[dict]) -> list[str]:
     return targets[:8]
 
 
+# Deterministic platform seeds when Gemini is unavailable (403 / timeout / empty).
+# Fail-open: produce continues with rule-based site: queries + pain-discovery.
+_PLATFORM_MINING_FAMILY_DEFAULTS: dict[str, list[str]] = {
+    "real_estate": ["bayut.com", "propertyfinder.com", "dubizzle.com", "olx.com"],
+    "saas": ["g2.com", "capterra.com", "trustpilot.com", "linkedin.com"],
+    "manufacturing": ["indiamart.com", "thomasnet.com", "alibaba.com"],
+    "healthcare": ["practo.com", "justdial.com", "sulekha.com"],
+    "marketing_agency": ["clutch.co", "linkedin.com", "reddit.com"],
+    "professional_services": ["linkedin.com", "clutch.co", "justdial.com"],
+    "hospitality": ["tripadvisor.com", "yelp.com", "trustpilot.com"],
+    "ecommerce": ["amazon.com", "trustpilot.com", "reddit.com"],
+    "construction": ["indiamart.com", "justdial.com", "sulekha.com"],
+}
+
+
+def _platform_mining_deterministic_fallback(
+    *,
+    campaign_id: str,
+    strategy_plan: Optional[dict],
+    domain_profile: Optional[dict],
+    domain_targets: list[str],
+    domain_family: str,
+    reason: str,
+) -> list[str]:
+    """Build site: platform-mining queries without Gemini (always fail-open)."""
+    platform_targets: list[str] = []
+    if strategy_plan:
+        platform_targets.extend(
+            [p for p in strategy_plan.get("platform_targets", []) if p][:4]
+        )
+    # Domain preferred hosts first so vertical-correct platforms win.
+    if domain_targets:
+        platform_targets = list(domain_targets) + platform_targets
+
+    family = (domain_family or "").lower()
+    if not platform_targets:
+        platform_targets = list(_PLATFORM_MINING_FAMILY_DEFAULTS.get(family) or [])
+    if not platform_targets:
+        # Last-resort generic public lead channels (never empty when mining forced)
+        platform_targets = ["linkedin.com", "reddit.com", "trustpilot.com", "g2.com"]
+
+    # Dedupe hosts while preserving order.
+    _seen_hosts: set[str] = set()
+    _deduped_targets: list[str] = []
+    for target in platform_targets:
+        domain = str(target).strip().lower()
+        if domain.startswith("http"):
+            from urllib.parse import urlparse
+            domain = urlparse(domain).netloc
+        domain = domain.replace("site:", "").replace("www.", "").split("/")[0]
+        if not domain or domain in _seen_hosts:
+            continue
+        _seen_hosts.add(domain)
+        _deduped_targets.append(domain)
+    platform_targets = _deduped_targets[:5]
+
+    geo_terms: list[str] = []
+    if strategy_plan:
+        geo_terms = [g for g in strategy_plan.get("geo_terms", []) if g][:3]
+
+    fallback_queries: list[str] = []
+    for domain in platform_targets:
+        entity_terms = ["agent", "broker", "profile", "contact"]
+        if family == "manufacturing" or "indiamart" in domain or "thomasnet" in domain:
+            entity_terms = ["supplier", "manufacturer", "RFQ", "contact"]
+        elif family == "real_estate" or any(
+            x in domain for x in ("property", "realestate", "bayut", "dubizzle", "zillow")
+        ):
+            entity_terms = ["agent", "broker", "listing", "contact"]
+        elif "g2" in domain or "capterra" in domain or "trustpilot" in domain:
+            entity_terms = ["review", "profile", "contact"]
+        elif "linkedin" in domain:
+            entity_terms = ["looking for", "recommend", "vendor"]
+        elif "reddit" in domain:
+            entity_terms = ["looking for", "recommend", "help"]
+        base = f"site:{domain} {' '.join(entity_terms[:2])}"
+        if geo_terms:
+            base = f"{base} {' '.join(geo_terms)}"
+        fallback_queries.append(f"{base} -wiki -jobs -careers")
+
+    if fallback_queries:
+        log.info(
+            "query_brain_platform_mining_domain_fallback",
+            campaign_id=campaign_id,
+            domain_family=domain_family or None,
+            count=len(fallback_queries),
+            reason=reason,
+            note="Built platform-mining fallback queries (deterministic, no Gemini).",
+        )
+        log.info(
+            "platform_mining_gemini_skipped",
+            campaign_id=campaign_id,
+            reason=reason,
+            fallback_count=len(fallback_queries),
+            domain_family=domain_family or None,
+            note="Gemini platform-mining skipped or failed; using rule-based site: queries. "
+                 "Pain-discovery queries still run.",
+        )
+    return fallback_queries[:4]
+
+
 def _generate_platform_mining_queries(
     ctx: "CampaignQueryContext",
     bio: str,
@@ -337,7 +438,7 @@ def _generate_platform_mining_queries(
 
     Returns:
         List of ready-to-use Serper queries with site: operators.
-        Empty list on Gemini failure (non-fatal).
+        On Gemini 403/timeout/empty: deterministic fallback (never raises).
     """
     from services.gemini_service import call_gemini_2_5  # type: ignore[import]
 
@@ -359,6 +460,30 @@ def _generate_platform_mining_queries(
                 seeds=domain_targets[:5],
                 note="Domain profile preferred platforms seeding platform-mining generation.",
             )
+
+    # Observability: which Vertex project will serve this Gemini call
+    _vertex_project = ""
+    try:
+        from core.config import resolve_vertex_ai_project  # type: ignore[import]
+        from core.clients import get_vertex_project  # type: ignore[import]
+        _vertex_project = get_vertex_project() or resolve_vertex_ai_project()
+    except Exception:
+        try:
+            from core.config import resolve_vertex_ai_project  # type: ignore[import]
+            _vertex_project = resolve_vertex_ai_project()
+        except Exception:
+            _vertex_project = (
+                (os.environ.get("VERTEX_AI_PROJECT") or "").strip()
+                or (os.environ.get("PROJECT_ID") or "").strip()
+                or "lead-sniper-prod"
+            )
+    log.info(
+        "platform_mining_vertex_project_used",
+        campaign_id=ctx.campaign_id,
+        vertex_project=_vertex_project,
+        note="Vertex AI project for platform-mining Gemini (VERTEX_AI_PROJECT → "
+             "PROJECT_ID → lead-sniper-prod).",
+    )
 
     _domain_family_line = f"DOMAIN FAMILY: {domain_family}\n" if domain_family else ""
     prompt = (
@@ -407,8 +532,16 @@ def _generate_platform_mining_queries(
                 "platform_mining_bad_response",
                 response_type=type(result).__name__,
                 campaign_id=ctx.campaign_id,
+                vertex_project=_vertex_project,
             )
-            return []
+            return _platform_mining_deterministic_fallback(
+                campaign_id=ctx.campaign_id,
+                strategy_plan=strategy_plan,
+                domain_profile=domain_profile,
+                domain_targets=domain_targets,
+                domain_family=domain_family,
+                reason="bad_gemini_response_type",
+            )
 
         raw_queries = [
             q.strip() for q in result.get("platform_queries", [])
@@ -431,75 +564,51 @@ def _generate_platform_mining_queries(
             campaign_id=ctx.campaign_id,
             raw_count=len(raw_queries),
             validated_count=len(validated),
+            vertex_project=_vertex_project,
         )
         if validated:
             return validated
 
+        return _platform_mining_deterministic_fallback(
+            campaign_id=ctx.campaign_id,
+            strategy_plan=strategy_plan,
+            domain_profile=domain_profile,
+            domain_targets=domain_targets,
+            domain_family=domain_family,
+            reason="empty_gemini_platform_queries",
+        )
+
     except Exception as exc:
+        err_text = str(exc)
+        err_lower = err_text.lower()
+        is_auth = any(
+            tok in err_lower
+            for tok in (
+                "403",
+                "permission",
+                "permissiondenied",
+                "permission_denied",
+                "access denied",
+                "caller does not have permission",
+                "serviceusage.services.use",
+            )
+        )
         log.warning(
             "platform_mining_generation_failed",
             campaign_id=ctx.campaign_id,
-            error=str(exc),
-            note="Non-fatal — pain-discovery queries will still run.",
+            error=err_text[:300],
+            vertex_project=_vertex_project,
+            is_auth_or_403=is_auth,
+            note="Non-fatal — deterministic platform fallback + pain-discovery still run.",
         )
-
-    # Fallback: use strategy plan + domain profile platforms when Gemini
-    # doesn't produce usable site: queries.
-    platform_targets: list[str] = []
-    if strategy_plan:
-        platform_targets.extend(
-            [p for p in strategy_plan.get("platform_targets", []) if p][:4]
+        return _platform_mining_deterministic_fallback(
+            campaign_id=ctx.campaign_id,
+            strategy_plan=strategy_plan,
+            domain_profile=domain_profile,
+            domain_targets=domain_targets,
+            domain_family=domain_family,
+            reason="gemini_403" if is_auth else f"gemini_error:{type(exc).__name__}",
         )
-    # Domain preferred hosts first so vertical-correct platforms win.
-    if domain_targets:
-        platform_targets = list(domain_targets) + platform_targets
-    # Dedupe hosts while preserving order.
-    _seen_hosts: set[str] = set()
-    _deduped_targets: list[str] = []
-    for target in platform_targets:
-        domain = str(target).strip().lower()
-        if domain.startswith("http"):
-            from urllib.parse import urlparse
-            domain = urlparse(domain).netloc
-        domain = domain.replace("site:", "").split("/")[0]
-        if not domain or domain in _seen_hosts:
-            continue
-        _seen_hosts.add(domain)
-        _deduped_targets.append(domain)
-    platform_targets = _deduped_targets[:5]
-
-    if platform_targets:
-        geo_terms = []
-        if strategy_plan:
-            geo_terms = [g for g in strategy_plan.get("geo_terms", []) if g][:3]
-        family = (domain_family or "").lower()
-        fallback_queries: list[str] = []
-        for domain in platform_targets:
-            entity_terms = ["agent", "broker", "profile", "contact"]
-            if family == "manufacturing" or "indiamart" in domain or "thomasnet" in domain:
-                entity_terms = ["supplier", "manufacturer", "RFQ", "contact"]
-            elif family == "real_estate" or any(
-                x in domain for x in ("property", "realestate", "bayut", "dubizzle", "zillow")
-            ):
-                entity_terms = ["agent", "broker", "listing", "contact"]
-            elif "g2" in domain or "capterra" in domain or "trustpilot" in domain:
-                entity_terms = ["review", "profile", "contact"]
-            base = f"site:{domain} {' '.join(entity_terms[:2])}"
-            if geo_terms:
-                base = f"{base} {' '.join(geo_terms)}"
-            fallback_queries.append(f"{base} -wiki -jobs -careers")
-        if fallback_queries:
-            if domain_targets:
-                log.info(
-                    "query_brain_platform_mining_domain_fallback",
-                    campaign_id=ctx.campaign_id,
-                    domain_family=domain_family or None,
-                    count=len(fallback_queries),
-                    note="Built platform-mining fallback queries from domain profile seeds.",
-                )
-            return fallback_queries[:4]
-
-    return []
 
 
 # ---------------------------------------------------------------------------

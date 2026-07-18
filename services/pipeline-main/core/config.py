@@ -17,6 +17,42 @@ from cryptography.fernet import Fernet
 PROJECT_ID: str = os.environ.get("PROJECT_ID", "sideio-leads-v16")
 LOCATION: str = os.environ.get("LOCATION", "asia-south1")
 
+# Vertex AI / Gemini — prefer dedicated VERTEX_AI_PROJECT so BQ/Firestore
+# PROJECT_ID can differ from the project that owns Vertex model access.
+# Default: lead-sniper-prod (production Firebase / Vertex host).
+# NEVER default to legacy/wrong projects (e.g. trendpulse-app-2025).
+_DEFAULT_VERTEX_AI_PROJECT = "lead-sniper-prod"
+
+
+def resolve_vertex_ai_project() -> str:
+    """Return the GCP project used for Vertex AI init (runtime-safe).
+
+    Precedence:
+      1. VERTEX_AI_PROJECT
+      2. PROJECT_ID
+      3. lead-sniper-prod
+    """
+    for key in ("VERTEX_AI_PROJECT", "PROJECT_ID"):
+        value = (os.environ.get(key) or "").strip()
+        if value:
+            return value
+    return _DEFAULT_VERTEX_AI_PROJECT
+
+
+def resolve_vertex_ai_location() -> str:
+    """Return Vertex AI region (VERTEX_AI_LOCATION → LOCATION → asia-south1)."""
+    for key in ("VERTEX_AI_LOCATION", "LOCATION"):
+        value = (os.environ.get(key) or "").strip()
+        if value:
+            return value
+    return "asia-south1"
+
+
+# Snapshotted at import for modules that only need a static string.
+# Prefer resolve_vertex_ai_project() in hot paths so tests can mutate env.
+VERTEX_AI_PROJECT: str = resolve_vertex_ai_project()
+VERTEX_AI_LOCATION: str = resolve_vertex_ai_location()
+
 # ---------------------------------------------------------------------------
 # Cloud Tasks / Services
 # ---------------------------------------------------------------------------

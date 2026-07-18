@@ -148,16 +148,37 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 | **Autonomous Engine** | **`autonomous-engine`** | **Cloud Run Job (no HTTP)** | **512 Mi** | **asia-south1** |
 | Frontend | Firebase Hosting | Public CDN | — | Global |
 
-**GCP Project ID:** `sideio-leads-v16`
+**GCP Project ID:** `sideio-leads-v16` (BQ / Secrets / Tasks may use this or `lead-sniper-prod`)
 **Firebase Project:** `lead-sniper-prod`
 **Cloud Tasks Queue:** `lead-pipeline-queue` (region: asia-south1)
-**Vertex AI / Gemini:** `gemini-2.5-flash` via `google-genai` SDK (2-tier fallback: primary model → `gemini-2.0-flash`)
+**Vertex AI / Gemini:** `gemini-2.5-flash` via Vertex AI SDK (2-tier fallback: primary model → `gemini-2.0-flash`)
+
+### Vertex AI project resolution (V27.0.1)
+
+`core.clients.init_vertex()` resolves the Vertex project as:
+
+```
+VERTEX_AI_PROJECT  →  PROJECT_ID  →  lead-sniper-prod
+```
+
+**Never** hardcodes legacy `trendpulse-app-2025` (403 PermissionDenied on Gemini).  
+Platform mining Gemini failures are **non-fatal**: logs `platform_mining_gemini_skipped` / `platform_mining_generation_failed` and falls back to deterministic `site:` templates; pain-discovery queries still run.
+
+| Log | Meaning |
+|-----|---------|
+| `vertex_ai_initialized` | Project + location used at first Vertex init |
+| `platform_mining_vertex_project_used` | Project logged before platform-mining Gemini call |
+| `platform_mining_gemini_skipped` | Gemini skipped/failed; rule-based platform queries used |
+| `platform_mining_generation_failed` | Exception detail (incl. 403); produce continues |
 
 ### Environment Variables
 
 ```bash
 # Orchestrator & Pipeline-Main (shared)
 PROJECT_ID=sideio-leads-v16
+# Vertex AI host (production Gemini). Prefer explicit set in Cloud Run.
+VERTEX_AI_PROJECT=lead-sniper-prod
+VERTEX_AI_LOCATION=asia-south1   # optional; falls back to LOCATION
 LOCATION=asia-south1
 QUEUE=lead-pipeline-queue
 PIPELINE_URL=https://lead-pipeline-main-222247989819.asia-south1.run.app/dispatch
@@ -177,6 +198,7 @@ MEDIUM_CAMPAIGN_QUOTA_24H=12       # Per-campaign Medium soft quota (0 = disable
 MEDIUM_CAMPAIGN_QUOTA_ENABLED=true # Master switch for campaign Medium soft quota
 MULTI_ENTITY_HOST_SUFFIXES=        # Optional comma-separated extra portal host suffixes
 SNIPPET_CACHE_TTL_HOURS=72         # Max age for snippet-cache fallback in dispatch
+V27_INTELLIGENCE_ORCHESTRATOR=false  # IntentDomainOrchestrator (default off)
 
 # Autonomous Engine
 DAILY_GEMINI_BUDGET=1000
@@ -1695,6 +1717,7 @@ All items: **fail-open** (prefer admit + score over silent drop), **structured l
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V27.0.1** | **2026-07-18** | **Vertex AI project fix: remove hardcoded `trendpulse-app-2025` from `init_vertex()`; resolve via `VERTEX_AI_PROJECT` → `PROJECT_ID` → `lead-sniper-prod`. Platform mining Gemini 403 is non-fatal with deterministic `site:` fallback + logs `platform_mining_vertex_project_used` / `platform_mining_gemini_skipped`. Tests: `test_vertex_project_platform_mining`.** |
 | **V27.0** | **2026-07-18** | **IntentDomainOrchestrator (`services/intelligence/orchestrator.py`): unified intent_profile for domain+use-case intelligence; flag `V27_INTELLIGENCE_ORCHESTRATOR` (default false). Channel admission replaces hard G2/Capterra bans when active; path/author exclusion; produce/governance/noise/dispatch/nourish consume profile; funnel telemetry `last_cycle_funnel`. Dockerfile copies intelligence package. Tests: `test_intent_orchestrator_v27` (Oman RE, Kerala CAC, brand narrative, scam recovery).** |
 | **V26.8.1** | **2026-07-17** | **Produce recall fix: low-liquidity geo global fallback (colloquial + platform); high/medium still skips non-platform doubles. Query governance: max 6/4 `-site:` caps, priority trim, positive-site deconflict, force ≥3–4 PLATFORM_MINING queries front-loaded. Brand Narrative → `marketing_agency` scoring. Fix `UnboundLocalError` on `datetime` in produce dedup. Observability: geo_fallbacks_*, negative_filters_trimmed, platform_queries_executed. Tests: `test_produce_geo_fallback`, governance cap/platform tests.** |
 | **V26.8.0** | **2026-07-17** | **Serper produce-gate: `/harvest` + harvest-sweep hard-block SerperDiscovery / Google Reviews / Reddit Serper fallback (`allow_serper=False`); produce path opts in. Inbound Radar: safe Firestore query materialization (explicit public Retry — fixes `_UnaryStreamMultiCallable` / `_retry` crash); defensive tenant/write isolation. Inbound URL pre-screen: allowlist review platforms (Trustpilot/G2/Capterra/…), soft `/blog/` filter, structured keep/filter reasons. Tests: `test_harvest_serper_gate`, `test_inbound_firestore_stream`, `test_inbound_url_prescreen`.** |

@@ -202,6 +202,13 @@ def get_gcs_client() -> storage.Client:
 # ---------------------------------------------------------------------------
 _vertex_lock: threading.Lock = threading.Lock()
 _vertex_initialised: bool = False
+_vertex_project_used: Optional[str] = None
+_vertex_location_used: Optional[str] = None
+
+
+def get_vertex_project() -> Optional[str]:
+    """Return the project used for the last successful ``init_vertex()`` call."""
+    return _vertex_project_used
 
 
 def init_vertex() -> None:
@@ -211,14 +218,47 @@ def init_vertex() -> None:
     exactly once per process, preventing concurrent gRPC channel setup races
     under Gunicorn gthread workers.
 
+    Project resolution (V27.0.1 — never hardcode trendpulse-app-2025):
+      VERTEX_AI_PROJECT → PROJECT_ID → lead-sniper-prod
+
     Returns:
         None
     """
-    global _vertex_initialised
+    global _vertex_initialised, _vertex_project_used, _vertex_location_used
     if not _vertex_initialised:
         with _vertex_lock:
             if not _vertex_initialised:
-                _project  = os.environ.get("PROJECT_ID", "trendpulse-app-2025")
-                _location = os.environ.get("LOCATION", "asia-south1")
+                try:
+                    from core.config import (  # type: ignore[import]
+                        resolve_vertex_ai_project,
+                        resolve_vertex_ai_location,
+                    )
+                    _project = resolve_vertex_ai_project()
+                    _location = resolve_vertex_ai_location()
+                except Exception:
+                    # Fail-open to production Vertex host — never trendpulse.
+                    _project = (
+                        (os.environ.get("VERTEX_AI_PROJECT") or "").strip()
+                        or (os.environ.get("PROJECT_ID") or "").strip()
+                        or "lead-sniper-prod"
+                    )
+                    _location = (
+                        (os.environ.get("VERTEX_AI_LOCATION") or "").strip()
+                        or (os.environ.get("LOCATION") or "").strip()
+                        or "asia-south1"
+                    )
                 vertexai.init(project=_project, location=_location)
+                _vertex_project_used = _project
+                _vertex_location_used = _location
                 _vertex_initialised = True
+                try:
+                    from core.logging import get_logger  # type: ignore[import]
+                    get_logger("pipeline.clients").info(
+                        "vertex_ai_initialized",
+                        project=_project,
+                        location=_location,
+                        note="Vertex AI project resolved via VERTEX_AI_PROJECT → "
+                             "PROJECT_ID → lead-sniper-prod.",
+                    )
+                except Exception:
+                    pass
