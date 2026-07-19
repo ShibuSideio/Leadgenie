@@ -313,34 +313,13 @@ def _domain_platform_targets(domain_profile: Optional[dict]) -> list[str]:
     return targets[:8]
 
 
-# Deterministic platform seeds when Gemini is unavailable (403 / timeout / empty).
-# Fail-open: produce continues with rule-based site: queries + pain-discovery.
-_PLATFORM_MINING_FAMILY_DEFAULTS: dict[str, list[str]] = {
-    "real_estate": ["bayut.com", "propertyfinder.com", "dubizzle.com", "olx.com"],
-    "saas": ["g2.com", "capterra.com", "trustpilot.com", "linkedin.com"],
-    "manufacturing": ["indiamart.com", "thomasnet.com", "alibaba.com"],
-    "healthcare": ["practo.com", "justdial.com", "sulekha.com"],
-    "marketing_agency": ["clutch.co", "linkedin.com", "reddit.com"],
-    "professional_services": ["linkedin.com", "clutch.co", "justdial.com"],
-    "hospitality": ["tripadvisor.com", "yelp.com", "trustpilot.com"],
-    "ecommerce": ["amazon.com", "trustpilot.com", "reddit.com"],
-    "construction": ["indiamart.com", "justdial.com", "sulekha.com"],
-    # Education B2C student/parent surfaces (sub-pattern may override via profile).
-    "education": [
-        "reddit.com",
-        "quora.com",
-        "youtube.com",
-        "shiksha.com",
-        "facebook.com",
-    ],
-}
-
-# Strategies where consumer verticals must not inherit real-estate agent/broker
-# language packs when the domain is not real_estate.
-_CONSUMER_STRATEGY_NO_BROKER: frozenset[str] = frozenset({
-    "COLLOQUIAL_DISCOVERY",
-    "COMPETITOR_TOUCHPOINT",
-})
+# Deterministic last-resort hosts when profile + config yield nothing.
+# Never implies language — language always comes from the profile pack.
+_PLATFORM_MINING_LAST_RESORT_HOSTS: list[str] = [
+    "reddit.com",
+    "trustpilot.com",
+    "linkedin.com",
+]
 
 
 def _resolve_platform_entity_language(
@@ -351,101 +330,64 @@ def _resolve_platform_entity_language(
     sourcing_vector: str = "",
     primary_strategy: str = "",
 ) -> tuple[list[str], str]:
-    """Select domain/strategy-aware entity terms for platform-mining queries.
+    """Select entity terms from the domain profile language pack (config SSOT).
 
     Returns:
         (entity_terms, language_pack_name)
 
-    Rules (priority order):
-      1. Host-specific overrides (directories, review sites) for non-education.
-      2. Education family → education_profiles language pack (never agent/broker).
-      3. Real estate / manufacturing family packs (unchanged behaviour).
-      4. B2C + COLLOQUIAL/COMPETITOR for non-RE → consumer discovery language.
-      5. Default legacy pack (agent/broker) for remaining B2B-style mining.
+    Hard rule: never invent ``agent broker`` from family name alone. Terms come
+    from ``domain_profile.entity_language_pack`` / ``entity_terms``, resolved via
+    ``shared.domain_platform_config``. Missing profile → ``neutral_safe``.
     """
-    family = (domain_family or "").strip().lower()
-    host_l = (host or "").strip().lower()
-    vector = (sourcing_vector or "").upper().strip()
-    strategy = (primary_strategy or "").upper().strip()
-    is_consumer_vector = vector in {"B2C", "D2C", "B2B2C"}
-    is_consumer_strategy = any(s in strategy for s in _CONSUMER_STRATEGY_NO_BROKER)
+    try:
+        from shared.domain_platform_config import (  # type: ignore[import]
+            SAFE_FALLBACK_LANGUAGE_PACK,
+            entity_terms_from_profile,
+            get_entity_terms,
+            host_pack_override,
+            language_pack_from_profile,
+            resolve_platform_slice,
+        )
+    except ImportError:
+        return ["looking for", "recommend", "review", "contact"], "neutral_safe"
 
-    # Profile-carried terms win for education (set by domain_intelligence).
-    if family == "education":
-        pack_name = "education_general"
-        terms: list[str] = []
-        if isinstance(domain_profile, dict):
-            profile_terms = domain_profile.get("entity_terms") or domain_profile.get(
-                "platform_entity_terms"
+    pack = language_pack_from_profile(
+        domain_profile if isinstance(domain_profile, dict) else None
+    )
+    terms = entity_terms_from_profile(
+        domain_profile if isinstance(domain_profile, dict) else None
+    )
+
+    # Profile incomplete: resolve from shared config by family (still data-driven).
+    profile_has_pack = isinstance(domain_profile, dict) and bool(
+        domain_profile.get("entity_language_pack")
+        or domain_profile.get("entity_terms")
+        or domain_profile.get("language_pack")
+    )
+    if not profile_has_pack:
+        fam = (domain_family or "").strip().lower() or "general_services"
+        try:
+            slice_ = resolve_platform_slice(
+                fam,
+                sourcing_vector=sourcing_vector or None,
             )
-            if isinstance(profile_terms, (list, tuple)) and profile_terms:
-                terms = [str(t).strip() for t in profile_terms if str(t).strip()]
-            pack_name = str(
-                domain_profile.get("language_pack")
-                or domain_profile.get("education_sub_pattern")
-                or "general_education"
-            )
-        if not terms:
-            try:
-                from shared.education_profiles import (  # type: ignore[import]
-                    education_entity_terms,
-                    normalize_education_sub_pattern,
-                )
-                sub = "general_education"
-                is_b2b = False
-                if isinstance(domain_profile, dict):
-                    sub = normalize_education_sub_pattern(
-                        domain_profile.get("education_sub_pattern")
-                    )
-                    is_b2b = bool(domain_profile.get("is_b2b_education"))
-                terms = education_entity_terms(sub, is_b2b=is_b2b)
-                pack_name = "education_b2b" if is_b2b else sub
-            except Exception:
-                terms = ["admission", "student", "parent", "course"]
-                pack_name = "education_failopen"
-        return terms[:4], pack_name
+            pack = str(slice_.get("entity_language_pack") or SAFE_FALLBACK_LANGUAGE_PACK)
+            terms = list(slice_.get("entity_terms") or get_entity_terms(pack))
+        except Exception:
+            pack = SAFE_FALLBACK_LANGUAGE_PACK
+            terms = get_entity_terms(pack)
 
-    # Host-level specialisation (directories / social) — unchanged for non-edu.
-    if "g2" in host_l or "capterra" in host_l or "trustpilot" in host_l:
-        return ["review", "profile", "contact"], "host_review_directory"
-    if family != "real_estate" and "linkedin" in host_l:
-        return ["looking for", "recommend", "vendor"], "host_linkedin"
-    if family not in {"real_estate", "manufacturing"} and "reddit" in host_l:
-        # For consumer strategies / B2C, prefer discovery language on Reddit.
-        if is_consumer_vector or is_consumer_strategy:
-            return ["looking for", "recommend", "help"], "host_reddit_consumer"
-        return ["looking for", "recommend", "help"], "host_reddit"
+    # Optional host override only for neutral/consumer packs (never clobber RE).
+    if host:
+        overridden = host_pack_override(host, pack)
+        if overridden != pack:
+            pack = overridden
+            terms = get_entity_terms(pack)
 
-    if family == "manufacturing" or "indiamart" in host_l or "thomasnet" in host_l:
-        return ["supplier", "manufacturer", "RFQ", "contact"], "manufacturing"
-    if family == "real_estate" or any(
-        x in host_l for x in ("property", "realestate", "bayut", "dubizzle", "zillow")
-    ):
-        return ["agent", "broker", "listing", "contact"], "real_estate"
-    if family == "healthcare":
-        return ["clinic", "doctor", "patient", "review"], "healthcare"
-    if family == "hospitality":
-        return ["hotel", "restaurant", "guest", "review"], "hospitality"
-    if family == "saas":
-        return ["review", "alternative", "pricing", "integration"], "saas"
-    if family == "construction":
-        return ["contractor", "project", "tender", "contact"], "construction"
-    if family == "professional_services":
-        return ["consultant", "firm", "services", "contact"], "professional_services"
-
-    # B2C / colloquial consumer verticals that are NOT real estate must not
-    # inherit the default agent/broker template (education already handled).
-    if family != "real_estate" and (
-        is_consumer_vector
-        or (is_consumer_strategy and family in {
-            "education", "healthcare", "ecommerce", "hospitality",
-            "general_services", "finance",
-        })
-    ):
-        return ["looking for", "recommend", "help", "review"], "consumer_discovery"
-
-    # Legacy default (B2B-style platform mining) — preserved for non-education.
-    return ["agent", "broker", "profile", "contact"], "legacy_default"
+    if not terms:
+        terms = get_entity_terms(SAFE_FALLBACK_LANGUAGE_PACK)
+        pack = SAFE_FALLBACK_LANGUAGE_PACK
+    return list(terms)[:4], pack
 
 
 def _platform_mining_deterministic_fallback(
@@ -459,7 +401,11 @@ def _platform_mining_deterministic_fallback(
     sourcing_vector: str = "",
     primary_strategy: str = "",
 ) -> list[str]:
-    """Build site: platform-mining queries without Gemini (always fail-open)."""
+    """Build site: platform-mining queries without Gemini (always fail-open).
+
+    Hosts and entity language come from the domain profile / shared config —
+    never from hard-coded family → agent/broker maps.
+    """
     platform_targets: list[str] = []
     if strategy_plan:
         platform_targets.extend(
@@ -469,35 +415,30 @@ def _platform_mining_deterministic_fallback(
     if domain_targets:
         platform_targets = list(domain_targets) + platform_targets
 
-    # Education profile may carry platform_hosts from sub-pattern resolution.
     family = (domain_family or "").lower()
-    if isinstance(domain_profile, dict):
-        for host in domain_profile.get("platform_hosts") or []:
-            if host:
-                platform_targets.append(str(host))
+    try:
+        from shared.domain_platform_config import (  # type: ignore[import]
+            family_platform_hosts,
+            pack_allows_directory_language,
+            platform_hosts_from_profile,
+            platform_mining_mode_from_profile,
+            query_uses_directory_only_language,
+        )
+        for host in platform_hosts_from_profile(
+            domain_profile if isinstance(domain_profile, dict) else None,
+            family=family,
+        ):
+            platform_targets.append(host)
+        if not platform_targets:
+            platform_targets = family_platform_hosts(family)
+    except Exception:
+        if isinstance(domain_profile, dict):
+            for host in domain_profile.get("platform_hosts") or []:
+                if host:
+                    platform_targets.append(str(host))
 
     if not platform_targets:
-        if family == "education":
-            try:
-                from shared.education_profiles import (  # type: ignore[import]
-                    education_platform_hosts,
-                    normalize_education_sub_pattern,
-                )
-                sub = "general_education"
-                is_b2b = False
-                if isinstance(domain_profile, dict):
-                    sub = normalize_education_sub_pattern(
-                        domain_profile.get("education_sub_pattern")
-                    )
-                    is_b2b = bool(domain_profile.get("is_b2b_education"))
-                platform_targets = education_platform_hosts(sub, is_b2b=is_b2b)
-            except Exception:
-                platform_targets = list(_PLATFORM_MINING_FAMILY_DEFAULTS.get("education") or [])
-        else:
-            platform_targets = list(_PLATFORM_MINING_FAMILY_DEFAULTS.get(family) or [])
-    if not platform_targets:
-        # Last-resort generic public lead channels (never empty when mining forced)
-        platform_targets = ["linkedin.com", "reddit.com", "trustpilot.com", "g2.com"]
+        platform_targets = list(_PLATFORM_MINING_LAST_RESORT_HOSTS)
 
     # Dedupe hosts while preserving order.
     _seen_hosts: set[str] = set()
@@ -518,7 +459,6 @@ def _platform_mining_deterministic_fallback(
     if strategy_plan:
         geo_terms = [g for g in strategy_plan.get("geo_terms", []) if g][:3]
 
-    # Resolve strategy/vector from plan when not passed.
     if not primary_strategy and isinstance(strategy_plan, dict):
         primary_strategy = str(
             strategy_plan.get("primary_strategy")
@@ -528,7 +468,15 @@ def _platform_mining_deterministic_fallback(
     if not sourcing_vector and isinstance(strategy_plan, dict):
         sourcing_vector = str(strategy_plan.get("sourcing_vector") or "")
 
-    language_pack_used = "legacy_default"
+    language_pack_used = "neutral_safe"
+    mining_mode = "none"
+    try:
+        mining_mode = platform_mining_mode_from_profile(
+            domain_profile if isinstance(domain_profile, dict) else None
+        )
+    except Exception:
+        pass
+
     fallback_queries: list[str] = []
     for domain in platform_targets:
         entity_terms, pack_name = _resolve_platform_entity_language(
@@ -544,20 +492,20 @@ def _platform_mining_deterministic_fallback(
             base = f"{base} {' '.join(geo_terms)}"
         fallback_queries.append(f"{base} -wiki -jobs -careers")
 
-    # Safety: never emit agent+broker for education (belt-and-suspenders).
-    if family == "education":
-        cleaned: list[str] = []
-        for q in fallback_queries:
-            q_l = q.lower()
-            if "agent" in q_l.split() and "broker" in q_l.split():
-                # Rewrite with education-safe terms.
+    # Safety: rewrite directory-only language when pack is not directory_listing.
+    cleaned: list[str] = []
+    for q in fallback_queries:
+        try:
+            if query_uses_directory_only_language(q) and not pack_allows_directory_language(
+                language_pack_used
+            ):
                 host = ""
                 for tok in q.split():
                     if tok.lower().startswith("site:"):
                         host = tok[5:]
                         break
                 terms, pack_name = _resolve_platform_entity_language(
-                    domain_family="education",
+                    domain_family=family,
                     domain_profile=domain_profile if isinstance(domain_profile, dict) else None,
                     host=host,
                     sourcing_vector=sourcing_vector,
@@ -567,8 +515,16 @@ def _platform_mining_deterministic_fallback(
                 geo_part = " ".join(geo_terms) if geo_terms else ""
                 q = f"site:{host} {' '.join(terms[:2])} {geo_part} -wiki -jobs -careers".strip()
                 q = " ".join(q.split())
-            cleaned.append(q)
-        fallback_queries = cleaned
+        except Exception:
+            pass
+        cleaned.append(q)
+    fallback_queries = cleaned
+
+    sub_pattern = None
+    if isinstance(domain_profile, dict):
+        sub_pattern = domain_profile.get("sub_pattern") or domain_profile.get(
+            "education_sub_pattern"
+        )
 
     if fallback_queries:
         log.info(
@@ -578,11 +534,9 @@ def _platform_mining_deterministic_fallback(
             count=len(fallback_queries),
             reason=reason,
             language_pack=language_pack_used,
-            education_sub_pattern=(
-                (domain_profile or {}).get("education_sub_pattern")
-                if isinstance(domain_profile, dict)
-                else None
-            ),
+            entity_language_pack=language_pack_used,
+            platform_mining_mode=mining_mode,
+            sub_pattern=sub_pattern,
             note="Built platform-mining fallback queries (deterministic, no Gemini).",
         )
         log.info(
@@ -592,6 +546,7 @@ def _platform_mining_deterministic_fallback(
             fallback_count=len(fallback_queries),
             domain_family=domain_family or None,
             language_pack=language_pack_used,
+            platform_mining_mode=mining_mode,
             note="Gemini platform-mining skipped or failed; using rule-based site: queries. "
                  "Pain-discovery queries still run.",
         )
@@ -609,18 +564,10 @@ def _generate_platform_mining_queries(
 ) -> list[str]:
     """Generate site:-inclusion queries for competitor listing platforms.
 
-    For B2C campaigns (real estate, education, health, e-commerce), the real
-    leads — agents, brokers, consultants, sellers — are listed ON competitor
-    platforms (Dubizzle, PropertyFinder, Savills, Practo, Sulekha, etc.).
-
-    Pain-discovery queries miss these entirely because agent profile pages
-    don't contain pain language. Platform mining queries surface the actual
-    entities with contact details.
-
-    When *domain_profile* is provided, preferred platforms / query hints seed
-    both the Gemini prompt and the deterministic fallback. Entity language is
-    selected from the domain profile + strategy (education never uses
-    agent/broker phrasing).
+    When *domain_profile* is provided, preferred platforms / query hints and
+    ``entity_language_pack`` seed both the Gemini prompt and the deterministic
+    fallback. Language is always profile/config-driven — never a global
+    agent/broker template.
 
     Returns:
         List of ready-to-use Serper queries with site: operators.
@@ -631,19 +578,24 @@ def _generate_platform_mining_queries(
     domain_family = ""
     domain_platform_lines = ""
     domain_targets = _domain_platform_targets(domain_profile)
-    education_sub_pattern = ""
-    language_pack = "legacy_default"
+    sub_pattern = ""
+    mining_mode = "none"
+    language_pack = "neutral_safe"
     if isinstance(domain_profile, dict) and domain_profile:
         domain_family = str(domain_profile.get("domain_family") or "").strip()
-        education_sub_pattern = str(
-            domain_profile.get("education_sub_pattern") or ""
-        ).strip()
-        language_pack = str(
-            domain_profile.get("language_pack")
+        sub_pattern = str(
+            domain_profile.get("sub_pattern")
             or domain_profile.get("education_sub_pattern")
             or ""
+        ).strip()
+        language_pack = str(
+            domain_profile.get("entity_language_pack")
+            or domain_profile.get("language_pack")
+            or ""
         ).strip() or language_pack
-        # Also seed hosts from education platform_hosts when present.
+        mining_mode = str(
+            domain_profile.get("platform_mining_mode") or "none"
+        ).strip().lower()
         for host in domain_profile.get("platform_hosts") or []:
             h = str(host).strip().lower().replace("www.", "")
             if h and h not in domain_targets:
@@ -657,8 +609,9 @@ def _generate_platform_mining_queries(
                 "query_brain_platform_mining_domain_seeds",
                 campaign_id=ctx.campaign_id,
                 domain_family=domain_family or None,
-                education_sub_pattern=education_sub_pattern or None,
-                language_pack=language_pack or None,
+                sub_pattern=sub_pattern or None,
+                entity_language_pack=language_pack or None,
+                platform_mining_mode=mining_mode or None,
                 seed_count=len(domain_targets),
                 seeds=domain_targets[:5],
                 note="Domain profile preferred platforms seeding platform-mining generation.",
@@ -688,12 +641,13 @@ def _generate_platform_mining_queries(
         "query_brain_platform_mining_language_pack",
         campaign_id=ctx.campaign_id,
         domain_family=domain_family or None,
-        education_sub_pattern=education_sub_pattern or None,
-        language_pack=language_pack,
+        sub_pattern=sub_pattern or None,
+        entity_language_pack=language_pack,
+        platform_mining_mode=mining_mode,
         entity_terms=entity_terms[:4],
         sourcing_vector=sourcing_vector or None,
         primary_strategy=primary_strategy or None,
-        note="Selected domain/strategy entity language for platform mining.",
+        note="Selected profile language pack for platform mining.",
     )
 
     # Observability: which Vertex project will serve this Gemini call
@@ -721,39 +675,33 @@ def _generate_platform_mining_queries(
     )
 
     _domain_family_line = f"DOMAIN FAMILY: {domain_family}\n" if domain_family else ""
-    _edu_line = ""
-    _edu_examples = ""
-    _entity_rule = (
-        f"- Include entity terms appropriate for this vertical: {entity_terms_csv}.\n"
+    _profile_lines = (
+        f"SUB-PATTERN: {sub_pattern or 'none'}\n"
+        f"ENTITY LANGUAGE PACK: {language_pack}\n"
+        f"PLATFORM MINING MODE: {mining_mode}\n"
+        f"ENTITY TERMS TO USE: {entity_terms_csv}\n"
     )
-    if (domain_family or "").lower() == "education":
-        _edu_line = (
-            f"EDUCATION SUB-PATTERN: {education_sub_pattern or 'general_education'}\n"
-            f"LANGUAGE PACK: {language_pack}\n"
-            "CRITICAL: This is an EDUCATION campaign. Do NOT use real-estate language "
-            "such as 'agent broker', 'broker listings', or property portals. "
-            "Use education entity language (consultant, counsellor, admission, "
-            "college, university, student, parent, coaching, course) instead.\n"
-            "Prefer student/parent community surfaces (Reddit, Quora, YouTube, "
-            "Facebook groups, education portals) over LinkedIn unless the campaign "
-            "is clearly B2B institutional.\n"
+    _extra_examples = ""
+    try:
+        from shared.domain_platform_config import (  # type: ignore[import]
+            gemini_platform_examples,
+            pack_allows_directory_language,
         )
-        try:
-            from shared.education_profiles import (  # type: ignore[import]
-                education_gemini_prompt_examples,
-            )
-            _edu_examples = education_gemini_prompt_examples(
-                education_sub_pattern or "general_education"
-            )
-        except Exception:
-            _edu_examples = (
-                "  Education: site:shiksha.com consultant MBBS admission\n"
-                "  Education: site:reddit.com looking for study abroad counsellor\n"
-                "  Education: site:quora.com university admission help\n"
-            )
-        _entity_rule = (
-            f"- Include education entity terms ONLY: {entity_terms_csv}.\n"
-            "- NEVER use: agent broker, property agent, real estate broker.\n"
+        _extra_examples = gemini_platform_examples(
+            domain_profile if isinstance(domain_profile, dict) else None
+        )
+        _allow_directory = pack_allows_directory_language(language_pack)
+    except Exception:
+        _allow_directory = language_pack == "directory_listing"
+
+    _entity_rule = (
+        f"- Include ONLY these entity terms (from domain profile language pack "
+        f"'{language_pack}'): {entity_terms_csv}.\n"
+    )
+    if not _allow_directory:
+        _entity_rule += (
+            "- Do NOT use real-estate directory language (agent broker, property "
+            "agent, broker listings) unless the language pack is directory_listing.\n"
         )
 
     prompt = (
@@ -765,7 +713,7 @@ def _generate_platform_mining_queries(
         f"KEYWORDS: {kw_str[:300]}\n"
         f"VERTICAL: {vector_label}\n"
         f"{_domain_family_line}"
-        f"{_edu_line}"
+        f"{_profile_lines}"
         f"\n"
         f"{domain_platform_lines}"
         f"For each platform, generate a Google search query using site: operator\n"
@@ -776,7 +724,7 @@ def _generate_platform_mining_queries(
         f"  Real Estate: site:bayut.com broker listings\n"
         f"  Manufacturing: site:indiamart.com supplier RFQ equipment\n"
         f"  Manufacturing: site:thomasnet.com manufacturer contact\n"
-        f"{_edu_examples if _edu_examples else '  Education: site:shiksha.com consultant profile\\n'}"
+        f"{_extra_examples if _extra_examples else ''}"
         f"  Health: site:practo.com doctor clinic\n"
         f"  Services: site:sulekha.com provider profile\n"
         f"  Services: site:justdial.com business contact\n\n"
@@ -829,25 +777,28 @@ def _generate_platform_mining_queries(
         for q in raw_queries[:5]:
             if len(q) < 10 or len(q) > 200:
                 continue
-            # Education guard: drop Gemini outputs that still use agent+broker.
-            if (domain_family or "").lower() == "education":
-                try:
-                    from shared.education_profiles import (  # type: ignore[import]
-                        contains_forbidden_education_language,
+            # Drop Gemini outputs that use directory-only language when pack forbids it.
+            try:
+                from shared.domain_platform_config import (  # type: ignore[import]
+                    pack_allows_directory_language,
+                    query_uses_directory_only_language,
+                )
+                if query_uses_directory_only_language(q) and not pack_allows_directory_language(
+                    language_pack
+                ):
+                    log.info(
+                        "platform_mining_forbidden_language_dropped",
+                        campaign_id=ctx.campaign_id,
+                        query_preview=q[:80],
+                        entity_language_pack=language_pack,
+                        platform_mining_mode=mining_mode,
+                        note="Dropped Gemini query with directory agent/broker language.",
                     )
-                    if contains_forbidden_education_language(q):
-                        log.info(
-                            "platform_mining_education_forbidden_language_dropped",
-                            campaign_id=ctx.campaign_id,
-                            query_preview=q[:80],
-                            language_pack=language_pack,
-                            note="Dropped Gemini platform query with agent/broker language.",
-                        )
-                        continue
-                except Exception:
-                    q_tokens = set(q.lower().replace(":", " ").split())
-                    if "agent" in q_tokens and "broker" in q_tokens:
-                        continue
+                    continue
+            except Exception:
+                q_tokens = set(q.lower().replace(":", " ").split())
+                if "agent" in q_tokens and "broker" in q_tokens and language_pack != "directory_listing":
+                    continue
             # Don't append the full blacklist to platform mining queries —
             # these target specific platforms and the blacklist would conflict
             # with the positive site: operator. Only append minimal spam guards.
@@ -861,7 +812,9 @@ def _generate_platform_mining_queries(
             validated_count=len(validated),
             vertex_project=_vertex_project,
             language_pack=language_pack,
-            education_sub_pattern=education_sub_pattern or None,
+            entity_language_pack=language_pack,
+            platform_mining_mode=mining_mode,
+            sub_pattern=sub_pattern or None,
             domain_family=domain_family or None,
         )
         if validated:

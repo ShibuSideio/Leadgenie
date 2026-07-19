@@ -32,36 +32,43 @@ from shared.domain_constants import (  # type: ignore[import]
 )
 
 try:
-    from shared.education_profiles import (  # type: ignore[import]
-        LEGACY_EDUCATION_QUERY_HINTS,
-        LEGACY_EDUCATION_SOURCES,
-        resolve_education_profile,
+    from shared.domain_platform_config import (  # type: ignore[import]
+        SAFE_FALLBACK_LANGUAGE_PACK,
+        entity_terms_from_profile,
+        family_preferred_sources,
+        family_query_hints,
+        get_entity_terms,
+        resolve_platform_slice,
     )
 except ImportError:  # pragma: no cover — monorepo path variants
-    LEGACY_EDUCATION_QUERY_HINTS = (
-        "site:reddit.com/r/teachers",
-        "site:coursera.org",
-        "site:linkedin.com",
-    )
-    LEGACY_EDUCATION_SOURCES = (
-        "serper_discovery",
-        "reddit",
-        "consumer_forum",
-        "rss_feed",
-        "youtube",
-    )
+    SAFE_FALLBACK_LANGUAGE_PACK = "neutral_safe"
 
-    def resolve_education_profile(*_a, **_k):  # type: ignore[misc]
+    def get_entity_terms(pack_name=None):  # type: ignore[misc]
+        return ["looking for", "recommend", "review", "contact"]
+
+    def entity_terms_from_profile(domain_profile=None):  # type: ignore[misc]
+        return get_entity_terms(SAFE_FALLBACK_LANGUAGE_PACK)
+
+    def family_query_hints(family):  # type: ignore[misc]
+        return []
+
+    def family_preferred_sources(family):  # type: ignore[misc]
+        return []
+
+    def resolve_platform_slice(family, **_k):  # type: ignore[misc]
         return {
-            "education_sub_pattern": "general_education",
-            "education_sub_pattern_confidence": 0.0,
-            "education_matched_terms": [],
-            "is_b2b_education": False,
-            "language_pack": "general_education",
-            "entity_terms": ["admission", "student", "parent", "course"],
-            "preferred_query_hints": list(LEGACY_EDUCATION_QUERY_HINTS),
-            "preferred_sources": list(LEGACY_EDUCATION_SOURCES),
-            "platform_hosts": ["reddit.com", "quora.com", "youtube.com"],
+            "domain_family": family or "general_services",
+            "sub_pattern": None,
+            "sub_pattern_confidence": 0.0,
+            "sub_pattern_matched_terms": [],
+            "is_b2b_context": False,
+            "entity_language_pack": SAFE_FALLBACK_LANGUAGE_PACK,
+            "entity_terms": get_entity_terms(SAFE_FALLBACK_LANGUAGE_PACK),
+            "platform_mining_mode": "none",
+            "preferred_query_hints": [],
+            "preferred_sources": [],
+            "platform_hosts": [],
+            "language_pack": SAFE_FALLBACK_LANGUAGE_PACK,
             "resolve_error": True,
         }
 
@@ -81,9 +88,10 @@ __all_domain_constants__ = (
 # ---------------------------------------------------------------------------
 # Schema version — bump when profile shape or inference quality changes so
 # produce/dispatch can re-infer stale system_domain_profile documents.
-# domain-v3: education sub-pattern aware preferred platforms + entity language.
+# domain-v4: unified platform contract (entity_language_pack, platform_mining_mode,
+# sub_pattern) driven by shared.domain_platform_config — no per-family modules.
 # ---------------------------------------------------------------------------
-DOMAIN_PROFILE_VERSION = "domain-v3"
+DOMAIN_PROFILE_VERSION = "domain-v4"
 
 # Field weights: persona + pain/keywords are stronger ICP signals than name.
 _FIELD_WEIGHTS: dict[str, float] = {
@@ -710,6 +718,12 @@ _FALLBACK_PROFILE: dict[str, Any] = {
     "notes": "fallback_profile: inference failed or empty campaign",
     "scores": {},
     "matched_terms": {},
+    # Platform contract (domain-v4) — always present
+    "sub_pattern": None,
+    "entity_language_pack": SAFE_FALLBACK_LANGUAGE_PACK,
+    "entity_terms": get_entity_terms(SAFE_FALLBACK_LANGUAGE_PACK),
+    "platform_mining_mode": "none",
+    "language_pack": SAFE_FALLBACK_LANGUAGE_PACK,
 }
 
 # High-signal ICP fields used to judge thin vs rich campaigns.
@@ -1169,8 +1183,9 @@ def _build_notes(
     profile_confidence: str = "medium",
     thin_campaign: bool = False,
     input_richness: str = "medium",
-    education_sub_pattern: str | None = None,
-    language_pack: str | None = None,
+    sub_pattern: str | None = None,
+    entity_language_pack: str | None = None,
+    platform_mining_mode: str | None = None,
 ) -> str:
     """Human-readable observations for logs and debugging."""
     parts: list[str] = []
@@ -1193,85 +1208,161 @@ def _build_notes(
         parts.append("soft_domain_defaults")
     if liquidity_level == "low":
         parts.append("sparse_market_geo")
-    if education_sub_pattern:
-        parts.append(f"education_sub_pattern={education_sub_pattern}")
-    if language_pack:
-        parts.append(f"language_pack={language_pack}")
+    if sub_pattern:
+        parts.append(f"sub_pattern={sub_pattern}")
+    if entity_language_pack:
+        parts.append(f"entity_language_pack={entity_language_pack}")
+    if platform_mining_mode:
+        parts.append(f"platform_mining_mode={platform_mining_mode}")
     return "; ".join(parts)
 
 
-def _apply_education_vertical_profile(
+def _apply_platform_config_slice(
+    family: str,
     preferred_sources: list[str],
     preferred_hints: list[str],
     campaign: Mapping[str, Any] | None,
-    *,
-    force_legacy_on_error: bool = True,
 ) -> tuple[list[str], list[str], dict[str, Any]]:
-    """Overlay education sub-pattern platforms onto family defaults.
+    """Overlay shared domain_platform_config onto family defaults.
 
-    Fail-open: on any resolution failure, keep the caller-provided lists
-    (or legacy education defaults if those lists are empty).
+    Fail-open: on any resolution failure keep caller-provided lists and a
+    neutral language pack (never hard-codes real-estate agent/broker).
     """
-    edu_meta: dict[str, Any] = {
-        "education_sub_pattern": "general_education",
-        "language_pack": "general_education",
-        "is_b2b_education": False,
-        "entity_terms": list(_PLATFORM_ENTITY_TERMS["education"]),
+    platform_meta: dict[str, Any] = {
+        "sub_pattern": None,
+        "entity_language_pack": SAFE_FALLBACK_LANGUAGE_PACK,
+        "platform_mining_mode": "none",
+        "entity_terms": get_entity_terms(SAFE_FALLBACK_LANGUAGE_PACK),
+        "is_b2b_context": False,
     }
     try:
         vector = None
         if isinstance(campaign, Mapping):
             vector = str(campaign.get("sourcing_vector") or "") or None
-        edu = resolve_education_profile(campaign, sourcing_vector=vector)
-        if edu.get("resolve_error") and force_legacy_on_error:
-            # Module-level resolve failed — keep safer static education defaults
-            # (already non-legacy in _PREFERRED_QUERY_HINTS["education"]).
-            edu_meta["resolve_error"] = True
-            return preferred_sources, preferred_hints, edu_meta
-
-        edu_meta = {
-            "education_sub_pattern": edu.get("education_sub_pattern") or "general_education",
-            "education_sub_pattern_confidence": edu.get("education_sub_pattern_confidence"),
-            "education_matched_terms": list(edu.get("education_matched_terms") or [])[:8],
-            "is_b2b_education": bool(edu.get("is_b2b_education")),
-            "language_pack": edu.get("language_pack") or "general_education",
-            "entity_terms": list(edu.get("entity_terms") or _PLATFORM_ENTITY_TERMS["education"]),
-            "platform_hosts": list(edu.get("platform_hosts") or []),
-        }
-        sources = list(edu.get("preferred_sources") or preferred_sources)
-        hints = list(edu.get("preferred_query_hints") or preferred_hints)
-        if not sources:
-            sources = preferred_sources or list(LEGACY_EDUCATION_SOURCES)
-        if not hints:
-            hints = preferred_hints or list(
-                _PREFERRED_QUERY_HINTS.get("education", LEGACY_EDUCATION_QUERY_HINTS)
+        slice_ = resolve_platform_slice(
+            family,
+            campaign=campaign if isinstance(campaign, Mapping) else None,
+            sourcing_vector=vector,
+        )
+        if slice_.get("resolve_error"):
+            # Keep local family defaults; still attach neutral pack metadata.
+            platform_meta["resolve_error"] = True
+            # Prefer config family tables when local lists empty.
+            cfg_hints = family_query_hints(family)
+            cfg_sources = family_preferred_sources(family)
+            return (
+                preferred_sources or cfg_sources or preferred_sources,
+                preferred_hints or cfg_hints or preferred_hints,
+                platform_meta,
             )
+
+        platform_meta = {
+            "sub_pattern": slice_.get("sub_pattern"),
+            "sub_pattern_confidence": slice_.get("sub_pattern_confidence"),
+            "sub_pattern_matched_terms": list(
+                slice_.get("sub_pattern_matched_terms") or []
+            )[:8],
+            "is_b2b_context": bool(slice_.get("is_b2b_context")),
+            "entity_language_pack": slice_.get("entity_language_pack")
+            or SAFE_FALLBACK_LANGUAGE_PACK,
+            "platform_mining_mode": slice_.get("platform_mining_mode") or "none",
+            "entity_terms": list(
+                slice_.get("entity_terms")
+                or get_entity_terms(slice_.get("entity_language_pack"))
+            ),
+            "platform_hosts": list(slice_.get("platform_hosts") or []),
+            "gemini_examples": slice_.get("gemini_examples") or "",
+            # Compat aliases
+            "language_pack": slice_.get("entity_language_pack")
+            or SAFE_FALLBACK_LANGUAGE_PACK,
+            "education_sub_pattern": slice_.get("education_sub_pattern"),
+            "is_b2b_education": bool(slice_.get("is_b2b_education")),
+        }
+        sources = list(slice_.get("preferred_sources") or preferred_sources)
+        hints = list(slice_.get("preferred_query_hints") or preferred_hints)
+        if not sources:
+            sources = preferred_sources or family_preferred_sources(family)
+        if not hints:
+            hints = preferred_hints or family_query_hints(family)
 
         if _log is not None:
             try:
                 _log.info(
-                    "domain_intelligence_education_sub_pattern",
-                    education_sub_pattern=edu_meta["education_sub_pattern"],
-                    language_pack=edu_meta["language_pack"],
-                    is_b2b_education=edu_meta["is_b2b_education"],
-                    sub_pattern_confidence=edu_meta.get("education_sub_pattern_confidence"),
-                    matched_terms=edu_meta.get("education_matched_terms"),
+                    "domain_intelligence_platform_slice",
+                    domain_family=family,
+                    sub_pattern=platform_meta.get("sub_pattern"),
+                    entity_language_pack=platform_meta.get("entity_language_pack"),
+                    platform_mining_mode=platform_meta.get("platform_mining_mode"),
+                    is_b2b_context=platform_meta.get("is_b2b_context"),
+                    sub_pattern_confidence=platform_meta.get("sub_pattern_confidence"),
+                    matched_terms=platform_meta.get("sub_pattern_matched_terms"),
                     preferred_hints_preview=hints[:4],
-                    note="Education vertical resolved to sub-pattern platforms + language pack.",
+                    note="Resolved platform config slice (language pack + mining mode).",
                 )
             except Exception:  # noqa: BLE001
                 pass
-        return sources, hints, edu_meta
+        return sources, hints, platform_meta
     except Exception as exc:  # noqa: BLE001 — never break infer
-        edu_meta["resolve_error"] = True
-        edu_meta["error"] = f"{type(exc).__name__}: {exc}"
-        if force_legacy_on_error and not preferred_hints:
-            preferred_hints = list(
-                _PREFERRED_QUERY_HINTS.get("education", LEGACY_EDUCATION_QUERY_HINTS)
-            )
-        if force_legacy_on_error and not preferred_sources:
-            preferred_sources = list(LEGACY_EDUCATION_SOURCES)
-        return preferred_sources, preferred_hints, edu_meta
+        platform_meta["resolve_error"] = True
+        platform_meta["error"] = f"{type(exc).__name__}: {exc}"
+        return preferred_sources, preferred_hints, platform_meta
+
+
+def _attach_platform_meta(
+    profile_out: dict[str, Any],
+    platform_meta: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge platform contract fields onto a domain profile dict."""
+    if not platform_meta:
+        # Always guarantee the contract fields exist.
+        profile_out.setdefault("sub_pattern", None)
+        profile_out.setdefault("entity_language_pack", SAFE_FALLBACK_LANGUAGE_PACK)
+        profile_out.setdefault(
+            "entity_terms", get_entity_terms(SAFE_FALLBACK_LANGUAGE_PACK)
+        )
+        profile_out.setdefault("platform_mining_mode", "none")
+        profile_out.setdefault("language_pack", SAFE_FALLBACK_LANGUAGE_PACK)
+        return profile_out
+
+    profile_out["sub_pattern"] = platform_meta.get("sub_pattern")
+    profile_out["sub_pattern_confidence"] = platform_meta.get("sub_pattern_confidence")
+    profile_out["sub_pattern_matched_terms"] = list(
+        platform_meta.get("sub_pattern_matched_terms") or []
+    )
+    profile_out["entity_language_pack"] = platform_meta.get(
+        "entity_language_pack"
+    ) or SAFE_FALLBACK_LANGUAGE_PACK
+    profile_out["entity_terms"] = list(
+        platform_meta.get("entity_terms")
+        or get_entity_terms(profile_out["entity_language_pack"])
+    )
+    profile_out["platform_mining_mode"] = platform_meta.get(
+        "platform_mining_mode"
+    ) or "none"
+    profile_out["is_b2b_context"] = bool(platform_meta.get("is_b2b_context"))
+    # Compat / observability aliases
+    profile_out["language_pack"] = profile_out["entity_language_pack"]
+    if platform_meta.get("platform_hosts"):
+        profile_out["platform_hosts"] = list(platform_meta["platform_hosts"])
+    if platform_meta.get("gemini_examples"):
+        profile_out["gemini_examples"] = platform_meta["gemini_examples"]
+    # Education-specific aliases for older consumers/logs
+    if profile_out.get("domain_family") == "education":
+        profile_out["education_sub_pattern"] = (
+            platform_meta.get("education_sub_pattern")
+            or platform_meta.get("sub_pattern")
+        )
+        profile_out["education_sub_pattern_confidence"] = platform_meta.get(
+            "sub_pattern_confidence"
+        )
+        profile_out["education_matched_terms"] = list(
+            platform_meta.get("sub_pattern_matched_terms") or []
+        )
+        profile_out["is_b2b_education"] = bool(
+            platform_meta.get("is_b2b_education")
+            or platform_meta.get("is_b2b_context")
+        )
+    return profile_out
 
 
 def _safe_profile(**overrides: Any) -> dict[str, Any]:
@@ -1377,17 +1468,16 @@ def infer_domain_profile(campaign: dict[str, Any] | None) -> dict[str, Any]:
             )
         )
 
-        # Education: replace family-static platforms with sub-pattern packs
-        # (study_abroad / coaching / online_courses / general_education).
-        education_meta: dict[str, Any] = {}
-        if family == "education":
-            preferred_sources, preferred_hints, education_meta = (
-                _apply_education_vertical_profile(
-                    preferred_sources,
-                    preferred_hints,
-                    campaign if isinstance(campaign, Mapping) else None,
-                )
+        # Shared platform config SSOT: language pack, mining mode, sub-pattern,
+        # and (when configured) preferred platforms for all families.
+        preferred_sources, preferred_hints, platform_meta = (
+            _apply_platform_config_slice(
+                family,
+                preferred_sources,
+                preferred_hints,
+                campaign if isinstance(campaign, Mapping) else None,
             )
+        )
 
         strictness, preferred_sources, preferred_hints, soft_adj = (
             _soften_for_low_profile_confidence(
@@ -1422,8 +1512,9 @@ def infer_domain_profile(campaign: dict[str, Any] | None) -> dict[str, Any]:
             profile_confidence=profile_confidence,
             thin_campaign=thin_campaign,
             input_richness=input_richness,
-            education_sub_pattern=education_meta.get("education_sub_pattern"),
-            language_pack=education_meta.get("language_pack"),
+            sub_pattern=platform_meta.get("sub_pattern"),
+            entity_language_pack=platform_meta.get("entity_language_pack"),
+            platform_mining_mode=platform_meta.get("platform_mining_mode"),
         )
 
         profile_out: dict[str, Any] = {
@@ -1451,29 +1542,7 @@ def infer_domain_profile(campaign: dict[str, Any] | None) -> dict[str, Any]:
                 "has_persona": richness_meta["has_persona"],
             },
         }
-        if family == "education" and education_meta:
-            profile_out["education_sub_pattern"] = education_meta.get(
-                "education_sub_pattern", "general_education"
-            )
-            profile_out["education_sub_pattern_confidence"] = education_meta.get(
-                "education_sub_pattern_confidence"
-            )
-            profile_out["education_matched_terms"] = list(
-                education_meta.get("education_matched_terms") or []
-            )
-            profile_out["is_b2b_education"] = bool(
-                education_meta.get("is_b2b_education")
-            )
-            profile_out["language_pack"] = education_meta.get(
-                "language_pack", "general_education"
-            )
-            profile_out["entity_terms"] = list(
-                education_meta.get("entity_terms")
-                or _PLATFORM_ENTITY_TERMS["education"]
-            )
-            if education_meta.get("platform_hosts"):
-                profile_out["platform_hosts"] = list(education_meta["platform_hosts"])
-        return profile_out
+        return _attach_platform_meta(profile_out, platform_meta)
     except Exception as exc:  # noqa: BLE001 — must never break produce/dispatch
         return _safe_profile(
             notes=f"fallback_profile: inference_error ({type(exc).__name__}: {exc})",
@@ -1491,28 +1560,16 @@ _PLATFORM_QUERY_FAMILIES = frozenset({
     "education",
 })
 
-# Entity terms appended when building platform queries from preferred hints.
-# Education uses sub-pattern packs from shared.education_profiles when available;
-# the static entry here is the general_education B2C fail-open pack (no agent/broker).
-_PLATFORM_ENTITY_TERMS: dict[str, tuple[str, ...]] = {
-    "real_estate": ("agent", "broker", "listing", "contact"),
-    "manufacturing": ("supplier", "manufacturer", "RFQ", "equipment"),
-    "construction": ("contractor", "project", "tender", "contact"),
-    "professional_services": ("consultant", "firm", "services", "contact"),
-    "healthcare": ("clinic", "doctor", "patient", "review"),
-    "hospitality": ("hotel", "restaurant", "guest", "review"),
-    "saas": ("review", "alternative", "pricing", "integration"),
-    "education": ("admission", "student", "parent", "course", "college", "school"),
-    "general_services": ("review", "contact", "near me"),
-}
-
 # Tokens that count as "already has entity language" when expanding hints.
+# Derived loosely from ENTITY_LANGUAGE_PACKS — keep broad so we do not double-append.
 _ENTITY_LANGUAGE_MARKERS: frozenset[str] = frozenset({
     "agent", "broker", "supplier", "review", "listing", "contact", "rfq",
     "consultant", "counsellor", "counselor", "admission", "student", "parent",
     "tutor", "coaching", "tuition", "university", "college", "course",
     "enrollment", "instructor", "institute", "school", "looking for",
-    "recommend", "manufacturer", "contractor",
+    "recommend", "manufacturer", "contractor", "profile", "help", "near me",
+    "partnership", "institution", "recruiter", "clinic", "doctor", "hotel",
+    "alternative", "pricing", "integration", "tender", "project",
 })
 
 # preferred_sources → default site: fragments when hints are sparse.
@@ -1617,44 +1674,25 @@ def _entity_terms_for_family(
     family: str,
     domain_profile: Mapping[str, Any] | None = None,
 ) -> tuple[str, ...]:
-    """Resolve entity language for platform-hint expansion.
+    """Resolve entity language for platform-hint expansion from profile/config.
 
-    Education prefers profile-carried ``entity_terms`` / sub-pattern packs so
-    we never fall through to real-estate agent/broker language.
+    Never hard-codes family → agent/broker. Profile entity_terms /
+    entity_language_pack win; otherwise resolve_platform_slice for the family.
     """
-    if isinstance(domain_profile, Mapping):
-        profile_terms = domain_profile.get("entity_terms") or domain_profile.get(
-            "platform_entity_terms"
+    if isinstance(domain_profile, Mapping) and (
+        domain_profile.get("entity_terms")
+        or domain_profile.get("platform_entity_terms")
+        or domain_profile.get("entity_language_pack")
+        or domain_profile.get("language_pack")
+    ):
+        return tuple(entity_terms_from_profile(domain_profile))
+    try:
+        slice_ = resolve_platform_slice(family or "general_services")
+        return tuple(
+            slice_.get("entity_terms") or get_entity_terms(SAFE_FALLBACK_LANGUAGE_PACK)
         )
-        if isinstance(profile_terms, (list, tuple)) and profile_terms:
-            cleaned = tuple(str(t).strip() for t in profile_terms if str(t).strip())
-            if cleaned:
-                return cleaned
-
-    fam = (family or "").strip().lower()
-    if fam == "education" and isinstance(domain_profile, Mapping):
-        try:
-            edu = resolve_education_profile(
-                None,
-                sourcing_vector=str(domain_profile.get("sourcing_vector") or "") or None,
-                text=" ".join(
-                    str(x)
-                    for x in (
-                        domain_profile.get("education_sub_pattern"),
-                        domain_profile.get("notes"),
-                    )
-                    if x
-                ),
-            )
-            # Prefer explicit sub-pattern on profile over re-detect.
-            sub = str(domain_profile.get("education_sub_pattern") or edu.get("education_sub_pattern") or "")
-            is_b2b = bool(domain_profile.get("is_b2b_education"))
-            from shared.education_profiles import education_entity_terms  # type: ignore[import]
-            return tuple(education_entity_terms(sub, is_b2b=is_b2b))
-        except Exception:  # noqa: BLE001
-            return _PLATFORM_ENTITY_TERMS["education"]
-
-    return _PLATFORM_ENTITY_TERMS.get(fam) or _PLATFORM_ENTITY_TERMS["general_services"]
+    except Exception:  # noqa: BLE001
+        return tuple(get_entity_terms(SAFE_FALLBACK_LANGUAGE_PACK))
 
 
 def _hint_has_entity_language(hint: str) -> bool:
@@ -2186,18 +2224,20 @@ def expand_domain_override(
             _PREFERRED_QUERY_HINTS.get(family, _PREFERRED_QUERY_HINTS["general_services"])
         )
 
-    education_meta: dict[str, Any] = {}
-    # When override only pins the family (no explicit platforms), enrich
-    # education with sub-pattern packs from campaign text. Explicit override
-    # platforms are left untouched.
-    if family == "education" and not override.get("preferred_query_hints"):
-        preferred_sources, preferred_hints, education_meta = (
-            _apply_education_vertical_profile(
-                list(preferred_sources),
-                list(preferred_hints),
-                campaign if isinstance(campaign, Mapping) else None,
-            )
-        )
+    # Always resolve platform contract from shared config (sub-pattern when
+    # applicable). Explicit override platforms/sources are preserved.
+    had_explicit_hints = bool(override.get("preferred_query_hints"))
+    had_explicit_sources = bool(override.get("preferred_sources"))
+    slice_sources, slice_hints, platform_meta = _apply_platform_config_slice(
+        family,
+        list(preferred_sources),
+        list(preferred_hints),
+        campaign if isinstance(campaign, Mapping) else None,
+    )
+    if not had_explicit_sources and slice_sources:
+        preferred_sources = slice_sources
+    if not had_explicit_hints and slice_hints:
+        preferred_hints = slice_hints
 
     blocked = override.get("blocked_subreddits")
     if blocked is None:
@@ -2207,10 +2247,11 @@ def expand_domain_override(
     notes = "manual_domain_override"
     if user_notes:
         notes = f"manual_domain_override; {user_notes}"
-    if education_meta.get("education_sub_pattern"):
+    if platform_meta.get("sub_pattern") or platform_meta.get("entity_language_pack"):
         notes = (
-            f"{notes}; education_sub_pattern={education_meta['education_sub_pattern']}; "
-            f"language_pack={education_meta.get('language_pack') or 'general_education'}"
+            f"{notes}; sub_pattern={platform_meta.get('sub_pattern')}; "
+            f"entity_language_pack={platform_meta.get('entity_language_pack')}; "
+            f"platform_mining_mode={platform_meta.get('platform_mining_mode')}"
         )
 
     profile_out: dict[str, Any] = {
@@ -2233,26 +2274,7 @@ def expand_domain_override(
         "override_active": True,
         "override_source": "domain_override",
     }
-    if family == "education" and education_meta:
-        profile_out["education_sub_pattern"] = education_meta.get(
-            "education_sub_pattern", "general_education"
-        )
-        profile_out["education_sub_pattern_confidence"] = education_meta.get(
-            "education_sub_pattern_confidence"
-        )
-        profile_out["education_matched_terms"] = list(
-            education_meta.get("education_matched_terms") or []
-        )
-        profile_out["is_b2b_education"] = bool(education_meta.get("is_b2b_education"))
-        profile_out["language_pack"] = education_meta.get(
-            "language_pack", "general_education"
-        )
-        profile_out["entity_terms"] = list(
-            education_meta.get("entity_terms") or _PLATFORM_ENTITY_TERMS["education"]
-        )
-        if education_meta.get("platform_hosts"):
-            profile_out["platform_hosts"] = list(education_meta["platform_hosts"])
-    return profile_out
+    return _attach_platform_meta(profile_out, platform_meta)
 
 
 def resolve_campaign_domain_profile(

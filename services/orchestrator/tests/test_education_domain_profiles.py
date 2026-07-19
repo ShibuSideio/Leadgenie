@@ -145,7 +145,8 @@ def test_resolve_education_b2b_keeps_linkedin():
     assert edu["is_b2b_education"] is True
     hints = " ".join(edu["preferred_query_hints"]).lower()
     assert "linkedin.com" in hints
-    assert edu["language_pack"] == "education_b2b"
+    assert edu["language_pack"] in {"education_institution", "education_b2b"}
+    assert edu.get("entity_language_pack") == "education_institution"
 
 
 def test_forbidden_education_language_detector():
@@ -269,12 +270,17 @@ def test_resolve_language_education_never_agent_broker():
 def test_resolve_language_real_estate_still_agent_broker():
     terms, pack = _resolve_platform_entity_language(
         domain_family="real_estate",
-        domain_profile={"domain_family": "real_estate"},
+        domain_profile={
+            "domain_family": "real_estate",
+            "entity_language_pack": "directory_listing",
+            "entity_terms": ["agent", "broker", "listing", "contact"],
+            "platform_mining_mode": "directory",
+        },
         host="bayut.com",
         sourcing_vector="B2C",
         primary_strategy="PLATFORM_MINING",
     )
-    assert pack == "real_estate"
+    assert pack == "directory_listing"
     assert "agent" in terms
     assert "broker" in terms
 

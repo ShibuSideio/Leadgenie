@@ -1405,7 +1405,8 @@ Domain Intelligence classifies each campaign into a **vertical domain family** a
 | Module | Location | Role |
 |--------|----------|------|
 | `domain_constants.py` | `services/shared/` | **SSOT** for `KNOWN_DOMAIN_FAMILIES` (14 families), aliases, `is_valid_domain_family()`, `normalize_domain_family()` |
-| `education_profiles.py` | `services/shared/` | **SSOT** for education sub-patterns, B2C/B2B platform packs, entity language packs |
+| `domain_platform_config.py` | `services/shared/` | **SSOT** declarative platform hosts, entity language packs, sub-patterns, mining modes (no per-family modules) |
+| `education_profiles.py` | `services/shared/` | **Deprecated shim** → delegates to `domain_platform_config` |
 | `domain_gate.py` | `services/shared/` | Cross-service gates: `compute_intent_threshold()`, `compute_enrichment_priority()`, `enrichment_plan_for_priority()`, `enrichment_sort_key()` |
 | `domain_intelligence.py` | `pipeline-main/services/` | `infer_domain_profile()`, override validate/expand, `resolve_campaign_domain_profile()`, `apply_domain_query_profile()`, `build_domain_impact_summary()` |
 | `adaptive_policy.py` | `pipeline-main/services/` | `build_dispatch_policy()` — **adaptive-v3** with damped `strictness_bias` |
@@ -1413,25 +1414,49 @@ Domain Intelligence classifies each campaign into a **vertical domain family** a
 
 **Supported families:** `real_estate`, `saas`, `manufacturing`, `professional_services`, `healthcare`, `education`, `finance`, `ecommerce`, `hospitality`, `logistics`, `construction`, `hr_recruiting`, `marketing_agency`, `general_services`.
 
-### 22.1.1 Education sub-patterns (domain-v3)
+### 22.1.1 Domain platform contract (domain-v4)
 
-Education is **not** a single platform pack. When `domain_family=education`, `resolve_education_profile()` classifies a **sub-pattern** from campaign text and fills preferred platforms + entity language:
+**Principle:** never add a new `*_profiles.py` per vertical. Platforms, sub-patterns, and entity language are **declarative data** in `shared/domain_platform_config.py`.
 
-| Sub-pattern | Typical signals | B2C preferred surfaces (examples) | Entity language pack |
-|-------------|-----------------|-----------------------------------|----------------------|
-| `study_abroad` | MBBS, study abroad, medical education, nursing abroad, consultant/counsellor | Reddit (IndiaEducation/studytips), Quora, YouTube, Shiksha, Collegedunia, Facebook groups | consultant, counsellor, admission, university, student |
-| `coaching` | coaching, tuition, exam prep, JEE/NEET/UPSC | Reddit study communities, Quora, YouTube, Justdial, Sulekha | coaching, tutor, institute, tuition, student, parent |
-| `online_courses` | online course, skill education, certification, upskilling | Reddit onlinelearning, Quora, YouTube, Trustpilot | course, program, enrollment, student, review |
-| `general_education` | fallback | Reddit, Quora, YouTube, Facebook groups, Justdial | admission, student, parent, course, college, school |
+#### Profile contract (required platform fields)
+
+| Field | Meaning |
+|-------|---------|
+| `domain_family` | Vertical label |
+| `sub_pattern` | Optional (e.g. `study_abroad`, `coaching`) — table-driven detection |
+| `preferred_sources` / `preferred_query_hints` | Discovery surfaces |
+| `entity_language_pack` | Pack key (e.g. `directory_listing`, `education_study_abroad`) |
+| `entity_terms` | Resolved terms from the pack |
+| `platform_mining_mode` | `consumer` \| `professional` \| `directory` \| `none` |
+| `platform_hosts` | Host seeds for deterministic platform mining |
+
+#### Entity language packs (reusable)
+
+Families/sub-patterns **select** a pack; they do not invent terms. Packs include `directory_listing` (agent/broker — real estate only), `consumer_discovery`, `professional_service`, `supplier_directory`, `education_*`, `neutral_safe` (fail-open default — **never** agent/broker).
+
+#### Adding a vertical
+
+1. Add a row to `FAMILY_PLATFORM_CONFIG` (hints, hosts, pack, mode).
+2. Optionally add `SUB_PATTERN_CONFIG[family]` with detection terms + overlays.
+3. No new Python module. Query brain + V27 consume the profile only.
+
+#### Education (config data, not a special module)
+
+| Sub-pattern | B2C pack | Mode |
+|-------------|---------|------|
+| `study_abroad` | `education_study_abroad` | consumer |
+| `coaching` | `education_coaching` | consumer |
+| `online_courses` | `education_online` | consumer |
+| `general_education` | `education_student` | consumer |
+
+B2B education uses `education_institution` + LinkedIn. Real estate keeps `directory_listing`.
 
 **Rules:**
-- **B2C default:** no LinkedIn, no `/r/teachers`, no Coursera-as-default (those are teacher/LMS/B2B-skewed).
-- **B2B education only** (vector=`B2B` or institutional cues): LinkedIn + partnership/institution language pack.
-- **Platform mining language** is selected by domain profile + strategy (`query_brain._resolve_platform_entity_language`). Education **never** emits `agent broker`. Real estate B2C still uses agent/broker (unchanged).
-- **Fail-open:** sub-pattern resolve errors fall back to safe general_education B2C packs (not legacy teacher/Coursera/LinkedIn).
-- **Observable logs:** `domain_intelligence_education_sub_pattern`, `query_brain_platform_mining_language_pack`, fallback logs include `language_pack` + `education_sub_pattern`.
-- **Cache bump:** `DOMAIN_PROFILE_VERSION = domain-v3` forces re-infer of stale `system_domain_profile` so production education campaigns pick up new platforms on next produce.
-- **V27:** `intent_orchestrator` seeds education `platform_targets` / `query_hints` from the same SSOT when empty.
+- Platform mining **never** hard-codes `agent broker` from family name; it reads the profile pack.
+- Fail-open → `neutral_safe` if config resolve fails.
+- Logs: `domain_intelligence_platform_slice`, `query_brain_platform_mining_language_pack` (include pack + mode + sub_pattern).
+- Cache: `DOMAIN_PROFILE_VERSION = domain-v4`.
+- V27: `intent_orchestrator` uses `platform_hosts_from_profile` / `resolve_platform_slice`.
 
 ### 22.2 Resolution precedence
 ```
@@ -1456,9 +1481,11 @@ Invalid overrides fail open: log + auto-infer (pipeline never aborts).
 | `preferred_sources` / `preferred_query_hints` | Domain-biased discovery surfaces |
 | `blocked_subreddits` | Noise communities to drop |
 | `liquidity_level` / `low_liquidity_market` | Geo/OSINT density |
-| `education_sub_pattern` | (education only) study_abroad / coaching / online_courses / general_education |
-| `language_pack` / `entity_terms` | (education) platform-mining entity language pack |
-| `is_b2b_education` | (education) institutional vs student/parent intent |
+| `sub_pattern` | Optional use-case within family (config-driven) |
+| `entity_language_pack` / `entity_terms` | Platform-mining language pack + resolved terms |
+| `platform_mining_mode` | consumer / professional / directory / none |
+| `platform_hosts` | Deterministic platform-mining host seeds |
+| `education_sub_pattern` | Compat alias when family=education |
 
 ### 22.4 Thin campaign graceful degradation
 Sparse campaigns use softer family pick thresholds, light name/keyword industry hints, and **cannot claim high `profile_confidence`**. Low tier attenuates `strictness_bias` (~35%), caps preferred-hint injection (`max_inject` ≤ 1), and disables aggressive pre-filter directory softening. Well-filled campaigns keep original pick thresholds and full bias (backward compatible).
@@ -1788,6 +1815,7 @@ All items: **fail-open** (prefer admit + score over silent drop), **structured l
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V27.0.4** | **2026-07-19** | **Foundational platform contract: `shared/domain_platform_config.py` declarative SSOT (language packs + sub-patterns + mining modes). Domain profile domain-v4 always carries `entity_language_pack` / `platform_mining_mode` / `sub_pattern`. Query brain consumes profile only — no family hard-coded agent/broker. `education_profiles.py` deprecated shim. Tests: `test_domain_platform_config`.** |
 | **V27.0.3** | **2026-07-19** | **Education domain intelligence fix: sub-pattern SSOT (`shared/education_profiles.py`) replaces legacy `/r/teachers`+Coursera+LinkedIn defaults for B2C; platform mining entity language driven by domain profile + strategy (no `agent broker` for education); domain profile version `domain-v3`; V27 intent_orchestrator education platform seeds. Tests: `test_education_domain_profiles`.** |
 | **V27.0.2** | **2026-07-18** | **V27 flag audit fix: SSOT moved to `shared/intent_orchestrator.py` (always packaged). Produce no longer stubs flag to False when optional `intelligence` package missing. Campaign `flags.v27=null` no longer suppresses env. Skip logs include `skip_reason`, `env_raw`, `import_error`. Tests: null-flag / quoted-env / shared import regression.** |
 | **V27.0.1** | **2026-07-18** | **Vertex AI project fix: remove hardcoded `trendpulse-app-2025` from `init_vertex()`; resolve via `VERTEX_AI_PROJECT` → `PROJECT_ID` → `lead-sniper-prod`. Platform mining Gemini 403 is non-fatal with deterministic `site:` fallback + logs `platform_mining_vertex_project_used` / `platform_mining_gemini_skipped`. Tests: `test_vertex_project_platform_mining`.** |

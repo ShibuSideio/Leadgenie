@@ -664,35 +664,22 @@ def build_intent_profile(
         platforms = ["g2.com", "capterra.com", "trustpilot.com"]
     elif not platforms and family == "marketing_agency":
         platforms = ["linkedin.com", "clutch.co", "reddit.com"]
-    elif not platforms and family == "education":
-        # V27: education sub-pattern hosts (B2C student/parent) when profile sparse.
+    elif not platforms and family:
+        # V27: any family — hosts from domain profile / shared platform config.
         try:
-            from shared.education_profiles import (  # type: ignore[import]
-                education_platform_hosts,
-                normalize_education_sub_pattern,
-                resolve_education_profile,
+            from shared.domain_platform_config import (  # type: ignore[import]
+                platform_hosts_from_profile,
+                resolve_platform_slice,
             )
-            if isinstance(domain_profile, Mapping) and domain_profile.get("platform_hosts"):
-                platforms = [
-                    str(h).strip() for h in domain_profile.get("platform_hosts") or []
-                    if str(h).strip()
-                ][:6]
-            else:
-                sub = "general_education"
-                is_b2b = vector == "B2B"
-                if isinstance(domain_profile, Mapping):
-                    sub = normalize_education_sub_pattern(
-                        domain_profile.get("education_sub_pattern")
-                    )
-                    if "is_b2b_education" in domain_profile:
-                        is_b2b = bool(domain_profile.get("is_b2b_education"))
-                else:
-                    edu = resolve_education_profile(campaign, sourcing_vector=vector)
-                    sub = edu.get("education_sub_pattern") or sub
-                    is_b2b = bool(edu.get("is_b2b_education"))
-                platforms = education_platform_hosts(sub, is_b2b=is_b2b)[:6]
+            if isinstance(domain_profile, Mapping):
+                platforms = platform_hosts_from_profile(domain_profile, family=family)[:6]
+            if not platforms:
+                slice_ = resolve_platform_slice(
+                    family, campaign=campaign, sourcing_vector=vector
+                )
+                platforms = list(slice_.get("platform_hosts") or [])[:6]
         except Exception:
-            platforms = ["reddit.com", "quora.com", "youtube.com", "shiksha.com"]
+            platforms = []
 
     query_hints: list[str] = []
     if isinstance(domain_profile, Mapping):
@@ -700,12 +687,13 @@ def build_intent_profile(
             str(h).strip() for h in (domain_profile.get("preferred_query_hints") or [])
             if str(h).strip()
         ][:8]
-        # Prefer education-resolved hints over empty / legacy teacher packs.
-        if family == "education" and not query_hints:
+        if not query_hints and family:
             try:
-                from shared.education_profiles import resolve_education_profile  # type: ignore[import]
-                edu = resolve_education_profile(campaign, sourcing_vector=vector)
-                query_hints = list(edu.get("preferred_query_hints") or [])[:8]
+                from shared.domain_platform_config import resolve_platform_slice  # type: ignore[import]
+                slice_ = resolve_platform_slice(
+                    family, campaign=campaign, sourcing_vector=vector
+                )
+                query_hints = list(slice_.get("preferred_query_hints") or [])[:8]
             except Exception:
                 pass
 

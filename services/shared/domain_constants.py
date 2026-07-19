@@ -6,8 +6,8 @@ Single source of truth used by:
 
 Do not redefine family allowlists elsewhere — import from here.
 
-Education sub-patterns, preferred platforms, and entity language packs live in
-``shared.education_profiles`` (not here) so family allowlists stay lean.
+Platform hosts, entity language packs, sub-patterns, and mining modes live in
+``shared.domain_platform_config`` (declarative SSOT — no per-family modules).
 """
 from __future__ import annotations
 
