@@ -56,7 +56,7 @@ def test_domain_override_clear_falls_back_to_inference():
         "location": "Muscat, Oman",
         "domain_override": None,
         "system_domain_profile": {
-            "version": "domain-v2",
+            "version": "domain-v3",
             "domain_family": "saas",
             "confidence": 1.0,
             "override_active": True,

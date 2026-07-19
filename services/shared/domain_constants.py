@@ -5,6 +5,9 @@ Single source of truth used by:
   - orchestrator campaigns API (domain_override validation)
 
 Do not redefine family allowlists elsewhere — import from here.
+
+Education sub-patterns, preferred platforms, and entity language packs live in
+``shared.education_profiles`` (not here) so family allowlists stay lean.
 """
 from __future__ import annotations
 

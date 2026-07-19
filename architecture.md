@@ -1405,12 +1405,33 @@ Domain Intelligence classifies each campaign into a **vertical domain family** a
 | Module | Location | Role |
 |--------|----------|------|
 | `domain_constants.py` | `services/shared/` | **SSOT** for `KNOWN_DOMAIN_FAMILIES` (14 families), aliases, `is_valid_domain_family()`, `normalize_domain_family()` |
+| `education_profiles.py` | `services/shared/` | **SSOT** for education sub-patterns, B2C/B2B platform packs, entity language packs |
 | `domain_gate.py` | `services/shared/` | Cross-service gates: `compute_intent_threshold()`, `compute_enrichment_priority()`, `enrichment_plan_for_priority()`, `enrichment_sort_key()` |
 | `domain_intelligence.py` | `pipeline-main/services/` | `infer_domain_profile()`, override validate/expand, `resolve_campaign_domain_profile()`, `apply_domain_query_profile()`, `build_domain_impact_summary()` |
 | `adaptive_policy.py` | `pipeline-main/services/` | `build_dispatch_policy()` — **adaptive-v3** with damped `strictness_bias` |
 | Campaigns API | `orchestrator/api/routers/campaigns.py` | Validates/persists `domain_override` using shared constants |
 
 **Supported families:** `real_estate`, `saas`, `manufacturing`, `professional_services`, `healthcare`, `education`, `finance`, `ecommerce`, `hospitality`, `logistics`, `construction`, `hr_recruiting`, `marketing_agency`, `general_services`.
+
+### 22.1.1 Education sub-patterns (domain-v3)
+
+Education is **not** a single platform pack. When `domain_family=education`, `resolve_education_profile()` classifies a **sub-pattern** from campaign text and fills preferred platforms + entity language:
+
+| Sub-pattern | Typical signals | B2C preferred surfaces (examples) | Entity language pack |
+|-------------|-----------------|-----------------------------------|----------------------|
+| `study_abroad` | MBBS, study abroad, medical education, nursing abroad, consultant/counsellor | Reddit (IndiaEducation/studytips), Quora, YouTube, Shiksha, Collegedunia, Facebook groups | consultant, counsellor, admission, university, student |
+| `coaching` | coaching, tuition, exam prep, JEE/NEET/UPSC | Reddit study communities, Quora, YouTube, Justdial, Sulekha | coaching, tutor, institute, tuition, student, parent |
+| `online_courses` | online course, skill education, certification, upskilling | Reddit onlinelearning, Quora, YouTube, Trustpilot | course, program, enrollment, student, review |
+| `general_education` | fallback | Reddit, Quora, YouTube, Facebook groups, Justdial | admission, student, parent, course, college, school |
+
+**Rules:**
+- **B2C default:** no LinkedIn, no `/r/teachers`, no Coursera-as-default (those are teacher/LMS/B2B-skewed).
+- **B2B education only** (vector=`B2B` or institutional cues): LinkedIn + partnership/institution language pack.
+- **Platform mining language** is selected by domain profile + strategy (`query_brain._resolve_platform_entity_language`). Education **never** emits `agent broker`. Real estate B2C still uses agent/broker (unchanged).
+- **Fail-open:** sub-pattern resolve errors fall back to safe general_education B2C packs (not legacy teacher/Coursera/LinkedIn).
+- **Observable logs:** `domain_intelligence_education_sub_pattern`, `query_brain_platform_mining_language_pack`, fallback logs include `language_pack` + `education_sub_pattern`.
+- **Cache bump:** `DOMAIN_PROFILE_VERSION = domain-v3` forces re-infer of stale `system_domain_profile` so production education campaigns pick up new platforms on next produce.
+- **V27:** `intent_orchestrator` seeds education `platform_targets` / `query_hints` from the same SSOT when empty.
 
 ### 22.2 Resolution precedence
 ```
@@ -1435,6 +1456,9 @@ Invalid overrides fail open: log + auto-infer (pipeline never aborts).
 | `preferred_sources` / `preferred_query_hints` | Domain-biased discovery surfaces |
 | `blocked_subreddits` | Noise communities to drop |
 | `liquidity_level` / `low_liquidity_market` | Geo/OSINT density |
+| `education_sub_pattern` | (education only) study_abroad / coaching / online_courses / general_education |
+| `language_pack` / `entity_terms` | (education) platform-mining entity language pack |
+| `is_b2b_education` | (education) institutional vs student/parent intent |
 
 ### 22.4 Thin campaign graceful degradation
 Sparse campaigns use softer family pick thresholds, light name/keyword industry hints, and **cannot claim high `profile_confidence`**. Low tier attenuates `strictness_bias` (~35%), caps preferred-hint injection (`max_inject` ≤ 1), and disables aggressive pre-filter directory softening. Well-filled campaigns keep original pick thresholds and full bias (backward compatible).
@@ -1764,6 +1788,7 @@ All items: **fail-open** (prefer admit + score over silent drop), **structured l
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V27.0.3** | **2026-07-19** | **Education domain intelligence fix: sub-pattern SSOT (`shared/education_profiles.py`) replaces legacy `/r/teachers`+Coursera+LinkedIn defaults for B2C; platform mining entity language driven by domain profile + strategy (no `agent broker` for education); domain profile version `domain-v3`; V27 intent_orchestrator education platform seeds. Tests: `test_education_domain_profiles`.** |
 | **V27.0.2** | **2026-07-18** | **V27 flag audit fix: SSOT moved to `shared/intent_orchestrator.py` (always packaged). Produce no longer stubs flag to False when optional `intelligence` package missing. Campaign `flags.v27=null` no longer suppresses env. Skip logs include `skip_reason`, `env_raw`, `import_error`. Tests: null-flag / quoted-env / shared import regression.** |
 | **V27.0.1** | **2026-07-18** | **Vertex AI project fix: remove hardcoded `trendpulse-app-2025` from `init_vertex()`; resolve via `VERTEX_AI_PROJECT` → `PROJECT_ID` → `lead-sniper-prod`. Platform mining Gemini 403 is non-fatal with deterministic `site:` fallback + logs `platform_mining_vertex_project_used` / `platform_mining_gemini_skipped`. Tests: `test_vertex_project_platform_mining`.** |
 | **V27.0** | **2026-07-18** | **IntentDomainOrchestrator (`services/intelligence/orchestrator.py`): unified intent_profile for domain+use-case intelligence; flag `V27_INTELLIGENCE_ORCHESTRATOR` (default false). Channel admission replaces hard G2/Capterra bans when active; path/author exclusion; produce/governance/noise/dispatch/nourish consume profile; funnel telemetry `last_cycle_funnel`. Dockerfile copies intelligence package. Tests: `test_intent_orchestrator_v27` (Oman RE, Kerala CAC, brand narrative, scam recovery).** |

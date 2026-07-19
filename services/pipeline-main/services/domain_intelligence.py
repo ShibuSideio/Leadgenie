@@ -31,6 +31,46 @@ from shared.domain_constants import (  # type: ignore[import]
     normalize_domain_family,
 )
 
+try:
+    from shared.education_profiles import (  # type: ignore[import]
+        LEGACY_EDUCATION_QUERY_HINTS,
+        LEGACY_EDUCATION_SOURCES,
+        resolve_education_profile,
+    )
+except ImportError:  # pragma: no cover — monorepo path variants
+    LEGACY_EDUCATION_QUERY_HINTS = (
+        "site:reddit.com/r/teachers",
+        "site:coursera.org",
+        "site:linkedin.com",
+    )
+    LEGACY_EDUCATION_SOURCES = (
+        "serper_discovery",
+        "reddit",
+        "consumer_forum",
+        "rss_feed",
+        "youtube",
+    )
+
+    def resolve_education_profile(*_a, **_k):  # type: ignore[misc]
+        return {
+            "education_sub_pattern": "general_education",
+            "education_sub_pattern_confidence": 0.0,
+            "education_matched_terms": [],
+            "is_b2b_education": False,
+            "language_pack": "general_education",
+            "entity_terms": ["admission", "student", "parent", "course"],
+            "preferred_query_hints": list(LEGACY_EDUCATION_QUERY_HINTS),
+            "preferred_sources": list(LEGACY_EDUCATION_SOURCES),
+            "platform_hosts": ["reddit.com", "quora.com", "youtube.com"],
+            "resolve_error": True,
+        }
+
+try:
+    from core.logging import get_logger  # type: ignore[import]
+    _log = get_logger("pipeline.domain_intelligence")
+except Exception:  # pragma: no cover
+    _log = None  # type: ignore[assignment]
+
 # Re-export for callers/tests that import from domain_intelligence.
 __all_domain_constants__ = (
     "KNOWN_DOMAIN_FAMILIES",
@@ -41,8 +81,9 @@ __all_domain_constants__ = (
 # ---------------------------------------------------------------------------
 # Schema version — bump when profile shape or inference quality changes so
 # produce/dispatch can re-infer stale system_domain_profile documents.
+# domain-v3: education sub-pattern aware preferred platforms + entity language.
 # ---------------------------------------------------------------------------
-DOMAIN_PROFILE_VERSION = "domain-v2"
+DOMAIN_PROFILE_VERSION = "domain-v3"
 
 # Field weights: persona + pain/keywords are stronger ICP signals than name.
 _FIELD_WEIGHTS: dict[str, float] = {
@@ -209,6 +250,16 @@ _DOMAIN_TERM_PACKS: dict[str, tuple[tuple[str, float], ...]] = {
         ("lms", 1.5),
         ("k-12", 1.8),
         ("higher education", 2.0),
+        # Study-abroad / medical education / coaching signals
+        ("study abroad", 2.8),
+        ("overseas education", 2.6),
+        ("mbbs", 2.6),
+        ("medical education", 2.4),
+        ("education consultant", 2.4),
+        ("education counsellor", 2.4),
+        ("coaching institute", 2.4),
+        ("exam prep", 2.2),
+        ("nursing", 1.4),
     ),
     "finance": (
         ("financial services", 2.8),
@@ -393,10 +444,16 @@ _PREFERRED_QUERY_HINTS: dict[str, tuple[str, ...]] = {
         "site:practo.com",
         "site:google.com/maps",
     ),
+    # Education family defaults are B2C student/parent surfaces.
+    # Sub-pattern resolution (study_abroad / coaching / online_courses) may
+    # replace these via resolve_education_profile(); keep general_education
+    # here as the static fail-open baseline (NOT legacy /r/teachers+Coursera).
     "education": (
-        "site:reddit.com/r/teachers",
-        "site:coursera.org",
-        "site:linkedin.com",
+        "site:reddit.com",
+        "site:quora.com",
+        "site:youtube.com",
+        "site:facebook.com/groups",
+        "site:justdial.com",
     ),
     "finance": (
         "site:reddit.com/r/personalfinance",
@@ -688,7 +745,7 @@ _THIN_SIGNAL_HINTS: dict[str, tuple[str, ...]] = {
     ),
     "education": (
         "school", "tuition", "edtech", "course", "university", "training",
-        "academy",
+        "academy", "mbbs", "study abroad", "coaching", "admission",
     ),
     "finance": (
         "fintech", "lending", "insurance", "mortgage", "wealth", "banking",
@@ -1112,6 +1169,8 @@ def _build_notes(
     profile_confidence: str = "medium",
     thin_campaign: bool = False,
     input_richness: str = "medium",
+    education_sub_pattern: str | None = None,
+    language_pack: str | None = None,
 ) -> str:
     """Human-readable observations for logs and debugging."""
     parts: list[str] = []
@@ -1134,7 +1193,85 @@ def _build_notes(
         parts.append("soft_domain_defaults")
     if liquidity_level == "low":
         parts.append("sparse_market_geo")
+    if education_sub_pattern:
+        parts.append(f"education_sub_pattern={education_sub_pattern}")
+    if language_pack:
+        parts.append(f"language_pack={language_pack}")
     return "; ".join(parts)
+
+
+def _apply_education_vertical_profile(
+    preferred_sources: list[str],
+    preferred_hints: list[str],
+    campaign: Mapping[str, Any] | None,
+    *,
+    force_legacy_on_error: bool = True,
+) -> tuple[list[str], list[str], dict[str, Any]]:
+    """Overlay education sub-pattern platforms onto family defaults.
+
+    Fail-open: on any resolution failure, keep the caller-provided lists
+    (or legacy education defaults if those lists are empty).
+    """
+    edu_meta: dict[str, Any] = {
+        "education_sub_pattern": "general_education",
+        "language_pack": "general_education",
+        "is_b2b_education": False,
+        "entity_terms": list(_PLATFORM_ENTITY_TERMS["education"]),
+    }
+    try:
+        vector = None
+        if isinstance(campaign, Mapping):
+            vector = str(campaign.get("sourcing_vector") or "") or None
+        edu = resolve_education_profile(campaign, sourcing_vector=vector)
+        if edu.get("resolve_error") and force_legacy_on_error:
+            # Module-level resolve failed — keep safer static education defaults
+            # (already non-legacy in _PREFERRED_QUERY_HINTS["education"]).
+            edu_meta["resolve_error"] = True
+            return preferred_sources, preferred_hints, edu_meta
+
+        edu_meta = {
+            "education_sub_pattern": edu.get("education_sub_pattern") or "general_education",
+            "education_sub_pattern_confidence": edu.get("education_sub_pattern_confidence"),
+            "education_matched_terms": list(edu.get("education_matched_terms") or [])[:8],
+            "is_b2b_education": bool(edu.get("is_b2b_education")),
+            "language_pack": edu.get("language_pack") or "general_education",
+            "entity_terms": list(edu.get("entity_terms") or _PLATFORM_ENTITY_TERMS["education"]),
+            "platform_hosts": list(edu.get("platform_hosts") or []),
+        }
+        sources = list(edu.get("preferred_sources") or preferred_sources)
+        hints = list(edu.get("preferred_query_hints") or preferred_hints)
+        if not sources:
+            sources = preferred_sources or list(LEGACY_EDUCATION_SOURCES)
+        if not hints:
+            hints = preferred_hints or list(
+                _PREFERRED_QUERY_HINTS.get("education", LEGACY_EDUCATION_QUERY_HINTS)
+            )
+
+        if _log is not None:
+            try:
+                _log.info(
+                    "domain_intelligence_education_sub_pattern",
+                    education_sub_pattern=edu_meta["education_sub_pattern"],
+                    language_pack=edu_meta["language_pack"],
+                    is_b2b_education=edu_meta["is_b2b_education"],
+                    sub_pattern_confidence=edu_meta.get("education_sub_pattern_confidence"),
+                    matched_terms=edu_meta.get("education_matched_terms"),
+                    preferred_hints_preview=hints[:4],
+                    note="Education vertical resolved to sub-pattern platforms + language pack.",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return sources, hints, edu_meta
+    except Exception as exc:  # noqa: BLE001 — never break infer
+        edu_meta["resolve_error"] = True
+        edu_meta["error"] = f"{type(exc).__name__}: {exc}"
+        if force_legacy_on_error and not preferred_hints:
+            preferred_hints = list(
+                _PREFERRED_QUERY_HINTS.get("education", LEGACY_EDUCATION_QUERY_HINTS)
+            )
+        if force_legacy_on_error and not preferred_sources:
+            preferred_sources = list(LEGACY_EDUCATION_SOURCES)
+        return preferred_sources, preferred_hints, edu_meta
 
 
 def _safe_profile(**overrides: Any) -> dict[str, Any]:
@@ -1239,6 +1376,19 @@ def infer_domain_profile(campaign: dict[str, Any] | None) -> dict[str, Any]:
                 family, _PREFERRED_QUERY_HINTS["general_services"]
             )
         )
+
+        # Education: replace family-static platforms with sub-pattern packs
+        # (study_abroad / coaching / online_courses / general_education).
+        education_meta: dict[str, Any] = {}
+        if family == "education":
+            preferred_sources, preferred_hints, education_meta = (
+                _apply_education_vertical_profile(
+                    preferred_sources,
+                    preferred_hints,
+                    campaign if isinstance(campaign, Mapping) else None,
+                )
+            )
+
         strictness, preferred_sources, preferred_hints, soft_adj = (
             _soften_for_low_profile_confidence(
                 family=family,
@@ -1272,9 +1422,11 @@ def infer_domain_profile(campaign: dict[str, Any] | None) -> dict[str, Any]:
             profile_confidence=profile_confidence,
             thin_campaign=thin_campaign,
             input_richness=input_richness,
+            education_sub_pattern=education_meta.get("education_sub_pattern"),
+            language_pack=education_meta.get("language_pack"),
         )
 
-        return {
+        profile_out: dict[str, Any] = {
             "version": DOMAIN_PROFILE_VERSION,
             "domain_family": family,
             "confidence": confidence,
@@ -1299,6 +1451,29 @@ def infer_domain_profile(campaign: dict[str, Any] | None) -> dict[str, Any]:
                 "has_persona": richness_meta["has_persona"],
             },
         }
+        if family == "education" and education_meta:
+            profile_out["education_sub_pattern"] = education_meta.get(
+                "education_sub_pattern", "general_education"
+            )
+            profile_out["education_sub_pattern_confidence"] = education_meta.get(
+                "education_sub_pattern_confidence"
+            )
+            profile_out["education_matched_terms"] = list(
+                education_meta.get("education_matched_terms") or []
+            )
+            profile_out["is_b2b_education"] = bool(
+                education_meta.get("is_b2b_education")
+            )
+            profile_out["language_pack"] = education_meta.get(
+                "language_pack", "general_education"
+            )
+            profile_out["entity_terms"] = list(
+                education_meta.get("entity_terms")
+                or _PLATFORM_ENTITY_TERMS["education"]
+            )
+            if education_meta.get("platform_hosts"):
+                profile_out["platform_hosts"] = list(education_meta["platform_hosts"])
+        return profile_out
     except Exception as exc:  # noqa: BLE001 — must never break produce/dispatch
         return _safe_profile(
             notes=f"fallback_profile: inference_error ({type(exc).__name__}: {exc})",
@@ -1313,9 +1488,12 @@ _PLATFORM_QUERY_FAMILIES = frozenset({
     "professional_services",
     "healthcare",
     "hospitality",
+    "education",
 })
 
 # Entity terms appended when building platform queries from preferred hints.
+# Education uses sub-pattern packs from shared.education_profiles when available;
+# the static entry here is the general_education B2C fail-open pack (no agent/broker).
 _PLATFORM_ENTITY_TERMS: dict[str, tuple[str, ...]] = {
     "real_estate": ("agent", "broker", "listing", "contact"),
     "manufacturing": ("supplier", "manufacturer", "RFQ", "equipment"),
@@ -1324,8 +1502,18 @@ _PLATFORM_ENTITY_TERMS: dict[str, tuple[str, ...]] = {
     "healthcare": ("clinic", "doctor", "patient", "review"),
     "hospitality": ("hotel", "restaurant", "guest", "review"),
     "saas": ("review", "alternative", "pricing", "integration"),
+    "education": ("admission", "student", "parent", "course", "college", "school"),
     "general_services": ("review", "contact", "near me"),
 }
+
+# Tokens that count as "already has entity language" when expanding hints.
+_ENTITY_LANGUAGE_MARKERS: frozenset[str] = frozenset({
+    "agent", "broker", "supplier", "review", "listing", "contact", "rfq",
+    "consultant", "counsellor", "counselor", "admission", "student", "parent",
+    "tutor", "coaching", "tuition", "university", "college", "course",
+    "enrollment", "instructor", "institute", "school", "looking for",
+    "recommend", "manufacturer", "contractor",
+})
 
 # preferred_sources → default site: fragments when hints are sparse.
 _SOURCE_SITE_SEEDS: dict[str, tuple[str, ...]] = {
@@ -1425,24 +1613,79 @@ def _hint_covered(query: str, hint: str) -> bool:
     return False
 
 
+def _entity_terms_for_family(
+    family: str,
+    domain_profile: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Resolve entity language for platform-hint expansion.
+
+    Education prefers profile-carried ``entity_terms`` / sub-pattern packs so
+    we never fall through to real-estate agent/broker language.
+    """
+    if isinstance(domain_profile, Mapping):
+        profile_terms = domain_profile.get("entity_terms") or domain_profile.get(
+            "platform_entity_terms"
+        )
+        if isinstance(profile_terms, (list, tuple)) and profile_terms:
+            cleaned = tuple(str(t).strip() for t in profile_terms if str(t).strip())
+            if cleaned:
+                return cleaned
+
+    fam = (family or "").strip().lower()
+    if fam == "education" and isinstance(domain_profile, Mapping):
+        try:
+            edu = resolve_education_profile(
+                None,
+                sourcing_vector=str(domain_profile.get("sourcing_vector") or "") or None,
+                text=" ".join(
+                    str(x)
+                    for x in (
+                        domain_profile.get("education_sub_pattern"),
+                        domain_profile.get("notes"),
+                    )
+                    if x
+                ),
+            )
+            # Prefer explicit sub-pattern on profile over re-detect.
+            sub = str(domain_profile.get("education_sub_pattern") or edu.get("education_sub_pattern") or "")
+            is_b2b = bool(domain_profile.get("is_b2b_education"))
+            from shared.education_profiles import education_entity_terms  # type: ignore[import]
+            return tuple(education_entity_terms(sub, is_b2b=is_b2b))
+        except Exception:  # noqa: BLE001
+            return _PLATFORM_ENTITY_TERMS["education"]
+
+    return _PLATFORM_ENTITY_TERMS.get(fam) or _PLATFORM_ENTITY_TERMS["general_services"]
+
+
+def _hint_has_entity_language(hint: str) -> bool:
+    lower = (hint or "").lower()
+    if not lower:
+        return False
+    for tok in _ENTITY_LANGUAGE_MARKERS:
+        if tok in lower:
+            return True
+    return False
+
+
 def _build_query_from_hint(
     hint: str,
     *,
     family: str,
     location: str,
     keywords: str,
+    domain_profile: Mapping[str, Any] | None = None,
 ) -> str:
     """Expand a preferred_query_hint into an executable Serper query string."""
     hint = (hint or "").strip()
     if not hint:
         return ""
-    entities = _PLATFORM_ENTITY_TERMS.get(family) or _PLATFORM_ENTITY_TERMS["general_services"]
+    entities = _entity_terms_for_family(family, domain_profile)
     loc = _location_token(location)
     kw = _primary_keyword(keywords)
 
     # Hint may already be a full-ish query; only append light context.
     base = hint
-    if not any(tok in hint.lower() for tok in ("agent", "broker", "supplier", "review", "listing", "contact", "rfq")):
+    if not _hint_has_entity_language(hint):
         base = f"{hint} {entities[0]} {entities[1] if len(entities) > 1 else 'contact'}"
     if loc and loc.lower() not in base.lower():
         base = f'{base} "{loc}"'
@@ -1677,6 +1920,7 @@ def apply_domain_query_profile(
                     family=family,
                     location=location,
                     keywords=keywords,
+                    domain_profile=domain_profile,
                 )
                 if not candidate:
                     continue
@@ -1942,6 +2186,19 @@ def expand_domain_override(
             _PREFERRED_QUERY_HINTS.get(family, _PREFERRED_QUERY_HINTS["general_services"])
         )
 
+    education_meta: dict[str, Any] = {}
+    # When override only pins the family (no explicit platforms), enrich
+    # education with sub-pattern packs from campaign text. Explicit override
+    # platforms are left untouched.
+    if family == "education" and not override.get("preferred_query_hints"):
+        preferred_sources, preferred_hints, education_meta = (
+            _apply_education_vertical_profile(
+                list(preferred_sources),
+                list(preferred_hints),
+                campaign if isinstance(campaign, Mapping) else None,
+            )
+        )
+
     blocked = override.get("blocked_subreddits")
     if blocked is None:
         blocked = sorted(_BLOCKED_SUBREDDITS_BY_DOMAIN.get(family, set()))
@@ -1950,8 +2207,13 @@ def expand_domain_override(
     notes = "manual_domain_override"
     if user_notes:
         notes = f"manual_domain_override; {user_notes}"
+    if education_meta.get("education_sub_pattern"):
+        notes = (
+            f"{notes}; education_sub_pattern={education_meta['education_sub_pattern']}; "
+            f"language_pack={education_meta.get('language_pack') or 'general_education'}"
+        )
 
-    return {
+    profile_out: dict[str, Any] = {
         "version": DOMAIN_PROFILE_VERSION,
         "domain_family": family,
         "confidence": round(float(confidence), 3),
@@ -1971,6 +2233,26 @@ def expand_domain_override(
         "override_active": True,
         "override_source": "domain_override",
     }
+    if family == "education" and education_meta:
+        profile_out["education_sub_pattern"] = education_meta.get(
+            "education_sub_pattern", "general_education"
+        )
+        profile_out["education_sub_pattern_confidence"] = education_meta.get(
+            "education_sub_pattern_confidence"
+        )
+        profile_out["education_matched_terms"] = list(
+            education_meta.get("education_matched_terms") or []
+        )
+        profile_out["is_b2b_education"] = bool(education_meta.get("is_b2b_education"))
+        profile_out["language_pack"] = education_meta.get(
+            "language_pack", "general_education"
+        )
+        profile_out["entity_terms"] = list(
+            education_meta.get("entity_terms") or _PLATFORM_ENTITY_TERMS["education"]
+        )
+        if education_meta.get("platform_hosts"):
+            profile_out["platform_hosts"] = list(education_meta["platform_hosts"])
+    return profile_out
 
 
 def resolve_campaign_domain_profile(
