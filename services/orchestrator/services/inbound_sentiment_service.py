@@ -353,7 +353,7 @@ B2C_SIGNAL_MODES: dict[int, dict] = {
     6: {
         "name": "consumer_entity_discovery",
         "templates": [
-            '"{pain_keyword}" "{geo}" "top agents" OR "best brokers" OR "recommended" -"top 10" -listicle',
+            '"{pain_keyword}" "{geo}" "top agents" OR "recommended brokers" OR "recommended" -"top 10" -listicle',
             '"{pain_keyword}" "{geo}" "licensed" OR "certified" OR "RERA" OR "registered"',
             '"{pain_keyword}" "{geo}" new listing OR "just listed" OR "available now"',
             '"{pain_keyword}" "{geo}" "contact us" OR "get in touch" OR "free consultation"',

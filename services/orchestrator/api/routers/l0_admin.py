@@ -132,18 +132,30 @@ def get_l0_telemetry(uid, tenant_id, user_role):
         u_data = user_doc.to_dict() or {}
         t_id   = u_data.get("tenant_id", user_doc.id)
         leads_count = db.collection("leads").where(filter=FieldFilter("tenant_id", "==", t_id)).count().get()[0][0].value
-        wallet    = u_data.get("wallet", {}) or {}
-        shard_sum = sum(
-            s.to_dict().get("consumed_credits", 0)
-            for s in db.collection("users").document(t_id).collection("wallet_shards").stream()
-        )
-        # P1-FIN-3: Use correct dual-accounting formula matching helpers.py.
-        _allocated = int(wallet.get("allocated_credits", 0) or 0)
-        _total_consumed = int(wallet.get("total_consumed", 0) or 0)
-        _legacy_consumed = int(wallet.get("consumed_credits", 0) or 0)
-        _consumed = max(_total_consumed, _legacy_consumed + shard_sum)
-        _reserved = int(wallet.get("reserved_credits", 0) or 0)
-        _balance = _allocated - _consumed - _reserved
+        wallet = u_data.get("wallet", {}) or {}
+        # V27.2.0 shared.wallet SSOT
+        try:
+            from shared.wallet import wallet_snapshot  # type: ignore[import]
+            shard_sum = sum(
+                int((s.to_dict() or {}).get("consumed_credits", 0) or 0)
+                for s in db.collection("users").document(t_id).collection("wallet_shards").stream()
+            )
+            _snap = wallet_snapshot(wallet, shard_sum=shard_sum)
+            _allocated, _consumed, _balance = (
+                _snap["allocated"], _snap["effective_consumed"], _snap["available"],
+            )
+        except Exception:
+            shard_sum = sum(
+                int((s.to_dict() or {}).get("consumed_credits", 0) or 0)
+                for s in db.collection("users").document(t_id).collection("wallet_shards").stream()
+            )
+            _allocated = int(wallet.get("allocated_credits", 0) or 0)
+            _consumed = max(
+                int(wallet.get("total_consumed", 0) or 0),
+                int(wallet.get("consumed_credits", 0) or 0) + shard_sum,
+            )
+            _reserved = int(wallet.get("reserved_credits", 0) or 0)
+            _balance = _allocated - _consumed - _reserved
         t_info = {
             "tenant_id":              t_id,
             "email":                  u_data.get("email", ""),

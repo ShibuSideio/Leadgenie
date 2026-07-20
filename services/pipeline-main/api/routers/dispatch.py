@@ -287,12 +287,19 @@ def _settle_credit(tenant_id: str, outcome: str, count: int = 1, lead_id: str = 
     before dispatching the HTTP request to the orchestrator.
     """
     if not ORCHESTRATOR_URL:
+        # V27.2.0: write total_consumed (SSOT) not shards-only — matches atomic settle
         try:
-            shard_id = random.randint(0, 9)
             if outcome == "success":
-                _db().collection("users").document(tenant_id) \
-                    .collection("wallet_shards").document(str(shard_id)) \
-                    .set({"consumed_credits": firestore.Increment(1)}, merge=True)
+                _db().collection("users").document(tenant_id).update({
+                    "wallet.total_consumed": firestore.Increment(count),
+                })
+                if lead_id:
+                    try:
+                        _db().collection("leads").document(lead_id).update(
+                            {"credit_settled": True}
+                        )
+                    except Exception:
+                        pass
         except Exception as fb_e:
             log.warning("settle_credit_fallback_failed", tenant_id=tenant_id, error=str(fb_e))
         return
@@ -1698,6 +1705,7 @@ def dispatch():
             lead_payload = {
                 "id":                           lead_id,
                 "source_url":                   url,
+                "url":                          url,  # V27.2.0 identity SSOT (dedup reads both)
                 "tenant_id":                    tenant_id,
                 "origin_engine":                "cartographer",
                 "score":                        score,
@@ -1705,7 +1713,7 @@ def dispatch():
                 # and inbound (×100 from 0-1 intent_score) onto the same scale.
                 # The UI must read normalized_score for display.
                 "normalized_score":             min(score * 10, 100),
-                "matched_campaign_ids":         evaluation.get("matched_campaign_ids", []),
+                "matched_campaign_ids":         evaluation.get("matched_campaign_ids", []) or [campaign_id],
                 "matched_campaigns":            [campaign_id],
                 "campaign_id":                  campaign_id,
                 "trend_mapped":                 evaluation.get("trend_mapped", False),
@@ -2414,9 +2422,54 @@ def _maybe_notify_whatsapp(tenant_id: str, url: str, lead_id: str,
 # Per-domain rate limiting: Track domain scrape counts in memory to prevent
 # hammering a single platform. Max 5 pages per domain per dispatch batch.
 
-_ENTITY_DOMAIN_COUNTS: dict[str, int] = {}  # Reset each dispatch batch
+_ENTITY_DOMAIN_COUNTS: dict[str, int] = {}  # Soft per-batch hint only
 _ENTITY_DOMAIN_MAX = 5
 _ENTITY_DOMAIN_LOCK = __import__('threading').Lock()  # V26.0.1: Thread safety for TPE
+
+
+def _entity_domain_rate_allow(tenant_id: str, domain: str) -> bool:
+    """V27.2.0 multi-instance entity rate via Firestore daily counter.
+
+    Caps entity page scrapes per (tenant, domain, UTC day) across all Cloud Run
+    instances. Fail-open on Firestore errors so yield is preserved.
+    """
+    try:
+        from shared.scale_limits import ENTITY_DOMAIN_MAX_PER_DAY  # type: ignore[import]
+        _max = ENTITY_DOMAIN_MAX_PER_DAY
+    except Exception:
+        _max = 40
+    if not domain or not tenant_id:
+        return True
+    try:
+        from datetime import datetime, timezone as _tz
+        day = datetime.now(_tz.utc).strftime("%Y%m%d")
+        safe_dom = domain.replace("/", "_")[:120]
+        ref = _db().collection("usage_metrics").document(tenant_id) \
+            .collection("entity_domain_rate").document(f"{safe_dom}_{day}")
+        snap = ref.get()
+        cur = int((snap.to_dict() or {}).get("count", 0) or 0) if snap.exists else 0
+        if cur >= _max:
+            log.info(
+                "entity_domain_rate_capped",
+                tenant_id=tenant_id,
+                domain=domain[:80],
+                count=cur,
+                max=_max,
+            )
+            return False
+        ref.set({
+            "count": firestore.Increment(1),
+            "domain": domain,
+            "day": day,
+        }, merge=True)
+        return True
+    except Exception as exc:
+        log.warning(
+            "entity_domain_rate_fail_open",
+            domain=domain[:80],
+            error=str(exc),
+        )
+        return True
 
 _ENTITY_EXTRACTION_SCHEMA = {
     "type": "OBJECT",
@@ -2496,7 +2549,7 @@ def _extract_entities_from_dom(
     Non-fatal: returns empty list on any failure.
     """
 
-    # Per-domain rate limit (thread-safe for ThreadPoolExecutor)
+    # Per-domain rate limit: process soft-cap + Firestore multi-instance daily cap
     from urllib.parse import urlparse as _urlparse
     _domain = _urlparse(source_url).netloc.lower() if source_url else ""
     with _ENTITY_DOMAIN_LOCK:
@@ -2507,6 +2560,8 @@ def _extract_entities_from_dom(
                      note="Skipping entity extraction to avoid platform rate-limiting.")
             return []
         _ENTITY_DOMAIN_COUNTS[_domain] = _domain_count + 1
+    if not _entity_domain_rate_allow(tenant_id, _domain):
+        return []
 
     # Guard against very short text
     if len(text.strip()) < 200:

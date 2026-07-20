@@ -288,16 +288,24 @@ def test_filter_serper_noise_admits_g2_when_v27_active():
     assert not any("ibm.com" in u for u in links)
 
 
-def test_filter_serper_noise_legacy_still_blocks_g2_without_profile():
+def test_filter_serper_noise_admits_g2_without_profile_v27_2():
+    """V27.2.0: public lead channels never hard-blocked even without V27 profile."""
     results = [
         {
             "link": "https://www.g2.com/products/foo/reviews",
             "title": "Foo",
             "snippet": "Reviews",
         },
+        {
+            "link": "https://www.ibm.com/products/x",
+            "title": "IBM",
+            "snippet": "Brochure",
+        },
     ]
     cleaned = filter_serper_noise(results)  # no intent_profile
-    assert cleaned == []
+    links = [r["link"] for r in cleaned]
+    assert any("g2.com" in u for u in links)
+    assert not any("ibm.com" in u for u in links)
 
 
 # ---------------------------------------------------------------------------

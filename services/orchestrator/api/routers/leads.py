@@ -57,7 +57,11 @@ VALID_REJECTION_REASONS = frozenset({
     "other",
 })
 
-_LEAD_UPDATE_ALLOWED = {"status", "is_in_crm", "crm_status", "rejection_reason", "deal_value", "follow_up_date", "notes", "crm_notes", "updatedAt"}
+_LEAD_UPDATE_ALLOWED = {
+    "status", "is_in_crm", "crm_status", "rejection_reason",
+    "deal_value", "estimated_value",  # V27.2.0: estimated_value aliases deal_value
+    "follow_up_date", "notes", "crm_notes", "updatedAt",
+}
 
 REJECTION_PENALTY_MAP: dict[str, float] = {
     "not_b2b":          -0.25,
@@ -140,22 +144,32 @@ def update_lead(uid, tenant_id, user_role, doc_id):
                          "The issue is likely permanent — please remove or skip this lead."
             }), 422
 
-        # Credit gate: verify tenant has available credits
-        user_doc  = _db().collection("users").document(tenant_id).get()
+        # Credit gate: V27.2.0 shared.wallet SSOT (includes shards + reserved)
+        user_doc = _db().collection("users").document(tenant_id).get()
         if user_doc.exists:
-            wallet       = (user_doc.to_dict() or {}).get("wallet", {})
-            # V24.4 (L5-2): Read total_consumed (written by atomic settlement) rather than
-            # consumed_credits (legacy field). Using the wrong field allows quota-exhausted
-            # tenants to bypass the requeue gate if their credits were settled atomically.
-            _consumed = max(
-                wallet.get("total_consumed", 0),
-                wallet.get("consumed_credits", 0),  # legacy fallback
-            )
-            if wallet.get("allocated_credits", 0) <= _consumed:
-                log.warning("requeue_credit_gate_blocked",
-                            doc_id=doc_id, tenant_id=tenant_id,
-                            total=wallet.get("allocated_credits", 0), reserved=_consumed)
-                return jsonify({"error": "Insufficient credits"}), 402
+            try:
+                from shared.wallet import has_available_credits, wallet_snapshot  # type: ignore[import]
+                from repositories.firestore_repo import get_wallet_shards_total  # type: ignore[import]
+                wallet = (user_doc.to_dict() or {}).get("wallet", {})
+                shard_sum = get_wallet_shards_total(_db(), tenant_id)
+                if not has_available_credits(wallet, shard_sum=shard_sum, need=1):
+                    snap = wallet_snapshot(wallet, shard_sum=shard_sum)
+                    log.warning(
+                        "requeue_credit_gate_blocked",
+                        doc_id=doc_id, tenant_id=tenant_id,
+                        available=snap["available"], allocated=snap["allocated"],
+                    )
+                    return jsonify({"error": "Insufficient credits"}), 402
+            except Exception as _wq_err:
+                log.warning("requeue_credit_gate_fallback", error=str(_wq_err))
+                wallet = (user_doc.to_dict() or {}).get("wallet", {})
+                _consumed = max(
+                    int(wallet.get("total_consumed", 0) or 0),
+                    int(wallet.get("consumed_credits", 0) or 0),
+                )
+                _reserved = int(wallet.get("reserved_credits", 0) or 0)
+                if int(wallet.get("allocated_credits", 0) or 0) - _consumed - _reserved <= 0:
+                    return jsonify({"error": "Insufficient credits"}), 402
 
         # Apply clean requeue mutation — V23.9: use DELETE_FIELD to nuke
         # error fields entirely (not just None), preventing worker re-fail.
@@ -223,16 +237,46 @@ def update_lead(uid, tenant_id, user_role, doc_id):
                  source=data.get("requeue_source", "manual_ui"))
         return jsonify({"status": "requeued"}), 200
 
+    # V27.2.0: normalize status aliases + deal_value field alias
+    try:
+        from shared.lead_identity import normalize_user_status  # type: ignore[import]
+        if data.get("status"):
+            data["status"] = normalize_user_status(data.get("status"))
+    except Exception:
+        if data.get("status") == "rejected":
+            data["status"] = "ignored"
+        if data.get("status") == "approved":
+            data["status"] = "converted"
+    if "estimated_value" in data and "deal_value" not in data:
+        data["deal_value"] = data.pop("estimated_value")
+    elif "estimated_value" in data and "deal_value" in data:
+        data.pop("estimated_value", None)
+
     # Persist the update
     if "interactions" in data:
         db_interaction = {"action": data.get("interactions", ""), "date": firestore.SERVER_TIMESTAMP}
-        doc_ref.update({
-            "status":       data.get("status"),
-            "updatedAt":    firestore.SERVER_TIMESTAMP,
-            "interactions": firestore.ArrayUnion([db_interaction]),
-        })
+        # Cap interactions array growth (scale guard)
+        try:
+            from shared.scale_limits import LEAD_INTERACTIONS_CAP  # type: ignore[import]
+            _icap = LEAD_INTERACTIONS_CAP
+        except Exception:
+            _icap = 200
+        _existing_ix = list((doc_data.to_dict() or {}).get("interactions") or [])
+        if len(_existing_ix) >= _icap:
+            doc_ref.update({
+                "status": data.get("status"),
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+                "interactions": (_existing_ix[-(_icap - 1):] + [db_interaction]),
+            })
+        else:
+            doc_ref.update({
+                "status":       data.get("status"),
+                "updatedAt":    firestore.SERVER_TIMESTAMP,
+                "interactions": firestore.ArrayUnion([db_interaction]),
+            })
     else:
         data = {k: v for k, v in data.items() if k in _LEAD_UPDATE_ALLOWED}
+        data.pop("estimated_value", None)  # never persist alias key
         doc_ref.update(data)
 
     status           = data.get("status")
@@ -259,7 +303,19 @@ def update_lead(uid, tenant_id, user_role, doc_id):
             if isinstance(tech_stack, list) and tech_stack:
                 extracted.extend([t.lower() for t in tech_stack[:2]])
             if extracted:
-                pref_updates["dynamic_blocklist"] = firestore.ArrayUnion(extracted)
+                try:
+                    from shared.scale_limits import DYNAMIC_BLOCKLIST_CAP  # type: ignore[import]
+                    _bl_cap = DYNAMIC_BLOCKLIST_CAP
+                except Exception:
+                    _bl_cap = 500
+                _ud = user_ref.get().to_dict() or {}
+                _cur_bl = list(_ud.get("dynamic_blocklist") or [])
+                if len(_cur_bl) >= _bl_cap:
+                    # Replace with capped tail + new terms (no unbounded growth)
+                    _merged = list(dict.fromkeys(_cur_bl[-( _bl_cap - len(extracted)):] + extracted))
+                    pref_updates["dynamic_blocklist"] = _merged[:_bl_cap]
+                else:
+                    pref_updates["dynamic_blocklist"] = firestore.ArrayUnion(extracted)
         if pref_updates:
             try:
                 user_ref.set(pref_updates, merge=True)
@@ -686,28 +742,30 @@ def update_signal_status(uid, tenant_id, user_role, signal_doc_id):
         # both pass the check before either increments.
         from google.cloud.firestore_v1.transaction import transactional as _fs_txn
 
+        try:
+            from shared.wallet import wallet_snapshot  # type: ignore[import]
+            from repositories.firestore_repo import get_wallet_shards_total  # type: ignore[import]
+            _pre_shard_sum = get_wallet_shards_total(_db(), tenant_id)
+        except Exception:
+            _pre_shard_sum = 0
+
         @_fs_txn
-        def _consume_signal_credit_txn(transaction, user_ref):
-            """Transactional credit check + consume for signal-to-lead conversion."""
+        def _consume_signal_credit_txn(transaction, user_ref, shard_sum: int = 0):
+            """Transactional credit check + consume — shared.wallet SSOT."""
+            from shared.wallet import wallet_snapshot as _ws  # type: ignore[import]
             _snap = user_ref.get(transaction=transaction)
             if not _snap.exists:
                 raise ValueError("Tenant wallet document does not exist.")
             _w = (_snap.to_dict() or {}).get("wallet", {})
-            _alloc = int(_w.get("allocated_credits", 0) or 0)
-            _total_consumed = int(_w.get("total_consumed", 0) or 0)
-            _legacy_consumed = int(_w.get("consumed_credits", 0) or 0)
-            _reserved = int(_w.get("reserved_credits", 0) or 0)
-            # Use max of both accounting paths (matches check_quota in helpers.py)
-            _consumed = max(_total_consumed, _legacy_consumed)
-            _avail = _alloc - _consumed - _reserved
-            if _avail <= 0:
+            _snap_w = _ws(_w, shard_sum=shard_sum)
+            if _snap_w["available"] <= 0:
                 raise ValueError("Insufficient credits to convert signal to lead")
             transaction.update(user_ref, {"wallet.total_consumed": fs.Increment(1)})
 
         try:
             _user_ref = _db().collection("users").document(tenant_id)
             _txn = _db().transaction()
-            _consume_signal_credit_txn(_txn, _user_ref)
+            _consume_signal_credit_txn(_txn, _user_ref, shard_sum=_pre_shard_sum)
         except ValueError as _credit_err:
             log.warning("inbound_signal_conversion_insufficient_credits",
                         signal_id=signal_doc_id, tenant_id=tenant_id,

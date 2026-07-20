@@ -433,12 +433,14 @@ def _create_cluster_lead(
             # Core identifiers
             "id":                          lead_id,
             "source_url":                  source_url,
+            "url":                         source_url,
             "tenant_id":                   tenant_id,
             "campaign_id":                 campaign_id,
             "origin_engine":               "cluster_analyst",
             "status":                      "new",
             "is_in_crm":                   False,
             "created_at":                  now_utc,
+            "createdAt":                   now_utc,
             "sourcing_vector":             archetype,
 
             # Cluster intelligence
@@ -490,10 +492,31 @@ def _create_cluster_lead(
             "trend_mapped":                False,
             "highest_campaign_id":         campaign_id,
         }
+        try:
+            from shared.lead_identity import apply_lead_identity_fields  # type: ignore[import]
+            lead_payload = apply_lead_identity_fields(
+                lead_payload,
+                url=source_url,
+                source_url=source_url,
+                campaign_id=campaign_id,
+                matched_campaigns=[campaign_id],
+            )
+        except Exception:
+            pass
 
-        db.collection("campaigns").document(campaign_id) \
-          .collection("leads").document(lead_id) \
-          .set(lead_payload)
+        # V27.2.0: Write top-level leads (feed/CRM/settle SSOT). Subcollection kept
+        # as legacy mirror for one release cycle.
+        db.collection("leads").document(lead_id).set(lead_payload, merge=True)
+        try:
+            db.collection("campaigns").document(campaign_id) \
+              .collection("leads").document(lead_id) \
+              .set(lead_payload, merge=True)
+        except Exception as _mirror_err:
+            log.warning(
+                "cluster_lead_subcollection_mirror_failed",
+                lead_id=lead_id,
+                error=str(_mirror_err),
+            )
 
         log.info(
             "cluster_lead_written",

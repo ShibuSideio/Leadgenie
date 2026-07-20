@@ -1370,44 +1370,90 @@ def produce():
     # ------------------------------------------------------------------
     existing_ids: set[str] = set()
     try:
-        # SF-005 FIX: Added .limit(500) to prevent full leads collection scan.
-        # For tenants with >500 leads, only the 500 most recently indexed URLs
-        # are checked. Fresh URLs beyond the 500-doc window may be re-queued.
-        # Acceptable trade-off: occasional re-scrape of an old URL is far safer
-        # than a minutes-long Firestore scan that blocks the producer worker.
-        # TODO(SF-005): Implement cursor-based pagination when tenant leads > 5000.
-        _DEDUP_SCAN_LIMIT = 500
-        known_docs = list(
+        # V27.2.0 scale: paginated dedup scan (was hard 500 — re-queue risk at 1k+ users).
+        # Pages of DEDUP_SCAN_PAGE_SIZE up to DEDUP_SCAN_LIMIT; reads url + source_url.
+        try:
+            from shared.scale_limits import (  # type: ignore[import]
+                DEDUP_SCAN_LIMIT as _DEDUP_SCAN_LIMIT,
+                DEDUP_SCAN_PAGE_SIZE as _DEDUP_PAGE,
+            )
+        except Exception:
+            _DEDUP_SCAN_LIMIT = 2500
+            _DEDUP_PAGE = 500
+        try:
+            from shared.lead_identity import (  # type: ignore[import]
+                is_terminal_non_lead,
+                resolve_lead_url,
+            )
+        except Exception:
+            def is_terminal_non_lead(s):  # type: ignore
+                return str(s or "").lower() in {
+                    "scored_out", "rlhf_filtered", "failed", "failed_scrape",
+                    "failed_eval", "failed_vertex_timeout",
+                }
+            def resolve_lead_url(d):  # type: ignore
+                return str((d or {}).get("source_url") or (d or {}).get("url") or "")
+
+        known_docs = []
+        _q = (
             get_db().collection("leads")
             .where(filter=FieldFilter("tenant_id", "==", tenant_id))
-            .select(["url", "createdAt", "status"])
-            .limit(_DEDUP_SCAN_LIMIT)
-            .stream()
+            .select(["url", "source_url", "createdAt", "status"])
+            .order_by("createdAt", direction=firestore.Query.DESCENDING)
+            .limit(_DEDUP_PAGE)
         )
+        _pages = 0
+        _max_pages = max(1, (_DEDUP_SCAN_LIMIT + _DEDUP_PAGE - 1) // _DEDUP_PAGE)
+        try:
+            while _pages < _max_pages and len(known_docs) < _DEDUP_SCAN_LIMIT:
+                batch = list(_q.stream())
+                if not batch:
+                    break
+                known_docs.extend(batch)
+                _pages += 1
+                if len(batch) < _DEDUP_PAGE:
+                    break
+                # Cursor pagination
+                _q = (
+                    get_db().collection("leads")
+                    .where(filter=FieldFilter("tenant_id", "==", tenant_id))
+                    .select(["url", "source_url", "createdAt", "status"])
+                    .order_by("createdAt", direction=firestore.Query.DESCENDING)
+                    .start_after(batch[-1])
+                    .limit(_DEDUP_PAGE)
+                )
+        except Exception as _page_err:
+            # Fallback: unordered limit if composite index missing
+            log.warning(
+                "produce_dedup_pagination_fallback",
+                error=str(_page_err),
+                note="Using unordered limit scan — deploy firestore index tenant_id+createdAt DESC.",
+            )
+            known_docs = list(
+                get_db().collection("leads")
+                .where(filter=FieldFilter("tenant_id", "==", tenant_id))
+                .select(["url", "source_url", "createdAt", "status"])
+                .limit(_DEDUP_SCAN_LIMIT)
+                .stream()
+            )
         _dedup_recrawl_days = max(1, min(120, int(os.environ.get("DEDUP_RECRAWL_DAYS", "30"))))
         _dedup_cutoff = datetime.now(timezone.utc) - timedelta(days=_dedup_recrawl_days)
-        if len(known_docs) == _DEDUP_SCAN_LIMIT:
-            log.warning("produce_dedup_scan_cap_hit",
-                        tenant_id=tenant_id,
-                        limit=_DEDUP_SCAN_LIMIT,
-                        note="Dedup scan capped. Tenant may have >500 leads. "
-                             "Implement cursor pagination (SF-005) to prevent re-scrape.")
+        if len(known_docs) >= _DEDUP_SCAN_LIMIT:
+            log.warning(
+                "produce_dedup_scan_cap_hit",
+                tenant_id=tenant_id,
+                limit=_DEDUP_SCAN_LIMIT,
+                note="Dedup scan hit scale cap. Increase DEDUP_SCAN_LIMIT or archive old leads.",
+            )
         for doc in known_docs:
             lead_data = doc.to_dict() or {}
-            u = lead_data.get("url", "")
+            u = resolve_lead_url(lead_data)
             _created_at = lead_data.get("createdAt")
             _status = str(lead_data.get("status") or "").strip().lower()
             if u:
                 if not _is_recent_for_dedup(_created_at, _dedup_cutoff):
                     continue
-                if _status in {
-                    "scored_out",
-                    "rlhf_filtered",
-                    "failed",
-                    "failed_scrape",
-                    "failed_eval",
-                    "failed_vertex_timeout",
-                }:
+                if is_terminal_non_lead(_status):
                     continue
                 # V26.7.0: multi-entity portals always path-keyed (even for B2B
                 # producers) so portal inventory is not domain-collapsed.

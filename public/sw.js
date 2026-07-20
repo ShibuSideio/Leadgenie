@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sideio-v26.0.5'; // V26.0.5: Platform Mining + Smart Time Filter — B2C leads from competitor platforms
+const CACHE_NAME = 'sideio-v27.2.0'; // V27.2.0: wallet SSOT + available_credits for 1000+ scale
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',

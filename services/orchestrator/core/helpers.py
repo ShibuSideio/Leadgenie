@@ -104,68 +104,86 @@ def get_service_account_email() -> str:
 
 
 # =============================================================================
-# QUOTA / WALLET HELPERS
+# QUOTA / WALLET HELPERS (V27.2.0 — shared.wallet SSOT)
 # =============================================================================
+def _wallet_shard_sum(tenant_id: str) -> int:
+    """Sum legacy wallet_shards for dual-path max() read."""
+    try:
+        from shared.wallet import shard_consumed_sum  # type: ignore[import]
+        shards = list(
+            _db().collection("users").document(tenant_id).collection("wallet_shards").stream()
+        )
+        return shard_consumed_sum(shards)
+    except Exception:
+        # Fail-open to 0 only if shards unreadable — total_consumed still applies
+        return sum(
+            int((s.to_dict() or {}).get("consumed_credits", 0) or 0)
+            for s in _db().collection("users").document(tenant_id)
+            .collection("wallet_shards").stream()
+        )
+
+
+def get_wallet_snapshot(tenant_id: str) -> dict:
+    """Authoritative wallet snapshot for tenant (includes reserved)."""
+    from shared.wallet import wallet_snapshot  # type: ignore[import]
+    user_doc = _db().collection("users").document(tenant_id).get()
+    if not user_doc.exists:
+        return wallet_snapshot({}, shard_sum=0)
+    data = user_doc.to_dict() or {}
+    return wallet_snapshot(data.get("wallet", {}), shard_sum=_wallet_shard_sum(tenant_id))
+
+
 def check_quota(tenant_id: str):
     """Return (is_valid: bool, status_code: int, message: str).
 
-    Postmortem Fix #1: Unified dual-accounting-path read.
-    Previously read only `consumed_credits + shard_sum`, while _atomic_settle_txn
-    writes `total_consumed`. These two paths diverged silently over time.
-    Fix: take max(total_consumed, consumed_credits + shard_sum) to cover both
-    schema paths regardless of migration state.
+    V27.2.0: Uses shared.wallet SSOT including reserved_credits.
+    available = allocated − max(total_consumed, legacy+shards) − reserved
     """
+    from shared.wallet import wallet_snapshot  # type: ignore[import]
     user_doc = _db().collection("users").document(tenant_id).get()
     if not user_doc.exists:
         return False, 401, "Unknown identity."
-    data = user_doc.to_dict()
+    data = user_doc.to_dict() or {}
     if data.get("role") == "super_admin":
         return True, 200, "OK"
     if data.get("approval_status") != "approved":
         return False, 403, "Your application is under review. Please wait for L0 approval."
-    wallet        = data.get("wallet", {})
-    credits       = wallet.get("allocated_credits", 0)
-    # Path A: new atomic settle path (total_consumed field)
-    total_consumed = int(wallet.get("total_consumed", 0) or 0)
-    # Path B: legacy shard path (consumed_credits field + shard subcollection)
-    legacy_consumed = int(wallet.get("consumed_credits", 0) or 0)
-    shard_sum = sum(
-        s.to_dict().get("consumed_credits", 0)
-        for s in _db().collection("users").document(tenant_id)
-                       .collection("wallet_shards").stream()
-    )
-    # Use whichever path shows higher consumption — prevents over-delivery on drift
-    consumed = max(total_consumed, legacy_consumed + shard_sum)
-    if (credits - consumed) <= 0:
+    snap = wallet_snapshot(data.get("wallet", {}), shard_sum=_wallet_shard_sum(tenant_id))
+    if snap["available"] <= 0:
         return False, 402, "Beta quota exhausted. Contact admin to reload."
     return True, 200, "OK"
 
 
 @_fs_transactional
-def _reserve_credits_txn(transaction, user_ref, batch_cost: int):
-    snapshot  = user_ref.get(transaction=transaction)
+def _reserve_credits_txn(transaction, user_ref, batch_cost: int, shard_sum: int = 0):
+    """Reserve credits using full SSOT formula (total + shards + reserved)."""
+    from shared.wallet import wallet_snapshot  # type: ignore[import]
+    snapshot = user_ref.get(transaction=transaction)
     if not snapshot.exists:
         raise ValueError("Tenant wallet document does not exist.")
-    wallet    = (snapshot.to_dict() or {}).get("wallet", {})
-    allocated = int(wallet.get("allocated_credits", 0) or 0)
-    consumed  = int(wallet.get("total_consumed",    0) or 0)
-    reserved  = int(wallet.get("reserved_credits",  0) or 0)
-    available = allocated - consumed - reserved
-    if available < batch_cost:
+    wallet = (snapshot.to_dict() or {}).get("wallet", {})
+    snap = wallet_snapshot(wallet, shard_sum=shard_sum)
+    if snap["available"] < batch_cost:
         raise ValueError(
-            f"Insufficient credits: {available} available, {batch_cost} requested."
+            f"Insufficient credits: {snap['available']} available, {batch_cost} requested."
         )
     transaction.update(user_ref, {"wallet.reserved_credits": firestore.Increment(batch_cost)})
-    return available - batch_cost
+    return snap["available"] - batch_cost
 
 
 def reserve_credits(tenant_id: str, batch_cost: int) -> bool:
     if batch_cost <= 0:
         return True
     user_ref = _db().collection("users").document(tenant_id)
-    txn      = _db().transaction()
+    txn = _db().transaction()
+    # Shard sum read outside txn (10 docs); total_consumed is authoritative write path.
+    # Included so legacy shard-only tenants cannot over-reserve.
     try:
-        _reserve_credits_txn(txn, user_ref, batch_cost)
+        shard_sum = _wallet_shard_sum(tenant_id)
+    except Exception:
+        shard_sum = 0
+    try:
+        _reserve_credits_txn(txn, user_ref, batch_cost, shard_sum=shard_sum)
         return True
     except (ValueError, Exception) as e:
         print(f"[RESERVE] Denied for {tenant_id}: {e}")

@@ -827,13 +827,20 @@ async function loadMe() {
                 }
             }
 
-            // Defensive dual-path: check nested wallet map AND flattened root
-            // (DB migration may have stored fields at either level).
+            // V27.2.0: prefer API available_credits (SSOT includes reserved + shards)
             const w = payload.wallet || data.wallet || {};
             const allocated = Number(w.allocated_credits  || data.allocated_credits  || 0) || 0;
             const consumed  = Number(w.consumed_credits   || data.consumed_credits   || 0) || 0;
-            const credits   = allocated - consumed;
-            window.activeWallet = { allocated_credits: allocated, consumed_credits: consumed };
+            const reserved  = Number(w.reserved_credits   || 0) || 0;
+            const credits   = (w.available_credits != null)
+                ? Number(w.available_credits) || 0
+                : (allocated - consumed - reserved);
+            window.activeWallet = {
+                allocated_credits: allocated,
+                consumed_credits: consumed,
+                reserved_credits: reserved,
+                available_credits: credits,
+            };
             if (window.SIO_DEBUG) console.log('[WALLET] payload.wallet:', payload.wallet, '| data.wallet:', data.wallet,
                         '| allocated:', allocated, '| consumed:', consumed, '| balance:', credits);
             const el = document.getElementById('wallet-balance');
@@ -3452,7 +3459,10 @@ window.openNewCampaignModal = async function() {
     const ud = window.currentUserData || {};
     const allocated = Number(aw.allocated_credits || ud.allocated_credits || 0) || 0;
     const consumed  = Number(aw.consumed_credits  || ud.consumed_credits  || 0) || 0;
-    const remaining = allocated - consumed;
+    const reserved  = Number(aw.reserved_credits || 0) || 0;
+    const remaining = (aw.available_credits != null)
+        ? Number(aw.available_credits) || 0
+        : (allocated - consumed - reserved);
     if (window.SIO_DEBUG) console.log('[DEBUG WALLET] window.activeWallet:', aw,
                 '| currentUserData:', ud,
                 '| allocated:', allocated, '| consumed:', consumed, '| remaining:', remaining);

@@ -145,9 +145,18 @@ def _is_consumer_archetype(vector: str) -> bool:
     return (vector or "").upper().strip() in _CONSUMER_ARCHETYPES
 
 
+# V27.2.0: Public review/lead channels are NEVER hard-blocked as domains.
+# g2.com / capterra.com removed from enterprise hard-block list — they are
+# PLATFORM_MINING / COMPETITOR_TOUCHPOINT sources. Path/author noise still
+# filtered below. zoominfo remains enterprise data-broker noise.
+_PUBLIC_LEAD_CHANNELS = frozenset({
+    "g2.com", "capterra.com", "trustpilot.com", "reddit.com", "quora.com",
+    "yelp.com", "trustradius.com", "sitejabber.com",
+})
+
 _ENTERPRISE_DOMAINS = [
     "ibm.com", "amazon.com", "microsoft.com",
-    "g2.com", "capterra.com", "zoominfo.com",
+    "zoominfo.com",
     # V24.5.8: Academic preprint and research repositories — never a business lead.
     # Gemini pre-filter can misclassify these as buyers when campaign domain overlaps
     # with the paper's subject (e.g., MediMorph AI campaign → medical AI papers).
@@ -395,9 +404,12 @@ def filter_serper_noise(
                 )
 
         # ── Legacy path (V26 and earlier / orchestrator off) ──────────────
-        if link_domain in _ENTERPRISE_DOMAINS:
+        # V27.2.0: never hard-drop public lead channels even when V27 flag off
+        if link_domain in _ENTERPRISE_DOMAINS and link_domain not in _PUBLIC_LEAD_CHANNELS:
             _rejected_enterprise += 1
             continue
+        if link_domain in _PUBLIC_LEAD_CHANNELS:
+            _channel_admitted += 1
         # V24.5.7: Block CDN/static subdomains — these are asset servers, not business pages.
         # extract_root_domain strips 'www.' but keeps other subdomains.
         # Check if the netloc (before root domain stripping) starts with a CDN prefix.
@@ -509,30 +521,14 @@ def sanitize_query(query: str) -> str:
     if _SERPER_PAID_TIER:
         return query
 
-    # V27.0: When orchestrator is on, never strip positive site: for public
-    # lead channels (reddit/quora/youtube/g2/…). Fail-open if import fails.
-    _v27_preserve_site = False
-    try:
-        from shared.intent_orchestrator import is_v27_orchestrator_enabled  # type: ignore[import]
-        _v27_preserve_site = is_v27_orchestrator_enabled()
-    except Exception:
-        try:
-            from intelligence.orchestrator import is_v27_orchestrator_enabled  # type: ignore[import]
-            _v27_preserve_site = is_v27_orchestrator_enabled()
-        except Exception:
-            _v27_preserve_site = os.getenv("V27_INTELLIGENCE_ORCHESTRATOR", "").strip().lower() in (
-                "1", "true", "yes", "on",
-            )
-
-    # V26.0.4: B2B exception — LinkedIn and Facebook are primary B2B lead sources.
-    # On free tier, strip consumer-only social platforms but preserve B2B-critical ones.
-    # LinkedIn company pages, posts, articles — all contain B2B buyer signals.
-    # Facebook business pages — contain SMB buyer signals.
+    # V27.2.0 SCALE: Always preserve positive site: for public lead channels
+    # on free tier. Stripping them was a pay-then-zero-yield bug at scale.
+    # Only strip non-site consumer tokens that Serper free-tier rejects.
     forbidden = ["twitter", "instagram", "reddit", "quora", "youtube", "x.com"]
-    # Public channels whose positive site: must survive free-tier sanitize under V27
-    _V27_SITE_KEEP = (
+    _SITE_KEEP = (
         "reddit", "quora", "youtube", "twitter", "x.com", "instagram",
         "g2.com", "capterra", "trustpilot", "linkedin", "facebook",
+        "yelp", "trustradius", "sitejabber",
     )
 
     # Matches quoted strings (possibly with prefix like -site: or -intitle:) or parentheses or words
@@ -551,25 +547,22 @@ def sanitize_query(query: str) -> str:
                 is_forbidden = True
                 break
         if is_forbidden:
-            # V27: preserve positive site: operators for public lead channels
-            if _v27_preserve_site and (
-                token_lower.startswith("site:")
-                or token_lower.startswith("-site:") is False and "site:" in token_lower
-            ):
-                if any(k in token_lower for k in _V27_SITE_KEEP) and token_lower.startswith("site:"):
-                    log.info(
-                        "sanitize_query_positive_site_preserved",
-                        token=token[:80],
-                        note="V27 orchestrator: public channel site: kept on free tier.",
-                    )
-                    clean_tokens.append(token)
-                    continue
-            # V24.1.1: Log when positive site: operators are stripped
+            # Always keep positive site: for public lead channels (V27.2.0)
+            if token_lower.startswith("site:") and any(k in token_lower for k in _SITE_KEEP):
+                log.info(
+                    "sanitize_query_positive_site_preserved",
+                    token=token[:80],
+                    note="V27.2.0: public channel site: always kept on free tier.",
+                )
+                clean_tokens.append(token)
+                continue
             if token_lower.startswith("site:"):
-                log.warning("sanitize_query_positive_site_stripped",
-                            token=token[:80], query=query[:100],
-                            note="Set SERPER_PAID_TIER=true or V27_INTELLIGENCE_ORCHESTRATOR=true "
-                                 "to preserve social site: operators.")
+                log.warning(
+                    "sanitize_query_positive_site_stripped",
+                    token=token[:80],
+                    query=query[:100],
+                    note="Non-keep-list site: stripped on free tier.",
+                )
             continue
         clean_tokens.append(token)
 

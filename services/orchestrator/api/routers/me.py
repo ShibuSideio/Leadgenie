@@ -67,15 +67,26 @@ def me_endpoint(uid: str, tenant_id: str, user_role: str):
 
     data = user_doc.to_dict() or {}
     raw_wallet = data.get("wallet", {})
-    allocated = int(raw_wallet.get("allocated_credits", 0) or 0)
-    # P1-FIN-2: Use authoritative field matching check_quota in helpers.py.
-    # Take max(total_consumed, consumed_credits + shard_sum) to cover both
-    # the atomic settle path and the legacy shard path.
-    shard_sum = get_wallet_shards_total(db, uid)
-    consumed = max(
-        int(raw_wallet.get("total_consumed", 0) or 0),
-        int(raw_wallet.get("consumed_credits", 0) or 0) + shard_sum,
-    )
+    # V27.2.0: shared.wallet SSOT — includes reserved + available for scale-safe UI.
+    try:
+        from shared.wallet import api_wallet_payload  # type: ignore[import]
+        shard_sum = get_wallet_shards_total(db, uid)
+        wallet_out = api_wallet_payload(raw_wallet, shard_sum=shard_sum)
+    except Exception:
+        shard_sum = get_wallet_shards_total(db, uid)
+        allocated = int(raw_wallet.get("allocated_credits", 0) or 0)
+        consumed = max(
+            int(raw_wallet.get("total_consumed", 0) or 0),
+            int(raw_wallet.get("consumed_credits", 0) or 0) + shard_sum,
+        )
+        reserved = int(raw_wallet.get("reserved_credits", 0) or 0)
+        wallet_out = {
+            "allocated_credits": allocated,
+            "consumed_credits": consumed,
+            "total_consumed": int(raw_wallet.get("total_consumed", 0) or 0),
+            "reserved_credits": reserved,
+            "available_credits": allocated - consumed - reserved,
+        }
 
     log.info("user_profile_fetched", uid=uid[:8])
 
@@ -91,6 +102,6 @@ def me_endpoint(uid: str, tenant_id: str, user_role: str):
     return jsonify({
         "status":        "success",
         "data":          data,
-        "wallet":        {"allocated_credits": allocated, "consumed_credits": consumed},
+        "wallet":        wallet_out,
         "inbound_radar": inbound_radar_summary,
     }), 200

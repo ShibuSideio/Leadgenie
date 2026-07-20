@@ -648,20 +648,25 @@ def cron_sweep():
             user_doc = (_db_instance.collection("users").document(tenant_id).get().to_dict() or {})
         user_role = user_doc.get("role", "")
         if user_role != "super_admin":
-            wallet    = user_doc.get("wallet", {})
-            # FIELD SCHEMA NOTE:
-            #   allocated_credits — total credits granted (always present)
-            #   total_consumed    — authoritative consumed count (written by _atomic_settle_txn)
-            #   consumed_credits  — legacy field (written by old wallet_shards path)
-            #   reserved_credits  — in-flight reservations
-            # We read BOTH consumed field names and take the max to handle schema drift.
-            credits   = int(wallet.get("allocated_credits", 0) or 0)
-            consumed  = max(
-                int(wallet.get("total_consumed",   0) or 0),
-                int(wallet.get("consumed_credits", 0) or 0),
-            )
-            reserved  = int(wallet.get("reserved_credits", 0) or 0)
-            available = credits - consumed - reserved
+            wallet = user_doc.get("wallet", {}) or {}
+            # V27.2.0: shared.wallet SSOT (includes wallet_shards + reserved)
+            try:
+                from shared.wallet import wallet_snapshot  # type: ignore[import]
+                from repositories.firestore_repo import get_wallet_shards_total  # type: ignore[import]
+                _ss = get_wallet_shards_total(_db(), tenant_id)
+                _snap = wallet_snapshot(wallet, shard_sum=_ss)
+                credits, consumed, reserved, available = (
+                    _snap["allocated"], _snap["effective_consumed"],
+                    _snap["reserved"], _snap["available"],
+                )
+            except Exception:
+                credits = int(wallet.get("allocated_credits", 0) or 0)
+                consumed = max(
+                    int(wallet.get("total_consumed", 0) or 0),
+                    int(wallet.get("consumed_credits", 0) or 0),
+                )
+                reserved = int(wallet.get("reserved_credits", 0) or 0)
+                available = credits - consumed - reserved
             log.info("sweep_quota_check",
                      campaign_id=campaign_id, tenant_id=tenant_id,
                      credits=credits, consumed=consumed,
@@ -1171,14 +1176,24 @@ def cron_harvest_sweep():
             user_data = _db().collection("users").document(tenant_id).get().to_dict() or {}
             user_role = user_data.get("role", "")
             if user_role != "super_admin":
-                wallet    = user_data.get("wallet", {}) or {}
-                allocated = int(wallet.get("allocated_credits", 0) or 0)
-                consumed  = max(
-                    int(wallet.get("total_consumed",   0) or 0),
-                    int(wallet.get("consumed_credits", 0) or 0),
-                )
-                reserved  = int(wallet.get("reserved_credits", 0) or 0)
-                remaining = allocated - consumed - reserved
+                wallet = user_data.get("wallet", {}) or {}
+                try:
+                    from shared.wallet import wallet_snapshot  # type: ignore[import]
+                    from repositories.firestore_repo import get_wallet_shards_total  # type: ignore[import]
+                    _ss = get_wallet_shards_total(_db(), tenant_id)
+                    _snap = wallet_snapshot(wallet, shard_sum=_ss)
+                    allocated, consumed, reserved, remaining = (
+                        _snap["allocated"], _snap["effective_consumed"],
+                        _snap["reserved"], _snap["available"],
+                    )
+                except Exception:
+                    allocated = int(wallet.get("allocated_credits", 0) or 0)
+                    consumed = max(
+                        int(wallet.get("total_consumed", 0) or 0),
+                        int(wallet.get("consumed_credits", 0) or 0),
+                    )
+                    reserved = int(wallet.get("reserved_credits", 0) or 0)
+                    remaining = allocated - consumed - reserved
                 if remaining <= 0:
                     log.info("harvest_sweep_credit_gate_skip",
                              tenant_id=tenant_id, campaign_id=campaign_id,

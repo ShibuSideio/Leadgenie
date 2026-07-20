@@ -38,6 +38,7 @@ You **must not claim** any of the following until you **paste the corresponding 
 ## Canonical references (do not invent)
 
 - Deep system design: `architecture.md` — read the relevant section before changing produce, wallet/Serper, PRISM, inbound, or domain intelligence.
+- **Inconsistency & scale register:** `AUDIT_INCONSISTENCY_REGISTER.md` (2026-07-20; V27.2.0 remediation notes). Wallet SSOT: `shared/wallet.py`. Lead identity: `shared/lead_identity.py`. Scale caps: `shared/scale_limits.py`.
 - Verify schemas, field names, and formulas in **code + architecture.md**. Do not invent Firestore fields (e.g. there is no `remaining_credits`).
 - Prefer opening the real module over restating architecture from memory.
 

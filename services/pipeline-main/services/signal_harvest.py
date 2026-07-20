@@ -1058,13 +1058,12 @@ def _write_to_firestore(
                 lead_ref.set(lead_doc)
                 direct_leads_count += 1
 
-                # FIN-01 FIX: Settle credit after successful direct lead creation
+                # V27.2.0: Settle via total_consumed SSOT (not shards-only)
                 try:
-                    import random as _rnd
-                    _shard = _rnd.randint(0, 9)
-                    db.collection("users").document(tenant_id) \
-                        .collection("wallet_shards").document(str(_shard)) \
-                        .set({"consumed_credits": firestore.Increment(1)}, merge=True)
+                    db.collection("users").document(tenant_id).update({
+                        "wallet.total_consumed": firestore.Increment(1),
+                    })
+                    lead_ref.update({"credit_settled": True})
                 except Exception as _settle_err:
                     log.warning(
                         "signal_harvest_credit_settle_failed",
@@ -1151,16 +1150,46 @@ def _write_to_firestore(
     # Use arrayUnion for atomic, dedup-safe append.
     if harvest_urls:
         try:
-            campaign_ref = db.collection("campaigns").document(campaign_id)
-            # Cap at 200 to match produce.py’s queue limit
-            campaign_ref.update({
-                "unprocessed_queue": firestore.ArrayUnion(harvest_urls[:200]),
-            })
-            log.info(
-                "signal_harvest_queue_appended",
-                campaign_id=campaign_id,
-                urls_appended=len(harvest_urls),
+            from shared.scale_limits import (  # type: ignore[import]
+                UNPROCESSED_QUEUE_HARD_CAP,
+                UNPROCESSED_QUEUE_BACKPRESSURE,
             )
+            _q_cap = UNPROCESSED_QUEUE_HARD_CAP
+            _q_bp = UNPROCESSED_QUEUE_BACKPRESSURE
+        except Exception:
+            _q_cap, _q_bp = 200, 150
+        try:
+            campaign_ref = db.collection("campaigns").document(campaign_id)
+            _snap = campaign_ref.get()
+            _cur = list((_snap.to_dict() or {}).get("unprocessed_queue") or [])
+            _depth = len(_cur)
+            if _depth >= _q_bp:
+                log.info(
+                    "signal_harvest_queue_backpressure",
+                    campaign_id=campaign_id,
+                    queue_depth=_depth,
+                    note="Skipping ArrayUnion — produce/dispatch must drain queue first.",
+                )
+                queued = 0
+            else:
+                _room = max(_q_cap - _depth, 0)
+                _to_add = harvest_urls[: min(200, _room)]
+                if _to_add:
+                    campaign_ref.update({
+                        "unprocessed_queue": firestore.ArrayUnion(_to_add),
+                    })
+                    # Defense-in-depth trim if concurrent writers overshoot
+                    _post = list((campaign_ref.get().to_dict() or {}).get("unprocessed_queue") or [])
+                    if len(_post) > _q_cap:
+                        campaign_ref.update({"unprocessed_queue": _post[:_q_cap]})
+                    log.info(
+                        "signal_harvest_queue_appended",
+                        campaign_id=campaign_id,
+                        urls_appended=len(_to_add),
+                        queue_depth_before=_depth,
+                    )
+                else:
+                    queued = 0
         except Exception as exc:
             log.error(
                 "signal_harvest_queue_append_failed",
