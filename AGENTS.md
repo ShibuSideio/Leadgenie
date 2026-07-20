@@ -1,7 +1,5 @@
 # LeadGenie (Sideio) — Source of Truth for Agents
 
-> **Canonical file:** repo-root `AGENTS.md` (loaded by Grok). Keep this file in sync when rules change.
-
 ## Operating mode: Radical truth only
 
 - State only what is supported by code, docs, config, or **live evidence** you have just obtained.

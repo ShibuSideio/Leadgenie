@@ -35,21 +35,30 @@ class InboundMapsService:
     def __init__(self, persona: dict, campaign: dict):
         self.persona = persona
         self.campaign = campaign
-        self.competitors = [str(c) for c in (persona.get("competitors") or [])[:3]]
-        # V26.0.4.3: Derive industry from campaign bio/focus instead of
-        # hardcoded "B2B software". The old default caused every campaign
-        # without persona.industry to search "B2B software near me" on
-        # Google Maps — 3 credits/call for irrelevant results.
-        self.industry = str(
+        _junk = {"legacy tool", "target persona", "general business", "n/a", "placeholder"}
+        self.competitors = [
+            str(c).strip()
+            for c in (persona.get("competitors") or [])[:3]
+            if str(c).strip() and str(c).strip().lower() not in _junk
+        ]
+        # V26.0.4.3 / V27.1.0: Derive a short maps-safe phrase — never full bio.
+        # Full bio/"Seed investment Sideio"/"AI Lead Generation for B2B" as
+        # "{bio} near me" costs 3 Serper credits for near-zero Maps utility.
+        from services.inbound_sentiment_service import (  # type: ignore[import]
+            _sanitize_phrase,
+        )
+        _raw_industry = str(
             persona.get("industry")
             or campaign.get("campaign_focus")
-            or campaign.get("effective_bio")
-            or campaign.get("bio")
+            or campaign.get("keywords")
             or ""
         ).strip()
-        # Strip the common "Product/Service: " prefix from bio-derived values
-        if self.industry.lower().startswith("product/service:"):
-            self.industry = self.industry[len("Product/Service:"):].strip()
+        # Prefer keywords / focus over free-text bio for Maps queries.
+        if not _raw_industry:
+            _raw_industry = str(
+                campaign.get("effective_bio") or campaign.get("bio") or ""
+            ).strip()
+        self.industry = _sanitize_phrase(_raw_industry, max_words=4)
         self.icp_desc = str(
             persona.get("icp_description")
             or persona.get("persona_description")
@@ -57,18 +66,18 @@ class InboundMapsService:
         )
 
     def _build_queries(self) -> list[str]:
-        """Build maps search queries using competitor names."""
-        queries = []
-        for comp in self.competitors:
-            if comp and comp.lower() != "legacy tool":
+        """Build maps search queries using competitor names (max 3)."""
+        queries: list[str] = []
+        for comp in self.competitors[:3]:
+            if comp and len(comp) >= 3:
                 queries.append(comp)
-        # V26.0.4.3: Only fall back to industry search if we have a
-        # meaningful industry string. An empty/generic industry produces
-        # garbage Maps queries ("near me", "B2B software near me") that
-        # waste 3 Serper credits each.
+        # V26.0.4.3 / V27.1.0: industry fallback only if short + search-safe.
         if not queries and self.industry and len(self.industry) >= 3:
-            queries.append(f"{self.industry} near me")
-        elif not queries:
+            if self.industry.lower() not in {
+                "target persona", "general business", "legacy tool",
+            }:
+                queries.append(f"{self.industry} near me")
+        if not queries:
             log.info(
                 "inbound_maps_no_queries",
                 campaign_id=self.campaign.get("campaign_id", ""),
@@ -103,7 +112,10 @@ class InboundMapsService:
 
     def _fetch_place_reviews(self, cid: str) -> list[dict]:
         """Fetch actual reviews for a place using its Google Customer ID (cid) via Serper."""
-        if not cid:
+        # V27.1.0: Never call Reviews API without a real cid — empty payloads
+        # still bill 1 credit each (blank Query rows in Serper audit).
+        if not cid or not str(cid).strip():
+            log.info("serper_reviews_skipped_empty_cid")
             return []
         try:
             resp = httpx.post(
@@ -112,7 +124,7 @@ class InboundMapsService:
                     "X-API-KEY": _get_serper_key(),
                     "Content-Type": "application/json",
                 },
-                json={"cid": cid},
+                json={"cid": str(cid).strip()},
                 timeout=15.0,
             )
             resp.raise_for_status()

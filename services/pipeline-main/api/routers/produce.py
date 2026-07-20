@@ -564,14 +564,58 @@ def produce():
         bio = ""
 
     # Synthesise keywords from bio if empty
+    # V27.1.0: Do NOT word-split bio into weak singles ("customer", "reduce",
+    # "Target", "Persona"). That pattern produced cartesian Serper fan-out and
+    # literal "Target Persona" searches. Prefer one short phrase instead.
     if not keywords:
-        if _raw_bio:
-            # V25.3.1: Use raw bio, not enriched context, to prevent
-            # structural labels from becoming Serper search terms.
-            keywords = [w.strip() for w in _raw_bio.split() if len(w.strip()) > 3][:5]
-            log.info("keywords_synthesised_from_bio",
-                     count=len(keywords), campaign_id=campaign_id,
-                     source="raw_bio")
+        _synth_source = (
+            (campaign.get("campaign_focus") or "").strip()
+            or (campaign.get("pain_point") or "").strip()
+            or _raw_bio
+        )
+        if _synth_source:
+            _stop = {
+                "that", "this", "with", "from", "they", "their", "have", "been",
+                "will", "about", "what", "when", "which", "your", "the", "and",
+                "for", "are", "was", "product", "service", "target", "persona",
+            }
+            _junk_phrases = {
+                "target persona", "general business", "n/a", "placeholder",
+                "product/service",
+            }
+            _text = re.sub(r"\s+", " ", _synth_source).strip()
+            if _text.lower().startswith("product/service:"):
+                _text = _text.split(":", 1)[1].strip()
+            # Question-shaped bios must not become keywords.
+            if "?" in _text or _text.lower().startswith(
+                ("what ", "how ", "why ", "who ", "when ", "where ")
+            ):
+                log.warning(
+                    "keywords_synth_skipped_question_bio",
+                    campaign_id=campaign_id,
+                    preview=_text[:80],
+                )
+            elif _text.lower() in _junk_phrases or "target persona" in _text.lower():
+                log.warning(
+                    "keywords_synth_skipped_junk_bio",
+                    campaign_id=campaign_id,
+                    preview=_text[:80],
+                )
+            else:
+                _words = [
+                    w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-'/]*", _text)
+                    if len(w) > 2 and w.lower() not in _stop
+                ][:6]
+                if _words:
+                    # One phrase keyword, not five singles.
+                    keywords = [" ".join(_words)]
+                    log.info(
+                        "keywords_synthesised_from_bio",
+                        count=len(keywords),
+                        campaign_id=campaign_id,
+                        source="phrase",
+                        keyword=keywords[0][:80],
+                    )
 
     # ------------------------------------------------------------------
     # FIX (2026-06-21): Keyword ingestion sanitizer.

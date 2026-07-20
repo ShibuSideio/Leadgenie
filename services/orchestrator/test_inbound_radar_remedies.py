@@ -200,26 +200,108 @@ class TestInboundRadarRemedies(unittest.TestCase):
         self.assertNotIn("tbs", payload)
 
     def test_inbound_sentiment_service_dialog_cue_dorking(self):
-        """Verify that _build_queries appends dialog cues only for B2C/consumer campaigns."""
-        # 1. B2C campaign
+        """B2C gets consumer dialog cues (once); B2B does not. V27.1.0."""
+        # 1. B2C campaign — dialog cues on dedicated consumer query, not B2B SaaS
         svc_b2c = InboundSentimentService(
             persona={"pain_points": ["rent villa"]},
-            campaign={"sourcing_vector": "B2C"}
+            campaign={"sourcing_vector": "B2C", "location": "Muscat", "gl": "om"},
+            force_day_of_week=0,
         )
         queries_b2c = svc_b2c._build_queries()
         self.assertTrue(len(queries_b2c) > 0)
-        for q in queries_b2c:
-            self.assertIn('"pm me" OR "pm sent" OR "still available"', q)
-            
-        # 2. B2B campaign
+        self.assertLessEqual(len(queries_b2c), 6, "hard Serper budget cap")
+        joined_b2c = " | ".join(queries_b2c)
+        self.assertIn("pm me", joined_b2c)
+        self.assertIn("still available", joined_b2c)
+        # Must NOT use B2B SaaS inventory for consumer campaigns
+        self.assertNotIn("r/sales", joined_b2c)
+        self.assertNotIn("looking for tool", joined_b2c)
+        self.assertNotIn("software suggestion", joined_b2c)
+        self.assertNotIn("legacy tool", joined_b2c)
+
+        # 2. B2B campaign — no consumer dialog cues
         svc_b2b = InboundSentimentService(
-            persona={"pain_points": ["rent villa"]},
-            campaign={"sourcing_vector": "B2B"}
+            persona={"pain_points": ["customer acquisition cost"]},
+            campaign={"sourcing_vector": "B2B"},
+            force_day_of_week=0,
         )
         queries_b2b = svc_b2b._build_queries()
         self.assertTrue(len(queries_b2b) > 0)
+        self.assertLessEqual(len(queries_b2b), 6)
         for q in queries_b2b:
-            self.assertNotIn('"pm me" OR "pm sent" OR "still available"', q)
+            self.assertNotIn("pm me", q)
+            self.assertNotIn("still available", q)
+            self.assertNotIn("legacy tool", q)
+
+    def test_inbound_no_bio_word_split_fanout(self):
+        """Industry/ICP prose must not explode into single-token pain keywords."""
+        svc = InboundSentimentService(
+            persona={
+                "pain_points": [],
+                "industry": "reduce customer acquisition cost for B2B SaaS",
+                "icp_description": "We help reduce customer acquisition cost",
+            },
+            campaign={"sourcing_vector": "B2B", "keywords": ""},
+            force_day_of_week=1,
+        )
+        # Phrase-level pains only — not customer/reduce/acquisition as three keys
+        self.assertLessEqual(len(svc.pain_kws), 2)
+        for kw in svc.pain_kws:
+            self.assertNotEqual(kw.lower(), "customer")
+            self.assertNotEqual(kw.lower(), "reduce")
+            self.assertNotEqual(kw.lower(), "acquisition")
+        queries = svc._build_queries()
+        self.assertLessEqual(len(queries), 6)
+        joined = " | ".join(queries)
+        self.assertNotIn("legacy tool", joined)
+
+    def test_inbound_b2c_uses_consumer_mode_table(self):
+        """Oman-style B2C must not emit G2/SaaS templates."""
+        svc = InboundSentimentService(
+            persona={
+                "pain_points": ["property for sale Oman", "villa rent Muscat"],
+            },
+            campaign={
+                "sourcing_vector": "B2C",
+                "gl": "om",
+                "location": "Muscat Oman",
+            },
+            force_day_of_week=0,
+        )
+        queries = svc._build_queries()
+        self.assertTrue(queries)
+        self.assertLessEqual(len(queries), 6)
+        joined = " | ".join(queries).lower()
+        self.assertNotIn("g2.com", joined)
+        self.assertNotIn("r/sales", joined)
+        self.assertNotIn("r/startups", joined)
+        self.assertNotIn("software suggestion", joined)
+
+    def test_inbound_maps_skips_bio_as_near_me(self):
+        """Maps must not search full bio / persona labels as 'near me'."""
+        svc = InboundMapsService(
+            persona={"competitors": [], "industry": ""},
+            campaign={
+                "bio": "What are the best examples of user generated content campaigns?",
+                "effective_bio": "Target Persona",
+                "campaign_focus": "",
+                "keywords": "",
+            },
+        )
+        queries = svc._build_queries()
+        # Question bio + Target Persona must not produce Maps queries
+        self.assertEqual(queries, [])
+
+    def test_inbound_maps_uses_short_industry(self):
+        svc = InboundMapsService(
+            persona={"competitors": [], "industry": "Oman Realty agents and brokers"},
+            campaign={"gl": "om"},
+        )
+        queries = svc._build_queries()
+        self.assertEqual(len(queries), 1)
+        self.assertTrue(queries[0].endswith("near me"))
+        # Truncated — not a full paragraph
+        self.assertLessEqual(len(queries[0].split()), 6)
 
     @patch("vertexai.generative_models.GenerativeModel")
     @patch("core.clients.init_vertex")

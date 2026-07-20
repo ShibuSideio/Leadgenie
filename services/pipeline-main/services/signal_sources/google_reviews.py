@@ -262,13 +262,16 @@ class GoogleReviewSource(BaseSignalSource):
         Returns:
             List of review dicts from Serper.
         """
+        if not place_id or not str(place_id).strip():
+            log.info("google_reviews_skipped_empty_place_id")
+            return []
         resp = requests.post(
             _REVIEWS_URL,
             headers={
                 "X-API-KEY":    self._api_key,
                 "Content-Type": "application/json",
             },
-            data=json.dumps({"placeId": place_id}),
+            data=json.dumps({"placeId": str(place_id).strip()}),
             timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
         )
         resp.raise_for_status()
@@ -293,7 +296,9 @@ class GoogleReviewSource(BaseSignalSource):
             )
             return []
 
-        place_id = place.get("placeId") or place.get("place_id") or ""
+        place_id = (place.get("placeId") or place.get("place_id") or "").strip()
+        # V27.1.0: Never call Reviews API without a real placeId — empty
+        # payloads still bill 1 Serper credit (blank Query audit rows).
         if not place_id:
             log.info(
                 "google_reviews_no_place_id",

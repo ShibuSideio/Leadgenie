@@ -14,6 +14,9 @@ Query strategy:
 
 V23.5 — added 2026-06-08
 V25.3.1 — fix NameError: is_consumer, dialog_suffix undefined in _build_queries()
+V27.1.0 — Serper credit guards: use B2C_SIGNAL_MODES for consumers, hard query
+          budget, phrase-level pain keywords (no bio word-split fan-out),
+          drop junk/persona/legacy-tool queries before Serper.
 """
 from __future__ import annotations
 
@@ -364,6 +367,177 @@ GLOBAL_NEGATIVE = (
     '-"buy now" -"click here" -"sign up free" -"privacy policy"'
 )
 
+# ---------------------------------------------------------------------------
+# Serper credit guards (V27.1.0)
+# Hard caps + query hygiene. Logs showed 3 pain tokens × 4 B2B templates
+# (+ catch-alls) burning ~14 credits per inbound sweep with near-duplicate
+# dorks and bio/ICP prose leaking into `q`.
+# ---------------------------------------------------------------------------
+_MAX_PAIN_KEYWORDS = 2
+_MAX_TEMPLATES_PER_SWEEP = 3
+_MAX_QUERIES_PER_SWEEP = 6
+_MAX_INDUSTRY_WORDS = 6
+_MAX_PAIN_WORDS = 6
+
+_CONSUMER_VECTORS = frozenset({"B2C", "B2B2C", "D2C"})
+
+_STOPWORDS = frozenset({
+    "that", "this", "with", "from", "they", "their", "have", "been", "will",
+    "about", "what", "when", "which", "your", "ours", "into", "than", "then",
+    "also", "just", "more", "most", "some", "such", "only", "over", "under",
+    "after", "before", "where", "while", "does", "doing", "were", "was",
+    "are", "for", "and", "the", "you", "our", "how", "who", "why", "can",
+    "need", "needs", "using", "used", "use", "very", "much", "many",
+})
+
+# Single tokens that are too generic to own a full template fan-out.
+_WEAK_SINGLE_TOKENS = frozenset({
+    "customer", "customers", "reduce", "looking", "sale", "sales", "user",
+    "users", "strategy", "brand", "invest", "startups", "startup", "tool",
+    "tools", "software", "service", "services", "business", "company",
+    "general", "help", "best", "good", "near", "oman", "india", "dubai",
+    "persona", "target", "content", "marketing", "digital", "students",
+    "parents", "property", "acquisition",
+})
+
+_JUNK_QUERY_PHRASES = frozenset({
+    "target persona",
+    "target persona 1",
+    "target persona 2",
+    "target persona 3",
+    "general business",
+    "legacy tool",
+    "n/a",
+    "placeholder",
+    "product/service",
+})
+
+# Dialog cues — applied once as a dedicated consumer query, not bolted onto
+# every B2B SaaS template (that combination produced the Oman log waste).
+_CONSUMER_DIALOG_CUE = (
+    '("pm me" OR "still available" OR "send details" OR "anyone know")'
+)
+
+
+def _is_consumer_vector(sourcing_vector: object) -> bool:
+    return str(sourcing_vector or "").strip().upper() in _CONSUMER_VECTORS
+
+
+def _sanitize_phrase(text: str, *, max_words: int = _MAX_INDUSTRY_WORDS) -> str:
+    """Collapse bio/ICP prose into a short search-safe phrase.
+
+    Rejects persona labels and system junk. Truncates long sentences so full
+    bios never become Serper ``q`` values.
+    """
+    if not text:
+        return ""
+    cleaned = re.sub(r"\s+", " ", str(text)).strip()
+    if cleaned.lower().startswith("product/service:"):
+        cleaned = cleaned.split(":", 1)[1].strip()
+    lower = cleaned.lower()
+    if any(junk in lower for junk in _JUNK_QUERY_PHRASES):
+        return ""
+    # Drop sentence-shaped / question-shaped bios (UGC questions as queries).
+    if "?" in cleaned or cleaned.lower().startswith(
+        ("what ", "how ", "why ", "who ", "when ", "where ", "which ")
+    ):
+        return ""
+    words = [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-'/]*", cleaned) if w]
+    if not words:
+        return ""
+    # Prefer content words when truncating.
+    content = [w for w in words if w.lower() not in _STOPWORDS]
+    picked = (content or words)[:max_words]
+    phrase = " ".join(picked).strip()
+    if len(phrase) < 3:
+        return ""
+    if phrase.lower() in _JUNK_QUERY_PHRASES:
+        return ""
+    return phrase
+
+
+def _normalize_pain_keywords(
+    raw_pain: list[str],
+    *,
+    industry: str,
+    icp_desc: str,
+) -> list[str]:
+    """Normalize pain keywords for Serper budget hygiene.
+
+    - Keep multi-word pain points as phrases (capped).
+    - Never fan out single tokens extracted by word-splitting a bio/industry.
+    - Prefer 1–2 high-signal phrases over 3–5 weak singles.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _push(candidate: str) -> None:
+        phrase = _sanitize_phrase(candidate, max_words=_MAX_PAIN_WORDS)
+        if not phrase:
+            return
+        key = phrase.lower()
+        if key in seen:
+            return
+        tokens = phrase.lower().split()
+        # Reject lone weak tokens (they create near-duplicate template rows).
+        if len(tokens) == 1 and tokens[0] in _WEAK_SINGLE_TOKENS:
+            return
+        if len(tokens) == 1 and tokens[0] in _STOPWORDS:
+            return
+        seen.add(key)
+        out.append(phrase)
+
+    for item in raw_pain:
+        if not item:
+            continue
+        text = str(item).strip()
+        if not text:
+            continue
+        # Explicit multi-word pains: keep as one phrase, do not tokenize.
+        if " " in text or len(text) >= 8:
+            _push(text)
+        else:
+            _push(text)
+        if len(out) >= _MAX_PAIN_KEYWORDS:
+            return out[:_MAX_PAIN_KEYWORDS]
+
+    if out:
+        return out[:_MAX_PAIN_KEYWORDS]
+
+    # Fallback: industry / ICP as a *single* phrase — never word-split fan-out.
+    for source in (industry, icp_desc):
+        phrase = _sanitize_phrase(source, max_words=_MAX_PAIN_WORDS)
+        if phrase:
+            _push(phrase)
+        if out:
+            break
+
+    if not out:
+        # Last resort: one generic but non-junk anchor (still better than 5 tokens).
+        _push("customer acquisition")
+    return out[:_MAX_PAIN_KEYWORDS]
+
+
+def _query_is_search_safe(query: str) -> bool:
+    """Drop queries that would waste Serper credits before they hit the wire."""
+    q = (query or "").strip()
+    if len(q) < 8:
+        return False
+    # Strip negatives for content inspection
+    core = re.sub(r'\s+-\S+', " ", q)
+    core = re.sub(r"\s+", " ", core).strip().lower()
+    if not core:
+        return False
+    if any(junk in core for junk in _JUNK_QUERY_PHRASES):
+        return False
+    # Reject raw persona/bio labels without operators or buyer language.
+    if core in {"target persona", "general business", "legacy tool"}:
+        return False
+    # Reject pure questions with no site: operator (Gemini/bio prose leaks).
+    if "?" in q and "site:" not in core:
+        return False
+    return True
+
 
 # ---------------------------------------------------------------------------
 # Gemini scoring
@@ -504,116 +678,177 @@ class InboundSentimentService:
             if isinstance(_cached, dict) and _cached.get("domain_family"):
                 self.domain_profile = _cached
         self.gemini_min_intent_score = float(gemini_min_intent_score)
-        self.pain_kws      = [str(p) for p in (persona.get("pain_points") or [])[:5]]
-        # INT-11: Use campaign keywords or 'general business' instead of hardcoded 'B2B software'
+        # INT-11: Use campaign keywords instead of hardcoded 'B2B software'
         _campaign_kws = (campaign.get("keywords") or "").strip()
-        _industry_fallback = _campaign_kws.split(",")[0].strip() if _campaign_kws else "general business"
-        self.industry      = str(persona.get("industry") or _industry_fallback)
-        self.competitors   = [str(c) for c in (persona.get("competitors") or [])[:3]]
-        self.icp_desc      = str(
+        _industry_fallback = _campaign_kws.split(",")[0].strip() if _campaign_kws else ""
+        _raw_industry = str(
+            persona.get("industry")
+            or _industry_fallback
+            or campaign.get("campaign_focus")
+            or ""
+        ).strip()
+        self.industry = _sanitize_phrase(_raw_industry, max_words=_MAX_INDUSTRY_WORDS) or "general business"
+        # Real competitors only — never invent "legacy tool" (cross-campaign waste).
+        self.competitors = [
+            str(c).strip()
+            for c in (persona.get("competitors") or [])[:3]
+            if str(c).strip() and str(c).strip().lower() not in _JUNK_QUERY_PHRASES
+        ]
+        self.icp_desc = str(
             persona.get("icp_description")
             or persona.get("persona_description")
             or self.industry
         )
         self.icp_job_title = str(persona.get("icp_job_title") or "operations manager")
-        self.company_type  = str(persona.get("company_type") or "company")
+        self.company_type = str(persona.get("company_type") or "company")
+        self.geo = _sanitize_phrase(
+            str(
+                campaign.get("location")
+                or persona.get("location_hint")
+                or campaign.get("gl")
+                or ""
+            ),
+            max_words=4,
+        )
 
-        # INT-05: Guard against empty pain_kws — extract keywords from icp_desc or industry
-        if not self.pain_kws:
-            _fallback_text = self.icp_desc if self.icp_desc and self.icp_desc != self.industry else self.industry
-            # Extract multi-word keywords (4+ chars) from fallback text
-            import re as _re
-            _extracted = list(dict.fromkeys(
-                w for w in _re.findall(r"\b\w{4,}\b", _fallback_text.lower())
-                if w not in {"that", "this", "with", "from", "they", "their", "have", "been", "will", "about", "what", "when", "which"}
-            ))[:5]
-            if _extracted:
-                self.pain_kws = _extracted
-                log.info("pain_kws_fallback_applied", source="icp_desc" if self.icp_desc != self.industry else "industry", keywords=_extracted)
-            else:
-                # Last resort: use industry as a single keyword
-                self.pain_kws = [self.industry]
-                log.warning("pain_kws_last_resort_fallback", keyword=self.industry)
+        raw_pain = [str(p) for p in (persona.get("pain_points") or []) if p]
+        # Prefer campaign keyword phrases when persona pains are empty
+        if not raw_pain and _campaign_kws:
+            raw_pain = [p.strip() for p in _campaign_kws.split(",") if p.strip()][:3]
+        self.pain_kws = _normalize_pain_keywords(
+            raw_pain,
+            industry=self.industry,
+            icp_desc=self.icp_desc,
+        )
+        log.info(
+            "inbound_pain_kws_normalized",
+            count=len(self.pain_kws),
+            keywords=self.pain_kws,
+            industry=self.industry,
+        )
 
     # ------------------------------------------------------------------
     # Query building
     # ------------------------------------------------------------------
 
     def _build_queries(self) -> list[str]:
-        """Build today's search queries using a blended daily rotation mode.
-        
-        Blends queries across multiple core intent modes (Active Intent, Competitor Churn,
-        Review Signals, and Community Signals) to prevent temporal lag while capping the
-        total number of queries to keep Serper credit costs constant and low.
-        """
-        day_of_week = datetime.utcnow().weekday() if self.force_day_of_week is None else self.force_day_of_week
-        primary_mode = SIGNAL_MODES[day_of_week]
+        """Build today's Serper queries with hard credit caps and vector-aware modes.
 
-        # V25.3.1: Fix NameError — is_consumer was never defined.
-        _consumer_vectors = frozenset({"B2C", "B2B2C", "D2C"})
-        is_consumer = (self.campaign.get("sourcing_vector") or "") in _consumer_vectors
+        V27.1.0 credit policy:
+          - Consumer campaigns use ``B2C_SIGNAL_MODES`` (not B2B r/sales + G2).
+          - Max 2 pain phrases × max 3 templates + optional 1 dialog/catch-all
+            ≤ ``_MAX_QUERIES_PER_SWEEP`` (6).
+          - No word-split fan-out of bios; no default ``legacy tool`` competitor.
+          - Drop non-search-safe queries before they hit Serper.
+        """
+        if self.force_day_of_week is None:
+            from datetime import timezone as _tz
+            day_of_week = datetime.now(_tz.utc).weekday()
+        else:
+            day_of_week = int(self.force_day_of_week)
+
+        is_consumer = _is_consumer_vector(self.campaign.get("sourcing_vector"))
+        mode_table = B2C_SIGNAL_MODES if is_consumer else SIGNAL_MODES
+        primary_mode = mode_table[day_of_week % 7]
+
+        has_competitor = bool(self.competitors)
+        competitor = self.competitors[0] if has_competitor else ""
 
         subs_base = {
-            "industry":      self.industry,
-            "competitor":    self.competitors[0] if self.competitors else "legacy tool",
+            "industry": self.industry,
+            "competitor": competitor,
             "icp_job_title": self.icp_job_title,
-            "company_type":  self.company_type,
+            "company_type": self.company_type,
+            "geo": self.geo or self.industry,
+            "pain_keyword": "",  # filled per keyword
         }
 
-        # Select a blended mix of templates
         selected_templates: list[str] = []
-        
-        # 1. First 2 templates from primary mode of the day
+        # Primary mode: up to 2 templates
         selected_templates.extend(primary_mode["templates"][:2])
-        
-        # V25.2.2: Source-vector-aware core mode selection.
-        # B2C/D2C buyers don't respond to competitor_churn (mode 2) or hiring_signals (mode 3).
-        # Use review_signals (mode 4) and community_signals (mode 6) for consumer verticals.
+
         if is_consumer:
-            # Consumer mode blend: active_intent + pain_expression + review_signals + community_signals
-            core_days = [0, 1, 4, 6]  # NO competitor_churn(2), NO hiring_signals(3)
+            core_days = [0, 1, 4, 6]
         else:
-            # B2B mode blend: active_intent + pain_expression + competitor_churn + review_signals
-            core_days = [0, 1, 2, 4]
+            # Skip competitor_churn (2) when no real competitors — avoids "legacy tool"
+            core_days = [0, 1, 4] if not has_competitor else [0, 1, 2, 4]
 
         if day_of_week in core_days:
-            core_days.remove(day_of_week)
-        # Take 1 template from the first two other core modes
-        for d in core_days[:2]:
-            other_mode = SIGNAL_MODES[d]
-            if other_mode["templates"]:
-                selected_templates.append(other_mode["templates"][0])
+            core_days = [d for d in core_days if d != day_of_week]
+        for d in core_days[:1]:  # one secondary template only (credit cap)
+            other = mode_table[d % 7]
+            if other["templates"]:
+                selected_templates.append(other["templates"][0])
 
-        # V25.3.1: Fix NameError — dialog_suffix was never defined.
-        # Consumer campaigns get dialog-cue operators to find active purchase threads.
-        # B2B campaigns get empty suffix (pain keywords are sufficient).
-        if is_consumer:
-            dialog_suffix = ' ("pm me" OR "still available" OR "send details" OR "anyone know")'
-        else:
-            dialog_suffix = ""
+        # Hard cap template count
+        selected_templates = selected_templates[:_MAX_TEMPLATES_PER_SWEEP]
+
+        # Drop templates that require {competitor} when we have none
+        if not has_competitor:
+            selected_templates = [
+                t for t in selected_templates if "{competitor}" not in t
+            ]
 
         queries: list[str] = []
-        for pain_kw in self.pain_kws[:3]:  # Cap pain keywords count to protect Serper budget
+        pain_kws = self.pain_kws[:_MAX_PAIN_KEYWORDS]
+
+        for pain_kw in pain_kws:
             subs = {**subs_base, "pain_keyword": pain_kw}
             for template in selected_templates:
                 try:
-                    q = template.format(**subs) + dialog_suffix + GLOBAL_NEGATIVE
+                    q = template.format(**subs) + GLOBAL_NEGATIVE
+                except KeyError as exc:
+                    log.warning(
+                        "inbound_template_format_failed",
+                        missing=str(exc),
+                        template=template[:80],
+                    )
+                    continue
+                if _query_is_search_safe(q):
                     queries.append(q)
-                except KeyError:
-                    pass
+                if len(queries) >= _MAX_QUERIES_PER_SWEEP:
+                    break
+            if len(queries) >= _MAX_QUERIES_PER_SWEEP:
+                break
 
-        # Unconstrained catch-all — surfaces long-tail sources Google knows about
-        for pain_kw in self.pain_kws[:2]:
-            queries.append(f'"{pain_kw}" "{self.industry}"' + dialog_suffix + GLOBAL_NEGATIVE)
+        # One consumer dialog-cue query OR one B2B catch-all — never both × N pains.
+        if len(queries) < _MAX_QUERIES_PER_SWEEP and pain_kws:
+            anchor = pain_kws[0]
+            if is_consumer:
+                extra = (
+                    f'site:reddit.com OR site:quora.com "{anchor}" '
+                    f'{_CONSUMER_DIALOG_CUE}'
+                )
+                if self.geo:
+                    extra = (
+                        f'site:reddit.com OR site:quora.com "{anchor}" "{self.geo}" '
+                        f'{_CONSUMER_DIALOG_CUE}'
+                    )
+            else:
+                # Avoid `"token" "same token"` waste when industry == pain.
+                if self.industry.lower() != anchor.lower():
+                    extra = f'"{anchor}" "{self.industry}"'
+                else:
+                    extra = f'"{anchor}" ("looking for" OR recommend OR alternative)'
+            extra = extra + GLOBAL_NEGATIVE
+            if _query_is_search_safe(extra):
+                queries.append(extra)
+
+        # Dedup + hard cap
+        deduped = list(dict.fromkeys(queries))[:_MAX_QUERIES_PER_SWEEP]
 
         log.info(
             "inbound_queries_built",
             mode=primary_mode["name"],
             day=day_of_week,
+            is_consumer=is_consumer,
+            mode_table="B2C" if is_consumer else "B2B",
             blended_templates=len(selected_templates),
-            count=len(queries),
+            pain_kws=pain_kws,
+            count=len(deduped),
+            max_queries=_MAX_QUERIES_PER_SWEEP,
         )
-        return list(dict.fromkeys(queries))  # deduplicate, preserve order
+        return deduped
 
     # ------------------------------------------------------------------
     # Serper search
@@ -622,6 +857,13 @@ class InboundSentimentService:
     def _search_serper(self, query: str, num: int = 5) -> list[dict]:
         """Execute a single Serper search. Returns list of organic result dicts."""
         query = _clean_query_syntax(query)
+        if not _query_is_search_safe(query):
+            log.warning(
+                "inbound_serper_skipped_unsafe_query",
+                query=query[:120],
+                note="Refusing Serper call to protect credits.",
+            )
+            return []
         gl = self.campaign.get("gl") or "us"
         location = self.campaign.get("location")
         
