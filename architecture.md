@@ -1,14 +1,19 @@
-# LeadGenie (Sideio) — Platform Architecture V27.0.2
+# LeadGenie (Sideio) — Platform Architecture V27.4.0
 **Technical Specification Document**
-*Last Updated: 2026-07-18 | Version: V27.0.2 — Intent Orchestrator packaging + Vertex project fix*
+*Last Updated: 2026-07-20 | Version: V27.4.0 — Scale foundation (wallet/queue/Serper residual) for 1000+ tenants*
 
-### Latest: V27.0.2 (flag packaging + Vertex)
-- **V27 SSOT:** `services/shared/intent_orchestrator.py` (always in pipeline image via `COPY services/shared`). BC re-export: `services/intelligence/*`.
-- **Flag fix:** Produce/dispatch import `shared.intent_orchestrator` first — no longer silently stubs `is_v27_orchestrator_enabled→False` when optional `intelligence` package is missing. Campaign `flags.v27=null` no longer suppresses env.
-- **Cloud Build:** `deploy-pipeline-main` injects `V27_INTELLIGENCE_ORCHESTRATOR=true` and `VERTEX_AI_PROJECT=lead-sniper-prod` (plus `VERTEX_AI_LOCATION`).
-- **Vertex (V27.0.1):** `init_vertex()` uses `VERTEX_AI_PROJECT` → `PROJECT_ID` → `lead-sniper-prod` (never `trendpulse-app-2025`). Platform mining Gemini 403 is fail-open with deterministic `site:` fallback.
-- **Channel admission (V27 on):** G2/Capterra/Trustpilot/Reddit/Quora/LinkedIn public never hard-blocked as domains.
-- See **§27** for full design.
+### Latest: V27.2.0 – V27.4.0 (scale + consistency)
+- **Wallet SSOT (V27.2):** `services/shared/wallet.py` — single formula used by quota, reserve, settle, `/api/me`, sweep, inbound convert, L0. See §4.1 and §28.
+- **Lead identity (V27.2):** `services/shared/lead_identity.py` — `url` + `source_url` dual-set; cluster leads write top-level `leads`; CRM `estimated_value` → `deal_value`.
+- **Serper channel (V27.2):** G2/Capterra never hard-blocked as enterprise domains (even without V27 flag). Free-tier always preserves public-channel `site:` tokens.
+- **Inbound Serper hygiene (V27.1):** B2C uses `B2C_SIGNAL_MODES`; max 6 organic queries/sweep; no bio word-split fan-out.
+- **Residual Serper budget (V27.3–V27.4):** `shared/serper_budget.py` — Firestore `system_telemetry/serper_daily_budget`; residual default 800/day. Wired to produce residual paths, inbound, PRISM, deep_context, agent, digital-twin.
+- **Campaign queue dual-path (V27.3–V27.4):** `shared/campaign_queue.py` — merge `unprocessed_queue` array + `campaigns/{id}/queue_items/*`. Modes: `hybrid` (default) | `subcollection` | `array`. See §4.3 and §28.
+- **enrichment_pending lifecycle (V27.3):** `POST /api/internal/cron/enrichment-pending-resume` — resume after 6h, expire after 7d.
+- **Strategy primary lock (V27.3):** `intelligence_strategy.primary` immutable after create; platform_targets/vocab may refresh on edit.
+- **Domain preferred sources SSOT (V27.3):** `domain_platform_config` wins over local `domain_intelligence` maps.
+- **Audit register:** `AUDIT_INCONSISTENCY_REGISTER.md` (code-backed inconsistency inventory).
+- See **§27** (V27 intent) and **§28** (scale foundation).
 
 ---
 
@@ -72,6 +77,12 @@ LeadGenie is a fully automated, multi-tenant OSINT-powered lead generation SaaS 
 ├── /services
 │   ├── /shared                      # Shared cross-service heuristics (orchestrator + pipeline)
 │   │   ├── intent_orchestrator.py   # V27 SSOT: IntentDomainOrchestrator + flag (always packaged)
+│   │   ├── domain_platform_config.py # V27.0.4: preferred sources/hints + language packs SSOT
+│   │   ├── wallet.py                # V27.2: wallet balance SSOT (quota/reserve/UI)
+│   │   ├── lead_identity.py         # V27.2: url/source_url + campaign refs + status aliases
+│   │   ├── scale_limits.py          # V27.2: caps (queue, dedup, blocklist, entity rate)
+│   │   ├── serper_budget.py         # V27.3: project residual/total Serper daily budget
+│   │   ├── campaign_queue.py        # V27.4: dual-path work queue load/append/pop
 │   │   ├── intelligence_profile.py  # Deterministic strategy-profile inference + execution plan
 │   │   ├── domain_constants.py      # SSOT: KNOWN_DOMAIN_FAMILIES, is_valid_domain_family()
 │   │   ├── domain_gate.py           # Shared thresholds + enrichment_priority contracts
@@ -263,8 +274,15 @@ Primary tenant anchor. Document ID = Firebase Auth UID.
 - `approval_status`: `"pending"` blocks all pipeline execution; set to `"approved"` by L0 admin
 - `visitor_signals_enabled` (V24.5): opt-out flag for Inbound Radar; returns 204 immediately if false
 - `wallet.reserved_credits`: in-flight credits held during pipeline execution; settled on completion
-- `wallet.total_consumed` (V25.6.0): authoritative consumed counter, written atomically by `_atomic_settle_txn`. True balance = `allocated_credits − max(total_consumed, consumed_credits + SUM(wallet_shards/0-9)) − reserved_credits`
-- `wallet.consumed_credits`: legacy base counter. Kept for backward compatibility. The `max()` formula ensures neither path underreports consumption
+- **Wallet SSOT (V27.2.0):** all gates use `shared/wallet.py`:
+  ```
+  available = allocated_credits
+              − max(total_consumed, consumed_credits + SUM(wallet_shards/0-9))
+              − reserved_credits
+  ```
+- `wallet.total_consumed`: preferred write path (atomic settle, harvest settle, convert). Harvest/dispatch fallbacks write `total_consumed` (not shards-only).
+- `wallet.consumed_credits` + `wallet_shards/{0-9}`: legacy read path still included via `max()` for migration safety.
+- `/api/me` returns `wallet.available_credits`, `reserved_credits`, `total_consumed`, and effective `consumed_credits` for the PWA banner.
 
 ### 4.2 `users/{tenant_id}/wallet_shards/{0-9}` Sub-Collection
 Distributed credit counters (bypass Firestore write contention).
@@ -290,7 +308,7 @@ Distributed credit counters (bypass Firestore write contention).
   "intelligence_strategy": {
     "primary": "COLLOQUIAL_DISCOVERY",
     "vocabulary_notes": "Buyers say 'our office is dirty' not 'facility management services'",
-    "mining_targets": ["yelp.com", "google.com/maps"],
+    "platform_targets": ["yelp.com", "google.com/maps"],
     "confidence": 0.85
   },
   "persona_id": "<firestore_persona_doc_id>",
@@ -303,7 +321,7 @@ Distributed credit counters (bypass Firestore write contention).
   "target_angle_adv": "Advantage angle for outreach",
   "unfair_advantage": "Seller differentiator — used by context_builder for ICP framing",
   "system_domain_profile": {
-    "version": "domain-v2",
+    "version": "domain-v4",
     "domain_family": "real_estate",
     "confidence": 0.92,
     "profile_confidence": "high",
@@ -315,15 +333,21 @@ Distributed credit counters (bypass Firestore write contention).
     "low_liquidity_market": true,
     "preferred_sources": ["classified_listings", "serper_discovery", "consumer_forum"],
     "preferred_query_hints": ["site:propertyfinder", "site:bayut"],
+    "entity_language_pack": "real_estate_consumer",
+    "platform_mining_mode": "directory",
+    "sub_pattern": null,
     "blocked_subreddits": ["frugal", "buyitforlife"],
     "override_active": false,
     "notes": "fields_used=...; profile_confidence=high"
   },
   "domain_override": null,
   "leads_generated": 105,
+  "next_produce_due": "<TIMESTAMP>",
   "next_drip_due": "<TIMESTAMP>",
   "drip_interval_minutes": 60,
   "unprocessed_queue": [],
+  "_query_novelty_memory_signatures": [],
+  "last_cycle_funnel": {},
   "createdAt": "<SERVER_TIMESTAMP>",
   "updatedAt": "<SERVER_TIMESTAMP>"
 }
@@ -332,19 +356,23 @@ Distributed credit counters (bypass Firestore write contention).
 **Notes:**
 - `sourcing_vector`: one of `B2B`, `B2C`, `B2B2C`, `D2C` — drives query generation, Serper temporal window, and Gemini prompt branching
 - `intelligence_strategy` (V26.0): AI-classified strategy object set at campaign creation. Sub-fields:
-  - `primary`: one of `PLATFORM_MINING`, `COLLOQUIAL_DISCOVERY`, `COMPETITOR_TOUCHPOINT`, `PROFESSIONAL_NETWORK`, `EVENT_TRIGGER`
+  - `primary`: one of `PLATFORM_MINING`, `COLLOQUIAL_DISCOVERY`, `COMPETITOR_TOUCHPOINT`, `PROFESSIONAL_NETWORK`, `EVENT_TRIGGER` — **immutable after create (V27.3)**; platform_targets/vocabulary may refresh on bio/keyword edit
   - `vocabulary_notes`: how the ICP speaks — fed to Gemini for colloquial query translation
-  - `mining_targets`: auto-derived platform URLs for PLATFORM_MINING/COMPETITOR_TOUCHPOINT
+  - `platform_targets` (runtime; formerly documented as `mining_targets`): auto-derived platform hosts/brands
   - `confidence`: classification confidence (0.0–1.0)
-- `system_domain_profile` (V26.4–V26.5): resolved domain intelligence snapshot (see §21). Written by produce/dispatch via `resolve_campaign_domain_profile()`.
+- `system_domain_profile` (V26.4–V27.0.4): resolved domain intelligence snapshot; **version `domain-v4`**. Written by produce/dispatch via `resolve_campaign_domain_profile()`. Preferred sources/hints SSOT: `shared/domain_platform_config.py`.
 - `domain_override` (V26.5): optional manual override (`string` family or partial object). Validated on campaign create/update; takes precedence over auto-inference. `null` / `{}` clears override and forces re-infer.
-- `unprocessed_queue`: array of Serper result objects awaiting Gemini profiling; capped at 200 (backpressure at depth 150)
-- `next_drip_due`: updated on every produce run (V24.4 fix — was only set on first fill)
+- **Work queue (V27.4 dual-path SSOT — `shared/campaign_queue.py`):**
+  - `unprocessed_queue`: array of **URL strings** (not Serper objects); capped at 200; backpressure at depth 150
+  - `campaigns/{id}/queue_items/{sha16}`: subcollection docs `{url, status: queued|consumed, source, createdAt}`
+  - Modes via `CAMPAIGN_QUEUE_MODE`: `hybrid` (default, dual-read/write), `subcollection` (items primary; clears parent array on append), `array` (emergency rollback)
+  - Produce, harvest, dispatch, consume, sweep, enrichment-resume all use load/append/pop helpers
+- Dual clocks: `next_produce_due` (producer gate) and `next_drip_due` (consumer/dispatch gate)
+- Novelty: `_query_novelty_memory_signatures` capped at 80; exhaustion counters + `last_cycle_funnel` are additive runtime fields
 - `keywords`: stored as comma-separated string, parsed to array in pipeline
-- `V26.1.0`: the backend now infers a lightweight intelligence profile from sparse campaign input and uses it to drive routing and query decisions even when the user provides minimal details
 - `effective_bio`: AI-generated enriched product description. Priority Layer 1 in `context_builder.py`
-- `pain_point`: accumulates real buyer language from approved leads over time. Fed back into query generation by `context_builder.py` Layer 3 — the system compounds in intelligence with each approval
-- `target_angle_hook`, `unfair_advantage`, `persona_targeting_signals`: ALL consumed by `context_builder.py` (V24.6.1). Previously unused in pipeline.
+- `pain_point`: accumulates real buyer language from approved leads over time. Fed back into query generation by `context_builder.py` Layer 3
+- `target_angle_hook`, `unfair_advantage`, `persona_targeting_signals`: ALL consumed by `context_builder.py` (V24.6.1)
 
 > [!IMPORTANT]
 > **V24.6.1 context pipeline:** `context_builder.build_enriched_context(campaign)` is the single source of truth for ICP context. It aggregates all 15+ campaign fields (including `effective_bio`, `pain_point`, `target_angle_hook`, `unfair_advantage`) into a structured context string used by both `produce.py` (query generation) and `dispatch.py` (pre-filter). Any new campaign field that should influence query generation must be added to `context_builder.py`, not to `dispatch.py` or `produce.py` individually.
@@ -1218,7 +1246,7 @@ log.warning("lead_lock_delete_failed",
 10. **Consumer archetypes:** Defined once in `pipeline-main/core/constants.py`. Import from there — never duplicate.
 11. **No silent failures:** All `except: pass` is prohibited. Every exception must be logged with enough context to debug without reproduction.
 12. **PII before BQ:** Always apply `_scrub_pii()` before writing lead text to BigQuery N-gram tables.
-13. **Intelligence strategy immutable post-creation:** `intelligence_strategy.primary` is classified at campaign creation by Gemini and must not be changed after creation. The entire pipeline (query_brain, source_router, dispatch entity extraction) branches on this value.
+13. **Intelligence strategy primary immutable post-creation (enforced V27.3):** `intelligence_strategy.primary` is classified at campaign creation. On bio/keyword edit, backend may refresh `platform_targets` / vocabulary but **must preserve** existing `primary` (log: `intelligence_strategy_primary_preserved`). Pipeline branches on `primary`.
 14. **Entity extraction thread safety:** `_ENTITY_DOMAIN_COUNTS` in `dispatch.py` is a module-level dict guarded by `_ENTITY_DOMAIN_LOCK`. All read-modify-write operations MUST hold the lock.
 15. **Contact endpoints schema:** Entity-extracted leads must use `list[dict]` format: `[{"type": "email", "value": "..."}]`. Never flat strings.
 16. **Strategy-aware blacklist:** PLATFORM_MINING strategy preserves review/directory sites (g2, capterra, yelp) in blacklist — these are intelligence sources, not noise.
@@ -1811,10 +1839,100 @@ All items: **fail-open** (prefer admit + score over silent drop), **structured l
 
 ---
 
+## 28. SCALE FOUNDATION (V27.2–V27.4) — 1000+ TENANTS
+
+Enterprise consistency and multi-instance scale work landed 2026-07-20. Full static inventory: repo-root **`AUDIT_INCONSISTENCY_REGISTER.md`**. Agent rules: root **`AGENTS.md`**.
+
+### 28.1 Wallet (billing integrity)
+
+| Item | Detail |
+|------|--------|
+| Module | `services/shared/wallet.py` |
+| Formula | `available = allocated − max(total_consumed, consumed_credits + shards) − reserved` |
+| Writers | Prefer `wallet.total_consumed` (settle, harvest, inbound convert) |
+| Readers | `check_quota`, `reserve_credits`, `/api/me`, sweep, harvest-sweep, requeue, L0 admin, PWA |
+
+### 28.2 Serper spend model
+
+| Path | Budget class | Notes |
+|------|--------------|--------|
+| Produce QueryBrain `search_serper` | Total project (`SERPER_DAILY_LIMIT`, 0=unlimited) | Always metered |
+| Produce harvest plugins (`allow_serper=True`) | Produce-gated | Not residual |
+| deep_context / PRISM / inbound organic / agent / digital-twin | **Residual** | `SERPER_RESIDUAL_DAILY_LIMIT` default **800**/day project-wide |
+| Firestore counter | `system_telemetry/serper_daily_budget` | `{day, spent, residual_spent}` multi-instance |
+
+**Channel policy (V27.2+):** Public lead channels (G2, Capterra, Trustpilot, Reddit, Quora, …) are **never** hard-dropped by `_ENTERPRISE_DOMAINS`. Free-tier sanitize **always preserves** positive `site:` for those hosts.
+
+**Inbound (V27.1):** Consumer vectors use `B2C_SIGNAL_MODES`; hard cap ≤6 organic queries; phrase-level pain keywords (no bio word-split fan-out). Maps spend is separate residual cost.
+
+### 28.3 Campaign work queue
+
+| Store | Role |
+|-------|------|
+| `unprocessed_queue[]` | URL strings; BC array; cap 200; backpressure 150 |
+| `campaigns/{id}/queue_items/{id}` | Scalable subcollection; `status=queued\|consumed` |
+| SSOT API | `load_queued_urls` / `append_urls` / `pop_batch` / `queue_depth` |
+
+| `CAMPAIGN_QUEUE_MODE` | Behavior |
+|----------------------|----------|
+| `hybrid` (default) | Dual-read merge + dual-write — **feature-safe** |
+| `subcollection` | Items primary; clears parent array on append (1 MiB relief) |
+| `array` | Emergency rollback to array-only |
+
+### 28.4 Lead identity & status
+
+- Always set both `url` and `source_url` on promote/cluster write.
+- Align `campaign_id`, `matched_campaigns`, `matched_campaign_ids`.
+- Cluster analyst writes **top-level `leads`** (feed/CRM) + optional subcollection mirror.
+- Status aliases: UI `rejected` → `ignored`; WhatsApp `approved` → `converted`.
+- CRM: accept `estimated_value` as alias of `deal_value`.
+- `enrichment_pending`: resume cron after 6h; expire after 7d (`scored_out` reason `enrichment_stale`); max 3 resumes.
+
+### 28.5 Multi-instance limits
+
+| Control | Implementation |
+|---------|----------------|
+| Entity domain scrape rate | `usage_metrics/{tenant}/entity_domain_rate/{domain_day}` (default 40/day) |
+| Produce dedup scan | Paginated up to 2500; selects `url` + `source_url`; order `createdAt` DESC |
+| `dynamic_blocklist` | Cap 500 |
+| Lead `interactions` | Cap 200 |
+| Query novelty memory | Cap 80 signatures on campaign doc |
+
+### 28.6 Ops endpoints (manual / scheduler)
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/internal/cron/enrichment-pending-resume` | Resume/expire thin parked leads |
+| `POST /api/internal/inbound-sentiment-run` | Inbound Radar (existing) |
+| `POST /api/internal/cron/sweep` | Produce/dispatch fan-out (existing) |
+| `POST /api/internal/cron/harvest-sweep` | Free-source harvest only (existing) |
+
+Auth: `X-Internal-Secret: $INTERNAL_CRON_SECRET` or Cloud Tasks queue header / OIDC.
+
+### 28.7 Recommended Cloud Run env (post-deploy)
+
+| Variable | Service | Default / recommended |
+|----------|---------|------------------------|
+| `V27_INTELLIGENCE_ORCHESTRATOR` | pipeline | `true` (Cloud Build injects) |
+| `VERTEX_AI_PROJECT` | pipeline | `lead-sniper-prod` |
+| `SERPER_PAID_TIER` | pipeline | `true` if paid Serper plan |
+| `SERPER_RESIDUAL_DAILY_LIMIT` | pipeline + orchestrator | `800` (or higher after monitoring) |
+| `SERPER_DAILY_LIMIT` | pipeline | `0` unlimited total, or set hard ceiling |
+| `CAMPAIGN_QUEUE_MODE` | pipeline + orchestrator | `hybrid` → later `subcollection` |
+| `ENRICHMENT_PENDING_RESUME_HOURS` | orchestrator | `6` |
+| `ENRICHMENT_PENDING_EXPIRE_HOURS` | orchestrator | `168` |
+| `INTERNAL_CRON_SECRET` | orchestrator | Secret Manager (already) |
+
+---
+
 ## 22. VERSION HISTORY (RECENT)
 
 | Version | Date | Key Changes |
 |---|---|---|
+| **V27.4.0** | **2026-07-20** | **Campaign queue dual-path SSOT (`campaign_queue.py`): hybrid/subcollection/array modes; produce/harvest/dispatch/consume/sweep use load/append/pop. Residual Serper budget on agent + digital-twin. Fail-open legacy dispatch pop. Tests: `test_campaign_queue_ssot`.** |
+| **V27.3.0** | **2026-07-20** | **Residual Serper budget (`serper_budget.py`); enrichment_pending resume/expire job + cron route; strategy primary immutable post-create; domain_platform_config preferred sources SSOT; queue dual-write + size telemetry. Tests: `test_serper_budget_and_identity`.** |
+| **V27.2.0** | **2026-07-20** | **Scale foundation: wallet SSOT; lead identity; G2/Capterra always admit; free-tier site: keep; paginated dedup 2500; harvest queue backpressure; Firestore entity domain rate; CRM deal_value alias; cluster→top-level leads; AUDIT_INCONSISTENCY_REGISTER. Tests: `test_wallet_ssot`.** |
+| **V27.1.0** | **2026-07-20** | **Inbound Serper credit guards: B2C_SIGNAL_MODES selected for consumers; max 6 queries; phrase-level pains; no legacy tool; maps industry sanitize; empty placeId skip. CI: split site: literals for smoke gate.** |
 | **V27.0.4** | **2026-07-19** | **Foundational platform contract: `shared/domain_platform_config.py` declarative SSOT (language packs + sub-patterns + mining modes). Domain profile domain-v4 always carries `entity_language_pack` / `platform_mining_mode` / `sub_pattern`. Query brain consumes profile only — no family hard-coded agent/broker. `education_profiles.py` deprecated shim. Tests: `test_domain_platform_config`.** |
 | **V27.0.3** | **2026-07-19** | **Education domain intelligence fix: sub-pattern SSOT (`shared/education_profiles.py`) replaces legacy `/r/teachers`+Coursera+LinkedIn defaults for B2C; platform mining entity language driven by domain profile + strategy (no `agent broker` for education); domain profile version `domain-v3`; V27 intent_orchestrator education platform seeds. Tests: `test_education_domain_profiles`.** |
 | **V27.0.2** | **2026-07-18** | **V27 flag audit fix: SSOT moved to `shared/intent_orchestrator.py` (always packaged). Produce no longer stubs flag to False when optional `intelligence` package missing. Campaign `flags.v27=null` no longer suppresses env. Skip logs include `skip_reason`, `env_raw`, `import_error`. Tests: null-flag / quoted-env / shared import regression.** |
