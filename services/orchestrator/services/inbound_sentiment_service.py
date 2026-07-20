@@ -868,6 +868,20 @@ class InboundSentimentService:
                 note="Refusing Serper call to protect credits.",
             )
             return []
+        # V27.3.0 residual Serper budget (project-wide multi-instance)
+        try:
+            from shared.serper_budget import record_serper_spend  # type: ignore[import]
+            from core.clients import get_db as _gdb  # type: ignore[import]
+            if not record_serper_spend(
+                _gdb(),
+                amount=1,
+                residual=True,
+                log=lambda msg, **kw: log.info(msg, **kw),
+            ):
+                log.warning("inbound_serper_budget_blocked", query=query[:120])
+                return []
+        except Exception as _ibe:
+            log.warning("inbound_serper_budget_error", error=str(_ibe), note="Fail-open")
         gl = self.campaign.get("gl") or "us"
         location = self.campaign.get("location")
         

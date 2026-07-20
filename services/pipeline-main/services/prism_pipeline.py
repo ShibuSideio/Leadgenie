@@ -211,7 +211,7 @@ class WalledGardenHook:
         """Execute a Serper search via the centralized service (circuit breaker + audit)."""
         try:
             from services.serper_service import search_serper  # type: ignore[import]
-            results = search_serper(query)
+            results = search_serper(query, residual=True)
             # search_serper returns organic list; wrap in dict for _extract_snippets
             return {"organic": results} if results else {}
         except Exception as e:
@@ -513,7 +513,7 @@ class B2B2CIntermediaryFinder:
         """Execute a Serper search via the centralized service (circuit breaker + audit)."""
         try:
             from services.serper_service import search_serper  # type: ignore[import]
-            results = search_serper(query, gl=gl)
+            results = search_serper(query, gl=gl, residual=True)
             return results if results else []
         except Exception as e:
             log.warning("b2b2c_serper_failed", query=query[:60], error=str(e))

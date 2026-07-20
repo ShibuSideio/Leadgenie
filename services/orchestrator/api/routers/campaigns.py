@@ -767,6 +767,31 @@ def update_campaign(uid, tenant_id, user_role, doc_id):
                     sourcing_vector=_reclass_sv,
                     location=_reclass_loc,
                 )
+                # V27.3.0: primary strategy is immutable after create (architecture invariant).
+                # Only fill missing primary (legacy upgrade) or refresh platform_targets /
+                # vocabulary. Never flip PLATFORM_MINING ↔ COLLOQUIAL mid-campaign.
+                _existing_strat = existing_data.get("intelligence_strategy") or {}
+                _locked_primary = (
+                    _existing_strat.get("primary")
+                    if isinstance(_existing_strat, dict)
+                    else None
+                )
+                if _locked_primary:
+                    _prev_primary = _new_strategy.get("primary")
+                    _new_strategy["primary"] = _locked_primary
+                    # Preserve platform_targets if reclassifier returned empty
+                    if not _new_strategy.get("platform_targets") and _existing_strat.get(
+                        "platform_targets"
+                    ):
+                        _new_strategy["platform_targets"] = _existing_strat.get(
+                            "platform_targets"
+                        )
+                    log.info(
+                        "intelligence_strategy_primary_preserved",
+                        campaign_id=doc_id,
+                        primary=_locked_primary,
+                        classifier_suggested=_prev_primary,
+                    )
                 data["intelligence_strategy"] = _new_strategy
                 log.info("intelligence_strategy_auto_reclassified",
                          campaign_id=doc_id,

@@ -842,6 +842,7 @@ def search_serper(
     campaign_id: str = "",
     tenant_id: str = "",
     sourcing_vector: str = "",
+    residual: bool = False,
 ) -> list:
     """Execute a Serper Google Search query with tenacity 429-retry.
 
@@ -859,6 +860,8 @@ def search_serper(
         campaign_id:     Campaign context for BQ audit telemetry (optional).
         tenant_id:       Tenant context for BQ audit telemetry (optional).
         sourcing_vector: Campaign sourcing vector label (optional).
+        residual:        V27.3.0 — True for non-produce paths (mesh, inbound,
+                         PRISM). Counts against SERPER_RESIDUAL_DAILY_LIMIT.
 
     Returns:
         List of organic result dicts from Serper.  Empty on any failure.
@@ -875,6 +878,26 @@ def search_serper(
     if sanitized != query:
         log.info("serper_query_sanitized", original=query, sanitized=sanitized)
         query = sanitized
+
+    # V27.3.0: project-wide Serper budget (multi-instance Firestore)
+    try:
+        from shared.serper_budget import record_serper_spend  # type: ignore[import]
+        from core.clients import get_db as _get_db_budget  # type: ignore[import]
+        if not record_serper_spend(
+            _get_db_budget(),
+            amount=1,
+            residual=bool(residual),
+            log=lambda msg, **kw: log.info(msg, **kw),
+        ):
+            log.warning(
+                "serper_budget_blocked",
+                query=query[:120],
+                residual=bool(residual),
+                campaign_id=campaign_id,
+            )
+            return []
+    except Exception as _bg_err:
+        log.warning("serper_budget_check_error", error=str(_bg_err), note="Fail-open")
 
     api_key = _get_serper_api_key()
     url     = "https://google.serper.dev/search"
@@ -1071,6 +1094,26 @@ def deep_context_serper_dork(
     if any(cleaned.endswith(sfx) for sfx in _NON_BUSINESS_SUFFIXES):
         log.info("enrichment_gated_non_business_suffix", domain=domain)
         return "", False
+
+    # V27.3.0: residual Serper budget (deep_context is outside produce QueryBrain)
+    _n_calls = 2 if _is_consumer_archetype(sourcing_vector) else 3
+    try:
+        from shared.serper_budget import record_serper_spend  # type: ignore[import]
+        from core.clients import get_db as _gdb  # type: ignore[import]
+        if not record_serper_spend(
+            _gdb(),
+            amount=_n_calls,
+            residual=True,
+            log=lambda msg, **kw: log.info(msg, **kw),
+        ):
+            log.warning(
+                "deep_context_serper_budget_blocked",
+                domain=domain,
+                amount=_n_calls,
+            )
+            return "", False
+    except Exception as _bge:
+        log.warning("deep_context_budget_error", error=str(_bge), note="Fail-open")
 
     api_key = _get_serper_api_key()
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}

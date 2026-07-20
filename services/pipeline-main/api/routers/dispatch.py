@@ -651,6 +651,12 @@ def dispatch():
     log.info("TRACE-6: Destructive queue pop complete.",
              campaign_id=campaign_id, batch_size=len(batch_urls),
              remaining=len(remaining))
+    # V27.3.0: mark dual-written queue_items consumed
+    try:
+        from shared.campaign_queue import mark_queue_items_consumed  # type: ignore[import]
+        mark_queue_items_consumed(_db(), campaign_id, batch_urls, log=log)
+    except Exception as _mc_err:
+        log.warning("dispatch_queue_items_mark_failed", error=str(_mc_err))
 
     # ── User preferences (RLHF weights) ─────────────────────────────────────
     try:

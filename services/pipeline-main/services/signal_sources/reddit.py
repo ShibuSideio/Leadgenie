@@ -198,7 +198,7 @@ class RedditSource(BaseSignalSource):
                     for term in _fallback_terms:
                         _query = f"site:reddit.com/r/{sub} {term}"
                         try:
-                            _results = search_serper(_query)
+                            _results = search_serper(_query, residual=False)  # produce harvest path
                             for r in (_results or []):
                                 _link = r.get("link", "")
                                 _title = r.get("title", "") or ""

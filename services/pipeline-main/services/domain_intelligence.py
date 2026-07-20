@@ -1244,17 +1244,24 @@ def _apply_platform_config_slice(
             campaign=campaign if isinstance(campaign, Mapping) else None,
             sourcing_vector=vector,
         )
+        # V27.3.0: domain_platform_config is SSOT for preferred sources/hints.
+        # Local _PREFERRED_* maps remain fail-open fallback only.
+        cfg_hints = family_query_hints(family) or []
+        cfg_sources = family_preferred_sources(family) or []
+
         if slice_.get("resolve_error"):
-            # Keep local family defaults; still attach neutral pack metadata.
             platform_meta["resolve_error"] = True
-            # Prefer config family tables when local lists empty.
-            cfg_hints = family_query_hints(family)
-            cfg_sources = family_preferred_sources(family)
             return (
-                preferred_sources or cfg_sources or preferred_sources,
-                preferred_hints or cfg_hints or preferred_hints,
+                list(cfg_sources) or preferred_sources,
+                list(cfg_hints) or preferred_hints,
                 platform_meta,
             )
+
+        # Prefer config SSOT when present
+        if cfg_sources:
+            preferred_sources = list(cfg_sources)
+        if cfg_hints:
+            preferred_hints = list(cfg_hints)
 
         platform_meta = {
             "sub_pattern": slice_.get("sub_pattern"),
@@ -1278,8 +1285,9 @@ def _apply_platform_config_slice(
             "education_sub_pattern": slice_.get("education_sub_pattern"),
             "is_b2b_education": bool(slice_.get("is_b2b_education")),
         }
-        sources = list(slice_.get("preferred_sources") or preferred_sources)
-        hints = list(slice_.get("preferred_query_hints") or preferred_hints)
+        # V27.3.0: config SSOT wins over slice/local when non-empty
+        sources = list(cfg_sources or slice_.get("preferred_sources") or preferred_sources)
+        hints = list(cfg_hints or slice_.get("preferred_query_hints") or preferred_hints)
         if not sources:
             sources = preferred_sources or family_preferred_sources(family)
         if not hints:

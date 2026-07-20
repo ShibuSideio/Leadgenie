@@ -1612,6 +1612,26 @@ def produce():
 
         campaign_ref.update(update_data)
 
+        # V27.3.0: dual-write queue items subcollection + size telemetry
+        try:
+            from shared.campaign_queue import (  # type: ignore[import]
+                approx_queue_bytes,
+                dual_write_queue_items,
+            )
+            dual_write_queue_items(
+                get_db(), campaign_id, _capped_fresh, source="produce", log=log,
+            )
+            _q_bytes = approx_queue_bytes(list(current_queue or []) + list(_capped_fresh))
+            log.info(
+                "produce_queue_size_telemetry",
+                campaign_id=campaign_id,
+                queue_depth=_queue_depth + len(_capped_fresh),
+                approx_queue_bytes=_q_bytes,
+                note="Monitor for approach toward Firestore 1MiB campaign doc limit.",
+            )
+        except Exception as _qdw:
+            log.warning("produce_queue_dual_write_failed", error=str(_qdw))
+
         # Post-write cap enforcement: re-read queue length and trim if another
         # concurrent producer pushed it past 200 (defense-in-depth).
         try:

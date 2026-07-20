@@ -13,6 +13,7 @@ Routes:
   POST /api/internal/cron/sweep            (Serper produce fan-out, every 24h)
   POST /api/internal/cron/harvest-sweep   (Free-source harvest fan-out, 4h; allow_serper=False)
   POST /api/internal/campaign-enrichment-run
+  POST /api/internal/cron/enrichment-pending-resume  (V27.3.0 — thin-lead resume)
   POST /api/internal/cron/reflection
   POST /api/internal/cron/ontology-decay
   POST /api/telemetry/conversion_feedback
@@ -1607,3 +1608,48 @@ def trigger_campaign_enrichment_run():
     t.start()
     log.info("campaign_enrichment_trigger_accepted")
     return jsonify({"status": "accepted", "message": "Campaign enrichment job started"}), 202
+
+
+# =============================================================================
+# POST /api/internal/cron/enrichment-pending-resume  (V27.3.0)
+# Resume thin leads parked as enrichment_pending; expire stale ones.
+# =============================================================================
+@bp.route("/api/internal/cron/enrichment-pending-resume", methods=["POST"])
+def cron_enrichment_pending_resume():
+    import os as _os
+    import threading
+
+    internal_secret = _os.environ.get("INTERNAL_CRON_SECRET", "")
+    provided_secret = request.headers.get("X-Internal-Secret", "")
+    cloud_tasks_hdr = request.headers.get("X-CloudTasks-QueueName", "")
+
+    if not internal_secret:
+        log.error(
+            "enrichment_pending_resume_secret_not_configured",
+            note="INTERNAL_CRON_SECRET env var is not set.",
+        )
+        return jsonify({"error": "Service not configured — contact administrator"}), 503
+
+    if provided_secret != internal_secret and not cloud_tasks_hdr:
+        log.warning(
+            "enrichment_pending_resume_unauthorized",
+            has_queue_header=bool(cloud_tasks_hdr),
+            has_secret=bool(provided_secret),
+        )
+        return jsonify({"error": "unauthorized"}), 401
+
+    def _run():
+        try:
+            from jobs.enrichment_pending_job import run  # type: ignore[import]
+            result = run()
+            log.info("enrichment_pending_job_finished", **result)
+        except Exception as exc:
+            log.error("enrichment_pending_job_error", error=str(exc))
+
+    t = threading.Thread(target=_run, daemon=True, name="enrichment-pending-resume")
+    t.start()
+    log.info("enrichment_pending_resume_trigger_accepted")
+    return jsonify({
+        "status": "accepted",
+        "message": "enrichment_pending resume job started",
+    }), 202
