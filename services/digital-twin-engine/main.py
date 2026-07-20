@@ -199,6 +199,24 @@ def _extract_root_domain(raw_url: str) -> tuple[str, str]:
 
 def _serper_search(query: str, api_key: str, num: int = 10) -> dict:
     """Single synchronous Serper call. Returns raw JSON dict."""
+    # V27.4.0 residual Serper budget (fail-open if shared not packaged)
+    try:
+        import os as _os
+        from google.cloud import firestore as _fs
+        # lightweight import path — shared may be copied as ./shared in some images
+        try:
+            from shared.serper_budget import record_serper_spend  # type: ignore[import]
+        except ImportError:
+            import sys as _sys
+            _sys.path.insert(0, "/app")
+            from shared.serper_budget import record_serper_spend  # type: ignore[import]
+        _db = _fs.Client(project=_os.environ.get("PROJECT_ID") or _os.environ.get("GOOGLE_CLOUD_PROJECT"))
+        if not record_serper_spend(_db, amount=1, residual=True):
+            print(f"[SERPER] residual budget blocked for query: {query!r}")
+            return {}
+    except Exception as _bg:
+        print(f"[SERPER] budget check skipped: {_bg}")
+
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
     payload = {"q": query, "num": num}
     resp = httpx.post(

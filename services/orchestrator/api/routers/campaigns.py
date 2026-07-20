@@ -963,7 +963,11 @@ def consume_campaign(uid, tenant_id, user_role, campaign_id):
         return jsonify({"error": "Forbidden"}), 403
 
     camp_data = camp_doc.to_dict() or {}
-    queue_depth = len(camp_data.get("unprocessed_queue", []))
+    try:
+        from shared.campaign_queue import queue_depth as _qd  # type: ignore[import]
+        queue_depth = _qd(db, campaign_id, camp_data)
+    except Exception:
+        queue_depth = len(camp_data.get("unprocessed_queue") or [])
     if queue_depth == 0:
         return jsonify({"status": "noop", "reason": "unprocessed_queue empty — run /ignite first", "queue_depth": 0}), 200
 

@@ -167,12 +167,22 @@ def run() -> dict:
             # Re-append URL to campaign queue for normal dispatch path
             if campaign_id:
                 try:
-                    from google.cloud import firestore as _fs
-                    db.collection("campaigns").document(campaign_id).update({
-                        "unprocessed_queue": _fs.ArrayUnion([url]),
-                    })
+                    from shared.campaign_queue import append_urls  # type: ignore[import]
+                    _cref = db.collection("campaigns").document(campaign_id)
+                    append_urls(
+                        db, _cref, campaign_id, [url],
+                        source="enrichment_resume",
+                        campaign_doc=_cref.get().to_dict() or {},
+                        log=log,
+                    )
                 except Exception:
-                    pass
+                    try:
+                        from google.cloud import firestore as _fs
+                        db.collection("campaigns").document(campaign_id).update({
+                            "unprocessed_queue": _fs.ArrayUnion([url]),
+                        })
+                    except Exception:
+                        pass
             _dispatch_url(tenant_id, campaign_id, url)
             resumed += 1
             log.info(

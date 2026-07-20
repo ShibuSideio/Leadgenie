@@ -860,12 +860,17 @@ def produce():
             campaign_id=campaign_id,
             note="All generated queries were system junk. Running signal_harvest fallback.",
         )
+        try:
+            from shared.campaign_queue import queue_depth as _qd  # type: ignore[import]
+            _qd0 = _qd(get_db(), campaign_id, campaign)
+        except Exception:
+            _qd0 = len(campaign.get("unprocessed_queue") or [])
         return jsonify({
             "status": "produced",
             "fetched": 0,
             "deduplicated": 0,
             "queued": 0,
-            "queue_depth": len(campaign.get("unprocessed_queue", [])),
+            "queue_depth": _qd0,
             "warning": "All queries sanitized as system junk.",
             "harvest": harvest_metrics,
         }), 200
@@ -1124,12 +1129,17 @@ def produce():
             queries_reordered=_empty_domain_impact.get("queries_reordered"),
             note="End-of-produce domain impact (empty query portfolio after governance).",
         )
+        try:
+            from shared.campaign_queue import queue_depth as _qd  # type: ignore[import]
+            _qd1 = _qd(get_db(), campaign_id, campaign)
+        except Exception:
+            _qd1 = len(campaign.get("unprocessed_queue") or [])
         return jsonify({
             "status": "produced",
             "fetched": 0,
             "deduplicated": 0,
             "queued": 0,
-            "queue_depth": len(campaign.get("unprocessed_queue", [])),
+            "queue_depth": _qd1,
             "warning": "No governed queries available.",
             "harvest": harvest_metrics,
             "domain_impact_summary": _empty_domain_impact,
@@ -1557,12 +1567,21 @@ def produce():
     # RACE-01/02 FIX: Use firestore.ArrayUnion for atomic, race-safe
     # append instead of destructive overwrite that loses concurrent writes.
     # ------------------------------------------------------------------
-    current_queue = campaign.get("unprocessed_queue", [])
+    # V27.4.0: dual-path queue SSOT (array + queue_items)
+    try:
+        from shared.campaign_queue import (  # type: ignore[import]
+            append_urls as _queue_append,
+            load_queued_urls as _load_q,
+            queue_depth as _q_depth_fn,
+        )
+        current_queue = _load_q(get_db(), campaign_id, campaign, log=log)
+        _queue_depth = _q_depth_fn(get_db(), campaign_id, campaign, log=log)
+    except Exception as _qload_err:
+        log.warning("produce_queue_load_fallback", error=str(_qload_err))
+        current_queue = list(campaign.get("unprocessed_queue") or [])
+        _queue_depth = len(current_queue)
+        _queue_append = None  # type: ignore
 
-    # V24.4 (L3-4): Queue backpressure — if queue depth > 150 unconsumed URLs,
-    # skip producing new URLs. The consumer hasn't caught up yet. Producing more
-    # would cause the 200-URL cap to silently discard fresh signals.
-    _queue_depth = len(current_queue) if current_queue else 0
     if _queue_depth > 150:
         _persist_query_memory()
         log.info(
@@ -1570,15 +1589,10 @@ def produce():
             campaign_id=campaign_id,
             queue_depth=_queue_depth,
             threshold=150,
-            note="Queue saturated. Skipping produce run — consumer must drain queue first. "
-                 "Reduce drip_interval_minutes or increase dispatch frequency.",
+            note="Queue saturated. Skipping produce run — consumer must drain queue first.",
         )
         return jsonify({"status": "skipped_queue_full", "queue_depth": _queue_depth}), 200
 
-    # Cap fresh_urls to stay within the 200-URL queue limit.
-    # Estimate remaining capacity from the snapshot (best-effort — concurrent
-    # producers may have appended since the read, but ArrayUnion is idempotent
-    # so duplicates are harmless).
     _remaining_capacity = max(200 - _queue_depth, 0)
     _capped_fresh = fresh_urls[:_remaining_capacity] if fresh_urls else []
 
@@ -1592,66 +1606,46 @@ def produce():
             note="No fresh URLs fit within 200-URL cap.",
         )
         return jsonify({"status": "skipped_no_fresh", "queue_depth": _queue_depth}), 200
-    else:
-        queued_count = len(_capped_fresh)  # Update queued_count to reflect actual appended
 
+    _append_res: dict = {}
     try:
-        # NOTE: Use module-level `from datetime import datetime, timezone`.
-        # A local `import datetime` here previously shadowed the binding and
-        # caused UnboundLocalError on earlier `datetime.now(...)` in this
-        # function (produce_dedup_query_failed).
-        update_data = {
-            "unprocessed_queue": firestore.ArrayUnion(_capped_fresh),
-            "last_produced_at":  firestore.SERVER_TIMESTAMP,
-        }
-        # V24.4 (L3-5): Always update next_drip_due when the queue is refreshed,
-        # not only on first fill. A stale next_drip_due causes immediate dispatch
-        # on every sweep instead of respecting the configured drip cadence.
+        if _queue_append is not None:
+            _append_res = _queue_append(
+                get_db(),
+                campaign_ref,
+                campaign_id,
+                _capped_fresh,
+                source="produce",
+                campaign_doc=campaign,
+                log=log,
+            ) or {}
+            if _append_res.get("skipped") and not _append_res.get("appended"):
+                _persist_query_memory()
+                return jsonify({
+                    "status": "skipped_queue_full",
+                    "queue_depth": _append_res.get("depth_before", _queue_depth),
+                    "reason": _append_res.get("skipped"),
+                }), 200
+            queued_count = int(_append_res.get("appended") or 0)
+            _capped_fresh = _capped_fresh[:queued_count] if queued_count else []
+        else:
+            campaign_ref.update({
+                "unprocessed_queue": firestore.ArrayUnion(_capped_fresh),
+            })
+            queued_count = len(_capped_fresh)
+
+        update_meta = {"last_produced_at": firestore.SERVER_TIMESTAMP}
         if _capped_fresh:
-            update_data["next_drip_due"] = datetime.now(timezone.utc).isoformat()
+            update_meta["next_drip_due"] = datetime.now(timezone.utc).isoformat()
+        campaign_ref.update(update_meta)
 
-        campaign_ref.update(update_data)
-
-        # V27.3.0: dual-write queue items subcollection + size telemetry
-        try:
-            from shared.campaign_queue import (  # type: ignore[import]
-                approx_queue_bytes,
-                dual_write_queue_items,
-            )
-            dual_write_queue_items(
-                get_db(), campaign_id, _capped_fresh, source="produce", log=log,
-            )
-            _q_bytes = approx_queue_bytes(list(current_queue or []) + list(_capped_fresh))
-            log.info(
-                "produce_queue_size_telemetry",
-                campaign_id=campaign_id,
-                queue_depth=_queue_depth + len(_capped_fresh),
-                approx_queue_bytes=_q_bytes,
-                note="Monitor for approach toward Firestore 1MiB campaign doc limit.",
-            )
-        except Exception as _qdw:
-            log.warning("produce_queue_dual_write_failed", error=str(_qdw))
-
-        # Post-write cap enforcement: re-read queue length and trim if another
-        # concurrent producer pushed it past 200 (defense-in-depth).
-        try:
-            _refreshed = campaign_ref.get().to_dict() or {}
-            _post_queue = _refreshed.get("unprocessed_queue", [])
-            if len(_post_queue) > 200:
-                log.warning(
-                    "produce_queue_over_cap_trimming",
-                    campaign_id=campaign_id,
-                    queue_len=len(_post_queue),
-                    note="Concurrent append pushed queue past 200. Trimming to 200.",
-                )
-                campaign_ref.update({"unprocessed_queue": _post_queue[:200]})
-        except Exception as _cap_check_err:
-            log.warning(
-                "produce_queue_cap_check_failed",
-                campaign_id=campaign_id,
-                error=str(_cap_check_err),
-                note="Non-fatal — queue may temporarily exceed 200 URLs.",
-            )
+        log.info(
+            "produce_queue_size_telemetry",
+            campaign_id=campaign_id,
+            queue_depth=_queue_depth + len(_capped_fresh),
+            appended=len(_capped_fresh),
+            mode=_append_res.get("mode") or "legacy",
+        )
     except Exception as exc:
         log.critical(
             "produce_queue_write_failed",
@@ -1662,7 +1656,7 @@ def produce():
         return jsonify({"error": "Queue write failed", "details": str(exc)}), 500
 
     _persist_query_memory()
-    combined_queue = current_queue + _capped_fresh  # For response metrics only
+    combined_queue = list(current_queue) + list(_capped_fresh)
 
     # ------------------------------------------------------------------
     # V25.1.0: Signal Harvest — multi-source intent discovery pathway.

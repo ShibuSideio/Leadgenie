@@ -1150,46 +1150,34 @@ def _write_to_firestore(
     # Use arrayUnion for atomic, dedup-safe append.
     if harvest_urls:
         try:
-            from shared.scale_limits import (  # type: ignore[import]
-                UNPROCESSED_QUEUE_HARD_CAP,
-                UNPROCESSED_QUEUE_BACKPRESSURE,
-            )
-            _q_cap = UNPROCESSED_QUEUE_HARD_CAP
-            _q_bp = UNPROCESSED_QUEUE_BACKPRESSURE
-        except Exception:
-            _q_cap, _q_bp = 200, 150
-        try:
+            from shared.campaign_queue import append_urls  # type: ignore[import]
             campaign_ref = db.collection("campaigns").document(campaign_id)
-            _snap = campaign_ref.get()
-            _cur = list((_snap.to_dict() or {}).get("unprocessed_queue") or [])
-            _depth = len(_cur)
-            if _depth >= _q_bp:
-                log.info(
-                    "signal_harvest_queue_backpressure",
-                    campaign_id=campaign_id,
-                    queue_depth=_depth,
-                    note="Skipping ArrayUnion — produce/dispatch must drain queue first.",
-                )
+            camp_doc = campaign_ref.get().to_dict() or {}
+            _res = append_urls(
+                db,
+                campaign_ref,
+                campaign_id,
+                harvest_urls,
+                source="harvest",
+                campaign_doc=camp_doc,
+                log=log,
+            )
+            if not _res.get("appended"):
                 queued = 0
+                log.info(
+                    "signal_harvest_queue_skipped",
+                    campaign_id=campaign_id,
+                    reason=_res.get("skipped"),
+                    depth=_res.get("depth_before"),
+                )
             else:
-                _room = max(_q_cap - _depth, 0)
-                _to_add = harvest_urls[: min(200, _room)]
-                if _to_add:
-                    campaign_ref.update({
-                        "unprocessed_queue": firestore.ArrayUnion(_to_add),
-                    })
-                    # Defense-in-depth trim if concurrent writers overshoot
-                    _post = list((campaign_ref.get().to_dict() or {}).get("unprocessed_queue") or [])
-                    if len(_post) > _q_cap:
-                        campaign_ref.update({"unprocessed_queue": _post[:_q_cap]})
-                    log.info(
-                        "signal_harvest_queue_appended",
-                        campaign_id=campaign_id,
-                        urls_appended=len(_to_add),
-                        queue_depth_before=_depth,
-                    )
-                else:
-                    queued = 0
+                log.info(
+                    "signal_harvest_queue_appended",
+                    campaign_id=campaign_id,
+                    urls_appended=_res.get("appended"),
+                    queue_depth_before=_res.get("depth_before"),
+                    mode=_res.get("mode"),
+                )
         except Exception as exc:
             log.error(
                 "signal_harvest_queue_append_failed",

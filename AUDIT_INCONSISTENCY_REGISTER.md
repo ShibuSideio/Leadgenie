@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|--------|
 | **Audit date** | 2026-07-20 |
-| **Last remediation** | **V27.3.0 remaining scale** — residual Serper budget, enrichment_pending resume, strategy primary lock, domain preferred-sources SSOT, queue dual-write |
+| **Last remediation** | **V27.4.0 deferred cutover** — queue dual-path SSOT (hybrid default; subcollection mode), agent/DT residual Serper budget |
 | **Scope** | Codebase + architecture docs + Firestore schema/indexes/rules as declared in repo |
 | **Method** | Static analysis of services, `public/app.js`, `architecture.md`, `firestore.indexes.json`, `firestore.rules` |
 | **Live Firestore / prod env** | **Not measured** — any claim about production document sizes, wallet balances, or env flags is **unverified** |
@@ -23,7 +23,8 @@
 | P0-07 | Residual Serper | **Mitigated** — V27.3 `shared/serper_budget.py` residual daily cap (default 800); search_serper residual=True; deep_context/inbound gated |
 | P1-01 | Dedup 500 | **Fixed in code** — paginated to 2500 + source_url |
 | P1-05 | Harvest queue race | **Fixed in code** — backpressure + trim |
-| P1-06 | Campaign hot doc | **Mitigated** — queue dual-write to `queue_items` + size telemetry (array still primary BC) |
+| P1-06 | Campaign hot doc | **V27.4 dual-path SSOT** — `load/append/pop` merge array+`queue_items`; mode `hybrid` (default) or `subcollection` (array cleared on write). Feature-safe cutover. |
+| Residual agent/DT Serper | **V27.4** residual budget on agent_engine + digital-twin |
 | P1-07 | Unbounded blocklist | **Fixed in code** — cap 500 |
 | P1-10 | Entity process-local | **Fixed in code** — Firestore daily counter |
 | P1-11 | Strategy mutability | **Fixed in code** — primary locked after create |

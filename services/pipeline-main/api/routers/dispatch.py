@@ -520,10 +520,15 @@ def dispatch():
             if persona_bio:
                 bio = persona_bio
 
+    try:
+        from shared.campaign_queue import queue_depth as _qd  # type: ignore[import]
+        _trace_qdepth = _qd(_db(), campaign_id, campaign)
+    except Exception:
+        _trace_qdepth = len(campaign.get("unprocessed_queue") or [])
     log.info("TRACE-3: Campaign loaded.",
              campaign_id=campaign_id,
              sourcing_vector=sourcing_vector,
-             queue_depth=len(campaign.get("unprocessed_queue", [])),
+             queue_depth=_trace_qdepth,
              domain_family=domain_profile.get("domain_family"),
              domain_confidence=domain_profile.get("confidence"),
              profile_confidence=domain_profile.get("profile_confidence"),
@@ -611,52 +616,69 @@ def dispatch():
                     note="Falling back to scraper-heavy deferrals.")
 
 
-    # ── TRACE-6: Destructive Queue Pop (Batch of 10) ────────────────────────
-    current_queue = campaign.get("unprocessed_queue", [])
-    if not current_queue:
-        log.info("TRACE-6: unprocessed_queue empty — exiting gracefully.",
-                 campaign_id=campaign_id)
-        return jsonify({"status": "queue_empty", "processed": 0}), 200
-
-    # BATCH_SIZE restored to 10 (P2 fix — 2026-06-20).
-    # The prior reduction to 5 halved daily throughput to ~30 URLs/day per campaign.
-    # At 10/dispatch × 4h intervals = max 60 URLs/day per campaign — adequate
-    # pipeline fill rate given the downstream score gate pass-rate of ~30-40%.
+    # ── TRACE-6: Destructive Queue Pop (V27.4 dual-path SSOT) ──────────────
+    # Merges unprocessed_queue array + queue_items subcollection so neither
+    # store alone can starve dispatch. Pop ArrayRemoves array URLs and marks
+    # queue_items consumed (idempotent under at-least-once Cloud Tasks).
     BATCH_SIZE = 10
-    batch_urls = current_queue[:BATCH_SIZE]
-    remaining  = current_queue[BATCH_SIZE:]
-    queue_depth = len(current_queue)
-
-    # BUG-2 FIX: Atomic transactional queue pop — prevents double-dispatch race.
-    # A bare .update({"unprocessed_queue": remaining}) is NOT atomic. If two
-    # Cloud Task workers fire simultaneously for the same campaign_id (Cloud
-    # Tasks guarantees at-least-once delivery), both read the same snapshot,
-    # compute the same remaining slice, and the second .update() silently
-    # overwrites the first — causing duplicate lead processing.
-    # Fix: Use ArrayRemove inside a transaction. ArrayRemove is idempotent
-    # and set-based — even if two workers race, each URL is only removed once.
     try:
-        @_firestore_transactional
-        def _pop_queue(txn, ref):
-            txn.update(ref, {
-                "unprocessed_queue": firestore.ArrayRemove(batch_urls)
-            })
-        _pop_txn = _db().transaction()
-        _pop_queue(_pop_txn, campaign_ref)
+        from shared.campaign_queue import (  # type: ignore[import]
+            load_queued_urls,
+            pop_batch,
+            queue_depth as _q_depth,
+        )
+        current_queue = load_queued_urls(
+            _db(), campaign_id, campaign, log=log,
+        )
+        queue_depth = len(current_queue)
+        if not current_queue:
+            log.info(
+                "TRACE-6: unprocessed_queue empty — exiting gracefully.",
+                campaign_id=campaign_id,
+            )
+            return jsonify({"status": "queue_empty", "processed": 0}), 200
+        batch_urls = pop_batch(
+            _db(),
+            campaign_ref,
+            campaign_id,
+            campaign,
+            batch_size=BATCH_SIZE,
+            log=log,
+        )
+        if not batch_urls:
+            return jsonify({"status": "queue_empty", "processed": 0}), 200
+        remaining = max(queue_depth - len(batch_urls), 0)
     except Exception as pop_err:
-        log.error("dispatch_queue_pop_failed", campaign_id=campaign_id,
-                  error=str(pop_err), exc_info=True)
-        return jsonify({"error": "Queue pop transaction failed"}), 500
+        log.error(
+            "dispatch_queue_pop_failed",
+            campaign_id=campaign_id,
+            error=str(pop_err),
+            exc_info=True,
+        )
+        # Fail-open legacy path so features are not bricked if shared import fails
+        current_queue = list(campaign.get("unprocessed_queue") or [])
+        if not current_queue:
+            return jsonify({"status": "queue_empty", "processed": 0}), 200
+        batch_urls = current_queue[:BATCH_SIZE]
+        remaining = len(current_queue) - len(batch_urls)
+        queue_depth = len(current_queue)
+        try:
+            @_firestore_transactional
+            def _pop_queue(txn, ref):
+                txn.update(ref, {"unprocessed_queue": firestore.ArrayRemove(batch_urls)})
+            _pop_txn = _db().transaction()
+            _pop_queue(_pop_txn, campaign_ref)
+        except Exception as pop_err2:
+            log.error("dispatch_queue_pop_legacy_failed", error=str(pop_err2))
+            return jsonify({"error": "Queue pop transaction failed"}), 500
 
-    log.info("TRACE-6: Destructive queue pop complete.",
-             campaign_id=campaign_id, batch_size=len(batch_urls),
-             remaining=len(remaining))
-    # V27.3.0: mark dual-written queue_items consumed
-    try:
-        from shared.campaign_queue import mark_queue_items_consumed  # type: ignore[import]
-        mark_queue_items_consumed(_db(), campaign_id, batch_urls, log=log)
-    except Exception as _mc_err:
-        log.warning("dispatch_queue_items_mark_failed", error=str(_mc_err))
+    log.info(
+        "TRACE-6: Destructive queue pop complete.",
+        campaign_id=campaign_id,
+        batch_size=len(batch_urls),
+        remaining=remaining,
+        queue_depth=queue_depth,
+    )
 
     # ── User preferences (RLHF weights) ─────────────────────────────────────
     try:

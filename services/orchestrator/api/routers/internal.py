@@ -803,7 +803,11 @@ def cron_sweep():
                                     campaign_id=campaign_id, error=str(ts_cmp_err))
                         drip_due = True
 
-            queue_depth = len(campaign_data.get("unprocessed_queue", []) or [])
+            try:
+                from shared.campaign_queue import queue_depth as _qd  # type: ignore[import]
+                queue_depth = _qd(_db(), campaign_id, campaign_data)
+            except Exception:
+                queue_depth = len(campaign_data.get("unprocessed_queue") or [])
 
             log.info("sweep_drip_gate_result",
                      campaign_id=campaign_id, drip_due=drip_due,

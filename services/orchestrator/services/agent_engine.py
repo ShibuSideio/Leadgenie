@@ -130,6 +130,19 @@ def run_agent(agent_id: str, agent: dict, db: fs.Client) -> dict:
                 return {"error": "No Serper API key available"}
         
         import httpx
+        # V27.4.0 residual Serper budget (project-wide)
+        try:
+            from shared.serper_budget import record_serper_spend  # type: ignore[import]
+            from core.clients import get_db as _gdb  # type: ignore[import]
+            _n_q = min(3, len(queries))
+            if not record_serper_spend(
+                _gdb(), amount=_n_q, residual=True,
+                log=lambda m, **k: log.info("%s %s", m, k),
+            ):
+                log.warning("agent_serper_budget_blocked: agent=%s amount=%s", agent_id, _n_q)
+                return {"error": "Serper residual daily budget exhausted", "results": []}
+        except Exception as _bg_err:
+            log.warning("agent_serper_budget_error: %s", _bg_err)
         for query in queries[:3]:
             try:
                 resp = httpx.post(
