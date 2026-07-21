@@ -501,12 +501,23 @@ def sanitize_query(query: str) -> str:
     entirely. Paid tier supports site:linkedin.com and similar queries. On free
     tier, stripping is still active but now logs when positive site: operators
     are removed (to diagnose query degradation).
+
+    V27.5: Strip numbered list labels (``1. Seed Investment``), fix orphan
+    quotes after domain tokens (``linkedin.com"``), drop empty quote pairs.
     """
     if not query:
         return ""
 
     # Sanitize wildcard domain operators (site:*.org -> site:.org)
     query = re.sub(r'(?<!\w)site:\*\.', 'site:.', query)
+
+    # V27.5: "1. Seed Investment" / "2) Foo" list labels — not search intent
+    query = re.sub(r'(?i)(?:^|["\s])\d{1,2}[.)]\s+[A-Za-z][A-Za-z0-9 /&-]{2,40}', ' ', query)
+
+    # V27.5: orphan trailing quote glued to domain: linkedin.com" → linkedin.com
+    query = re.sub(r'([a-z0-9.-]+\.[a-z]{2,})"+(\s|$)', r'\1\2', query, flags=re.I)
+    # leading orphan quote before domain
+    query = re.sub(r'(^|\s)"+([a-z0-9.-]+\.[a-z]{2,})', r'\1\2', query, flags=re.I)
 
     # Insert missing space between quotes and opening parenthesis: "abc"(xyz) -> "abc" (xyz)
     query = re.sub(r'(?<=\")\(', ' (', query)
@@ -516,6 +527,7 @@ def sanitize_query(query: str) -> str:
     
     # Insert missing space between closing and opening parenthesis: )( -> ) (
     query = re.sub(r'\)(?=\()', ') ', query)
+    query = re.sub(r'\s+', ' ', query).strip()
 
     # V24.1.1: Skip sanitization entirely on paid tier
     if _SERPER_PAID_TIER:
@@ -923,37 +935,51 @@ def search_serper(
         }
         payload_dict["hl"] = _HL_BY_GL.get(str(gl).lower(), "en")
 
-    # V26.0.5: Smart time filter based on query structure.
-    # Platform Mining queries (positive site: operators like site:dubizzle.com.om)
-    # target EVERGREEN pages — agent profiles, property listings, competitor
-    # directories. These pages exist for years and don't get re-indexed monthly.
-    # The old qdr:m (past month) filter made them invisible to the pipeline,
-    # which is why dreoman.com/agent/mohammed (a real lead) was never found.
-    #
+    # V26.0.5 / V27.5: Smart time filter based on query structure.
     # Decision matrix:
-    #   site: dork query (platform mining)  → NO time filter (evergreen)
-    #   B2C non-site query                  → qdr:6m (6 months, was 1 month)
-    #   B2B                                 → qdr:2y (2 years)
+    #   site: social/forum (reddit, quora, linkedin, …) → qdr:6m (product rule)
+    #   site: evergreen platforms (directories, listings) → NO time filter
+    #   B2C non-site colloquial                          → qdr:6m
+    #   B2B non-site colloquial                          → qdr:6m (was qdr:2y —
+    #       year-old social/forum threads leaked into investor/B2B campaigns)
     import re as _re_tbs
     _query_body_tbs = _re_tbs.split(
         r'\s+-(?:site:|wiki\b|jobs\b|")', query, maxsplit=1
     )[0].strip()
     _has_positive_site = bool(_re_tbs.search(r'(?<!\-)site:', _query_body_tbs))
+    _q_lower = query.lower()
+    _SOCIAL_SITE_HINTS = (
+        "site:reddit.", "site:quora.", "site:linkedin.", "site:facebook.",
+        "site:twitter.", "site:x.com", "site:youtube.", "site:instagram.",
+        "site:tiktok.", "site:news.ycombinator", "site:team-bhp.",
+        "/r/", "comments/",
+    )
+    _is_social_forum_query = any(h in _q_lower for h in _SOCIAL_SITE_HINTS) or any(
+        d.replace("www.", "") in _q_lower
+        for d in (
+            "reddit.com", "quora.com", "linkedin.com", "facebook.com",
+            "twitter.com", "youtube.com",
+        )
+        if f"site:{d}" in _q_lower or f'site:{d.split(".")[0]}' in _q_lower
+    )
 
-    if _has_positive_site:
-        # Platform mining — no time restriction. Agent profiles, listing
-        # pages, competitor directories are valid leads regardless of age.
-        pass  # Don't set tbs at all
+    if _has_positive_site and _is_social_forum_query:
+        # V27.5: social/forum site: dorks still get 6-month freshness
+        payload_dict["tbs"] = "qdr:6m"
+        log.info(
+            "serper_tbs_social_forum",
+            tbs="qdr:6m",
+            query=query[:100],
+            note="Social/forum site: query — 6-month window (not evergreen).",
+        )
+    elif _has_positive_site:
+        # Evergreen platform mining — no time restriction
+        pass
     elif sourcing_vector and _is_consumer_archetype(sourcing_vector):
-        # B2C non-platform queries: 6-month window (was 1 month).
-        # Dialog-cue dorks ("pm me", "still available") benefit from recency,
-        # but 30 days was too aggressive — killed keyword phrase results.
-        # The _is_stale_content filter at produce level (14 days) handles
-        # stale forum posts as a separate safety net.
         payload_dict["tbs"] = "qdr:6m"
     else:
-        # B2B temporal freshness: 2-year window.
-        payload_dict["tbs"] = "qdr:2y"
+        # V27.5: B2B colloquial also 6 months (was 2 years — too cold for forums)
+        payload_dict["tbs"] = "qdr:6m"
 
     payload = json.dumps(payload_dict)
     headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}

@@ -196,16 +196,32 @@ class WalledGardenHook:
         self._serper_key = serper_key
 
     def _build_queries(self, url: str, root_domain: str, persona_summary: str) -> list[str]:
-        parsed    = urlparse(url)
-        path_slug = " ".join(
+        """Build Serper triangulation queries for a social URL.
+
+        V27.5: Single high-precision ``site:`` query (was 3 — dual bare-domain
+        queries doubled Serper cost and pulled cold SERP noise). Strip numbered
+        list labels and campaign titles from path/persona fragments.
+        """
+        import re as _re
+        parsed = urlparse(url)
+        raw_parts = [
             w for w in parsed.path.replace("-", " ").replace("_", " ").split("/")
             if len(w) > 2 and not w.isdigit()
-        )[:80]
-        q1 = f"site:{root_domain} {path_slug}".strip()
-        q2 = f'"{root_domain}" {path_slug[:50]}'.strip()
-        persona_hint = (persona_summary.split("—")[0].split("\n")[0][:60]).strip()
-        q3 = f'"{root_domain}" {persona_hint}'.strip() if persona_hint else q2
-        return [q1, q2, q3]
+        ]
+        # Drop reddit path noise tokens that are not identity
+        _skip = {"comments", "comment", "status", "posts", "post", "share", "r"}
+        path_slug = " ".join(w for w in raw_parts if w.lower() not in _skip)[:80]
+        # Strip "1. Seed Investment" style labels from path material
+        path_slug = _re.sub(
+            r"(?i)\b\d{1,2}[.)]\s+[A-Za-z][\w /&-]{2,40}", " ", path_slug
+        )
+        path_slug = _re.sub(r"\s+", " ", path_slug).strip()
+
+        # Prefer site: only — bare domain" twins were pure credit waste in prod logs
+        if path_slug:
+            return [f"site:{root_domain} {path_slug}".strip()]
+        # Fallback: site:domain alone (still 1 credit vs 3)
+        return [f"site:{root_domain}".strip()]
 
     def _run_serper(self, query: str) -> dict:
         """Execute a Serper search via the centralized service (circuit breaker + audit)."""

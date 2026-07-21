@@ -56,32 +56,34 @@ def should_attempt_geo_fallback(
 
 
 # ---------------------------------------------------------------------------
-# V25.5.0: Content age filter — reject stale Reddit/forum posts
+# V25.5.0 / V27.5.0: Content age filter — reject stale Reddit/forum posts
 # ---------------------------------------------------------------------------
-# Reddit URL slugs encode post date via the base36 ID. However, Serper results
-# include a `date` field (ISO-8601 or relative like "2 months ago") that we can
-# parse. For non-Reddit forums, we check snippet text for date indicators.
+# Product rule (V27.5): social/forum results older than 6 months are irrelevant.
+# Evergreen directory/agent profiles remain on the looser B2C window when the
+# host is NOT a social/forum domain.
 
-_STALE_DAYS_B2C = 90    # V26.0.5: 90 days (was 14). Agent profiles, property listings,
-                        # and competitor directory pages are valid leads for months.
-                        # The old 14-day window + qdr:m at Serper level was double-filtering,
-                        # killing evergreen pages like dreoman.com/agent/mohammed.
-_STALE_DAYS_B2B = 60    # B2B: 2 months — business discussions stay relevant longer
+_STALE_DAYS_B2C = 90    # Non-social consumer (listings, directories)
+_STALE_DAYS_B2B = 60    # Non-social B2B discussions
+_STALE_DAYS_SOCIAL = 180  # V27.5: Reddit/Quora/LinkedIn/forums — hard 6 months
+
+_SOCIAL_STALE_HOST_HINTS = (
+    "reddit.com", "quora.com", "linkedin.com", "facebook.com",
+    "twitter.com", "x.com", "youtube.com", "instagram.com",
+    "tiktok.com", "team-bhp.com", "forum.", "discourse.",
+    "stackexchange.com", "stackoverflow.com", "news.ycombinator.com",
+)
 
 
-def _is_stale_content(result: dict, is_consumer: bool) -> bool:
-    """Return True if Serper result is too old to be actionable.
+def _result_is_social_forum(result: dict) -> bool:
+    link = (result.get("link") or result.get("url") or "").lower()
+    return any(h in link for h in _SOCIAL_STALE_HOST_HINTS)
 
-    Checks the Serper ``date`` field (if present) against age thresholds.
-    Falls back to title/snippet heuristics for date indicators.
-    Returns False (not stale) if date cannot be determined — fail-open.
-    """
-    max_days = _STALE_DAYS_B2C if is_consumer else _STALE_DAYS_B2B
-    raw_date = (result.get("date") or "").strip()
+
+def _age_days_from_serper_date(raw_date: str) -> int | None:
+    """Parse Serper date string to age in days, or None if unparseable."""
+    raw_date = (raw_date or "").strip()
     if not raw_date:
-        return False  # No date info — fail-open, let scoring decide
-
-    # Try relative date parsing ("3 days ago", "2 months ago", "1 year ago")
+        return None
     _rel_match = re.match(
         r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago",
         raw_date, re.IGNORECASE,
@@ -93,19 +95,70 @@ def _is_stale_content(result: dict, is_consumer: bool) -> bool:
             "second": 0, "minute": 0, "hour": 0,
             "day": 1, "week": 7, "month": 30, "year": 365,
         }
-        age_days = _count * _multipliers.get(_unit, 0)
-        return age_days > max_days
+        return _count * _multipliers.get(_unit, 0)
 
-    # Try ISO-8601 date parsing ("2026-01-15T..." or "Jan 15, 2026")
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%b %d, %Y", "%B %d, %Y"):
+    for fmt, slen in (
+        ("%Y-%m-%dT%H:%M:%S", 19),
+        ("%Y-%m-%d", 10),
+        ("%b %d, %Y", 12),
+        ("%B %d, %Y", 18),
+    ):
         try:
-            parsed = datetime.strptime(raw_date[:20], fmt)
-            age = (datetime.now(timezone.utc) - parsed.replace(tzinfo=timezone.utc)).days
-            return age > max_days
+            parsed = datetime.strptime(raw_date[:slen], fmt)
+            return (datetime.now(timezone.utc) - parsed.replace(tzinfo=timezone.utc)).days
         except (ValueError, TypeError):
             continue
+    _ym = re.search(r"\b(20\d{2})\b", raw_date)
+    if _ym:
+        year = int(_ym.group(1))
+        try:
+            mid = datetime(year, 7, 1, tzinfo=timezone.utc)
+            return max(0, (datetime.now(timezone.utc) - mid).days)
+        except ValueError:
+            pass
+    return None
 
-    return False  # Unparseable — fail-open
+
+def _is_stale_content(result: dict, is_consumer: bool) -> bool:
+    """Return True if Serper result is too old to be actionable.
+
+    V27.5: Social/forum hosts use a hard 6-month window. Non-social keeps
+    B2C=90d / B2B=60d. When Serper omits ``date``, social results still check
+    title/snippet for year markers (e.g. 2023, 2024); non-social fail-open.
+    """
+    is_social = _result_is_social_forum(result)
+    max_days = _STALE_DAYS_SOCIAL if is_social else (
+        _STALE_DAYS_B2C if is_consumer else _STALE_DAYS_B2B
+    )
+
+    raw_date = (result.get("date") or "").strip()
+    age = _age_days_from_serper_date(raw_date)
+    if age is not None:
+        return age > max_days
+
+    # Social/forum without date: scan title+snippet for calendar years
+    if is_social:
+        blob = f"{result.get('title') or ''} {result.get('snippet') or ''}"
+        years = [int(y) for y in re.findall(r"\b(20\d{2})\b", blob)]
+        if years:
+            oldest = min(years)
+            now_y = datetime.now(timezone.utc).year
+            # Any year older than current calendar year - 1 is > ~6–18 months
+            if oldest < now_y and (now_y - oldest) >= 1:
+                # e.g. now 2026, year 2024 → stale; year 2025 might be within 6m early in 2026
+                if oldest <= now_y - 1:
+                    # Mid-year of that year vs now
+                    try:
+                        mid = datetime(oldest, 7, 1, tzinfo=timezone.utc)
+                        age_y = (datetime.now(timezone.utc) - mid).days
+                        if age_y > max_days:
+                            return True
+                    except ValueError:
+                        return True
+        # No date at all on social — fail-open but log-friendly caller counts
+        return False
+
+    return False  # Non-social, unparseable — fail-open
 from services.query_brain import generate_smart_query  # type: ignore[import]
 from services.query_brain import _is_consumer_archetype  # type: ignore[import]
 from services.query_governance import (  # type: ignore[import]

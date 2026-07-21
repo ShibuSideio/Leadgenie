@@ -150,13 +150,13 @@ class TestInboundRadarRemedies(unittest.TestCase):
         mock_resp.json.return_value = {"organic": []}
         mock_post.return_value = mock_resp
         
-        # 1. Default timeframe should be qdr:y (past year)
+        # 1. Default timeframe should be qdr:6m (V27.5 — was qdr:y)
         svc = InboundSentimentService(persona={}, campaign={})
         svc._search_serper("test query")
         
         args, kwargs = mock_post.call_args
         payload = kwargs.get("json", {})
-        self.assertEqual(payload.get("tbs"), "qdr:y")
+        self.assertEqual(payload.get("tbs"), "qdr:6m")
         
         # 2. Overridden timeframe should propagate
         svc_custom = InboundSentimentService(persona={}, campaign={"inbound_timeframe": "qdr:m"})
@@ -187,17 +187,22 @@ class TestInboundRadarRemedies(unittest.TestCase):
         
         from serper_service import search_serper
         
-        # 1. B2C campaign should have tbs="qdr:y"
+        # V27.5: B2C and B2B colloquial both use qdr:6m (was B2B qdr:2y / B2C qdr:y inbound)
         search_serper("test query", sourcing_vector="B2C")
         args, kwargs = mock_post.call_args
         payload = json.loads(kwargs.get("data", "{}"))
-        self.assertEqual(payload.get("tbs"), "qdr:y")
-        
-        # 2. B2B campaign should not have tbs
+        self.assertEqual(payload.get("tbs"), "qdr:6m")
+
         search_serper("test query", sourcing_vector="B2B")
         args, kwargs = mock_post.call_args
         payload = json.loads(kwargs.get("data", "{}"))
-        self.assertNotIn("tbs", payload)
+        self.assertEqual(payload.get("tbs"), "qdr:6m")
+
+        # Social site: also 6m (not evergreen)
+        search_serper("site:reddit.com AI startup Asia", sourcing_vector="B2B")
+        args, kwargs = mock_post.call_args
+        payload = json.loads(kwargs.get("data", "{}"))
+        self.assertEqual(payload.get("tbs"), "qdr:6m")
 
     def test_inbound_sentiment_service_dialog_cue_dorking(self):
         """B2C gets consumer dialog cues (once); B2B does not. V27.1.0."""

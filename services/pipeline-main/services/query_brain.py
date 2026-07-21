@@ -68,8 +68,10 @@ _QUERY_BRAIN_SCHEMA = {
     "required": ["historical_phrases", "symptom_dorks", "translated_queries"],
 }
 
+# V27.5: Removed ``-investors`` — it self-defeated seed/angel/investor campaigns
+# while still excluding generic directory spam via zoominfo/jobs/careers.
 _DEFAULT_BLACKLIST = (
-    "-wiki -jobs -careers -investors -support -\"login\" "
+    "-wiki -jobs -careers -support -\"login\" "
     "-www.zoominfo.com -www.ibm.com -www.amazon.com "
     "-site:upwork.com -site:fiverr.com -site:freelancer.com -site:behance.net "
     "-\"our services\" -\"our portfolio\" -\"case studies\" -\"we offer\""
