@@ -1,4 +1,4 @@
-const CACHE_NAME = 'sideio-v27.2.0'; // V27.2.0: wallet SSOT + available_credits for 1000+ scale
+const CACHE_NAME = 'sideio-v27.6.0'; // V27.6.0: lead export JSON/CSV all fields
 const ASSETS_TO_CACHE = [
      '/',
      '/index.html',

@@ -50,7 +50,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-storage.js"></script>
-    <link rel="stylesheet" href="styles.css?v=27.2.0">
+    <link rel="stylesheet" href="styles.css?v=27.6.0">
     <style>
         /* ── MODAL SYSTEM ────────────────────────────────── */
         .sio-modal-overlay {
@@ -378,11 +378,28 @@
             </div>
             <!-- ── END FEED MODE TOGGLE ────────────────────────────────────── -->
 
-            <div class="feed-header">
-                <h3 class="feed-title">Lead Intelligence Feed</h3>
-                <select id="campaign-filter" class="feed-filter" onchange="filterLeadsByCampaign(this.value)" aria-label="Filter leads by campaign">
-                    <option value="all">All Searches</option>
-                </select>
+            <div class="feed-header" style="display:flex; flex-wrap:wrap; align-items:center; gap:10px; justify-content:space-between;">
+                <h3 class="feed-title" style="margin:0;">Lead Intelligence Feed</h3>
+                <div style="display:flex; flex-wrap:wrap; align-items:center; gap:8px;">
+                    <select id="campaign-filter" class="feed-filter" onchange="filterLeadsByCampaign(this.value)" aria-label="Filter leads by campaign">
+                        <option value="all">All Searches</option>
+                    </select>
+                    <select id="export-status-filter" class="feed-filter" aria-label="Export status filter" title="Statuses included in export">
+                        <option value="new">Export: New only</option>
+                        <option value="all">Export: All statuses</option>
+                        <option value="failed">Export: Failed</option>
+                        <option value="scored_out">Export: Scored out</option>
+                        <option value="enrichment_pending">Export: Enrichment pending</option>
+                    </select>
+                    <button type="button" class="secondary-btn" id="btn-export-leads-json"
+                        onclick="exportLeadsDownload('json')"
+                        style="padding:6px 12px;font-size:0.78rem;font-weight:600;"
+                        title="Download all fields as JSON">&#128229; JSON</button>
+                    <button type="button" class="secondary-btn" id="btn-export-leads-csv"
+                        onclick="exportLeadsDownload('csv')"
+                        style="padding:6px 12px;font-size:0.78rem;font-weight:600;"
+                        title="Download all fields as CSV">&#128229; CSV</button>
+                </div>
             </div>
             <div id="active-campaign-feed"></div>
             <div id="leads-list" class="leads-list">
@@ -1550,6 +1567,6 @@
         });
     }
 </script>
-<script src="app.js?v=27.2.0"></script>
+<script src="app.js?v=27.6.0"></script>
 </body>
 </html>

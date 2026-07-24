@@ -1061,6 +1061,14 @@ function renderCampaignsTable(campaigns, activeCount) {
                     <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;margin-right:4px;"
                         data-campaign-id="${id}"
                         onclick="openEditModal(this.dataset.campaignId)">Edit</button>
+                    <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;margin-right:4px;"
+                        data-campaign-id="${id}"
+                        title="Export all lead fields as CSV"
+                        onclick="exportLeadsDownload('csv', this.dataset.campaignId)">CSV</button>
+                    <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;margin-right:4px;"
+                        data-campaign-id="${id}"
+                        title="Export all lead fields as JSON"
+                        onclick="exportLeadsDownload('json', this.dataset.campaignId)">JSON</button>
                     <button class="secondary-btn" style="padding:4px 10px;font-size:0.75rem;border-color:${statusColor};color:${statusColor};"
                         onclick="toggleCampaignStatus('${id}','${camp.status}')">${isActive ? 'Pause' : 'Resume'}</button>
                 </td>
@@ -1088,6 +1096,89 @@ window.changeCampaignsPage = function(pageIndex) {
     window.campaignsCurrentPage = pageIndex;
     if (window._cachedCampaigns) {
         renderCampaignsTable(window._cachedCampaigns, window.activeCampaignCount);
+    }
+};
+
+/**
+ * V27.6: Export leads with all Firestore fields via GET /api/leads/export.
+ * Nested objects/arrays are JSON-stringified in CSV; JSON keeps full structure.
+ * @param {'json'|'csv'} format
+ * @param {string} [campaignId] optional campaign filter; falls back to #campaign-filter
+ */
+window.exportLeadsDownload = async function(format, campaignId) {
+    const fmt = (format === 'csv') ? 'csv' : 'json';
+    try {
+        const user = firebase.auth().currentUser;
+        if (!user) {
+            showToast('Sign in required to export.', 'error');
+            return;
+        }
+        const token = await user.getIdToken();
+        const filterEl = document.getElementById('campaign-filter');
+        const statusEl = document.getElementById('export-status-filter');
+        let camp = (campaignId || '').trim();
+        if (!camp && filterEl && filterEl.value && filterEl.value !== 'all') {
+            camp = filterEl.value;
+        }
+        const status = (statusEl && statusEl.value) ? statusEl.value : 'new';
+        const params = new URLSearchParams({
+            format: fmt,
+            status: status,
+            limit: '5000',
+        });
+        if (camp) params.set('campaign_id', camp);
+
+        showToast('Preparing export…', 'success');
+        const res = await fetch(`${API_BASE}/api/leads/export?${params.toString()}&rt=${Date.now()}`, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${token}` },
+        });
+        if (!res.ok) {
+            let msg = `Export failed (${res.status})`;
+            try {
+                const errBody = await res.json();
+                if (errBody.error) msg = errBody.error;
+            } catch (_) { /* ignore parse errors */ }
+            showToast(msg, 'error');
+            return;
+        }
+
+        let countHdr = res.headers.get('X-Export-Count');
+        let filename = `sideio-leads-${camp || 'all'}.${fmt}`;
+        const cd = res.headers.get('Content-Disposition') || '';
+        const m = /filename="([^"]+)"/.exec(cd);
+        if (m) filename = m[1];
+
+        let blob;
+        if (fmt === 'json') {
+            const text = await res.text();
+            if (countHdr == null) {
+                try {
+                    const parsed = JSON.parse(text);
+                    if (parsed && typeof parsed.count === 'number') {
+                        countHdr = String(parsed.count);
+                    }
+                } catch (_) { /* keep header-less count */ }
+            }
+            blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+        } else {
+            blob = await res.blob();
+        }
+
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.setAttribute('aria-label', `Download leads export as ${fmt.toUpperCase()}`);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        const n = countHdr != null ? countHdr : '?';
+        showToast(`Exported ${n} lead(s) as ${fmt.toUpperCase()}.`, 'success');
+    } catch (err) {
+        console.error('exportLeadsDownload', err);
+        showToast('Export failed — check network and try again.', 'error');
     }
 };
 

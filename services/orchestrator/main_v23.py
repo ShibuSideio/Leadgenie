@@ -86,7 +86,9 @@ def create_app() -> Flask:
                 res.headers["Access-Control-Allow-Headers"]  = "Content-Type, Authorization"
                 res.headers["Access-Control-Allow-Methods"]  = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
                 res.headers["Access-Control-Max-Age"]        = "600"
-                res.headers["Access-Control-Expose-Headers"] = "Content-Type, X-Request-Id"
+                res.headers["Access-Control-Expose-Headers"] = (
+                    "Content-Type, X-Request-Id, Content-Disposition, X-Export-Count"
+                )
             return res, 204
 
     @app.after_request
@@ -97,7 +99,9 @@ def create_app() -> Flask:
             response.headers["Access-Control-Allow-Headers"]  = "Content-Type, Authorization"
             response.headers["Access-Control-Allow-Methods"]  = "GET, POST, PUT, DELETE, PATCH, OPTIONS"
             response.headers["Access-Control-Max-Age"]        = "600"
-            response.headers["Access-Control-Expose-Headers"] = "Content-Type, X-Request-Id"
+            response.headers["Access-Control-Expose-Headers"] = (
+                "Content-Type, X-Request-Id, Content-Disposition, X-Export-Count"
+            )
         return response
 
     @app.route("/", methods=["GET"])
